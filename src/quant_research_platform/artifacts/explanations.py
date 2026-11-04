@@ -209,7 +209,13 @@ def _validate(metadata, tables, *, partial=False):
         raise ValueError("explanation_single_attribution_method_required")
     if attribution or "permutation" in methods:
         space = metadata.get("output_space")
-        unit = "raw_margin" if space == "raw_margin" else metadata["label_unit"]
+        unit = (
+            "raw_margin"
+            if space == "raw_margin"
+            else "direction_score"
+            if metadata["model_algorithm"] == "deeplob_classifier"
+            else metadata["label_unit"]
+        )
         if (
             space not in {"model_output", "raw_margin"}
             or metadata.get("unit") != unit

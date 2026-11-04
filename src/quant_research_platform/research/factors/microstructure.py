@@ -18,7 +18,8 @@ def _trailing_sum(values, timestamps, seconds):
     return result
 
 
-def compute_factors(panel):
+def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
+    columns = protocol.DEFAULT_FACTORS if columns is None else tuple(columns)
     output = []
     for _, group in panel.groupby(["asset_id", "segment_id"], sort=False):
         work = group.sort_values("timestamp").reset_index(drop=True)
@@ -86,10 +87,93 @@ def compute_factors(panel):
         for column in ("observed_trade_volume", "observed_signed_trade_volume"):
             values[f"{column}_30s"] = _trailing_sum(work[column], work.timestamp, 30)
         values["book_ofi_30s"] = _trailing_sum(ofi, work.timestamp, 30)
-        values.loc[~work.eligible, list(protocol.FACTOR_INPUTS)] = np.nan
+        if set(columns) - set(protocol.DEFAULT_FACTORS):
+            extended = _book_features(work, ofi_halflife_seconds)
+            values = pd.concat([values, extended], axis=1)
+        values.loc[~work.eligible, list(columns)] = np.nan
         output.append(values)
     return (
         pd.concat(output, ignore_index=True)
-        .loc[:, (*protocol.KEY, *protocol.FACTOR_INPUTS)]
+        .loc[:, (*protocol.KEY, *columns)]
         .sort_values(["timestamp", "asset_id"], kind="stable")
     )
+
+
+def _book_features(work, halflife):
+    """Snapshot OFI proxies and depth shape measured at actual price distances."""
+    flow, shapes = {}, {}
+    for side, sign in (("bid", 1), ("ask", -1)):
+        prices = work[[f"{side}_px{i}" for i in range(1, 11)]].to_numpy(float)
+        quantity = work[[f"{side}_vol{i}" for i in range(1, 11)]].to_numpy(float)
+        prior_price = np.vstack((np.full(10, np.nan), prices[:-1]))
+        prior_quantity = np.vstack((np.full(10, np.nan), quantity[:-1]))
+        valid = (
+            np.isfinite(prices)
+            & np.isfinite(prior_price)
+            & np.isfinite(quantity)
+            & np.isfinite(prior_quantity)
+        )
+        flow[side] = np.where(
+            valid,
+            np.where(sign * prices >= sign * prior_price, quantity, 0)
+            - np.where(sign * prices <= sign * prior_price, prior_quantity, 0),
+            np.nan,
+        )
+        known = np.isfinite(quantity).all(axis=1) & (
+            (quantity == 0) | np.isfinite(prices)
+        ).all(axis=1)
+        total = quantity.sum(axis=1)
+        denominator = np.where(known & (total > 0), total, np.nan)
+        fraction = quantity / denominator[:, None]
+        shapes[f"{side}_depth_concentration"] = (fraction**2).sum(axis=1)
+        shapes[f"{side}_near_depth_fraction"] = fraction[:, :3].sum(axis=1)
+        present = quantity > 0
+        distance = (
+            sign
+            * (work.mid.to_numpy()[:, None] - prices)
+            / work.mid.to_numpy()[:, None]
+            * 10000
+        )
+        count = present.sum(axis=1)
+        count_safe = np.maximum(count, 1)
+        cumulative = fraction.cumsum(axis=1)
+        x = np.where(present, distance, 0)
+        y = np.where(present, cumulative, 0)
+        variance = (x * x).sum(axis=1) - x.sum(axis=1) ** 2 / count_safe
+        covariance = (x * y).sum(axis=1) - x.sum(axis=1) * y.sum(axis=1) / count_safe
+        slope = np.divide(
+            covariance,
+            variance,
+            out=np.full(len(work), np.nan),
+            where=known & (count >= 2) & (variance > 0),
+        )
+        shapes[f"{side}_depth_slope"] = slope
+        shapes[f"{side}_depth_slope_change"] = np.r_[np.nan, np.diff(slope)]
+        # Only volume increases at unchanged displayed prices count as this proxy.
+        replenished = np.where(
+            valid & (prices == prior_price), np.maximum(quantity - prior_quantity, 0), 0
+        ).sum(axis=1)
+        replenished[~valid.all(axis=1)] = np.nan
+        shapes[f"{side}_replenishment_30s"] = _trailing_sum(
+            pd.Series(replenished), work.timestamp, 30
+        )
+    level_flow = flow["bid"] - flow["ask"]
+    for level in (5, 10):
+        current = level_flow[:, :level].sum(axis=1)
+        shapes[f"book_ofi_{level}"] = current
+        depth = work[
+            [f"{side}_vol{i}" for side in ("bid", "ask") for i in range(1, level + 1)]
+        ].sum(axis=1, skipna=False)
+        shapes[f"depth_normalized_ofi_{level}"] = current / depth.where(depth.gt(0))
+    shapes["book_ofi_near_far"] = level_flow[:, :5].sum(axis=1) - level_flow[:, 5:].sum(
+        axis=1
+    )
+    total = pd.Series(shapes["book_ofi_10"])
+    shapes["book_ofi_10_30s"] = _trailing_sum(total, work.timestamp, 30)
+    shapes["book_ofi_10_ewma"] = total.ewm(
+        halflife=pd.Timedelta(seconds=halflife), times=work.timestamp, min_periods=1
+    ).mean()
+    shapes["depth_slope_difference"] = (
+        shapes["bid_depth_slope"] - shapes["ask_depth_slope"]
+    )
+    return pd.DataFrame(shapes)

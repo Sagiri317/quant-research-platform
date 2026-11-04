@@ -66,6 +66,14 @@ def prepare_source(config: Config) -> None:
     )
 
 
+@app.command("fetch-macro")
+def fetch_macro(config: Config) -> None:
+    """Download public macro histories and vintages to a new raw directory."""
+    from quant_research_platform.sources.macro.download import fetch_macro
+
+    _echo_result(fetch_macro(read_qrp_json_file(config)[1]))
+
+
 @app.command("prepare")
 def prepare(config: Config) -> None:
     """Prepare one market table from explicit inputs."""
@@ -88,6 +96,14 @@ def fit(config: Config) -> None:
     from quant_research_platform.research.models.production import fit
 
     _echo_result(fit(read_qrp_json_file(config)[1]))
+
+
+@app.command("fit-hawkes")
+def fit_hawkes(config: Config) -> None:
+    """Fit an exponential Hawkes model on explicit observed event intervals."""
+    from quant_research_platform.research.models.hawkes import fit_hawkes
+
+    _echo_result(fit_hawkes(read_qrp_json_file(config)[1]))
 
 
 @app.command("run-quarterly")

@@ -213,3 +213,33 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
         }
     )
     assert parse_qrp_json_object(report.read_bytes())["coverage"] == 1
+    changed = tmp_path / "changed-label-definition"
+    write_dataset(
+        changed,
+        frame,
+        spec=spec,
+        metadata={
+            "producer_diagnostics": {
+                "label_semantics": {"label": {"horizon_sessions": 99}}
+            }
+        },
+    )
+    with pytest.raises(ValueError, match="uncertainty_prediction_target_mismatch"):
+        calibrate_uncertainty(
+            {
+                **facts["config"],
+                "dataset": str(changed),
+                "output": str(tmp_path / "invalid-calibration.json"),
+            }
+        )
+    with pytest.raises(ValueError, match="uncertainty_evaluation_target_mismatch"):
+        evaluate_uncertainty(
+            {
+                "intervals": str(intervals),
+                "dataset": str(changed),
+                "window": window,
+                "label": "label",
+                "cutoff": "2020-01-13",
+                "output": str(tmp_path / "invalid-coverage.json"),
+            }
+        )

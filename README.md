@@ -6,6 +6,9 @@ quant-research-platform 是一个本地量化研究项目，覆盖 A 股日频�
 独立研究 agent 可在固定协议与预算下调用这些操作，生成的 Python 只在隔离容器运行。
 入口、示例和证据边界见[策略学习与研究 agent](docs/research-learning.md)。
 
+[全球宏观流动性](docs/macro-liquidity.md)支持版本化源数据、明确盘前决策时钟、宏观组合与个股交互。
+高频扩展包含逐笔与盘口因子、Hawkes、DeepLOB、因果信号滤波、AC 执行进度及被动队列假设，均通过现有原生操作接入。
+
 ## 研究报告
 
 - [A 股日频量价研究](reports/A股量价研究报告.md)：6/25/52 因子、四块消融、九类模型与 PV25 组合回测。
@@ -73,7 +76,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 未选择的统计分析不会读取其专用输入；模型解释等严格接口也会拒绝用不到的选项。
 候选顺序可能决定同分时的选择，输入列顺序则决定模型接收特征的排列，不能自行排序或去重。
 
-监督预测模型为 OLS、LASSO、XGBoost、LSTM、Transformer；支持 GPU 的模型在 CUDA 不可用时使用 CPU，也可显式选择 CPU。
+监督预测模型包括 OLS、LASSO、XGBoost、LSTM、Transformer，以及 DeepLOB 收益回归和三分类；支持 GPU 的模型在 CUDA 不可用时使用 CPU，也可显式选择 CPU。
 策略学习的 PPO、公式搜索和成本感知网络采用相同的设备回退约定。
 高频数据接入、因子、标签、T+1 库存账户与使用限制见 [A 股高频](docs/a-share-hft.md)。
 

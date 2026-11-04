@@ -84,7 +84,7 @@ def _stream(episode):
         )
 
         account = _strict_config(
-            account, {"panel", "fee_schedule", "daily_inputs", "parameters"}, set()
+            account, {"panel", "fee_schedule", "daily_inputs", "parameters"}, {"trades"}
         )
         params = _parameters(account["parameters"], policy=True)
         if (
@@ -92,7 +92,9 @@ def _stream(episode):
             or params["restore_at"] is not None
         ):
             raise ValueError("policy_inventory_or_restoration_conflict")
-        sessions, schedule = inventory_inputs(account, window, decision_columns=columns)
+        sessions, schedule, trade_session = inventory_inputs(
+            account, window, decision_columns=columns
+        )
         with (
             closing_iterator(sessions) as inputs,
             closing_iterator(
@@ -103,6 +105,7 @@ def _stream(episode):
                     window,
                     decision_columns=columns,
                     execution_order=episode.get("order"),
+                    trade_session=trade_session,
                 )
             ) as stream,
         ):

@@ -101,6 +101,51 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
     assert spec["column_units"]["feature_observed_momentum_20d"] == "dimensionless"
 
 
+def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_path):
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+
+    frame = _frame().assign(
+        eligible=True,
+        industry_standard_id="test",
+        industry_level1_code="A",
+        log_total_market_cap=np.arange(120) / 10,
+    )
+    root, _ = _source(tmp_path, frame)
+    macro = "ml_us_nfci_level"
+    macro_frame = frame[list(PLATFORM_ASSET_TIME_KEY)].assign(**{macro: 1.7})
+    macro_root = tmp_path / "macro"
+    write_dataset(
+        macro_root,
+        macro_frame,
+        spec=ProcessedDataSpec(
+            data_id="macro",
+            market_id="a_share",
+            kind="factor",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=PLATFORM_ASSET_TIME_KEY,
+            partition_columns=(),
+            column_roles={
+                "market_id": "key",
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                macro: "factor",
+            },
+        ),
+    )
+    config = _config(tmp_path, root, factor_columns=["momentum_20d", macro])
+    config.pop("feature_recipe")
+    config["inputs"]["macro"] = str(macro_root)
+    result = assembler.assemble(config)
+    data = read_dataset(result)
+    assert data[macro].eq(1.7).all()
+    assert "feature_" + macro not in data
+    assert "feature_momentum_20d" in data
+    assert inspect_dataset(result).spec["feature_transforms"][0]["source_columns"] == [
+        "momentum_20d"
+    ]
+
+
 def test_declared_industry_pairs_have_independent_native_feature_and_target_residuals(
     tmp_path,
 ):

@@ -18,6 +18,7 @@ from quant_research_platform.contracts.columns import (
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import (
+    DECISION_CONTEXT_COLUMNS,
     TimeWindow,
     time_window_timestamp_interval,
 )
@@ -599,7 +600,10 @@ def _add_a_share_semantic_columns(
 
 def assemble(config: Mapping) -> Path:
     """Assemble selected columns from actual input declarations and optional recipes."""
-    from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.contracts.features import (
+        FeatureTransformSpec,
+        inherited_feature_transforms,
+    )
     from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
     from quant_research_platform.storage.datasets.reading import _dataset_input_options
 
@@ -723,7 +727,11 @@ def assemble(config: Mapping) -> Path:
     }
     reused_features = config.get(
         "feature_columns",
-        [column for column in selected_roles if column in selected_features],
+        [
+            column
+            for column in (defaults.feature_columns if defaults else selected_roles)
+            if column in selected_features
+        ],
     )
     factors = config.get(
         "factor_columns",
@@ -746,6 +754,8 @@ def assemble(config: Mapping) -> Path:
         "filter_columns", list(defaults.filter_columns) if defaults else []
     )
     context = config.get("context_columns", [])
+    if "signal_session" in selected_roles:
+        context = list(dict.fromkeys((*context, *DECISION_CONTEXT_COLUMNS)))
     sparse_inputs = config.get("sparse_input_data_ids", [])
     for name, values in (
         ("factor_columns", factors),
@@ -800,23 +810,9 @@ def assemble(config: Mapping) -> Path:
         }
         if not columns:
             continue
-        inherited = session.manifest.get("producer_diagnostics", {}).get(
-            "reused_feature_transforms", {}
-        )
         feature_lineage.update(
-            {column: inherited[column] for column in columns if column in inherited}
+            inherited_feature_transforms(session.spec, session.manifest, columns)
         )
-        for transform in session.spec.get("feature_transforms", []):
-            outputs = FeatureTransformSpec(
-                **{
-                    **transform,
-                    "source_columns": tuple(transform["source_columns"]),
-                    "output_groups": tuple(transform["output_groups"]),
-                }
-            ).output_columns
-            feature_lineage.update(
-                {column: transform for column in outputs if column in columns}
-            )
     generated_labels = {"model_target"} if config["market_id"] == "a_share" else set()
     if (
         set(labels)
@@ -910,20 +906,28 @@ def assemble(config: Mapping) -> Path:
         raise ValueError("assemble_feature_recipe_not_supported")
     if recipe is None and options:
         raise ValueError("assemble_feature_transform_requires_recipe")
+    from quant_research_platform.research.factors.macro_liquidity.definitions import (
+        PRESERVE_AMPLITUDE_FACTORS,
+    )
+
+    preserve = PRESERVE_AMPLITUDE_FACTORS.intersection(factors)
+    if preserve and "raw" not in groups:
+        raise ValueError("macro_amplitude_factors_require_raw_group")
+    transform_factors = tuple(factor for factor in factors if factor not in preserve)
     transforms = (
         (
             FeatureTransformSpec(
-                recipe, tuple(factors), output_groups=processed_groups, **options
+                recipe, transform_factors, output_groups=processed_groups, **options
             ),
         )
-        if recipe is not None
+        if recipe is not None and transform_factors
         else ()
     )
     if transforms and "feature_recipe" not in config and not options:
         transform = transforms[0]
         pending_sources = tuple(
             factor
-            for factor in factors
+            for factor in transform.source_columns
             if not set(
                 replace(transform, source_columns=(factor,)).output_columns
             ).issubset(reused_features)

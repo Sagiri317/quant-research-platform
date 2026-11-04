@@ -196,7 +196,7 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
         "mature_label_rows_without_prediction": 0,
         "prediction_rows_without_label": 1,
     }
-    with pytest.raises(ValueError, match="prediction_dataset_coverage_mismatch"):
+    missing_artifact = read_statistics_artifact(
         model_statistics(
             {
                 **statistics,
@@ -204,6 +204,19 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
                 "output": str(tmp_path / "missing-statistics"),
             }
         )
+    )
+    assert missing_artifact.metadata["prediction_coverage"] == {
+        "unmatched_prediction_rows": 1
+    }
+    original_artifact = read_statistics_artifact(tmp_path / "statistics")
+    for member in original_artifact._members:
+        with (
+            original_artifact.table(member) as original,
+            missing_artifact.table(member) as actual,
+        ):
+            pd.testing.assert_frame_equal(
+                actual, original, check_exact=False, rtol=1e-12, atol=1e-14
+            )
     incomplete = write_prediction_outputs(
         output_path=tmp_path / "incomplete-predictions",
         output_chunks=[rows.loc[~rows.asset_id.eq("c")]],

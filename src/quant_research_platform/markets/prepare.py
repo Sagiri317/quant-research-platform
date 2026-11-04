@@ -87,6 +87,12 @@ def prepare(config: Mapping) -> Path:
             )
 
             producer, kwargs = produce, {}
+        elif spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
+            from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
+                produce,
+            )
+
+            producer, kwargs = produce, {}
     else:
         raise ValueError("data_operation_market_invalid")
     spec = _configured_spec(spec, config)
@@ -120,6 +126,13 @@ def _configured_spec(spec, config):
     """Apply only options consumed by this explicitly requested mathematical recipe."""
     from quant_research_platform.contracts.columns import ColumnRole
 
+    if spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
+        from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
+            configured_spec,
+        )
+
+        return configured_spec(spec, config)
+
     parameters = config.get("parameters", {})
     if type(parameters) is not dict:
         raise ValueError("data_operation_parameters_invalid")
@@ -139,6 +152,15 @@ def _configured_spec(spec, config):
         "market_model_factors": {"min_fresh_fraction"},
         "risk_residual_factors": {"min_fresh_fraction"},
         "hft_panel": {"max_gap_seconds"},
+        "hft_factors": {"ofi_halflife_seconds"},
+        "hft_event_factors": {
+            "event_window",
+            "volume_window",
+            "history_window",
+            "large_quantile",
+            "order_link_field",
+        },
+        "hft_hawkes_factors": {"model"},
     }.get(spec.data_id, set())
     if set(parameters) - dynamic:
         raise ValueError("data_operation_parameter_not_consumed")
@@ -157,6 +179,21 @@ def _configured_spec(spec, config):
         or not 0 < parameters["max_gap_seconds"] < float("inf")
     ):
         raise ValueError("hft_max_gap_seconds_invalid")
+    if "ofi_halflife_seconds" in parameters and (
+        type(parameters["ofi_halflife_seconds"]) not in (int, float)
+        or not 0 < parameters["ofi_halflife_seconds"] < float("inf")
+    ):
+        raise ValueError("hft_ofi_halflife_invalid")
+    if spec.data_id == "hft_event_factors":
+        from quant_research_platform.research.factors.event_microstructure import (
+            parameters as event_parameters,
+        )
+
+        event_parameters(parameters)
+    if spec.data_id == "hft_hawkes_factors" and (
+        type(parameters.get("model")) is not str or not parameters["model"]
+    ):
+        raise ValueError("hawkes_model_path_required")
     actual = {**json.loads(spec.parameters_json), **parameters}
     if "base_panel" in config:
         raise ValueError("data_operation_parameter_not_consumed")

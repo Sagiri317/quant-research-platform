@@ -17,7 +17,10 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.models import _prediction_loss_reason
+from quant_research_platform.contracts.models import (
+    CLASSIFICATION_METRICS,
+    _prediction_loss_reason,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
 )
@@ -472,8 +475,6 @@ def build_a_share_statistics_tables(
                             "common_observation_count": paired_count,
                         }
                     )
-    if prediction_lookup.coverage_counts() != (0, 0):
-        raise ValueError("prediction_dataset_coverage_mismatch")
     if not rank_records:
         raise ValueError("statistics_model_observations_empty")
     rank_by_date = pd.DataFrame.from_records(rank_records)
@@ -1163,7 +1164,11 @@ def _selection_trial_rows(selections, selection_group):
                         raise ValueError("statistics_trial_metric_invalid")
                     if "rankic" in metric_id:
                         count = metrics["validation_valid_rankic_count"]
-                    elif metric_id == "validation_mse":
+                    elif (
+                        metric_id == "validation_mse"
+                        or metric_id.removeprefix("validation_")
+                        in CLASSIFICATION_METRICS
+                    ):
                         count = metrics["validation_rows"]
                     else:
                         count = metrics["validation_valid_ic_count"]
@@ -1572,6 +1577,11 @@ def model_statistics(config):
             global_prediction_lookup=reference_lookup,
             global_inference_blocker=reference_blocker,
         )
+        prediction_coverage = {"unmatched_prediction_rows": lookup.coverage_counts()[0]}
+        if reference_lookup is not None:
+            prediction_coverage["unmatched_global_prediction_rows"] = (
+                reference_lookup.coverage_counts()[0]
+            )
     finally:
         lookup.close()
         if reference_lookup is not None:
@@ -1583,6 +1593,7 @@ def model_statistics(config):
             **_model_target_metadata(config, spec, window),
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
+            "prediction_coverage": prediction_coverage,
             "selection_cutoffs": sorted(
                 {
                     str(cutoff)

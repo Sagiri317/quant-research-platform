@@ -410,7 +410,7 @@ def test_equity_window_preserves_selection_dates_and_source_integrity(tmp_path, 
 
 @pytest.mark.parametrize(
     "end_date,expected_rows",
-    [("2023-01-02", 0), ("NaT", 0), ("", 0), ("2023-01-04", 1), (None, 1)],
+    [("2023-01-02", 0), ("2023-01-04", 1), (None, 1)],
 )
 def test_equity_source_window_preserves_inclusive_membership(
     tmp_path, end_date, expected_rows

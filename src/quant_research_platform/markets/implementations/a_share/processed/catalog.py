@@ -143,11 +143,15 @@ BENCHMARK_WEIGHTS_COLUMNS = (
 
 
 def processed_catalog() -> ProcessedDataCatalog:
+    from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
+        processed_specs as macro_specs,
+    )
     from quant_research_platform.research.protocols.a_share_hft import processed_specs
 
     return ProcessedDataCatalog(
         (
             *processed_specs(),
+            *macro_specs(),
             _spec(
                 MARKET_PANEL_ID,
                 ProcessedDataKind.PANEL,

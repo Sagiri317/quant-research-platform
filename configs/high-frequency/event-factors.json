@@ -1,0 +1,30 @@
+{
+  "market_id": "a_share",
+  "data_id": "hft_event_factors",
+  "inputs": {
+    "hft_panel": "data/processed/a_share/hft_panel",
+    "hft_orders": "data/interim/venvoo/hft_orders",
+    "hft_trades": "data/interim/venvoo/hft_trades"
+  },
+  "factor_columns": [
+    "trade_interval_seconds",
+    "trade_intensity",
+    "trade_event_flow_imbalance",
+    "trade_volume_flow_imbalance",
+    "large_trade_pressure",
+    "observed_cancel_order_ratio",
+    "observed_order_age_seconds"
+  ],
+  "parameters": {
+    "event_window": 50,
+    "volume_window": 10000,
+    "history_window": 200,
+    "large_quantile": 0.9,
+    "order_link_field": null
+  },
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "output_root": "data/processed/a_share/hft_event_factors"
+}

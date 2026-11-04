@@ -29,6 +29,10 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.policies.accounts import _episode
 from quant_research_platform.research.policies.environments import TradingEnv
+from quant_research_platform.research.policies.execution_schedules import (
+    execution_fraction,
+    execution_schedule_parameters,
+)
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -148,11 +152,22 @@ def train_policy(config):
 def backtest_policy(config):
     """Replay a frozen policy or explicit execution baseline into a native ledger."""
     config = _strict_config(
-        config, {"episode", "output", "strategy"}, {"policy", "device", "volume_curve"}
+        config,
+        {"episode", "output", "strategy"},
+        {"policy", "device", "volume_curve", "execution_parameters"},
     )
     episode = _episode(config["episode"])
     strategy = config["strategy"]
-    if strategy not in {"ppo", "immediate", "twap", "vwap", "hold", "equal_weight"}:
+    if strategy not in {
+        "ppo",
+        "immediate",
+        "twap",
+        "vwap",
+        "almgren_chriss",
+        "signal_ac",
+        "hold",
+        "equal_weight",
+    }:
         raise ValueError("policy_strategy_invalid")
     env = TradingEnv([episode])
     model = normalization = None
@@ -179,12 +194,24 @@ def backtest_policy(config):
         normalization.training = False
         normalization.norm_reward = False
         model = PPO.load(root / "policy.zip", device=config.get("device", "cpu"))
-    elif (strategy in {"immediate", "twap", "vwap"}) != (
+    elif (strategy in {"immediate", "twap", "vwap", "almgren_chriss", "signal_ac"}) != (
         episode["task"] == "execution"
     ):
         raise ValueError("policy_baseline_task_mismatch")
     if strategy == "equal_weight" and episode["task"] != "portfolio":
         raise ValueError("policy_baseline_task_mismatch")
+    lower, upper, _ = time_window_timestamp_interval(TimeWindow(**episode["window"]))
+    lower, upper = pd.Timestamp(lower), pd.Timestamp(upper)
+    schedule = None
+    if strategy in {"almgren_chriss", "signal_ac"}:
+        schedule = execution_schedule_parameters(
+            config.get("execution_parameters"),
+            signal=strategy == "signal_ac",
+            start=lower,
+            feature_columns=episode["feature_columns"],
+        )
+    elif "execution_parameters" in config:
+        raise ValueError("execution_schedule_parameters_unused")
     curve = None
     if strategy == "vwap":
         curve = _strict_config(
@@ -228,6 +255,7 @@ def backtest_policy(config):
         with closing_iterator(normalization if normalization is not None else env):
             observation, info = env.reset(seed=0)
             done = False
+            previous_desired = 0.0
             while not done:
                 if model is not None:
                     action, _ = model.predict(
@@ -247,7 +275,23 @@ def backtest_policy(config):
                         else fraction
                         if strategy == "twap"
                         else float(np.interp(fraction, x, y))
+                        if strategy == "vwap"
+                        else execution_fraction(
+                            fraction,
+                            (pd.Timestamp(upper) - pd.Timestamp(lower)).total_seconds(),
+                            schedule,
+                            signal=float(
+                                env.decision.features.loc[
+                                    episode["order"]["asset_id"],
+                                    schedule["signal_column"],
+                                ]
+                            )
+                            if strategy == "signal_ac"
+                            else 0.0,
+                            side=np.sign(episode["order"]["quantity"]),
+                        )
                     )
+                    desired = previous_desired = max(desired, previous_desired)
                     completed = info["completion_rate"]
                     action = np.array(
                         [

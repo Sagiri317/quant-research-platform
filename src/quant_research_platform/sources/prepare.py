@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
+from quant_research_platform.contracts.time import TimeWindow
 
 
 def prepare_source(config: Mapping):
@@ -23,6 +24,7 @@ def prepare_source(config: Mapping):
             "fee_sidecar",
             "instruments",
             "revision",
+            "release_csv",
         }
     ):
         raise ValueError("source_prepare_fields_invalid")
@@ -40,6 +42,11 @@ def prepare_source(config: Mapping):
         raise ValueError("source_prepare_outputs_invalid")
     if len({Path(value).resolve() for value in outputs.values()}) != len(outputs):
         raise ValueError("source_prepare_output_paths_duplicate")
+    start, end = config.get("start_date"), config.get("end_date")
+    if start is not None or end is not None:
+        TimeWindow(
+            start if start is not None else end, end if end is not None else start
+        )
     source = config["source_id"]
     if source == "csmar":
         from quant_research_platform.sources.csmar.interim import (
@@ -58,12 +65,22 @@ def prepare_source(config: Mapping):
 
         if not {"instruments", "revision", "start_date", "end_date"} <= set(config):
             raise ValueError("level2_source_scope_required")
+    elif source == "macro":
+        from quant_research_platform.sources.macro.interim import (
+            materialize_interim_data,
+        )
     else:
         raise ValueError("source_prepare_source_invalid")
     if "chunksize" in config and source != "csmar":
         raise ValueError("source_prepare_chunksize_not_consumed")
     if source != "venvoo" and {"instruments", "revision"} & set(config):
         raise ValueError("source_prepare_level2_parameters_not_consumed")
+    if "release_csv" in config and (
+        source != "macro"
+        or type(config["release_csv"]) is not str
+        or not config["release_csv"]
+    ):
+        raise ValueError("source_prepare_release_csv_invalid")
     for key in ("fee_csv", "fee_sidecar"):
         if key in config and (
             source != "reference" or type(config[key]) is not str or not config[key]
@@ -79,6 +96,7 @@ def prepare_source(config: Mapping):
             "fee_sidecar",
             "instruments",
             "revision",
+            "release_csv",
         )
         if key in config
     }

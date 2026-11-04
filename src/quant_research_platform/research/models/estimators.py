@@ -9,6 +9,7 @@ from importlib import import_module
 from quant_research_platform.contracts.models import (
     _PARALLEL_MODEL_ALGORITHMS,
     DEFAULT_MODEL_THREAD_COUNT,
+    SEQUENCE_ALGORITHMS,
     ModelSpec,
     _model_algorithm_facts,
     _thaw_model_hyperparameters,
@@ -44,8 +45,7 @@ def build_estimator_from_model_spec(spec: ModelSpec) -> object | None:
     require_model_dependency(spec.model_algorithm)
     if spec.model_algorithm in {
         "linear_regression",
-        "lstm_regressor",
-        "transformer_regressor",
+        *SEQUENCE_ALGORITHMS,
     }:
         return None
     module, name = _MODEL_ESTIMATOR_CLASSES[spec.model_algorithm]
@@ -61,7 +61,7 @@ def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
     if spec.model_algorithm == "xgboost_regressor":
         params.setdefault("device", "cuda")
         params.setdefault("tree_method", "hist")
-    if spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+    if spec.model_algorithm in SEQUENCE_ALGORITHMS:
         from quant_research_platform.research.models.neural import sequence_parameters
 
         return sequence_parameters(spec.model_algorithm, params)

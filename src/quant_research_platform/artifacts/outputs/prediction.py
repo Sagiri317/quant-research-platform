@@ -14,6 +14,7 @@ import pyarrow as pa
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_frame,
 )
+from quant_research_platform.contracts.models import prediction_columns
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import (
@@ -69,6 +70,8 @@ def write_prediction_outputs(
                     "prediction_rank_score": pd.Series(dtype="float64"),
                 }
             )
+            for column in prediction_columns(metadata)[4:]:
+                empty[column] = pd.Series(dtype="float64")
             empty.to_parquet(staging / "prediction.parquet", index=False)
             final_metadata.update(
                 prediction_rows=0, effective_prediction_end=None, status="empty"
@@ -116,7 +119,9 @@ def write_prediction_outputs(
     return destination
 
 
-def read_predictions(path: Path, *, columns=None, time_window=None):
+def read_predictions(
+    path: Path, *, columns=None, time_window=None, include_available_probabilities=False
+):
     """Read selected predictions without fitting or discovery."""
     from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
@@ -126,6 +131,14 @@ def read_predictions(path: Path, *, columns=None, time_window=None):
         Path(path), expected_definition_id="prediction_outputs"
     )
     metadata = manifest["metadata"]
+    if columns is not None and include_available_probabilities:
+        columns = tuple(columns)
+        if columns:
+            columns += tuple(
+                column
+                for column in prediction_columns(metadata)[4:]
+                if column not in columns
+            )
     from quant_research_platform.policy.lifecycle import closing_iterator
 
     with closing_iterator(
@@ -146,6 +159,9 @@ def read_predictions(path: Path, *, columns=None, time_window=None):
             }
         )
     )
+    if frame.empty:
+        for column in prediction_columns(metadata)[4:]:
+            frame[column] = pd.Series(dtype="float64")
     if columns is not None:
         frame = frame.loc[:, list(columns)]
     return frame, metadata
@@ -171,16 +187,11 @@ def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
     )
     from quant_research_platform.storage.parquet import iter_dataset_part_batches
 
-    requested = (
-        ("timestamp", "asset_id", "prediction_score", "prediction_rank_score")
-        if columns is None
-        else tuple(columns)
-    )
+    requested = prediction_columns(metadata) if columns is None else tuple(columns)
     if (
         not requested
         or len(requested) != len(set(requested))
-        or set(requested)
-        - {"timestamp", "asset_id", "prediction_score", "prediction_rank_score"}
+        or set(requested) - set(prediction_columns(metadata))
     ):
         raise ValueError("prediction_projection_columns_invalid")
     physical = tuple(dict.fromkeys(("timestamp", "asset_id", *requested)))

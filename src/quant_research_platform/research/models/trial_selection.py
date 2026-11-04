@@ -28,7 +28,10 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.models import (
     _PREDICTION_LOSS_REASONS,
+    CLASSIFICATION_METRICS,
+    PROBABILITY_COLUMNS,
     _prediction_loss_reason,
+    _prediction_target_reason,
 )
 from quant_research_platform.contracts.time import _window_payload
 from quant_research_platform.contracts.validation import (
@@ -447,6 +450,7 @@ def score(config):
                 Path(path),
                 columns=("timestamp", "asset_id", "prediction_score"),
                 time_window=declared_window,
+                include_available_probabilities=True,
             )
             if prediction["model_id"] != candidate_id:
                 raise ValueError("selection_candidate_model_mismatch")
@@ -536,6 +540,17 @@ def score(config):
                 target_unit=config["label_unit"],
             )
             mse_reason = mse_reason or reason
+            if facts["model"]["model_algorithm"] == "deeplob_classifier" and (
+                _prediction_target_reason(
+                    facts,
+                    target,
+                    declared,
+                    label_session.manifest,
+                    target_unit=config["label_unit"],
+                )
+                is not None
+            ):
+                raise ValueError("scoring_classification_target_mismatch")
             joined["prediction_label_value"] = (
                 joined.prediction_score if reason is None else np.nan
             )
@@ -599,6 +614,10 @@ def score(config):
 
             metrics = {key: None for key in _MODEL_SELECTION_TRIAL_METRIC_KEYS}
             metrics.update(model_id=candidate["model_id"], validation_rows=0)
+            if candidate["model"]["model_algorithm"] == "deeplob_classifier":
+                metrics.update(
+                    {f"validation_{name}": None for name in CLASSIFICATION_METRICS}
+                )
             for prefix in ("ic", "rankic"):
                 metrics[f"validation_valid_{prefix}_count"] = 0
                 for suffix in (
@@ -622,6 +641,21 @@ def score(config):
             validation_axis=config["validation_axis"],
             label_prediction_column="prediction_label_value",
         )
+        if candidate["model"]["model_algorithm"] == "deeplob_classifier":
+            from quant_research_platform.compute.classification import (
+                classification_metrics,
+            )
+
+            metrics.update(
+                {
+                    f"validation_{name}": value
+                    for name, value in classification_metrics(
+                        comparable.label.to_numpy(),
+                        comparable[list(PROBABILITY_COLUMNS)].to_numpy(),
+                        candidate["model"]["hyperparameters"]["class_threshold"],
+                    ).items()
+                }
+            )
         rows.append(_json_metrics(metrics))
         del comparable
     payload = {
@@ -673,7 +707,8 @@ def _selection_choice(value):
             raise ValueError("selection_mse_reason_invalid")
         if candidate.get("status") in {"failed", "abandoned"}:
             if metrics["validation_rows"] != 0 or any(
-                metrics[key] is not None for key in MODEL_SELECTION_METRIC_DIRECTIONS
+                metrics.get(key) is not None
+                for key in MODEL_SELECTION_METRIC_DIRECTIONS
             ):
                 raise ValueError("failed_trial_cannot_have_validation_metrics")
         else:
@@ -690,6 +725,25 @@ def _selection_choice(value):
     }
     if not eligible:
         return None
+    if value["selection_metric"] in {
+        f"validation_{name}" for name in CLASSIFICATION_METRICS
+    }:
+        classifiers = [
+            item["model"]
+            for item in value["candidates"]
+            if item["model_id"] in eligible
+        ]
+        if (
+            any(
+                model["model_algorithm"] != "deeplob_classifier"
+                for model in classifiers
+            )
+            or len(
+                {model["hyperparameters"]["class_threshold"] for model in classifiers}
+            )
+            != 1
+        ):
+            raise ValueError("classification_selection_target_mismatch")
     return select_best_validation_trial(
         pd.DataFrame([row for row in value["metrics"] if row["model_id"] in eligible]),
         trial_id_column="model_id",

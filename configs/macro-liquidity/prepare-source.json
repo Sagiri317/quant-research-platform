@@ -1,0 +1,9 @@
+{
+  "source_id": "macro",
+  "raw_root": "data/raw/macro_liquidity/new-download",
+  "outputs": {
+    "macro_observations": "data/interim/macro_liquidity/new-observations"
+  },
+  "start_date": "2010-01-01",
+  "end_date": "2025-12-31"
+}

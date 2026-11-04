@@ -29,9 +29,13 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
+    DEEPLOB_ALGORITHMS,
+    SEQUENCE_ALGORITHMS,
     _model_spec,
     _prediction_loss_reason,
     _validate_model_prediction_window,
+    model_context_window,
+    sequence_context_columns,
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
@@ -44,6 +48,7 @@ from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
@@ -133,6 +138,7 @@ def _prediction_frames(session, result, window, *, extra=()):
                 "timestamp",
                 "asset_id",
                 *metadata["input_columns"],
+                *sequence_context_columns(metadata["model_algorithm"]),
                 *model_input_validity_columns(
                     tuple(metadata["input_columns"]),
                     session.spec["column_roles"],
@@ -152,8 +158,7 @@ def _prediction_frames(session, result, window, *, extra=()):
                 metadata,
                 window,
                 declared_columns=session.spec["column_roles"],
-                include_context=metadata["model_algorithm"]
-                in {"lstm_regressor", "transformer_regressor"},
+                include_context=metadata["model_algorithm"] in SEQUENCE_ALGORITHMS,
             )
             for _, block in usable.groupby("timestamp", sort=True):
                 yield block
@@ -319,9 +324,17 @@ def _output(result, frame, output_space, *, intervention=False):
     if np.shape(raw) != (len(frame),) or np.shape(explained) != (len(frame),):
         raise ValueError("explanation_prediction_nonfinite")
     valid = np.ones(len(frame), dtype=bool)
-    if intervention:
+    deep = result.metadata["model_algorithm"] in DEEPLOB_ALGORITHMS
+    if intervention or deep:
         missing = (
-            frame.loc[:, result.metadata["input_columns"]].isna().all(axis=1).to_numpy()
+            (~complete_book_rows(frame)).to_numpy()
+            if deep
+            else (
+                frame.loc[:, result.metadata["input_columns"]]
+                .isna()
+                .all(axis=1)
+                .to_numpy()
+            )
         )
         if not np.isnan(raw[missing]).all():
             raise ValueError("explanation_prediction_nonfinite")
@@ -775,7 +788,9 @@ def _permutation(
                             "group": name,
                             "repeat": repeat,
                             "period": str(timestamp),
-                            "reason": "all_model_inputs_missing",
+                            "reason": "incomplete_order_book"
+                            if result.metadata["model_algorithm"] in DEEPLOB_ALGORITHMS
+                            else "all_model_inputs_missing",
                             "row_count": missing_count,
                         }
                     )
@@ -947,15 +962,8 @@ def explain(config: Mapping) -> Path:
             and selection["max_dates"] is not None
         ):
             raise ValueError("explanation_temporal_requires_contiguous_window")
-        sequence = result.metadata["model_algorithm"] in {
-            "lstm_regressor",
-            "transformer_regressor",
-        }
-        context_window = (
-            PredictionWindow(facts["fit_windows"][-1]["end"], window.end)
-            if sequence
-            else window
-        )
+        sequence = result.metadata["model_algorithm"] in SEQUENCE_ALGORITHMS
+        context_window = model_context_window(facts, window)
         session = _session(
             config["inputs"],
             config.get("input_spec"),
@@ -986,6 +994,8 @@ def explain(config: Mapping) -> Path:
             mode=result.metadata["sample_filter_mode"],
             metadata_key="sample_filter_mode",
         )
+        if result.metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
+            selectable = selectable.loc[complete_book_rows(selectable)]
         positions = _selected_indices(
             selectable, selection, window=window if sequence else None
         )
@@ -993,6 +1003,8 @@ def explain(config: Mapping) -> Path:
         unit = (
             "raw_margin"
             if config["output_space"] == "raw_margin"
+            else "direction_score"
+            if facts["model"]["model_algorithm"] == "deeplob_classifier"
             else facts["label_unit"]
         )
         metadata.update(

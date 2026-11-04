@@ -10,12 +10,14 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
+    DEEPLOB_ALGORITHMS,
     ModelSpec,
     _fit_windows,
     _model_spec,
     _resolve_candidate_parameters,
     _target_definition,
     model_spec_payload,
+    sequence_context_columns,
     validate_model_facts,
     validate_model_input_roles,
 )
@@ -156,6 +158,11 @@ def fit(config: Mapping) -> Path:
         raise ValueError("label_unit_required")
     if unit is not None and unit != config["label_unit"]:
         raise ValueError("model_label_unit_mismatch")
+    if (
+        spec.model_algorithm in DEEPLOB_ALGORITHMS
+        and config["label_unit"] != "decimal_return"
+    ):
+        raise ValueError("deeplob_target_requires_decimal_return")
 
     from quant_research_platform.contracts.ids import validate_market_id
 
@@ -230,6 +237,9 @@ def fit(config: Mapping) -> Path:
             sample_filter_mode=spec.sample_filter_mode,
             availability_column=availability,
             declared_columns=declared["column_roles"],
+        )
+        columns = tuple(
+            dict.fromkeys((*columns, *sequence_context_columns(spec.model_algorithm)))
         )
         if spec.training_weighting.half_life_periods is not None:
             columns = (*columns, "market_type")

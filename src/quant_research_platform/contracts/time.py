@@ -10,6 +10,13 @@ from datetime import UTC, date, datetime, time, timedelta
 
 import pandas as pd
 
+DECISION_CONTEXT_COLUMNS = (
+    "signal_session",
+    "execution_session",
+    "return_available_at",
+    "order_submit_at",
+)
+
 
 @dataclass(frozen=True)
 class TimeWindow:

@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -12,6 +13,7 @@ from quant_research_platform.artifacts.outputs.evaluation import (
 from quant_research_platform.artifacts.outputs.prediction import (
     read_predictions,
 )
+from quant_research_platform.compute.classification import ClassificationMetrics
 from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_FORECAST_AGE_BOUNDS,
@@ -25,6 +27,10 @@ from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import _strict_config
+from quant_research_platform.contracts.models import (
+    PROBABILITY_COLUMNS,
+    _prediction_target_reason,
+)
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -35,6 +41,7 @@ from quant_research_platform.research.evaluations.engine import (
 from quant_research_platform.research.features.transforms import (
     feature_observation_columns,
 )
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -232,17 +239,32 @@ def evaluate(config):
         raise ValueError("evaluation_workers_requires_a_share_factors")
     if prediction_sources.intersection(columns):
         raise ValueError("evaluation_prediction_input_column_conflict")
-    predictions = {}
+    predictions, classifications = {}, {}
     for column, path in supplied_predictions.items():
         frame, metadata = read_predictions(
             Path(path),
             columns=("timestamp", "asset_id", "prediction_score"),
             time_window=window,
+            include_available_probabilities=True,
         )
         validate_input_market(metadata["model_facts"], spec.market_id)
         # The prediction reader already owns uniqueness of these exact keys.
         frame.set_index(["timestamp", "asset_id"], inplace=True)
         predictions[column] = (frame["prediction_score"], metadata)
+        facts = metadata["model_facts"]
+        model = facts["model"]
+        target = model["target_column"]
+        if (
+            model["model_algorithm"] == "deeplob_classifier"
+            and target in spec.label_columns
+        ):
+            if _prediction_target_reason(facts, target, declared, session.manifest):
+                raise ValueError("evaluation_classification_target_mismatch")
+            classifications[column] = (
+                target,
+                frame[list(PROBABILITY_COLUMNS)],
+                ClassificationMetrics(model["hyperparameters"]["class_threshold"]),
+            )
         del frame
 
     def prepared():
@@ -305,6 +327,17 @@ def evaluate(config):
                             else "Int64"
                         )
                     frame[label] = frame[label].where(mature)
+                if classifications:
+                    scored, _ = apply_filter_mode(
+                        frame, mode=spec.filter_mode, metadata_key="filter_mode"
+                    )
+                    keys = pd.MultiIndex.from_frame(scored[["timestamp", "asset_id"]])
+                    for target, probabilities, accumulator in classifications.values():
+                        paired = probabilities.reindex(keys).to_numpy()
+                        valid = scored[target].notna().to_numpy() & np.isfinite(
+                            paired
+                        ).all(axis=1)
+                        accumulator.add(scored[target].to_numpy()[valid], paired[valid])
                 yield frame
 
     with build_evaluation_result_from_frames(
@@ -327,6 +360,19 @@ def evaluate(config):
             summary_factory=result.summaries,
             spec=spec,
             output_path=Path(config["output"]),
+            classification_summary=(
+                lambda: {
+                    column: {
+                        "target_column": target,
+                        "class_threshold": accumulator.threshold,
+                        "rows": accumulator.count,
+                        **accumulator.summary(),
+                    }
+                    for column, (target, _, accumulator) in classifications.items()
+                }
+            )
+            if classifications
+            else None,
             metadata={
                 **{
                     key: config[key]

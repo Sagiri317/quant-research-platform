@@ -1,5 +1,6 @@
 """Select valid prediction rows while retaining causal context for sequence models."""
 
+from quant_research_platform.contracts.models import DEEPLOB_ALGORITHMS
 from quant_research_platform.contracts.time import prediction_window_mask
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
@@ -52,4 +53,6 @@ def prediction_rows(
     filtered = mask_unobserved_features(
         filtered, metadata["input_columns"], declared_columns
     )
+    if include_context and metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
+        return filtered.sort_values(["timestamp", "asset_id"], kind="stable")
     return filtered.loc[observed].sort_values(["timestamp", "asset_id"], kind="stable")

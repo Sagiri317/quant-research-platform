@@ -6,12 +6,16 @@ from contextlib import contextmanager
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
     continuous_session,
+)
+from quant_research_platform.research.factors.event_microstructure import (
+    compute_event_factors,
 )
 from quant_research_platform.research.factors.microstructure import compute_factors
 from quant_research_platform.research.labels.quote_returns import compute_labels
@@ -109,6 +113,10 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
             total, signed = _flow(work, selected, kind)
             work[f"observed_{kind}_volume"] = total
             work[f"observed_signed_{kind}_volume"] = signed
+            boundary = work.segment_id.ne(work.segment_id.shift())
+            work.loc[
+                boundary, [f"observed_{kind}_volume", f"observed_signed_{kind}_volume"]
+            ] = np.nan
         output.append(work.loc[:, protocol.PANEL_COLUMNS])
     if not output:
         return pd.DataFrame(columns=protocol.PANEL_COLUMNS)
@@ -124,11 +132,9 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         for name, path in inputs.items()
     }
     for name, session in sessions.items():
-        if (
-            session.spec["data_id"] != name
-            or session.manifest.get("market_id", "a_share") != "a_share"
-        ):
+        if session.spec["data_id"] != name:
             raise ValueError("hft_input_identity_mismatch")
+        validate_input_market(session.spec, "a_share")
     metadata = {
         "producer_diagnostics": {
             "timestamp_semantics": "vendor_event_time_no_receive_clock",
@@ -144,6 +150,13 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             item.output_column: item.to_manifest() for item in definitions
         }
     lower, upper, closed = time_window_timestamp_interval(time_window)
+    hawkes_model = None
+    if spec.data_id == "hft_hawkes_factors":
+        from quant_research_platform.research.models.hawkes import load_hawkes
+
+        hawkes_model = load_hawkes(json.loads(spec.parameters_json)["model"])
+        if pd.Timestamp(lower) <= hawkes_model[1]:
+            raise ValueError("hawkes_prediction_not_out_of_sample")
 
     def frames():
         for day in pd.date_range(
@@ -164,7 +177,35 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             elif data["hft_panel"].empty:
                 continue
             elif spec.data_id == "hft_factors":
-                frame = compute_factors(data["hft_panel"])
+                frame = compute_factors(
+                    data["hft_panel"],
+                    columns=tuple(
+                        name
+                        for name, role in spec.column_roles.items()
+                        if role == "factor"
+                    ),
+                    **json.loads(spec.parameters_json),
+                )
+            elif spec.data_id == "hft_event_factors":
+                frame = compute_event_factors(
+                    data["hft_panel"],
+                    data["hft_orders"],
+                    data["hft_trades"],
+                    columns=tuple(
+                        name
+                        for name, role in spec.column_roles.items()
+                        if role == "factor"
+                    ),
+                    config=json.loads(spec.parameters_json),
+                )
+            elif spec.data_id == "hft_hawkes_factors":
+                from quant_research_platform.research.factors.hawkes import (
+                    compute_hawkes_factors,
+                )
+
+                frame = compute_hawkes_factors(
+                    data["hft_panel"], data["hft_trades"], hawkes_model
+                )
             else:
                 frame = compute_labels(data["hft_panel"], definitions)
             if frame.empty:

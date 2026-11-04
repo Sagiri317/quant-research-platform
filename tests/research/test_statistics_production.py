@@ -1487,6 +1487,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                         "family_id": family,
                         "model_id": model_id,
                         "model_metadata": prediction_model_metadata(prediction_meta),
+                        "model_facts": prediction_meta["model_facts"],
                     }
                 },
                 selections={"explicit_horizon": selection},

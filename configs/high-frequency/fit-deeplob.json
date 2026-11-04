@@ -1,0 +1,66 @@
+{
+  "market_id": "a_share",
+  "inputs": "data/research/a_share/deeplob",
+  "model": {
+    "model_id": "deeplob_direction",
+    "model_algorithm": "deeplob_classifier",
+    "input_feature_columns": [
+      "ask_px1",
+      "ask_vol1",
+      "bid_px1",
+      "bid_vol1",
+      "ask_px2",
+      "ask_vol2",
+      "bid_px2",
+      "bid_vol2",
+      "ask_px3",
+      "ask_vol3",
+      "bid_px3",
+      "bid_vol3",
+      "ask_px4",
+      "ask_vol4",
+      "bid_px4",
+      "bid_vol4",
+      "ask_px5",
+      "ask_vol5",
+      "bid_px5",
+      "bid_vol5",
+      "ask_px6",
+      "ask_vol6",
+      "bid_px6",
+      "bid_vol6",
+      "ask_px7",
+      "ask_vol7",
+      "bid_px7",
+      "bid_vol7",
+      "ask_px8",
+      "ask_vol8",
+      "bid_px8",
+      "bid_vol8",
+      "ask_px9",
+      "ask_vol9",
+      "bid_px9",
+      "bid_vol9",
+      "ask_px10",
+      "ask_vol10",
+      "bid_px10",
+      "bid_vol10"
+    ],
+    "target_column": "future_mid_return_30s",
+    "hyperparameters": {
+      "class_threshold": 0.0001,
+      "sequence_length": 100,
+      "epochs": 10,
+      "batch_size": 128,
+      "device": "cuda"
+    }
+  },
+  "fit_windows": [
+    {
+      "start": "2018-02-14T01:30:00",
+      "end": "2018-02-14T03:29:00"
+    }
+  ],
+  "fit_cutoff": "2018-02-14T03:30:00",
+  "output": "results/hft/deeplob"
+}

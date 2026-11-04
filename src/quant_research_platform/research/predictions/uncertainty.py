@@ -12,6 +12,10 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
+from quant_research_platform.contracts.models import (
+    _prediction_loss_reason,
+    _target_definition,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -63,17 +67,17 @@ def calibrate_uncertainty(config):
         set(),
     )
     alpha = strict_finite_float(config["alpha"], error="conformal_alpha_invalid")
-    frame, spec, availability = research_frame(
+    frame, session, availability = research_frame(
         config["dataset"], config["window"], (), label=config["label"]
     )
+    spec = session.spec
     if spec.get("column_units", {}).get(config["label"]) != config["unit"]:
         raise ValueError("uncertainty_label_unit_mismatch")
     predictions, metadata = read_predictions(
         Path(config["predictions"]), time_window=TimeWindow(**config["window"])
     )
-    if (
-        metadata["label_unit"] != config["unit"]
-        or metadata["model_facts"]["model"]["target_column"] != config["label"]
+    if _prediction_loss_reason(
+        metadata["model_facts"], config["label"], spec, session.manifest
     ):
         raise ValueError("uncertainty_prediction_target_mismatch")
     frame = mature_rows(
@@ -176,6 +180,7 @@ def apply_uncertainty(config):
                 "radius": radius,
                 "cost": cost,
                 "label": calibration["config"]["label"],
+                "target_definition": metadata["model_facts"]["target_definition"],
             },
         },
     )
@@ -192,9 +197,10 @@ def evaluate_uncertainty(config):
     config = _strict_config(
         config, {"intervals", "dataset", "window", "label", "cutoff", "output"}, set()
     )
-    labels, label_spec, availability = research_frame(
+    labels, label_session, availability = research_frame(
         config["dataset"], config["window"], (), label=config["label"]
     )
+    label_spec = label_session.spec
     labels = mature_rows(
         labels,
         label=config["label"],
@@ -208,6 +214,8 @@ def evaluate_uncertainty(config):
         session.spec["column_units"].get("prediction_lower")
         != label_spec.get("column_units", {}).get(config["label"])
         or session.manifest["parameters"]["label"] != config["label"]
+        or session.manifest["parameters"]["target_definition"]
+        != _target_definition(label_spec, config["label"], label_session.manifest)
     ):
         raise ValueError("uncertainty_evaluation_target_mismatch")
     intervals = materialize_dataset_session(session)

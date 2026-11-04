@@ -28,6 +28,35 @@ from tests.helpers.high_frequency import daily_view, write_daily_inputs
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
 
 
+def test_hft_prepare_rejects_conflicting_declared_market(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.research.protocols.a_share_hft import processed_specs
+    from quant_research_platform.storage.datasets import write_dataset
+
+    panel = build_panel(
+        normalize(raw_quotes(), "hft_quotes", INSTRUMENTS),
+        normalize(raw_events("hft_orders"), "hft_orders", INSTRUMENTS),
+        normalize(raw_events("hft_trades"), "hft_trades", INSTRUMENTS),
+        max_gap_seconds=6,
+    )
+    spec = next(item for item in processed_specs() if item.data_id == "hft_panel")
+    root = tmp_path / "wrong-market"
+    panel["market_id"] = "crypto"
+    write_dataset(root, panel, spec=replace(spec, market_id="crypto"))
+    with pytest.raises(ValueError, match="input_market_mismatch"):
+        prepare(
+            {
+                "market_id": "a_share",
+                "data_id": "hft_factors",
+                "inputs": {"hft_panel": str(root)},
+                "factor_columns": ["book_ofi"],
+                "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+                "output_root": str(tmp_path / "factors"),
+            }
+        )
+
+
 def raw_quotes(times=(93000000, 93003000, 93006000, 93009000)):
     result = pd.DataFrame(
         {

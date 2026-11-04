@@ -17,7 +17,9 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
 )
 from quant_research_platform.contracts.time import (
+    PredictionWindow,
     TimeWindow,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.calibration import (
@@ -176,22 +178,21 @@ def backtest(config: Mapping) -> Path:
         )[0]["metadata"]
         facts = metadata["model_facts"]
         window = TimeWindow(**item["window"])
+        lower, upper, closed = time_window_timestamp_interval(window)
         if any(
-            pd.Timestamp(window.start) <= pd.Timestamp(old.end)
-            and pd.Timestamp(old.start) <= pd.Timestamp(window.end)
-            for old in domains
+            (lower < old_upper or lower == old_upper and old_closed)
+            and (old_lower < upper or old_lower == upper and closed)
+            for old_lower, old_upper, old_closed in domains
         ):
             raise ValueError("portfolio_prediction_domains_overlap")
-        if (
-            window.end is None
-            or pd.Timestamp(window.start)
-            < pd.Timestamp(metadata["prediction_window"]["start"])
-            or (
-                metadata["prediction_window"]["end"] is not None
-                and pd.Timestamp(window.end)
-                > pd.Timestamp(metadata["prediction_window"]["end"])
+        saved_window = PredictionWindow(**metadata["prediction_window"])
+        outside = lower < pd.Timestamp(saved_window.start)
+        if saved_window.end is not None:
+            _, saved_upper, saved_closed = time_window_timestamp_interval(saved_window)
+            outside |= upper > saved_upper or (
+                upper == saved_upper and closed and not saved_closed
             )
-        ):
+        if outside:
             raise ValueError("portfolio_prediction_window_invalid")
         if facts["market_id"] != "a_share":
             raise ValueError("portfolio_model_market_mismatch")
@@ -243,20 +244,15 @@ def backtest(config: Mapping) -> Path:
             )
         ) as batches:
             for frame in batches:
-                chosen = frame.loc[
-                    frame.timestamp.between(
-                        pd.Timestamp(window.start), pd.Timestamp(window.end)
-                    )
-                ]
                 if index.add_float_value_table(
-                    pa.Table.from_pandas(chosen, preserve_index=False),
+                    pa.Table.from_pandas(frame, preserve_index=False),
                     namespace="prediction",
                     value_column="prediction_rank_score",
                     retain_values=True,
                 ):
                     raise ValueError("portfolio_prediction_keys_invalid")
-                del chosen, frame
-        domains.append(window)
+                del frame
+        domains.append((lower, upper, closed))
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),

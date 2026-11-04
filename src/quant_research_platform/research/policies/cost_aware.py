@@ -120,13 +120,14 @@ def fit_cost_model(config):
     assets = config["asset_ids"]
     if not assets or len(assets) != len(set(assets)):
         raise ValueError("cost_learning_assets_invalid")
-    frame, spec, availability = research_frame(
+    frame, session, availability = research_frame(
         config["dataset"],
         config["window"],
         config["feature_columns"],
         label=config["label"],
         context_columns=(config["return_end_column"],),
     )
+    spec = session.spec
     if spec.get("column_units", {}).get(config["label"]) != "decimal_return":
         raise ValueError("cost_learning_decimal_return_required")
     source = frame.loc[frame.asset_id.isin(assets)]

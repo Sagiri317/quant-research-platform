@@ -1,0 +1,51 @@
+{
+  "panel": "data/processed/a_share/hft_panel",
+  "predictions": "results/hft/predictions",
+  "fee_schedule": "data/processed/a_share/fee_schedule",
+  "window": {
+    "start": "2018-02-14T05:00:00",
+    "end": "2018-02-14T06:57:00"
+  },
+  "parameters": {
+    "initial_capital": 100000.0,
+    "initial_inventory": {
+      "000001": 1000,
+      "600000": 1000
+    },
+    "maximum_inventory": {
+      "000001": 2000,
+      "600000": 2000
+    },
+    "buy_threshold": 0.001,
+    "sell_threshold": -0.001,
+    "latency_ms": 1,
+    "participation_rate": 0.05,
+    "minimum_commission": 5.0,
+    "restore_at": null,
+    "passive": {
+      "queue_model": "conservative",
+      "cancel_latency_ms": 1
+    },
+    "signal_processing": [
+      {
+        "method": "ewma",
+        "halflife_seconds": 10
+      },
+      {
+        "method": "hysteresis",
+        "enter": 0.002,
+        "exit": 0.001
+      }
+    ]
+  },
+  "output": "results/hft/passive-ledger",
+  "daily_inputs": {
+    "panel": "data/processed/a_share/market_panel_1d",
+    "calendar": "data/interim/csmar/trading_calendar",
+    "market_bars": "data/interim/csmar/market_bars_1d",
+    "stock_master": "data/interim/csmar/stock_master",
+    "corporate_actions": "data/interim/csmar/corporate_actions",
+    "equity_events": "data/interim/reference/a_share_equity_events"
+  },
+  "trades": "data/interim/venvoo/hft_trades"
+}

@@ -6,7 +6,9 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.models import (
+    PROBABILITY_COLUMNS,
     _validate_model_prediction_window,
+    prediction_columns,
     validate_model_facts,
 )
 from quant_research_platform.contracts.time import (
@@ -133,12 +135,7 @@ def _validate_prediction_training_facts(facts, realized):
 
 def validate_prediction_frame(frame, metadata, *, columns=None):
     """Validate rows and return timestamps; the stream index owns uniqueness."""
-    expected = columns or (
-        "timestamp",
-        "asset_id",
-        "prediction_score",
-        "prediction_rank_score",
-    )
+    expected = columns or prediction_columns(metadata)
     if tuple(frame.columns) != tuple(expected):
         raise ValueError("persisted_prediction_columns_mismatch")
     if (
@@ -153,13 +150,28 @@ def validate_prediction_frame(frame, metadata, *, columns=None):
         raise ValueError("prediction_coverage_invalid")
     if any(type(asset) is not str or not asset for asset in frame.asset_id):
         raise ValueError("invalid_prediction_keys")
-    for column in ("prediction_score", "prediction_rank_score"):
+    for column in ("prediction_score", "prediction_rank_score", *PROBABILITY_COLUMNS):
         if column in frame:
             if not pd.api.types.is_numeric_dtype(frame[column]):
                 raise ValueError("invalid_prediction_values")
             strict_finite_numeric_series(
                 frame[column], error="invalid_prediction_values"
             )
+    for column in PROBABILITY_COLUMNS:
+        if column in frame and not frame[column].between(0, 1).all():
+            raise ValueError("invalid_prediction_probabilities")
+    if set(PROBABILITY_COLUMNS) <= set(frame):
+        if not np.allclose(
+            frame[list(PROBABILITY_COLUMNS)].sum(axis=1), 1.0, atol=1e-6, rtol=0
+        ):
+            raise ValueError("invalid_prediction_probabilities")
+        if "prediction_score" in frame and not np.allclose(
+            frame.prediction_score,
+            frame.probability_up - frame.probability_down,
+            atol=1e-12,
+            rtol=1e-12,
+        ):
+            raise ValueError("prediction_direction_score_mismatch")
     if (
         "prediction_rank_score" in frame
         and not frame["prediction_rank_score"].between(-0.5, 0.5).all()

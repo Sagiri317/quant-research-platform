@@ -17,6 +17,7 @@ from quant_research_platform.catalog.processed import (
     ProcessedDataCatalog,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -134,6 +135,7 @@ def produce_a_share_processed_data(
                 dict.fromkeys((*source_spec.primary_key, *options["columns"]))
             )
         source_sessions[data_id] = open_dataset_session(**options)
+        validate_input_market(source_sessions[data_id].spec, spec.market_id)
     if spec.data_id == "market_panel_1d":
         missing = {
             "market_bars_1d",
@@ -242,6 +244,7 @@ def produce_a_share_processed_data(
                 )
             )
         session = open_dataset_session(**options)
+        validate_input_market(session.spec, spec.market_id)
         if spec.data_id == "on_id_decomposition" and data_id == "market_panel_1d":
             session = replace(
                 session, _allow_infinite_columns=("adj_open", "adj_close")

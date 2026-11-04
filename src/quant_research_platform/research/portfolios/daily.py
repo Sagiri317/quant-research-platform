@@ -39,6 +39,7 @@ from quant_research_platform.contracts.portfolios import (
     portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.time import (
+    DECISION_CONTEXT_COLUMNS,
     TimeWindow,
     time_window_timestamp_interval,
 )
@@ -380,12 +381,11 @@ def backtest_a_share(
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
-    dataset_options = _dataset_input_options(
-        inputs["dataset"], time_window=TimeWindow(sessions[0], sessions[-1])
-    )
+    dataset_options = _dataset_input_options(inputs["dataset"])
     dataset_options["columns"] = ("timestamp", "asset_id")
     dataset_session = open_dataset_session(**dataset_options)
     declared_columns = dataset_session.spec["column_roles"]
+    explicit_decisions = "signal_session" in declared_columns
     dataset_business_columns = (
         ("float_market_cap",)
         if candidate.construction == "quantile_float_cap"
@@ -423,7 +423,18 @@ def backtest_a_share(
                 )
             )
         )
-    dataset_columns = (*_DATASET_COLUMNS, *dataset_business_columns)
+    if explicit_decisions:
+        if not set(DECISION_CONTEXT_COLUMNS) <= set(declared_columns):
+            raise ValueError("portfolio_decision_clock_context_missing")
+        dataset_business_columns = (
+            *dataset_business_columns,
+            *DECISION_CONTEXT_COLUMNS,
+        )
+    dataset_input_columns = (*_DATASET_COLUMNS, *dataset_business_columns)
+    dataset_columns = (
+        *dataset_input_columns,
+        *(("decision_at",) if explicit_decisions else ()),
+    )
     alpha_start = max(session_start, pd.Timestamp(prediction_window.start))
     fee_root = inputs["fees"]
     fee_identity = str(_dataset_input_options(fee_root)["dataset_root"])
@@ -469,6 +480,15 @@ def backtest_a_share(
     research_marks = ResearchValuationMarks()
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
+        dataset_history = history
+        if explicit_decisions:
+            successor = trading_sessions.searchsorted(sessions[-1], side="right")
+            if successor == len(trading_sessions):
+                raise ValueError("portfolio_decision_clock_requires_successor_session")
+            dataset_history = TimeWindow(
+                sessions[0],
+                trading_sessions[successor] + pd.Timedelta(hours=1, minutes=25),
+            )
         panel_columns = (
             (*_ENHANCED_PANEL_COLUMNS, factor_risk.config.weight_column)
             if enhanced
@@ -507,13 +527,20 @@ def backtest_a_share(
             closing_iterator(
                 _iter_input_sessions(
                     dataset_root,
-                    dataset_columns,
-                    history,
+                    dataset_input_columns,
+                    dataset_history,
                     business_columns=dataset_business_columns,
                     session=dataset_session,
                 )
             )
         )
+        if explicit_decisions:
+            dataset_frames = input_channels.enter_context(
+                closing_iterator(
+                    _decision_session_frames(dataset_frames, trading_sessions)
+                )
+            )
+        dataset_at = _session_reader(dataset_frames, dataset_columns)
         risk_inputs = (
             _risk_context_input_sessions(
                 roots=tuple(inputs.get("risk_context", ())),
@@ -524,6 +551,10 @@ def backtest_a_share(
             if enhanced
             else {}
         )
+        risk_inputs = {
+            position: _session_reader(frames, columns)
+            for position, (columns, frames) in risk_inputs.items()
+        }
         panel_window = {}
 
         def release_panels(before):
@@ -586,12 +617,8 @@ def backtest_a_share(
                     )
                 ]
                 risk_frames = []
-                for columns, context_frames in (
-                    risk_inputs.values() if not panel.empty else ()
-                ):
-                    context = _read_next_session(
-                        context_frames, columns, decision_timestamp
-                    )
+                for context_at in risk_inputs.values() if not panel.empty else ():
+                    context = context_at(decision_timestamp)
                     _validate_input_keys(panel, context)
                     risk_frames.append(context)
                 current_cross = _enhanced_risk_cross(
@@ -654,25 +681,34 @@ def backtest_a_share(
                         waiting_alpha[1],
                     )
                     waiting_alpha = None
-                if decision_timestamp >= alpha_start:
+                if explicit_decisions or decision_timestamp >= alpha_start:
                     dataset = (
-                        _read_next_session(
-                            dataset_frames, dataset_columns, decision_timestamp
-                        )
+                        dataset_at(decision_timestamp)
                         if not panel.empty
                         else pd.DataFrame(columns=dataset_columns).astype(
                             {"eligible": "bool"}
                         )
                     )
-                    if dataset.empty and not panel.empty:
+                    if (
+                        dataset.empty
+                        and not panel.empty
+                        and (
+                            not explicit_decisions or decision_timestamp >= output_start
+                        )
+                    ):
                         raise PortfolioTargetBlocked(
                             "portfolio_research_dataset_session_missing"
                         )
-                    _validate_input_keys(dataset, panel)
-                    alpha = _prediction_alpha(
-                        dataset,
-                        prediction_lookup,
-                    )
+                    if not dataset.empty or panel.empty:
+                        _validate_input_keys(dataset, panel)
+                        prediction_rows = (
+                            dataset.loc[dataset.decision_at.ge(alpha_start)]
+                            if explicit_decisions
+                            else dataset
+                        )
+                        alpha = _prediction_alpha(
+                            prediction_rows, prediction_lookup
+                        ).reindex(pd.Index(dataset.asset_id, name="asset_id"))
                     has_next_session = position + 1 < len(sessions)
                     if (
                         alpha is not None
@@ -702,9 +738,7 @@ def backtest_a_share(
                 continue
             if not enhanced:
                 dataset = (
-                    _read_next_session(
-                        dataset_frames, dataset_columns, decision_timestamp
-                    )
+                    dataset_at(decision_timestamp)
                     if not panel.empty
                     else pd.DataFrame(columns=dataset_columns).astype(
                         {"eligible": "bool"}
@@ -818,7 +852,11 @@ def backtest_a_share(
                         target_override = benchmark_weights.copy(deep=True)
                         decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
             decision_receivable = sum(entitlements.receivables.values())
-            if decision_columns is not None:
+            if decision_columns is not None and explicit_decisions and dataset.empty:
+                decision_skip_reason = "policy_no_decision_rows"
+            if decision_columns is not None and (
+                not explicit_decisions or not dataset.empty
+            ):
                 from quant_research_platform.research.features.transforms import (
                     mask_unobserved_features,
                 )
@@ -829,7 +867,9 @@ def backtest_a_share(
                 marks = view.valuation.set_index("asset_id").close
                 decision_assets = current.index.union(held_units.index)
                 target_override = yield PolicyDecision(
-                    decision_timestamp,
+                    pd.Timestamp(dataset.decision_at.iloc[0])
+                    if explicit_decisions
+                    else decision_timestamp,
                     current.reindex(decision_assets)
                     .loc[:, list(decision_columns)]
                     .copy(),
@@ -1087,18 +1127,57 @@ def _iter_input_sessions(
         yield from delegated_chunks
 
 
-def _read_next_session(
-    frames: Iterator[pd.DataFrame], columns: tuple[str, ...], timestamp: pd.Timestamp
-) -> pd.DataFrame:
+def _session_reader(frames: Iterator[pd.DataFrame], columns: tuple[str, ...]):
+    """Retain one future frame when a requested session has no observations."""
+    pending = None
+
+    def read(timestamp):
+        nonlocal pending
+        if pending is None:
+            pending = next(frames, None)
+        while (
+            pending is not None and pd.Timestamp(pending.timestamp.iloc[0]) < timestamp
+        ):
+            pending = next(frames, None)
+        if pending is None or pd.Timestamp(pending.timestamp.iloc[0]) > timestamp:
+            return pd.DataFrame(columns=columns)
+        result = _portfolio_session_frame(pending, columns)
+        pending = None
+        return result
+
+    return read
+
+
+def _decision_session_frames(frames, sessions):
+    """Bind real prediction instants to the account's prior-session schedule."""
     for frame in frames:
-        actual = pd.Timestamp(frame["timestamp"].iloc[0])
-        if actual < timestamp:
-            continue
-        if actual > timestamp:
-            break
-        normalized = _portfolio_session_frame(frame, columns)
-        return normalized
-    return pd.DataFrame(columns=columns)
+        signal = pd.DatetimeIndex(frame.signal_session)
+        positions = sessions.get_indexer(signal)
+        if (positions < 0).any() or (positions + 1 >= len(sessions)).any():
+            raise ValueError("portfolio_decision_session_invalid")
+        execution = sessions.take(positions + 1)
+        auction = (
+            (execution + pd.Timedelta(hours=9, minutes=25))
+            .tz_localize("Asia/Shanghai")
+            .tz_convert("UTC")
+            .tz_localize(None)
+        )
+        close = (
+            (signal + pd.Timedelta(hours=15, minutes=30))
+            .tz_localize("Asia/Shanghai")
+            .tz_convert("UTC")
+            .tz_localize(None)
+        )
+        if (
+            not pd.DatetimeIndex(frame.execution_session).equals(execution)
+            or frame.timestamp.isna().any()
+            or frame.order_submit_at.isna().any()
+            or (frame.timestamp.to_numpy() < close.to_numpy()).any()
+            or frame.order_submit_at.lt(frame.timestamp).any()
+            or (frame.order_submit_at.to_numpy() >= auction.to_numpy()).any()
+        ):
+            raise ValueError("portfolio_decision_clock_not_before_execution")
+        yield frame.assign(decision_at=frame.timestamp, timestamp=signal)
 
 
 def _risk_context_input_sessions(
@@ -2198,6 +2277,8 @@ def _prediction_alpha(
     # Match supplied keys against context even when current eligibility forbids
     # trading. The persisted PRED owns its score domain; historical X is irrelevant.
     required_rows = dataset.loc[:, ["timestamp", "asset_id"]]
+    if "decision_at" in dataset:
+        required_rows = required_rows.assign(timestamp=dataset.decision_at)
     alpha = pd.Series(np.nan, index=dataset.index, dtype="float64")
     if required_rows.empty:
         return alpha

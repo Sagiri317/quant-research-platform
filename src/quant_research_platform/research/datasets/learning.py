@@ -24,7 +24,7 @@ from quant_research_platform.storage.datasets.reading import (
 
 
 def research_frame(source, window, columns, *, label=None, context_columns=()):
-    """Read a bounded, unique asset-time panel and return its spec and maturity column.
+    """Read a bounded panel and return its source session and maturity column.
 
     Feature observation flags turn technical fills back into missing values.
     Labels and their availability clocks are read only when explicitly requested.
@@ -70,7 +70,7 @@ def research_frame(source, window, columns, *, label=None, context_columns=()):
         raise ValueError("research_panel_key_invalid")
     return (
         frame.sort_values(["timestamp", "asset_id"]).reset_index(drop=True),
-        spec,
+        session,
         availability,
     )
 

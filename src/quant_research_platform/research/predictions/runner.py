@@ -10,8 +10,13 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
+    DEEPLOB_ALGORITHMS,
+    PROBABILITY_COLUMNS,
+    SEQUENCE_ALGORITHMS,
     _model_spec,
     _validate_model_prediction_window,
+    model_context_window,
+    sequence_context_columns,
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
@@ -22,6 +27,7 @@ from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import (
     prediction_callable,
 )
@@ -56,15 +62,10 @@ def predict(config: Mapping) -> Path:
         raise ValueError("prediction_asset_ids_invalid")
     result, facts = load_model(Path(config["model"]))
     _validate_model_prediction_window(facts, window)
-    sequence = result.metadata["model_algorithm"] in {
-        "lstm_regressor",
-        "transformer_regressor",
-    }
-    read_window = (
-        PredictionWindow(start=facts["fit_windows"][-1]["end"], end=window.end)
-        if sequence
-        else window
-    )
+    algorithm = result.metadata["model_algorithm"]
+    sequence = algorithm in SEQUENCE_ALGORITHMS
+    classification = algorithm == "deeplob_classifier"
+    read_window = model_context_window(facts, window)
     from quant_research_platform.contracts.filtering import required_filter_columns
 
     source = config["inputs"]
@@ -89,6 +90,7 @@ def predict(config: Mapping) -> Path:
                 "timestamp",
                 "asset_id",
                 *result.metadata["input_columns"],
+                *sequence_context_columns(algorithm),
                 *model_input_validity_columns(
                     tuple(result.metadata["input_columns"]),
                     session.spec["column_roles"],
@@ -105,6 +107,10 @@ def predict(config: Mapping) -> Path:
         predict_values = prediction_callable(
             tuple(result.metadata["input_columns"]), result.prediction_model
         )
+        if classification:
+            predict_values = result.prediction_model.prediction_function(
+                probabilities=True
+            )
         with closing_iterator(
             iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
         ) as source:
@@ -119,9 +125,21 @@ def predict(config: Mapping) -> Path:
                 if usable.empty:
                     continue
                 values = predict_values(usable)
+                if algorithm in DEEPLOB_ALGORITHMS:
+                    valid = complete_book_rows(usable).to_numpy()
+                    usable, values = usable.loc[valid], values[valid]
+                if classification:
+                    if values.shape != (len(usable), 3):
+                        raise ValueError("invalid_prediction_probabilities")
+                    probabilities = values
+                    if not np.isfinite(probabilities).all():
+                        raise ValueError("invalid_prediction_probabilities")
+                    values = probabilities[:, 2] - probabilities[:, 0]
                 if values.shape != (len(usable),) or not np.isfinite(values).all():
                     raise ValueError("invalid_prediction_values")
                 output = usable.assign(prediction_score=values)
+                if classification:
+                    output[list(PROBABILITY_COLUMNS)] = probabilities
                 if sequence:
                     output, _ = apply_filter_mode(
                         output,
@@ -132,7 +150,13 @@ def predict(config: Mapping) -> Path:
                     if output.empty:
                         continue
                 output = output.loc[
-                    :, ["timestamp", "asset_id", "prediction_score"]
+                    :,
+                    [
+                        "timestamp",
+                        "asset_id",
+                        "prediction_score",
+                        *(PROBABILITY_COLUMNS if classification else ()),
+                    ],
                 ].copy()
                 ranks = output.groupby("timestamp", sort=False).prediction_score.rank(
                     method="average"
@@ -141,6 +165,15 @@ def predict(config: Mapping) -> Path:
                     "timestamp", sort=False
                 ).prediction_score.transform("size")
                 output["prediction_rank_score"] = (ranks - (counts + 1) / 2) / counts
+                output = output[
+                    [
+                        "timestamp",
+                        "asset_id",
+                        "prediction_score",
+                        "prediction_rank_score",
+                        *(PROBABILITY_COLUMNS if classification else ()),
+                    ]
+                ]
                 if assets is not None:
                     output = output.loc[output.asset_id.isin(assets)]
                 yield output

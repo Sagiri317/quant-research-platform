@@ -190,9 +190,10 @@ def search_factors(config):
         "end": config["validation_window"]["end"],
     }
     columns = tuple(dict.fromkeys((*config["columns"], *config["baseline_columns"])))
-    frame, spec, availability = research_frame(
+    frame, session, availability = research_frame(
         config["dataset"], window, columns, label=config["label"]
     )
+    spec = session.spec
     train = mature_rows(
         frame.loc[window_mask(frame, config["train_window"])],
         label=config["label"],
@@ -380,7 +381,10 @@ def apply_formula(config):
             (*selected["config"]["columns"], *selected["config"]["baseline_columns"])
         )
     )
-    frame, spec, _ = research_frame(config["dataset"], config["input_window"], columns)
+    frame, session, _ = research_frame(
+        config["dataset"], config["input_window"], columns
+    )
+    spec = session.spec
     frame["discovered_factor"] = formula_values(frame, expression, columns)
     frame = frame.loc[
         window_mask(frame, config["output_window"]),

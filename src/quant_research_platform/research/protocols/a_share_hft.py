@@ -11,7 +11,13 @@ from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
 
 KEY = ("market_id", "asset_id", "timestamp")
-DATA_IDS = ("hft_panel", "hft_factors", "hft_labels")
+DATA_IDS = (
+    "hft_panel",
+    "hft_factors",
+    "hft_labels",
+    "hft_event_factors",
+    "hft_hawkes_factors",
+)
 BOOK_COLUMNS = tuple(
     f"{side}_{kind}{level}"
     for side in ("bid", "ask")
@@ -65,6 +71,57 @@ FACTOR_INPUTS = {
     "observed_signed_trade_volume_30s": ("observed_signed_trade_volume",),
     "book_ofi_30s": ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1"),
 }
+DEFAULT_FACTORS = tuple(FACTOR_INPUTS)
+FACTOR_INPUTS.update(
+    {
+        **{f"book_ofi_{level}": BOOK_COLUMNS for level in (5, 10)},
+        **{f"depth_normalized_ofi_{level}": BOOK_COLUMNS for level in (5, 10)},
+        "book_ofi_near_far": BOOK_COLUMNS,
+        "book_ofi_10_30s": BOOK_COLUMNS,
+        "book_ofi_10_ewma": BOOK_COLUMNS,
+        **{
+            f"{side}_{metric}": BOOK_COLUMNS
+            for side in ("bid", "ask")
+            for metric in (
+                "depth_concentration",
+                "near_depth_fraction",
+                "depth_slope",
+                "depth_slope_change",
+                "replenishment_30s",
+            )
+        },
+        "depth_slope_difference": BOOK_COLUMNS,
+    }
+)
+EVENT_FACTORS = {
+    "trade_interval_seconds": "seconds",
+    "trade_interval_mean_seconds": "seconds",
+    "trade_interval_cv": "dimensionless",
+    "trade_intensity": "events_per_second",
+    "trade_activity_ratio": "dimensionless",
+    "trade_signed_run": "events",
+    "trade_signed_run_volume": "shares",
+    "trade_event_flow_imbalance": "dimensionless",
+    "trade_volume_flow_imbalance": "dimensionless",
+    "large_trade_pressure": "dimensionless",
+    "small_trade_pressure": "dimensionless",
+    "trade_interval_return_interaction": "decimal_return_times_seconds",
+    "observed_cancel_order_ratio": "dimensionless",
+    "observed_cancel_count_fraction": "dimensionless",
+    "observed_cancel_pressure_change": "dimensionless",
+    "observed_order_age_seconds": "seconds",
+    "observed_order_age_side_difference": "seconds",
+    "observed_cancel_age_seconds": "seconds",
+    "observed_age_weighted_cancel_pressure": "shares_times_seconds",
+    "observed_completed_lifetime_seconds": "seconds",
+    "observed_lifecycle_match_fraction": "dimensionless",
+}
+HAWKES_FACTORS = {
+    "hawkes_buy_intensity": "events_per_second",
+    "hawkes_sell_intensity": "events_per_second",
+    "hawkes_intensity_imbalance": "dimensionless",
+    "hawkes_excitation_fraction": "dimensionless",
+}
 
 
 def factor_catalog():
@@ -76,10 +133,18 @@ def factor_catalog():
             family="level2_microstructure",
             input_columns=inputs,
             output_column=name,
-            required_input_data_id="hft_panel",
+            required_input_data_id="hft_hawkes_factors"
+            if name in HAWKES_FACTORS
+            else "hft_event_factors"
+            if name in EVENT_FACTORS
+            else "hft_panel",
             timing_semantics="observed_at_or_before_vendor_quote_time_same_segment",
         )
-        for name, inputs in FACTOR_INPUTS.items()
+        for name, inputs in {
+            **FACTOR_INPUTS,
+            **dict.fromkeys(EVENT_FACTORS, ("timestamp", "volume")),
+            **dict.fromkeys(HAWKES_FACTORS, ("timestamp", "side")),
+        }.items()
     )
 
 
@@ -111,6 +176,8 @@ def _roles(columns, *, factors=(), labels=()):
         if name in KEY
         else "factor"
         if name in factors
+        else "feature"
+        if name in BOOK_COLUMNS
         else "label"
         if name in labels
         else "universe"
@@ -135,7 +202,7 @@ def processed_specs():
             label_columns,
         ),
     )
-    return tuple(
+    specs = tuple(
         ProcessedDataSpec(
             data_id=name,
             market_id="a_share",
@@ -155,7 +222,19 @@ def processed_specs():
                 else "shares"
                 if "volume" in column
                 or column.startswith(("bid_vol", "ask_vol"))
-                or column in {"book_ofi", "book_ofi_30s"}
+                or column
+                in {
+                    "book_ofi",
+                    "book_ofi_30s",
+                    "book_ofi_5",
+                    "book_ofi_10",
+                    "book_ofi_near_far",
+                    "book_ofi_10_30s",
+                    "book_ofi_10_ewma",
+                }
+                or "replenishment" in column
+                else "per_bp"
+                if "depth_slope" in column
                 else "dimensionless"
                 for column in columns
                 if column in factors
@@ -173,6 +252,44 @@ def processed_specs():
         )
         for name, kind, columns, factors, selected_labels in definitions
     )
+    return (
+        *specs,
+        ProcessedDataSpec(
+            data_id="hft_event_factors",
+            market_id="a_share",
+            kind="factor",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=KEY,
+            partition_columns=("year",),
+            column_roles=_roles((*KEY, *EVENT_FACTORS), factors=EVENT_FACTORS),
+            column_units=EVENT_FACTORS,
+            source_input_data_ids=("hft_orders", "hft_trades"),
+            processed_input_data_ids=("hft_panel",),
+            parameters_json=json.dumps(
+                {
+                    "event_window": 50,
+                    "volume_window": 10000,
+                    "history_window": 200,
+                    "large_quantile": 0.9,
+                    "order_link_field": None,
+                }
+            ),
+        ),
+        ProcessedDataSpec(
+            data_id="hft_hawkes_factors",
+            market_id="a_share",
+            kind="factor",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=KEY,
+            partition_columns=("year",),
+            column_roles=_roles((*KEY, *HAWKES_FACTORS), factors=HAWKES_FACTORS),
+            column_units=HAWKES_FACTORS,
+            source_input_data_ids=("hft_trades",),
+            processed_input_data_ids=("hft_panel",),
+        ),
+    )
 
 
 def research_dataset_catalog():
@@ -180,15 +297,15 @@ def research_dataset_catalog():
     label_columns = tuple(item.output_column for item in labels)
     maturity = {item.output_column: item.available_at_column for item in labels}
     context = ("session_date", "exchange", "segment_id", "mid", *maturity.values())
-    columns = (*KEY, *FACTOR_INPUTS, *label_columns, "eligible", *context)
+    columns = (*KEY, *DEFAULT_FACTORS, *label_columns, "eligible", *context)
     return ResearchDatasetCatalog(
         (
             ResearchDatasetSpec(
                 data_id="a_share_hft",
                 market_id="a_share",
-                input_data_ids=DATA_IDS,
+                input_data_ids=("hft_panel", "hft_factors", "hft_labels"),
                 base_input_data_id="hft_panel",
-                factor_columns=tuple(FACTOR_INPUTS),
+                factor_columns=DEFAULT_FACTORS,
                 label_columns=label_columns,
                 label_availability_columns=maturity,
                 filter_columns=("eligible",),

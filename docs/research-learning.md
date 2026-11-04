@@ -48,7 +48,7 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 
 每个 episode 指定 `kind`、`task`、`asset_ids`、`feature_columns`、有限 `window`、
 `account`、`risk_aversion`、`unfinished_penalty_bps`。日期和精确时刻沿用现有窗口约定：
-纯日期结束界包含全天，精确时间结束界为开区间。高频时刻使用原生 UTC 时钟。
+纯日期结束界包含全天，精确时间结束界包含该时刻。高频时刻使用原生 UTC 时钟。
 
 | 任务 | 账户与动作 | 奖励 |
 |---|---|---|

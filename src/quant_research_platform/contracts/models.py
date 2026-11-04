@@ -28,7 +28,9 @@ from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
 )
 from quant_research_platform.contracts.time import (
+    PredictionWindow,
     TimeWindow,
+    is_datetime_window,
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
@@ -44,19 +46,79 @@ class _ModelAlgorithmFacts:
 
     dependency_package: str | None = None
     parallel: bool = False
+    sequence: bool = False
 
 
 _MODEL_ALGORITHM_FACTS = {
     "linear_regression": _ModelAlgorithmFacts(),
     "lasso_regression": _ModelAlgorithmFacts("sklearn"),
     "xgboost_regressor": _ModelAlgorithmFacts("xgboost", parallel=True),
-    "lstm_regressor": _ModelAlgorithmFacts("torch"),
-    "transformer_regressor": _ModelAlgorithmFacts("torch"),
+    "lstm_regressor": _ModelAlgorithmFacts("torch", sequence=True),
+    "transformer_regressor": _ModelAlgorithmFacts("torch", sequence=True),
+    "deeplob_regressor": _ModelAlgorithmFacts("torch", sequence=True),
+    "deeplob_classifier": _ModelAlgorithmFacts("torch", sequence=True),
 }
+SEQUENCE_ALGORITHMS = frozenset(
+    name for name, facts in _MODEL_ALGORITHM_FACTS.items() if facts.sequence
+)
+DEEPLOB_ALGORITHMS = frozenset({"deeplob_regressor", "deeplob_classifier"})
+DEEPLOB_INPUT_COLUMNS = tuple(
+    f"{side}_{kind}{level}"
+    for level in range(1, 11)
+    for side in ("ask", "bid")
+    for kind in ("px", "vol")
+)
+PROBABILITY_COLUMNS = ("probability_down", "probability_flat", "probability_up")
+CLASSIFICATION_METRICS = ("log_loss", "brier", "accuracy", "macro_f1")
+
+
+def sequence_context_columns(algorithm):
+    return (
+        ("session_date", "segment_id", "eligible")
+        if algorithm in DEEPLOB_ALGORITHMS
+        else ()
+    )
+
+
+def model_context_window(facts, window):
+    """Read only history that can affect this algorithm's prediction window."""
+    algorithm = facts["model"]["model_algorithm"]
+    if algorithm not in SEQUENCE_ALGORITHMS:
+        return window
+    start = (
+        pd.Timestamp(window.start).normalize()
+        if algorithm in DEEPLOB_ALGORITHMS
+        else pd.Timestamp(facts["fit_windows"][-1]["end"])
+    )
+    return PredictionWindow(
+        start.to_pydatetime() if is_datetime_window(window) else start.date(),
+        window.end,
+    )
+
+
+def prediction_columns(metadata):
+    return (
+        "timestamp",
+        "asset_id",
+        "prediction_score",
+        "prediction_rank_score",
+        *(
+            PROBABILITY_COLUMNS
+            if metadata["model_facts"]["model"]["model_algorithm"]
+            == "deeplob_classifier"
+            else ()
+        ),
+    )
+
+
 MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_ic": "maximize",
     "validation_rankic": "maximize",
     "validation_mse": "minimize",
+    "validation_log_loss": "minimize",
+    "validation_brier": "minimize",
+    "validation_accuracy": "maximize",
+    "validation_macro_f1": "maximize",
 }
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
@@ -77,6 +139,14 @@ def sequence_parameters(algorithm, parameters):
     }
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
+    if algorithm in DEEPLOB_ALGORITHMS:
+        defaults.update(
+            sequence_length=100, hidden_size=64, conv_channels=32, inception_channels=64
+        )
+    if algorithm == "deeplob_classifier":
+        if "class_threshold" not in parameters:
+            raise ValueError("classification_threshold_required")
+        defaults["class_threshold"] = parameters["class_threshold"]
     if set(parameters) - set(defaults):
         raise ValueError("sequence_parameters_unknown")
     defaults.update(parameters)
@@ -106,6 +176,18 @@ def sequence_parameters(algorithm, parameters):
         heads = defaults["n_heads"]
         if type(heads) is not int or heads < 1 or defaults["hidden_size"] % heads:
             raise ValueError("transformer_heads_invalid")
+    if algorithm in DEEPLOB_ALGORITHMS:
+        for name in ("conv_channels", "inception_channels"):
+            if type(defaults[name]) is not int or defaults[name] < 1:
+                raise ValueError("deeplob_channels_invalid")
+    if algorithm == "deeplob_classifier":
+        threshold = defaults["class_threshold"]
+        if (
+            type(threshold) not in (int, float)
+            or not np.isfinite(threshold)
+            or threshold < 0
+        ):
+            raise ValueError("classification_threshold_invalid")
     return defaults
 
 
@@ -185,7 +267,7 @@ def _resolved_model_hyperparameters_match(
         if algorithm == "xgboost_regressor":
             expected.setdefault("device", "cuda")
             expected.setdefault("tree_method", "hist")
-        if algorithm in {"lstm_regressor", "transformer_regressor"}:
+        if algorithm in SEQUENCE_ALGORITHMS:
             expected = sequence_parameters(algorithm, expected)
         return canonical_identity_bytes(actual) == canonical_identity_bytes(expected)
     except (TypeError, ValueError):
@@ -251,8 +333,7 @@ class ModelSpec:
             scaling = self.model_algorithm in {
                 "linear_regression",
                 "lasso_regression",
-                "lstm_regressor",
-                "transformer_regressor",
+                *SEQUENCE_ALGORITHMS,
             }
         if type(scaling) is not bool:
             raise ValueError("model_training_scaling_invalid")
@@ -292,10 +373,15 @@ class ModelSpec:
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
         object.__setattr__(self, "hyperparameters", hyperparameters)
-        if self.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+        if self.model_algorithm in SEQUENCE_ALGORITHMS:
             sequence_parameters(
                 self.model_algorithm, _thaw_model_hyperparameters(hyperparameters)
             )
+        if (
+            self.model_algorithm in DEEPLOB_ALGORITHMS
+            and self.input_columns != DEEPLOB_INPUT_COLUMNS
+        ):
+            raise ValueError("deeplob_requires_ordered_ten_level_book")
 
     @property
     def input_columns(self) -> tuple[str, ...]:
@@ -596,10 +682,18 @@ def _validate_a_share_model_family_ids(family_ids) -> None:
 
 
 def _validate_model_selection_trial_record(trial: object) -> None:
-    if type(trial) is not dict or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS:
+    classification_keys = {f"validation_{name}" for name in CLASSIFICATION_METRICS}
+    if type(trial) is not dict or set(trial) not in (
+        _MODEL_SELECTION_TRIAL_METRIC_KEYS,
+        _MODEL_SELECTION_TRIAL_METRIC_KEYS | classification_keys,
+    ):
         raise ValueError("invalid_model_metadata")
     model_id = trial["model_id"]
     rows = trial["validation_rows"]
+    if classification_keys <= set(trial):
+        validate_classification_metrics(
+            {name: trial[f"validation_{name}"] for name in CLASSIFICATION_METRICS}, rows
+        )
     if type(model_id) is not str or not model_id or type(rows) is not int or rows < 0:
         raise ValueError("invalid_model_metadata")
     for metric, reason_key in (
@@ -697,6 +791,23 @@ def _validate_model_selection_trial_record(trial: object) -> None:
         or trial["validation_mse"] < 0
     ):
         raise ValueError("invalid_model_metadata")
+
+
+def validate_classification_metrics(metrics, rows):
+    if set(metrics) != set(CLASSIFICATION_METRICS) or type(rows) is not int or rows < 0:
+        raise ValueError("classification_metrics_invalid")
+    for name, value in metrics.items():
+        if rows == 0:
+            if value is not None:
+                raise ValueError("classification_metrics_invalid")
+        elif (
+            type(value) not in (int, float)
+            or not np.isfinite(value)
+            or value < 0
+            or (name in {"accuracy", "macro_f1"} and value > 1)
+            or (name == "brier" and value > 2 + 1e-6)
+        ):
+            raise ValueError("classification_metrics_invalid")
 
 
 def model_spec_payload(spec: object) -> dict[str, object]:
@@ -862,6 +973,7 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
 
 
 _PREDICTION_LOSS_REASONS = (
+    "prediction_direction_score_not_return",
     "prediction_target_mismatch",
     "target_unit_missing",
     "prediction_target_unit_mismatch",
@@ -877,7 +989,12 @@ def _target_definition(declared, target, manifest=None):
     if target == "model_target":
         transform, clip = declared.get("target_transform"), declared.get("target_clip")
         if transform is None or clip is None:
-            return None
+            return (
+                (manifest or {})
+                .get("producer_diagnostics", {})
+                .get("target_definitions", {})
+                .get(target)
+            )
         source = "forward_return_20d"
     semantics = (
         (manifest or {})
@@ -897,6 +1014,22 @@ def _prediction_loss_reason(
     facts, target, declared, manifest=None, *, model_target=None, target_unit=None
 ):
     """Check label-scale loss comparability independently of rank/IC evidence."""
+    if facts["model"]["model_algorithm"] == "deeplob_classifier":
+        return "prediction_direction_score_not_return"
+    return _prediction_target_reason(
+        facts,
+        target,
+        declared,
+        manifest,
+        model_target=model_target,
+        target_unit=target_unit,
+    )
+
+
+def _prediction_target_reason(
+    facts, target, declared, manifest=None, *, model_target=None, target_unit=None
+):
+    """Compare the economic target independently of the model output scale."""
     trained_target = model_target or facts["model"]["target_column"]
     trained = facts.get("target_definition")
     evaluated = _target_definition(declared, target, manifest)

@@ -699,9 +699,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     with artifact.table("portfolio_exposures.parquet") as rows:
         assert rows.empty
     with artifact.table("portfolio_performance.parquet") as rows:
-        assert (
-            rows.loc[rows.metric_id.eq("tracking_error"), "status"].eq("BLOCKED").all()
-        )
+        assert "tracking_error" not in set(rows.metric_id)
         assert rows.loc[rows.metric_id.eq("net_pnl"), "status"].eq("DEFINED").all()
     with artifact.table("portfolio_daily.parquet") as rows:
         assert len(rows) == 3 * len(candidates)

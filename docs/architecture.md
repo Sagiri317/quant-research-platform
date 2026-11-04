@@ -18,9 +18,11 @@
 公开 Python 函数放在负责该项计算的模块中。命令行接口（CLI）只负责严格解析 JSON，再调用同一个函数。
 
 - `sources.prepare.prepare_source(config)`：指定原始源与新规范表位置
+- `sources.macro.download.fetch_macro(config)`：获取显式宏观历史与版本，独立记录来源失败
 - `markets.prepare.prepare(config)`：指定已准备表或原生源，生成一个市场数据表
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
 - `research.models.production.fit(config)`：一次真实拟合及只追加的试验记录；选择后的最终重新拟合仍用该函数
+- `research.models.hawkes.fit_hawkes(config)`：在明确逐笔训练窗内拟合指数核，保存参数与截止时点
 - `research.predictions.runner.predict(config)`：读取保存模型，按保存列顺序做新预测；`artifacts.outputs.prediction.read_predictions(path)` / `iter_predictions(path)` 只读已有预测
 - `research.models.explanations.explain(config)`：明确冻结模型、解释方法及样本，保存独立解释数值
 - `research.models.trial_selection.score(config)` / `select(config)`：完整有序候选的成熟验证评分及明确规则选择
@@ -39,6 +41,7 @@
 - `agents.runner.run_agent(config)`：在固定协议和预算下调用研究操作；生成 Python 只进入隔离容器
 
 这些新增操作的配置、产物、单位、资源安排和验证边界见[策略学习与研究 agent](research-learning.md)。
+宏观来源、决策时钟和因子见[宏观流动性](macro-liquidity.md)；微观结构、DeepLOB 和队列模型见[A 股高频](a-share-hft.md)。
 
 各阶段的 config 使用 JSON 值，包括路径字符串和时间窗口对象；底层 Python 存储 API
 还可直接接收 Path、DataSpec、TimeWindow。复杂选择、窗口、风险、执行与候选设置均按严格 JSON 解析。
@@ -102,6 +105,8 @@ A 股 `backtest.selection_mode` 默认 `causal`；显式 `retrospective` 与 `se
 只加载可信本地模型并核自身完成状态及必要拟合事实，不依赖外部试验记录日志，不触发训练；
 不得加载不可信 pickle。
 PRED 的 `prediction.parquet` 保存键及 `prediction_score` / `prediction_rank_score`，
+DeepLOB 三分类额外保存固定顺序的下跌、平、上涨概率，`prediction_score` 为上涨概率减下跌概率。
+分类概率损失独立计算；方向评分不能作为小数收益使用 MSE 或收益残差区间。
 标签与成熟列在评分/评估时从明确数据输入读取，不重开 PRED 的历史特征输入。
 EVAL 按当前输入实际键与保存预测配对，使用当前资格与标签成熟域；不以历史模型输入重算预测资格，
 缺预测或缺成熟标签的行不计入对应配对样本，空共同域保留未定义成绩。显式请求的因子/特征仍须提供。

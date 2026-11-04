@@ -1,0 +1,18 @@
+{
+  "market_id": "a_share",
+  "data_id": "decision_panel",
+  "inputs": {
+    "daily_dataset": "data/research/a_share/pv_all",
+    "trading_calendar": "data/interim/csmar/trading_calendar"
+  },
+  "time_window": {
+    "start": "2014-01-01",
+    "end": "2025-12-31"
+  },
+  "parameters": {
+    "mode": "preopen",
+    "local_time": "09:00:00",
+    "latency_seconds": 1
+  },
+  "output_root": "data/processed/a_share/macro_decision_panel"
+}

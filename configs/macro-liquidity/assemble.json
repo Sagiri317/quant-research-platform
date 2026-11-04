@@ -1,0 +1,26 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "macro_preopen",
+  "inputs": {
+    "decision_panel": "data/processed/a_share/macro_decision_panel",
+    "macro_liquidity_factors": "data/processed/a_share/macro_factors"
+  },
+  "base_input_data_id": "decision_panel",
+  "factor_columns": [
+    "ml_us_net_liquidity_level",
+    "ml_us_net_liquidity_latest",
+    "ml_us_nfci_zscore",
+    "ml_us_net_liquidity_zscore_x_amihud_60d"
+  ],
+  "label_columns": [
+    "forward_return_1d"
+  ],
+  "filter_columns": [
+    "eligible"
+  ],
+  "time_window": {
+    "start": "2014-01-01",
+    "end": "2025-12-31"
+  },
+  "output_root": "data/research/a_share/macro_preopen"
+}

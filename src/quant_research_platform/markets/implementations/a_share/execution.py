@@ -337,6 +337,14 @@ class PreparedTradeCost:
         values[0] = full * commission(maximum) + commission(middle) + commission(last)
         return tuple(values)
 
+    def order_components(self, cumulative_notional, minimum_commission):
+        """Cumulative fees for one limit order, including all of its partial fills."""
+        values = list(self.components(cumulative_notional, np.nan))
+        values[0] = (
+            max(float(values[0]), minimum_commission) if cumulative_notional else 0.0
+        )
+        return np.asarray(values, dtype="float64")
+
     def totals(self, notional, adv20):
         commission, stamp, transfer, slippage, impact = self.components(notional, adv20)
         return commission + stamp + transfer + slippage + impact

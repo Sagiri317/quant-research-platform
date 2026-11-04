@@ -239,10 +239,10 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
     with closing_iterator(
         daily._iter_input_sessions(root, columns, window)
     ) as sessions:
+        session_at = daily._session_reader(sessions, columns)
+        assert session_at(dates[0] - pd.Timedelta(days=1)).empty
         for timestamp in (dates[0], dates[64], dates[65]):
-            panel = daily._read_next_session(sessions, columns, timestamp).set_index(
-                "asset_id"
-            )
+            panel = session_at(timestamp).set_index("asset_id")
             assert {
                 asset: market_name_for_type(panel.loc[asset, "market_type"])
                 for asset in panel.index

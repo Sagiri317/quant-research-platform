@@ -131,6 +131,12 @@ def model_statistics_inputs(
             "family_id": family["family_id"],
             "model_id": family["selected_config_id"],
             "model_facts": {
+                "model": {
+                    "model_algorithm": A_SHARE_MODEL_ALGORITHMS[
+                        index % len(A_SHARE_MODEL_ALGORITHMS)
+                    ],
+                    "target_column": config["evaluation"]["primary_label"],
+                },
                 "label_unit": spec.column_units.get(
                     config["evaluation"]["primary_label"]
                 ),

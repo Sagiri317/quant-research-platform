@@ -21,9 +21,12 @@ from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
 )
 from quant_research_platform.contracts.models import (
+    DEEPLOB_ALGORITHMS,
+    SEQUENCE_ALGORITHMS,
     ModelSpec,
     TrainingWeighting,
     _thaw_model_hyperparameters,
+    sequence_context_columns,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -65,6 +68,7 @@ class PreparedTraining:
     trading_sessions: object = None
     training_scaling: bool = True
     sequence_context: pd.DataFrame | None = None
+    complete_inputs: bool = False
 
     @cached_property
     def preprocessing(self):
@@ -78,7 +82,11 @@ class PreparedTraining:
         scaler = ModelMatrixScaler.fit(
             matrix,
             sample_weight=weights,
-            missing="native" if self.native_missing else "impute",
+            missing=None
+            if self.complete_inputs
+            else "native"
+            if self.native_missing
+            else "impute",
             scaling=self.training_scaling,
         )
         return weights, scaler, scaler.transform(matrix)
@@ -113,7 +121,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         training_weighting=metadata["training_weighting"],
         training_scaling=metadata["training_scaling"],
     )
-    if spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+    if spec.model_algorithm in SEQUENCE_ALGORITHMS:
         import torch
 
         from quant_research_platform.research.models.neural import (
@@ -139,7 +147,11 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         network.load_state_dict(predictor.state)
         if not all(torch.isfinite(value).all() for value in predictor.state.values()):
             raise ValueError("model_state_metadata_mismatch")
-        _ordered_context(predictor.history, spec.input_columns)
+        _ordered_context(
+            predictor.history,
+            spec.input_columns,
+            sequence_context_columns(spec.model_algorithm),
+        )
         importance = None
     elif spec.model_algorithm == "linear_regression":
         if type(predictor) is not LinearScaledPredictor:
@@ -226,7 +238,7 @@ def _fit_model_result(
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
         result = _fit_linear_model_result(prepared_training, spec)
-    elif spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+    elif spec.model_algorithm in SEQUENCE_ALGORITHMS:
         from quant_research_platform.research.models.neural import fit_sequence
 
         predictor = fit_sequence(prepared_training, spec)
@@ -426,6 +438,7 @@ def _collect_training_frame(
                     else ()
                 ),
                 *spec.input_columns,
+                *sequence_context_columns(spec.model_algorithm),
                 *validity_columns,
                 spec.target_column,
                 "eligible",
@@ -447,10 +460,12 @@ def _collect_training_frame(
     ) as work_frames:
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
-            if spec.model_algorithm in {"lstm_regressor", "transformer_regressor"}:
+            if spec.model_algorithm in SEQUENCE_ALGORITHMS:
                 observed = model_observed_input_mask(
                     chunk, spec.input_columns, declared_columns
                 )
+                if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+                    observed = pd.Series(True, index=chunk.index)
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
                 )
@@ -459,7 +474,13 @@ def _collect_training_frame(
                 )
                 sequence_context.append(
                     context.loc[
-                        observed, ["asset_id", "timestamp", *spec.input_columns]
+                        observed,
+                        [
+                            "asset_id",
+                            "timestamp",
+                            *spec.input_columns,
+                            *sequence_context_columns(spec.model_algorithm),
+                        ],
                     ]
                 )
             filtered, metadata = _legal_training_rows(
@@ -469,6 +490,10 @@ def _collect_training_frame(
                 availability_column=availability_columns[0],
                 declared_columns=declared_columns,
             )
+            if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+                filtered = filtered.loc[
+                    filtered.loc[:, spec.input_columns].notna().all(axis=1)
+                ]
             rows_input += metadata["rows_input"]
             rows_after_filter += metadata["rows_after_filter_mode"]
             filter_columns_used = list(metadata["filter_columns_used"])
@@ -576,6 +601,7 @@ def _collect_training_frame(
         sessions,
         spec.training_scaling,
         pd.concat(sequence_context, ignore_index=True) if sequence_context else None,
+        spec.model_algorithm in DEEPLOB_ALGORITHMS,
     )
 
 
@@ -650,8 +676,7 @@ def model_training_read_columns(
 def _native_missing(spec):
     if spec.model_algorithm in {
         "linear_regression",
-        "lstm_regressor",
-        "transformer_regressor",
+        *SEQUENCE_ALGORITHMS,
     }:
         return False
     estimator = estimators.build_estimator_from_model_spec(spec)

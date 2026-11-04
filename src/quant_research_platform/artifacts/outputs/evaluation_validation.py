@@ -86,6 +86,39 @@ def validate_evaluation_science(metadata):
     from quant_research_platform.contracts.time import TimeWindow
 
     base = {"window", "cutoff", "sample_role"}
+    if isinstance(metadata, dict) and "classification_metrics" in metadata:
+        from quant_research_platform.contracts.models import (
+            CLASSIFICATION_METRICS,
+            validate_classification_metrics,
+        )
+
+        summaries = metadata["classification_metrics"]
+        if not isinstance(summaries, dict) or not summaries:
+            raise ValueError("evaluation_classification_metrics_invalid")
+        for signal, summary in summaries.items():
+            if (
+                type(signal) is not str
+                or not signal
+                or set(summary)
+                != {"target_column", "class_threshold", "rows", *CLASSIFICATION_METRICS}
+            ):
+                raise ValueError("evaluation_classification_metrics_invalid")
+            if (
+                type(summary["target_column"]) is not str
+                or not summary["target_column"]
+                or type(summary["class_threshold"]) not in (int, float)
+                or not 0 <= summary["class_threshold"] < float("inf")
+            ):
+                raise ValueError("evaluation_classification_metrics_invalid")
+            validate_classification_metrics(
+                {name: summary[name] for name in CLASSIFICATION_METRICS},
+                summary["rows"],
+            )
+        metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != "classification_metrics"
+        }
     has_response = isinstance(metadata, dict) and "response_diagnostics" in metadata
     if isinstance(metadata, dict) and "response_diagnostics" in metadata:
         from quant_research_platform.contracts.evaluations import (
@@ -251,6 +284,8 @@ def validate_evaluation_output_metadata_shape(
     metadata: object,
 ) -> dict[str, object]:
     science = {"window", "cutoff", "sample_role"}
+    if isinstance(metadata, dict) and "classification_metrics" in metadata:
+        science.add("classification_metrics")
     if isinstance(metadata, dict) and "response_diagnostics" in metadata:
         science.add("response_diagnostics")
     if type(metadata) is not dict or set(metadata) not in (

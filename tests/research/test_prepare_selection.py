@@ -53,6 +53,38 @@ def _request(tmp_path, name, inputs, start, end, *, market="a_share", **options)
     }
 
 
+def test_daily_prepare_rejects_conflicting_native_dependency_market(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": ["a"],
+            "timestamp": pd.to_datetime(["2024-01-02"]),
+            "cash": [25.0],
+            "total_assets": [100.0],
+            "has_legal_fundamental_pit": True,
+        }
+    )
+    declared = processed_catalog().get("fundamental_pit")
+    spec = replace(
+        declared,
+        market_id="crypto",
+        column_roles={column: declared.column_roles[column] for column in frame},
+    )
+    root = tmp_path / "foreign-market"
+    write_dataset(root, frame, spec=spec)
+    with pytest.raises(ValueError, match="input_market_mismatch"):
+        prepare(
+            _request(
+                tmp_path,
+                "fundamental_factors",
+                {"fundamental_pit": str(root)},
+                "2024-01-02",
+                "2024-01-02",
+                factor_columns=["cash_to_assets"],
+            )
+        )
+
+
 @pytest.mark.parametrize("native", [False, True])
 def test_pit_only_factor_selects_business_columns_and_support_keys(tmp_path, native):
     frame = pd.DataFrame(

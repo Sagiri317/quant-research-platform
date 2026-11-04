@@ -49,7 +49,16 @@ from quant_research_platform.research.portfolios.accounting import (
     ResearchValuationMarks,
     execute_stock_target,
 )
+from quant_research_platform.research.portfolios.passive import (
+    PassiveOrders,
+    observed_trades,
+    passive_parameters,
+)
 from quant_research_platform.research.portfolios.performance import performance_rows
+from quant_research_platform.research.signals.processing import (
+    process_prediction_signals,
+    signal_processing_parameters,
+)
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     materialize_dataset_session,
@@ -73,7 +82,7 @@ def _parameters(value, *, policy=False):
             "restore_at",
         }
         - ({"buy_threshold", "sell_threshold"} if policy else set()),
-        set(),
+        {"passive"} if policy else {"signal_processing", "passive"},
     )
     for name in ("initial_inventory", "maximum_inventory"):
         values = params[name]
@@ -93,7 +102,19 @@ def _parameters(value, *, policy=False):
         or any(quantity > maximum[asset] for asset, quantity in initial.items())
     ):
         raise ValueError("hft_inventory_invalid")
-    for name in set(params) - {"initial_inventory", "maximum_inventory", "restore_at"}:
+    if "signal_processing" in params:
+        params["signal_processing"] = signal_processing_parameters(
+            params["signal_processing"]
+        )
+    if "passive" in params:
+        params["passive"] = passive_parameters(params["passive"])
+    for name in set(params) - {
+        "initial_inventory",
+        "maximum_inventory",
+        "restore_at",
+        "signal_processing",
+        "passive",
+    }:
         params[name] = strict_finite_float(params[name], error="hft_parameter_invalid")
     if (
         params["initial_capital"] <= 0
@@ -145,7 +166,14 @@ def _decisions(quotes, predictions, latency_ns):
 
 
 def inventory_batches(
-    sessions, schedule, params, window, *, decision_columns=None, execution_order=None
+    sessions,
+    schedule,
+    params,
+    window,
+    *,
+    decision_columns=None,
+    execution_order=None,
+    trade_session=None,
 ):
     """Yield quote-account transitions with shared cash and next-session sellability.
 
@@ -273,6 +301,40 @@ def inventory_batches(
         )
         return adjustments, flows
 
+    def settle(at, asset, order_id, signal_at, quantity, notional, costs):
+        nonlocal cash, remaining_order
+        fill_id = f"{sequence}:{asset}"
+        cash = fsum((cash, -notional, *(-costs)))
+        units[asset] += quantity
+        if quantity > 0:
+            bought_today[asset] += quantity
+        if execution_order is not None:
+            remaining_order -= quantity
+        trade = ExecutedTrade(
+            fill_id, order_id, int(at.value), asset, quantity, notional
+        )
+        flows = [
+            PortfolioCashFlow(
+                f"{fill_id}:principal",
+                int(at.value),
+                asset,
+                fill_id,
+                "principal",
+                -notional,
+            )
+        ]
+        flows.extend(
+            PortfolioCashFlow(
+                f"{fill_id}:{name}", int(at.value), asset, fill_id, name, -float(value)
+            )
+            for name, value in zip(PORTFOLIO_LEDGER_COST_COLUMNS, costs, strict=True)
+            if value
+        )
+        diagnostic = PortfolioDiagnostic(
+            asset, fill_id, "decision_timestamp_ns", text=str(signal_at)
+        )
+        return trade, flows, diagnostic
+
     for view, quotes, predictions in sessions:
         day = pd.Timestamp(view.timestamp).normalize()
         opening, closing = (
@@ -353,6 +415,10 @@ def inventory_batches(
             ),
         )
         if decision_columns is None:
+            if "signal_processing" in params:
+                predictions = process_prediction_signals(
+                    predictions, quotes, params["signal_processing"]
+                )
             predictions = predictions.loc[
                 predictions.timestamp.ge(lower)
                 & (
@@ -386,8 +452,42 @@ def inventory_batches(
             & (quotes.timestamp.le(upper) if closed else quotes.timestamp.lt(upper))
         ]
         observed_quotes += len(quotes)
+        passive = None
+        if "passive" in params:
+            if trade_session is None:
+                raise ValueError("passive_trade_input_required")
+            events = materialize_dataset_session(
+                trade_session.filtered_view(TimeWindow(day.date(), day.date()))
+            )
+            event_iterator = observed_trades(quotes, events)
+            next_trade = next(event_iterator, None)
+            passive = PassiveOrders(
+                params["passive"],
+                projected.market_type.reindex(
+                    quotes.loc[quotes.eligible, "asset_id"].unique()
+                ),
+                day.date(),
+                schedule,
+                assumptions,
+                params["participation_rate"],
+            )
         for stamp, group in quotes.groupby("timestamp", sort=False):
             at = pd.Timestamp(stamp)
+            if passive is not None:
+                while next_trade is not None and next_trade.timestamp <= at:
+                    event = next_trade
+                    next_trade = next(event_iterator, None)
+                    fill = passive.trade(event)
+                    if fill is not None:
+                        trade, cashflows, diagnostic = settle(
+                            event.timestamp, event.asset_id, *fill
+                        )
+                        yield emit(
+                            event.timestamp,
+                            trades=(trade,),
+                            flows=cashflows,
+                            diagnostics=(diagnostic, *passive.diagnostics()),
+                        )
             current = group.set_index("asset_id")
             valid = current.eligible & np.isfinite(current.mid) & current.mid.gt(0)
             marks.loc[current.index[valid]] = current.loc[valid, "mid"]
@@ -431,7 +531,14 @@ def inventory_batches(
                 )
             ]
             trades, flows = [], []
-            if targets.ne(units).any():
+            if passive is not None:
+                diagnostics.extend(
+                    passive.quote(
+                        at, current, targets, signal_times, units, sellable, cash
+                    )
+                )
+                diagnostics.extend(passive.diagnostics())
+            elif targets.ne(units).any():
                 permissions = valid.reindex(units.index, fill_value=False)
                 orders = pd.DataFrame(
                     {
@@ -459,7 +566,6 @@ def inventory_batches(
                     assumptions=assumptions,
                     receivable=fsum(entitlements.receivables.values()),
                 )
-                cash = account.post_trade_cash
                 executed = account.asset_ledger
                 requests = executed.target_notional - executed.pre_trade_notional
                 diagnostics.append(
@@ -483,52 +589,24 @@ def inventory_batches(
                         )
                     if not quantity:
                         continue
-                    fill_id = f"{sequence}:{row.asset_id}"
-                    trades.append(
-                        ExecutedTrade(
-                            fill_id,
-                            str(signal_times[row.asset_id]),
-                            int(at.value),
-                            row.asset_id,
-                            quantity,
-                            float(row.executed_delta_notional),
-                        )
+                    trade, cashflows, diagnostic = settle(
+                        at,
+                        row.asset_id,
+                        str(signal_times[row.asset_id]),
+                        signal_times[row.asset_id],
+                        quantity,
+                        float(row.executed_delta_notional),
+                        np.array(
+                            [
+                                getattr(row, name)
+                                for name in PORTFOLIO_LEDGER_COST_COLUMNS
+                            ]
+                        ),
                     )
-                    flows.append(
-                        PortfolioCashFlow(
-                            f"{fill_id}:principal",
-                            int(at.value),
-                            row.asset_id,
-                            fill_id,
-                            "principal",
-                            -float(row.executed_delta_notional),
-                        )
-                    )
-                    flows.extend(
-                        PortfolioCashFlow(
-                            f"{fill_id}:{name}",
-                            int(at.value),
-                            row.asset_id,
-                            fill_id,
-                            name,
-                            -float(getattr(row, name)),
-                        )
-                        for name in PORTFOLIO_LEDGER_COST_COLUMNS
-                        if getattr(row, name)
-                    )
-                    units[row.asset_id] += quantity
-                    if execution_order is not None:
-                        remaining_order -= quantity
-                    if quantity > 0:
-                        bought_today[row.asset_id] += quantity
-                    diagnostics.append(
-                        PortfolioDiagnostic(
-                            row.asset_id,
-                            fill_id,
-                            "decision_timestamp_ns",
-                            text=str(signal_times[row.asset_id]),
-                        )
-                    )
+                    trades.append(trade)
+                    flows.extend(cashflows)
+                    diagnostics.append(diagnostic)
+                cash = account.post_trade_cash
             for asset in units.index:
                 diagnostics.extend(
                     (
@@ -556,9 +634,16 @@ def inventory_batches(
                     at,
                     current.reindex(assets).loc[:, list(decision_columns)].copy(),
                     units.reindex(assets).copy(),
-                    (units - locked - bought_today).clip(lower=0.0).reindex(assets),
+                    (units - locked - bought_today).clip(lower=0.0).reindex(assets)
+                    - (
+                        pd.Series(
+                            {asset: passive.frozen_shares(asset) for asset in assets}
+                        )
+                        if passive is not None
+                        else 0
+                    ),
                     marks.reindex(assets).copy(),
-                    cash,
+                    cash - (passive.frozen_cash() if passive is not None else 0),
                     fsum(row.value for row in values(at).values()),
                 )
                 target = policy_target(
@@ -587,6 +672,8 @@ def inventory_batches(
                     PORTFOLIO_CASH_ASSET_ID, None, "session_phase", text="close"
                 )
             ]
+            if passive is not None:
+                diagnostics.extend(passive.expire("day_expired"))
             diagnostics.extend(
                 PortfolioDiagnostic(
                     asset,
@@ -753,6 +840,30 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
     )
     if panel.spec.get("market_id") != "a_share" or panel.spec["data_id"] != "hft_panel":
         raise ValueError("hft_panel_required")
+    passive = "passive" in config["parameters"]
+    if passive != ("trades" in config):
+        raise ValueError("passive_trade_input_required_or_unused")
+    trade_session = None
+    if passive:
+        trade_session = open_dataset_session(
+            **{
+                **_dataset_input_options(
+                    config["trades"],
+                    time_window=TimeWindow(start, end),
+                ),
+                "columns": (
+                    "timestamp",
+                    "asset_id",
+                    "source_row",
+                    "event_kind",
+                    "side",
+                    "price",
+                    "volume",
+                ),
+            }
+        )
+        if trade_session.spec["data_id"] != "hft_trades":
+            raise ValueError("passive_trade_input_invalid")
     if decision_columns is not None and any(
         panel.spec["column_roles"].get(column) not in {"feature", "factor"}
         and not (
@@ -816,7 +927,7 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
                         )
                 yield view, quotes, predictions
 
-    return sessions(), schedule
+    return sessions(), schedule, trade_session
 
 
 def backtest(config):
@@ -832,17 +943,19 @@ def backtest(config):
             "parameters",
             "output",
         },
-        set(),
+        {"trades"},
     )
     params = _parameters(config["parameters"])
     window = TimeWindow(**config["window"])
-    sessions, schedule = inventory_inputs(
+    sessions, schedule, trade_session = inventory_inputs(
         config, window, prediction_path=config["predictions"]
     )
 
     def produce(emit):
         with closing_iterator(sessions) as inputs:
-            for batch in inventory_batches(inputs, schedule, params, window):
+            for batch in inventory_batches(
+                inputs, schedule, params, window, trade_session=trade_session
+            ):
                 emit(batch)
 
     capital = PortfolioCapital(
@@ -861,7 +974,11 @@ def backtest(config):
             "parameters": params,
             "account_semantics": "shared_cash_continuous_inventory_t1",
             "execution": (
-                "strictly_subsequent_observed_top_of_book_no_queue_or_receive_clock"
+                "observed_depth_passive_queue_no_market_feedback_or_receive_clock"
+                if "passive" in params
+                else (
+                    "strictly_subsequent_observed_top_of_book_no_queue_or_receive_clock"
+                )
             ),
             "corporate_action_policy": CORPORATE_ACTION_POLICY,
             "fee_schedule_identity": schedule.content_identity,

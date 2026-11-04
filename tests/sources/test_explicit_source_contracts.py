@@ -13,6 +13,35 @@ from tests.sources.reference.test_equity_events import write_equity_source
 from tests.sources.reference.test_interim import _write_reference_root
 
 
+@pytest.mark.parametrize(
+    "window",
+    [
+        {"end_date": "NaT"},
+        {"start_date": ""},
+        {"end_date": 20250101},
+        {"start_date": "2024-01-02", "end_date": "2024-01-01"},
+    ],
+)
+def test_source_window_rejects_invalid_bounds_before_publication(tmp_path, window):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "adjustment.csv").write_text(
+        "Symbol,TradingDate,FwardFactor,BwardFactor,CumulateFwardFactor,CumulateBwardFactor\n"
+        "000001,2024-01-01,1,1,1,1\n"
+    )
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="time_window"):
+        prepare_source(
+            {
+                "source_id": "csmar",
+                "raw_root": str(raw),
+                "outputs": {"adjustment": str(output)},
+                **window,
+            }
+        )
+    assert not output.exists()
+
+
 def test_default_csmar_extent_and_explicit_state_prefix(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()

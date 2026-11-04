@@ -94,6 +94,7 @@ def write_evaluation_outputs_from_chunks(
     spec: EvaluationSpec,
     output_path: Path,
     metadata: Mapping | None = None,
+    classification_summary=None,
 ) -> Path:
     """Persist the evaluation engine's tables and summaries in one atomic bundle."""
     from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
@@ -103,6 +104,8 @@ def write_evaluation_outputs_from_chunks(
     def write(staging):
         _write_evaluation_artifact_chunks(chunks, temp_root=staging, science=science)
         diagnostics, ic_summary, group_spread_summary = summary_factory()
+        if classification_summary is not None:
+            science["classification_metrics"] = classification_summary()
         write_parquet(ic_summary, staging / "ic_summary.parquet")
         write_parquet(group_spread_summary, staging / "group_spread_summary.parquet")
         write_manifest(

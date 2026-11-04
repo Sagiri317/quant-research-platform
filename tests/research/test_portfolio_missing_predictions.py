@@ -495,6 +495,84 @@ def test_public_prediction_selection_cannot_extend_declaration(tmp_path):
         portfolio_production.backtest(config)
 
 
+@pytest.mark.parametrize("intraday_selection", [False, True])
+def test_public_prediction_selection_keeps_end_day_intraday_values(
+    tmp_path, monkeypatch, intraday_selection
+):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+
+    config = _public_prediction_config(tmp_path, empty=False)
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.portfolio_inputs import _interim_specs
+
+    calendar = read_dataset(config["inputs"]["calendar"])
+    extra = calendar.loc[calendar.calendar_date.eq(calendar.calendar_date.max())].copy()
+    extra["calendar_date"] = pd.Timestamp("2023-01-09")
+    extra["timestamp"] = pd.Timestamp("2023-01-09")
+    calendar = pd.concat([calendar, extra], ignore_index=True)
+    calendar_path = tmp_path / "extended-calendar"
+    write_dataset(
+        calendar_path, calendar, spec=_interim_specs().get("trading_calendar")
+    )
+    config["inputs"]["calendar"] = str(calendar_path)
+
+    decisions = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "decision_panel",
+            "inputs": {
+                "daily_dataset": config["inputs"]["dataset"],
+                "trading_calendar": config["inputs"]["calendar"],
+            },
+            "time_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "parameters": {
+                "mode": "preopen",
+                "local_time": "09:00",
+                "latency_seconds": 0,
+            },
+            "output_root": str(tmp_path / "decisions"),
+        }
+    )
+    config["inputs"]["dataset"] = str(decisions)
+    rows, metadata = read_predictions(config["predictions"][0]["path"])
+    at = pd.Timestamp("2023-01-05T01:00:00")
+    rows["timestamp"] = at
+    metadata["effective_prediction_end"] = None
+    metadata["prediction_window"]["end"] = "2023-01-05"
+    new_predictions = tmp_path / "intraday-predictions"
+    write_prediction_outputs(
+        output_path=new_predictions, output_chunks=[rows], metadata=metadata
+    )
+    config["predictions"] = [
+        {
+            "path": str(new_predictions),
+            "window": {"start": at.isoformat(), "end": at.isoformat()}
+            if intraday_selection
+            else {"start": "2023-01-05", "end": "2023-01-05"},
+        }
+    ]
+    original = portfolio_production.backtest_a_share
+    seen = []
+
+    def observed_lookup(**kwargs):
+        values, present = kwargs["prediction_lookup"].values_for_frame(
+            rows[["timestamp", "asset_id"]],
+            mark_matched=False,
+        )
+        assert all(present)
+        np.testing.assert_allclose(values, rows.prediction_rank_score)
+        seen.append(len(values))
+        yield from original(**kwargs)
+
+    monkeypatch.setattr(portfolio_production, "backtest_a_share", observed_lookup)
+    portfolio_production.backtest(config)
+    assert seen == [len(rows)]
+
+
 @pytest.mark.parametrize("cutoff", ["fit_cutoff", "selection_cutoff"])
 def test_native_empty_prediction_retains_causal_cutoffs(tmp_path, cutoff):
     from quant_research_platform.artifacts.outputs.prediction import (

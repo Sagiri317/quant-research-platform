@@ -10,6 +10,24 @@ FEATURE_RECIPES = {"a_share_canonical", "a_share_quantile_1_99"}
 FEATURE_PREFIXES = ("feature_", "feature_missing_", "feature_observed_")
 
 
+def inherited_feature_transforms(declared, manifest, columns):
+    """Project the recorded transformation of reused, already computed features."""
+    inherited = manifest.get("producer_diagnostics", {}).get(
+        "reused_feature_transforms", {}
+    )
+    lineage = {column: inherited[column] for column in columns if column in inherited}
+    for transform in declared.get("feature_transforms", []):
+        outputs = FeatureTransformSpec(
+            **{
+                **transform,
+                "source_columns": tuple(transform["source_columns"]),
+                "output_groups": tuple(transform["output_groups"]),
+            }
+        ).output_columns
+        lineage.update({column: transform for column in outputs if column in columns})
+    return lineage
+
+
 @dataclass(frozen=True)
 class FeatureTransformSpec:
     recipe_id: str

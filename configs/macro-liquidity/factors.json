@@ -1,0 +1,19 @@
+{
+  "market_id": "a_share",
+  "data_id": "macro_liquidity_factors",
+  "inputs": {
+    "decision_panel": "data/processed/a_share/macro_decision_panel",
+    "macro_observations": "data/interim/macro_liquidity/new-observations"
+  },
+  "factor_columns": [
+    "ml_us_net_liquidity_level",
+    "ml_us_net_liquidity_latest",
+    "ml_us_nfci_zscore",
+    "ml_us_net_liquidity_zscore_x_amihud_60d"
+  ],
+  "time_window": {
+    "start": "2014-01-01",
+    "end": "2025-12-31"
+  },
+  "output_root": "data/processed/a_share/macro_factors"
+}
