@@ -91,14 +91,3 @@ qrp assemble --config configs/macro-liquidity/assemble.json
 ```
 
 `assemble` 后继续使用原 `fit`、`predict`、`evaluate`、`calibrate` 和 `backtest`。需要盘前信息的模型必须直接拟合实际决策时间索引的数据，不能把这些值写回前一日收盘行。真实研究的重算范围和输出位置仍由调用者明确决定。
-
-已保存的香港历史日页可通过 `prepare-hkma-history` 规范化。输入根包含原页和 `download.json`；每条清单记录观测日期、状态，以及响应的文件名、URL、获取时间。仅 `parsed` 页面进入计算，其他状态计入诊断；有效页面应含日期与数值，缺失单元格保留 NaN。HIBOR 个别原页不带百分号仍按该列原单位读取，总结余保留百万港元；时钟沿用香港观测日日末的显式历史推断，不把页面展示时刻伪称已核实首发时刻。
-
-`merge-macro` 读取 `inputs` 明确列出的原生规范表，复用既有版本和来源冲突规则，写入新的 `output`。两项操作均不下载、搬移或修复 raw，不覆盖已有规范表：
-
-```text
-qrp prepare-hkma-history --config configs/macro-liquidity/hkma-history.json
-qrp merge-macro --config configs/macro-liquidity/merge.json
-```
-
-示例输入路径需按实际已保存来源替换；规范化、合并、因子计算及后续研究分别运行。

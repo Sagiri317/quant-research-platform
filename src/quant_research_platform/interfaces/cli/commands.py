@@ -82,22 +82,6 @@ def prepare(config: Config) -> None:
     _echo_result(prepare(read_qrp_json_file(config)[1]))
 
 
-@app.command("prepare-hkma-history")
-def prepare_hkma_history(config: Config) -> None:
-    """Normalize saved HKMA daily pages into a new native dataset."""
-    from quant_research_platform.sources.macro.history import prepare_hkma_history
-
-    _echo_result(prepare_hkma_history(read_qrp_json_file(config)[1]))
-
-
-@app.command("merge-macro")
-def merge_macro(config: Config) -> None:
-    """Merge explicitly named macro datasets into a new output."""
-    from quant_research_platform.sources.macro.history import merge_macro
-
-    _echo_result(merge_macro(read_qrp_json_file(config)[1]))
-
-
 @app.command("assemble")
 def assemble(config: Config) -> None:
     """Assemble selected factors, labels and features into a new dataset."""

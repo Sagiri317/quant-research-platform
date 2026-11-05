@@ -1,7 +1,0 @@
-{
-  "inputs": [
-    "data/interim/macro_liquidity/source-a",
-    "data/interim/macro_liquidity/source-b"
-  ],
-  "output": "data/interim/macro_liquidity/merged"
-}

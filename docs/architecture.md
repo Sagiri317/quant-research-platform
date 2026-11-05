@@ -19,8 +19,6 @@
 
 - `sources.prepare.prepare_source(config)`：指定原始源与新规范表位置
 - `sources.macro.download.fetch_macro(config)`：获取显式宏观历史与版本，独立记录来源失败
-- `sources.macro.history.prepare_hkma_history(config)`：把已保存 HKMA 日页规范化为原生宏观表
-- `sources.macro.history.merge_macro(config)`：按现有来源优先级合并明确指定的原生宏观表
 - `markets.prepare.prepare(config)`：指定已准备表或原生源，生成一个市场数据表
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
 - `research.models.production.fit(config)`：一次真实拟合及只追加的试验记录；选择后的最终重新拟合仍用该函数
