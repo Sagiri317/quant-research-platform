@@ -1,12 +1,12 @@
 # 美国流动性、波动率与偏度对 A 股的研究
 
-本研究关注美国宏观流动性及 VIX、VVIX、SKEW 状态与 A 股大盘、行业和个股风险暴露的关系。拟研究窗口为 2014 年至 2026 年 10 月；本轮已完成数据下载、源规范化和因子能力扩展，**尚未执行正式实证研究，以下均为待检验假说**。
+本研究关注美国宏观流动性及 VIX、VVIX、SKEW 状态与 A 股大盘、行业和个股风险暴露的关系。拟研究窗口为 2014 年至 2026 年 10 月；已具备相应来源适配与因子计算能力，当前数据覆盖见下文。**尚未执行正式实证研究，以下均为待检验假说**。
 
 来源契约、公式、缺失规则和操作方法由[宏观技术文档](../docs/macro-liquidity.md)统一说明。本报告保留研究问题、当前数据条件、方法与解释边界，不另设分轮落地或验收报告。
 
 ## 数据条件
 
-截至 2026-11-05，新规范源 `data/interim/macro_liquidity/extended-through-2026-final-20261105` 包含 **61 个序列、706,901 条版本记录、5,087 个源 NULL 值**，其中 53 个序列有 2026 年有效观测。版本行数包含历史修订，不等于独立样本数；有 2026 年观测也不等于完整覆盖 1—10 月。
+截至 2026-11-05，现用规范源 `data/interim/macro_liquidity/consolidated-20261105` 包含 **61 个序列、706,901 条版本记录、5,087 个源 NULL 值**，其中 53 个序列有 2026 年有效观测。版本行数包含历史修订，不等于独立样本数；有 2026 年观测也不等于完整覆盖 1—10 月。
 
 | 数据组 | 本地有效观测截止 | 主要覆盖限制 |
 |---|---|---|
@@ -45,7 +45,7 @@
 | [Miranda-Agrippino & Rey，2020，US Monetary Policy and the Global Financial Cycle，REStud](https://www.nber.org/papers/w21722) | 美国政策与全球金融条件共同变化；美元、NFCI、利率和央行资产状态本身不是已识别的外生政策冲击 |
 | [Ang、Hodrick、Xing、Zhang，2006，The Cross-Section of Volatility and Expected Returns，JF](https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.2006.00836.x) | 波动率风险敏感性与横截面收益有关；本研究估计 A 股的历史 VIX Beta，不照搬美国市场结论 |
 | [Huang、Schlag、Shaliastovich、Thimme，2019，Volatility-of-Volatility Risk，JFQA](https://safe-frankfurt.de/de/publikationen/working-papers/details/publicationname/volatility-of-volatility-risk.html) | VVIX 补充 VIX 水平；原文的期权收益证据不证明 A 股预测有效 |
-| [Bollerslev、Tauchen、Zhou，2009，Expected Stock Returns and Variance Risk Premia，RFS](https://public.econ.duke.edu/~get/wpapers/btz.pdf) | 区分隐含方差和实际方差；本轮未获取美国价格／ETF，未构造缺少同标的实际方差的 VRP |
+| [Bollerslev、Tauchen、Zhou，2009，Expected Stock Returns and Variance Risk Premia，RFS](https://public.econ.duke.edu/~get/wpapers/btz.pdf) | 区分隐含方差和实际方差；当前没有同标的实际方差输入，未构造 VRP |
 | [Adrian、Etula、Muir，2014，Financial Intermediaries and the Cross-Section of Asset Returns，JF](https://www.newyorkfed.org/medialibrary/media/research/staff_reports/sr464.pdf) | 融资约束可能影响风险定价；净流动性与 Amihud／规模／Beta 的交互是本地代理，不等于文中的券商杠杆冲击 |
 | [Cboe 期限结构](https://www.cboe.com/tradable-products/vix/term-structure)、[SKEW 白皮书](https://cdn.cboe.com/resources/indices/documents/SKEWwhitepaperjan2011.pdf) | 同期比率和偏度反变换依公开定义；VXN、VXEEM 是不同标的风险，不能解释成同一标的期限结构 |
 
@@ -111,12 +111,14 @@
 
 最终规范源已完成原生写入读回与全字段比较，独立复核确认六个输入清单、版本唯一性、新增九项原值／单位、香港逐页数值和社融原文一致。关键公式有独立手算，行业交互经过真实 `prepare → 持久化 → assemble` 链路；来源解析、真实零与 NULL、DST、观测日配对、行业身份、归档初版去重及后续修订均有定向验证。
 
-本次代码全量 `pytest -q --tb=short`：5,406 项通过，90 项子断言通过，耗时 59 分 33 秒。`ruff check .`、`ruff format --check .`（471 个文件）和 `git diff --check` 均通过。完整回归日志为 `.run/波动率与2026扩展完整回归.log`。
+宏观扩展版本 `709ad8e8` 的全量 `pytest -q --tb=short`：5,406 项通过，90 项子断言通过，耗时 59 分 33 秒。`ruff check .`、`ruff format --check .`（471 个文件）和 `git diff --check` 均通过。这是当时版本的验证记录，不是正式实证结论。
 
-来源证据保存在原生目录与 `.run/`，不在 `reports/` 复制逐次流水账：
+长期来源证据保存在数据目录，`reports/` 不依赖旧临时运行日志：
 
-- `.run/宏观2026扩展验收/`：逐序列覆盖、最终计数、来源清单摘要和使用限制。
-- `.run/宏观发布时间核查-20261105/`：逐版本、逐观测期、公告、BOJ／BIS 目录及 FOMC 事件证据，保留原取证状态与后来采用的推断的区别。
-- `data/raw/macro_liquidity/`：原始响应、URL、获取时间和 SHA256；最终规范源元数据可逐层追到输入与原响应，旧源未覆盖。
+- `data/raw/macro_liquidity/`：原始响应、URL、获取时间和 SHA256。
+- `data/raw/macro_liquidity/publication-audit-20261105/`：保留的逐观测期、公告、BOJ／BIS 目录及 FOMC 事件核查表，区分已证实发布时间与采用的历史推断。
+- `data/interim/macro_liquidity/consolidated-20261105`：本报告对应的规范源快照。元数据保留来源事实和 raw 证据位置，报告中的行数包含历史修订版本。
 
-公开可下载不等于取得统一再分发或商业许可，须遵守 [FRED 条款](https://fred.stlouisfed.org/legal/)、[Cboe 条款](https://www.cboe.com/terms/)及各原始提供方限制。原始数据未提交 Git。本轮未下载 ETF／美国股票价格，未构造无输入支持的 VRP，未运行正式研究、服务器规模性能或安装包验证。
+来源契约与操作入口见[宏观技术文档](../docs/macro-liquidity.md)。
+
+公开可下载不等于取得统一再分发或商业许可，须遵守 [FRED 条款](https://fred.stlouisfed.org/legal/)、[Cboe 条款](https://www.cboe.com/terms/)及各原始提供方限制。原始数据不随仓库分发。当前输入不含 ETF／美国股票价格，VRP 未构造；正式实证与服务器规模性能仍待单独验证。

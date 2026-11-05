@@ -24,7 +24,7 @@
 
 HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山联储政策冲击的当前下载均不提供本接口已核实的历史版本链，因此按 `inferred_snapshot_release` 导入。BIS 信贷单位为百万美元，BOJ 为亿日元；美国 ON RRP 为十亿美元，Fed 资产与 TGA 为百万美元。
 
-[旧金山联储政策冲击](https://www.frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises/)采用官方图表 CSV 的 `Surprise`，单位为基点。它是公告附近期货变化的主成分，包含事后估计权重；本地研究按用户认可的近似，在事件日收盘后使用当前快照；这不证明 PCA 权重或该数值当时已经冻结。工作簿和图表可能属于不同数值版本，不自动拼接或替换。
+[旧金山联储政策冲击](https://www.frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises/)采用官方图表 CSV 的 `Surprise`，单位为基点。它是公告附近期货变化的主成分，包含事后估计权重；当前研究近似在事件日收盘后使用现有快照，这不证明 PCA 权重或该数值当时已经冻结。工作簿和图表可能属于不同数值版本，不自动拼接或替换。
 
 上述推断是已声明的研究假设，不能消除当前修订快照或事后估计造成的潜在前视偏差。它不改变真实数值，不伪造历史版本。时间规则由 `sources/macro/publication.py` 统一负责：H.4.1 下一工作日17:30、H.10 下一周一17:15、美国隔夜利率下一工作日、M2次月第四个公布周收盘；ECB周表缓冲到下一周五18:00；中国月报次月20日18:00、香港当日末、日本月末资产次月10日、当座账户次月20日、BIS季度首日后第7个月末。已取得的逐期公告/目录可替换通用估计，但当前修订值配历史发布日期仍标推断。
 
@@ -91,3 +91,14 @@ qrp assemble --config configs/macro-liquidity/assemble.json
 ```
 
 `assemble` 后继续使用原 `fit`、`predict`、`evaluate`、`calibrate` 和 `backtest`。需要盘前信息的模型必须直接拟合实际决策时间索引的数据，不能把这些值写回前一日收盘行。真实研究的重算范围和输出位置仍由调用者明确决定。
+
+已保存的香港历史日页可通过 `prepare-hkma-history` 规范化。输入根包含原页和 `download.json`；每条清单记录观测日期、状态，以及响应的文件名、URL、获取时间。仅 `parsed` 页面进入计算，其他状态计入诊断；有效页面应含日期与数值，缺失单元格保留 NaN。HIBOR 个别原页不带百分号仍按该列原单位读取，总结余保留百万港元；时钟沿用香港观测日日末的显式历史推断，不把页面展示时刻伪称已核实首发时刻。
+
+`merge-macro` 读取 `inputs` 明确列出的原生规范表，复用既有版本和来源冲突规则，写入新的 `output`。两项操作均不下载、搬移或修复 raw，不覆盖已有规范表：
+
+```text
+qrp prepare-hkma-history --config configs/macro-liquidity/hkma-history.json
+qrp merge-macro --config configs/macro-liquidity/merge.json
+```
+
+示例输入路径需按实际已保存来源替换；规范化、合并、因子计算及后续研究分别运行。
