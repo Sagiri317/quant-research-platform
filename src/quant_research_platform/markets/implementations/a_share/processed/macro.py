@@ -254,8 +254,12 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         beta = any(RECIPES[name][0] == "beta" for name in columns)
         required = set(PLATFORM_ASSET_TIME_KEY) | {"eligible"}
         required.update(
-            RECIPES[name][2] for name in columns if RECIPES[name][0] == "interaction"
+            RECIPES[name][2]
+            for name in columns
+            if RECIPES[name][0] in {"interaction", "industry_interaction"}
         )
+        if any(RECIPES[name][0] == "industry_interaction" for name in columns):
+            required.update(("industry_standard_id", "industry_level1_code"))
         if beta:
             required.update(
                 (

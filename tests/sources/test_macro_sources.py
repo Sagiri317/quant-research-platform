@@ -164,6 +164,48 @@ def test_explicit_original_release_timestamp_and_timezone_requirement(tmp_path):
         read_release_csv(path)
 
 
+def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
+    raw, output = tmp_path / "raw", tmp_path / "interim"
+    source = raw / "us_fed_assets"
+    source.mkdir(parents=True)
+    records = []
+    for day in (4, 5):
+        filename = f"vintages-{day}.zip"
+        (source / filename).write_bytes(_vintage_zip())
+        records.append(
+            {
+                "file": filename,
+                "retrieved_at": f"2026-11-0{day}T00:00:00Z",
+                "url": "https://alfred.stlouisfed.org/",
+            }
+        )
+    (raw / "download.json").write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "us_fed_assets": {
+                        "status": "downloaded",
+                        "source": "alfred",
+                        "series_ids": ["us_fed_assets"],
+                        "responses": records,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
+    frame = read_dataset(output).sort_values(["observation_date", "timestamp"])
+    assert len(frame) == 3
+    assert frame.value.iloc[:2].tolist() == [100, 110]
+    assert pd.isna(frame.value.iloc[2])
+    assert frame.timestamp.iloc[:2].tolist() == [
+        pd.Timestamp("2014-01-02T22:30"),
+        pd.Timestamp("2014-02-07T06:00"),
+    ]
+    assert frame.retrieved_at.eq(pd.Timestamp("2026-11-05", tz="UTC")).all()
+
+
 @pytest.mark.parametrize(
     "name,observation,expected",
     [
@@ -353,3 +395,46 @@ def test_hkma_recorded_api_failure_preserves_valid_pages_and_other_sources(
     assert inspect_dataset(output).manifest["producer_diagnostics"]["incomplete"] == [
         "hk_hibor_on"
     ]
+
+
+def test_cboe_download_parse_roundtrip_retains_null_and_uses_exchange_date(
+    tmp_path, monkeypatch
+):
+    def respond(request):
+        if "VIX9D" in request.url.path:
+            return httpx.Response(
+                200, text="DATE,OPEN,HIGH,LOW,CLOSE\n11/11/2024,1,3,1,2\n"
+            )
+        return httpx.Response(200, text="DATE,VVIX\n03/08/2024,80\n03/11/2024,.\n")
+
+    client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kw: client(transport=httpx.MockTransport(respond), **kw),
+    )
+    raw, output = tmp_path / "raw", tmp_path / "output"
+    fetch_macro(
+        {
+            "raw_root": str(raw),
+            "start_date": "2024-01-01",
+            "end_date": "2024-12-31",
+            "series_ids": ["us_vvix", "us_vix9d"],
+            "workers": 1,
+        }
+    )
+    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
+    frame = read_dataset(output).sort_values(["series_id", "observation_date"])
+    vvix = frame.loc[frame.series_id.eq("us_vvix")]
+    assert vvix.value.iloc[0] == 80
+    assert pd.isna(vvix.value.iloc[1])
+    assert vvix.timestamp.tolist() == [
+        pd.Timestamp("2024-03-08T23:00"),
+        pd.Timestamp("2024-03-11T22:00"),
+    ]
+    # Veterans Day is a federal holiday but an observed equity-options session.
+    vix9d = frame.loc[frame.series_id.eq("us_vix9d")].iloc[0]
+    assert vix9d.value == 2
+    assert vix9d.timestamp == pd.Timestamp("2024-11-11T23:00")
+    assert frame.published_at.isna().all()
+    assert frame.availability_basis.eq("inferred_snapshot_release").all()

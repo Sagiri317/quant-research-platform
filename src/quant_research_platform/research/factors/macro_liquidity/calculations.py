@@ -8,9 +8,12 @@ import pandas as pd
 from quant_research_platform.research.factors.macro_liquidity.definitions import (
     COMPOSITES,
     PRESSURE_COMPONENTS,
+    RATIOS,
     RECIPES,
+    STATE_PRODUCTS,
     VARIABLES,
 )
+from quant_research_platform.research.features.transforms import _industry_group_codes
 
 DEFAULT_WINDOWS = {"D": 60, "W": 26, "M": 24, "Q": 12, "event": 20}
 
@@ -78,7 +81,8 @@ def parameters(values):
 
 
 def _composite_history(observations, name):
-    weights, _, _ = COMPOSITES[name]
+    ratio = name in RATIOS
+    weights = dict.fromkeys(RATIOS[name], 1) if ratio else COMPOSITES[name][0]
     rows = observations.loc[observations.series_id.isin(weights)]
     state = {key: {} for key in weights}
     output = []
@@ -88,16 +92,22 @@ def _composite_history(observations, name):
             state[row.series_id][row.observation_date] = row.value
             changed.add(row.observation_date)
         for observed in sorted(changed):
-            if all(observed in state[key] for key in weights):
+            if ratio or all(observed in state[key] for key in weights):
+                if ratio:
+                    numerator, denominator = (
+                        state[key].get(observed, np.nan) for key in weights
+                    )
+                    value = numerator / denominator if denominator > 0 else np.nan
+                else:
+                    value = sum(
+                        weight * state[key][observed] for key, weight in weights.items()
+                    )
                 output.append(
                     (
                         name,
                         observed,
                         timestamp,
-                        sum(
-                            weight * state[key][observed]
-                            for key, weight in weights.items()
-                        ),
+                        value,
                     )
                 )
     return pd.DataFrame(
@@ -141,6 +151,10 @@ def _history_features(history, transforms, unit, frequency, window, config):
             else np.nan,
             "yoy_change": (x - year_value) * scale,
         }
+        if "implied_variance" in transforms:
+            values["implied_variance"] = (x / 100) ** 2 if x >= 0 else np.nan
+        if "risk_neutral_skewness" in transforms:
+            values["risk_neutral_skewness"] = (100 - x) / 10
         if finite.sum() >= minimum:
             sample = current[finite]
             std = sample.std(ddof=1)
@@ -210,13 +224,16 @@ def macro_states(observations, cutoffs, *, columns, config):
     needed = set(selected)
     for column in tuple(needed):
         recipe = RECIPES[column]
-        if recipe[0] == "interaction":
+        if recipe[0] in {"interaction", "industry_interaction"}:
             needed.add("ml_" + recipe[1])
         elif recipe[0] == "beta":
             needed.add("ml_" + recipe[1] + "_level")
     if "ml_us_cn_pressure_difference" in needed:
         needed.update(("ml_us_funding_pressure", "ml_cn_funding_pressure"))
     for name, components in config["pressure_components"].items():
+        if "ml_" + name in needed:
+            needed.update("ml_" + item for item in components)
+    for name, components in STATE_PRODUCTS.items():
         if "ml_" + name in needed:
             needed.update("ml_" + item for item in components)
     ratio_inputs = {
@@ -246,7 +263,7 @@ def macro_states(observations, cutoffs, *, columns, config):
     for variable, transforms in series_requests.items():
         history = (
             _composite_history(data, variable)
-            if variable in COMPOSITES
+            if variable in COMPOSITES or variable in RATIOS
             else groups.get(variable, data.iloc[:0])
         )
         unit, frequency = VARIABLES[variable]
@@ -261,6 +278,9 @@ def macro_states(observations, cutoffs, *, columns, config):
             output["ml_" + name] = sum(
                 output["ml_" + item] * weight for item, weight in components.items()
             )
+    for name, (left, right) in STATE_PRODUCTS.items():
+        if "ml_" + name in needed:
+            output["ml_" + name] = output["ml_" + left] * output["ml_" + right]
     if "ml_us_cn_pressure_difference" in needed:
         output["ml_us_cn_pressure_difference"] = (
             output["ml_us_funding_pressure"] - output["ml_cn_funding_pressure"]
@@ -334,7 +354,7 @@ def calculate_macro_factors(observations, panel, *, columns, config, states=None
     )
     for column in columns:
         recipe = RECIPES[column]
-        if recipe[0] == "interaction":
+        if recipe[0] in {"interaction", "industry_interaction"}:
             _, state, exposure = recipe
             if exposure not in work:
                 output[column] = np.nan
@@ -345,6 +365,16 @@ def calculate_macro_factors(observations, panel, *, columns, config, states=None
             group = value.groupby(work.timestamp, sort=False)
             std = group.transform("std").where(lambda x: x.gt(0))
             value = (value - group.transform("mean")) / std
+            if recipe[0] == "industry_interaction":
+                if not {"industry_standard_id", "industry_level1_code"} <= set(work):
+                    output[column] = np.nan
+                    continue
+                # Sector means use only the current, eligible cross-section.
+                value = value.groupby(
+                    [work.timestamp, _industry_group_codes(work)], sort=False
+                ).transform("mean")
+                if "eligible" in work:
+                    value = value.where(work.eligible)
             output[column] = output["ml_" + state] * value
     beta_columns = [name for name in columns if RECIPES[name][0] == "beta"]
     output[beta_columns] = np.nan

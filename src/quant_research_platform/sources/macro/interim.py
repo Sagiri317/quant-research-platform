@@ -131,6 +131,19 @@ def _normalize_response(payload, names, record, *, incomplete=False):
     source = SERIES[names[0]].source
     if source == "alfred":
         return [normalize_alfred(payload, names[0], record)]
+    if source == "cboe":
+        name = names[0]
+        data = pd.read_csv(io.BytesIO(payload), na_values=["."])
+        value_column = "CLOSE" if SERIES[name].code == "VIX9D" else SERIES[name].code
+        return [
+            _frame(
+                name,
+                data[value_column],
+                pd.to_datetime(data.DATE, format="%m/%d/%Y"),
+                record=record,
+                timezone="America/New_York",
+            )
+        ]
     if source == "chinabond":
         from quant_research_platform.sources.macro.chinabond import yield_table
 
@@ -418,7 +431,7 @@ def materialize_interim_data(
     if not frames:
         raise ValueError("macro_no_observations")
     frame = validate_observations(pd.concat(frames, ignore_index=True))
-    frame = resolve_source_conflicts(estimate_initial_archive_times(frame))
+    frame = estimate_initial_archive_times(resolve_source_conflicts(frame))
     if start_date is not None:
         frame = frame.loc[frame.observation_date.ge(pd.Timestamp(start_date))]
     if end_date is not None:

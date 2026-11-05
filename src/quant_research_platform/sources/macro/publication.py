@@ -80,6 +80,19 @@ def estimated_release_at(name, observations):
         dates = _us_business_day(
             dates + pd.to_timedelta((weekday - dates.dt.dayofweek) % 7 + 21, unit="D")
         )
+    elif name in {
+        "us_vix",
+        "us_vix3m",
+        "us_vix9d",
+        "us_vxn",
+        "us_vxeem",
+        "us_vvix",
+        "us_skew",
+        "us_ovx",
+        "us_gvz",
+    }:
+        # Observed exchange sessions need not be federal business days.
+        pass
     elif name.startswith("us_"):
         # Includes policy rates, daily Treasury yields, VIX and event-window shocks.
         if series.frequency != "event":

@@ -38,6 +38,9 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
             "asset_id": ["A", "B"] * 7,
             "timestamp": sessions[:-1].repeat(2),
             "eligible": True,
+            "industry_standard_id": ["CSRC2012", "CAPCO"] * 7,
+            "industry_level1_code": "A",
+            "volatility_60d": [1.0, 3.0] * 7,
             "target": np.repeat(np.arange(1, 8), 2) * 0.001,
             "target_available_at": sessions[1:].repeat(2) + pd.Timedelta(hours=7),
         }
@@ -122,7 +125,10 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
     # A post-decision revision cannot change Monday's 09:00 input.
     revision = releases.iloc[[1]].assign(value=99, published_at="2024-01-08T02:00:00Z")
     release_file = tmp_path / "releases.csv"
-    pd.concat([releases, revision], ignore_index=True).to_csv(release_file, index=False)
+    volatility = releases.assign(series_id="us_vix", source_series="VIX", frequency="D")
+    pd.concat([releases, revision, volatility], ignore_index=True).to_csv(
+        release_file, index=False
+    )
     macro = tmp_path / "macro"
     write_dataset(
         macro,
@@ -130,6 +136,8 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
         spec=interim_catalog().get("macro_observations"),
     )
     column = "ml_us_nfci_level"
+    industry_column = "ml_us_vix_change_x_industry_volatility_60d"
+    columns = [column, industry_column]
     window = {"start": str(sessions[1].date()), "end": str(sessions[-1].date())}
     factors = prepare(
         {
@@ -140,7 +148,7 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
                 "decision_panel": str(decisions),
             },
             "time_window": window,
-            "factor_columns": [column],
+            "factor_columns": columns,
             "output_root": str(tmp_path / "factors"),
         }
     )
@@ -154,7 +162,7 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
             },
             "base_input_data_id": "decision_panel",
             "time_window": window,
-            "factor_columns": [column],
+            "factor_columns": columns,
             "label_columns": ["target"],
             "filter_columns": ["eligible"],
             "output_root": str(tmp_path / "dataset"),
@@ -166,6 +174,10 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
         range(1, 8)
     )
     assert actual.timestamp.iloc[2] == pd.Timestamp("2024-01-08T01:00")
+    assert actual[industry_column].iloc[:2].isna().all()
+    np.testing.assert_allclose(
+        actual[industry_column].iloc[2:], np.tile([-1 / np.sqrt(2), 1 / np.sqrt(2)], 6)
+    )
     assert factor_catalog().get(column).family == "macro_liquidity"
     model = ModelSpec(
         model_id="macro_test",

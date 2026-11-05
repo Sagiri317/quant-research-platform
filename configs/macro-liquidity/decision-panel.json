@@ -7,7 +7,7 @@
   },
   "time_window": {
     "start": "2014-01-01",
-    "end": "2025-12-31"
+    "end": "2026-10-31"
   },
   "parameters": {
     "mode": "preopen",

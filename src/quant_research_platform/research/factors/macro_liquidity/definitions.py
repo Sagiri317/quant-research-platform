@@ -25,9 +25,24 @@ COMPOSITES = {
         "D",
     ),
 }
+RATIOS = {
+    f"{name}_vix_ratio": (name, "us_vix")
+    for name in ("us_vix3m", "us_vix9d", "us_vxn", "us_vxeem")
+}
+VOLATILITY_INDICES = {
+    "us_vix",
+    "us_vix3m",
+    "us_vix9d",
+    "us_vxn",
+    "us_vxeem",
+    "us_vvix",
+    "us_ovx",
+    "us_gvz",
+}
 VARIABLES = {
     **MACRO_VARIABLES,
     **{name: (unit, frequency) for name, (_, unit, frequency) in COMPOSITES.items()},
+    **dict.fromkeys(RATIOS, ("dimensionless", "D")),
 }
 TRANSFORMS = (
     "level",
@@ -41,12 +56,16 @@ TRANSFORMS = (
     "innovation",
     "innovation_zscore",
 )
-POSITIVE_VARIABLES = {
-    name
-    for name, (unit, _) in VARIABLES.items()
-    if unit.startswith(("USD", "CNY", "EUR", "JPY", "HKD"))
-    and name not in {"cn_net_injection", "cn_tsf_flow", "us_net_liquidity"}
-} | {"us_vix", "us_broad_dollar", "us_broad_dollar_legacy"}
+POSITIVE_VARIABLES = (
+    {
+        name
+        for name, (unit, _) in VARIABLES.items()
+        if unit.startswith(("USD", "CNY", "EUR", "JPY", "HKD"))
+        and name not in {"cn_net_injection", "cn_tsf_flow", "us_net_liquidity"}
+    }
+    | VOLATILITY_INDICES
+    | {"us_skew", "us_broad_dollar", "us_broad_dollar_legacy"}
+)
 PRESSURE_COMPONENTS = {
     "us_funding_pressure": {
         "us_sofr_iorb_zscore": 0.25,
@@ -61,12 +80,25 @@ PRESSURE_COMPONENTS = {
         "jp_boj_assets_zscore": 1 / 3,
     },
 }
+STATE_PRODUCTS = {
+    "us_vix_skew_zscore_product": ("us_vix_zscore", "us_skew_zscore"),
+    "us_vix_vvix_zscore_product": ("us_vix_zscore", "us_vvix_zscore"),
+    "us_liquidity_vix_zscore_product": ("us_net_liquidity_zscore", "us_vix_zscore"),
+}
 STATE_FACTORS = (
     "us_net_liquidity_zscore",
     "us_funding_pressure",
     "cn_funding_pressure",
     "us_cn_pressure_difference",
     "global_liquidity",
+    "us_vix_change",
+    "us_vix_zscore",
+    "us_vvix_change",
+    "us_skew_zscore",
+    "us_vix3m_vix_ratio_level",
+    "us_vix9d_vix_ratio_level",
+    "us_broad_dollar_change",
+    "us_real_treasury_10y_change",
 )
 EXPOSURES = (
     "amihud_60d",
@@ -77,7 +109,16 @@ EXPOSURES = (
     "momentum_60d",
     "residual_volatility_60d",
 )
-BETA_VARIABLES = ("us_net_liquidity", "us_broad_dollar", "us_nfci", "cn_m2", "cn_dr007")
+BETA_VARIABLES = (
+    "us_net_liquidity",
+    "us_broad_dollar",
+    "us_nfci",
+    "cn_m2",
+    "cn_dr007",
+    "us_vix",
+    "us_vvix",
+    "us_skew",
+)
 
 
 def recipes():
@@ -95,10 +136,15 @@ def recipes():
             transforms += ("sum",)
         if name in POSITIVE_VARIABLES:
             transforms += ("log_level", "growth", "yoy_growth")
+        if name in VOLATILITY_INDICES:
+            transforms += ("implied_variance",)
+        if name == "us_skew":
+            transforms += ("risk_neutral_skewness",)
         for transform in transforms:
             output[f"ml_{name}_{transform}"] = ("series", name, transform)
     for name in (
         *PRESSURE_COMPONENTS,
+        *STATE_PRODUCTS,
         "us_cn_pressure_difference",
         "us_net_liquidity_latest",
         "us_reserve_asset_ratio",
@@ -109,6 +155,12 @@ def recipes():
     for state in STATE_FACTORS:
         for exposure in EXPOSURES:
             output[f"ml_{state}_x_{exposure}"] = ("interaction", state, exposure)
+        for exposure in ("volatility_60d", "amihud_60d", "beta_252d"):
+            output[f"ml_{state}_x_industry_{exposure}"] = (
+                "industry_interaction",
+                state,
+                exposure,
+            )
     for variable in BETA_VARIABLES:
         for kind in ("beta", "partial_beta"):
             output[f"ml_{variable}_{kind}"] = ("beta", variable, kind)
@@ -144,6 +196,8 @@ def factor_unit(name):
     if recipe[0] == "series":
         _, variable, transform = recipe
         unit = VARIABLES[variable][0]
+        if transform == "implied_variance":
+            return "annualized_variance"
         if transform in {
             "zscore",
             "percentile",
@@ -151,11 +205,14 @@ def factor_unit(name):
             "growth",
             "yoy_growth",
             "log_level",
+            "risk_neutral_skewness",
         }:
             return "dimensionless"
         return "bp" if unit == "percent" and transform != "level" else unit
     if name == "ml_us_net_liquidity_latest":
         return "USD_million"
+    if recipe[0] in {"interaction", "industry_interaction"}:
+        return factor_unit("ml_" + recipe[1])
     return (
         "dimensionless"
         if recipe[0] in {"state", "interaction"}

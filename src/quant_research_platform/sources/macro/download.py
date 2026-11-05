@@ -185,7 +185,7 @@ def fetch_macro(config):
     jobs = {}
     for name in selected:
         series = SERIES[name]
-        key = name if series.source == "alfred" else series.source
+        key = name if series.source in {"alfred", "cboe"} else series.source
         jobs.setdefault(key, []).append(name)
 
     def fetch(job):
@@ -204,6 +204,15 @@ def fetch_macro(config):
                 with httpx.Client(timeout=timeout, follow_redirects=True) as client:
                     if series.source == "alfred":
                         _alfred(client, staging, records, series, str(start), str(end))
+                    elif series.source == "cboe":
+                        _response(
+                            client,
+                            staging,
+                            records,
+                            "history.csv",
+                            "https://cdn-api.cboe.com/api/global/us_indices/"
+                            f"daily_prices/{series.code}_History.csv",
+                        )
                     elif series.source == "hkma":
                         _hkma(client, staging, records, str(start), str(end))
                     elif series.source == "eastmoney":

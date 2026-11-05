@@ -1,7 +1,7 @@
 {
   "raw_root": "data/raw/macro_liquidity/new-download",
   "start_date": "2010-01-01",
-  "end_date": "2025-12-31",
+  "end_date": "2026-10-31",
   "series_ids": [
     "us_fed_assets",
     "us_tga_wed",
@@ -28,7 +28,20 @@
     "jp_boj_assets",
     "jp_current_accounts",
     "global_usd_credit",
-    "us_fomc_surprise"
+    "us_fomc_surprise",
+    "us_vix3m",
+    "us_vix9d",
+    "us_vvix",
+    "us_vxn",
+    "us_vxeem",
+    "us_skew",
+    "us_ovx",
+    "us_gvz",
+    "us_real_treasury_10y",
+    "us_anfci",
+    "cn_shibor_1w",
+    "cn_shibor_3m",
+    "cn_tsf_flow"
   ],
   "workers": 4
 }
