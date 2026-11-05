@@ -72,10 +72,12 @@
   },
   "output": "results/learning/agent",
   "llm": {
-    "base_url": "https://api.example.com/v1",
-    "model": "replace-with-provider-model",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-6-luna",
     "credential_env": "QRP_RESEARCH_API_KEY",
-    "max_output_tokens": 4096
+    "max_output_tokens": 128000,
+    "reasoning_effort": "high",
+    "timeout_seconds": 300
   },
   "sandbox": {
     "image": "qrp-research:local",

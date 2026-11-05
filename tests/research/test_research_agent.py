@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.agents import execution
-from quant_research_platform.agents.client import AgentAction, OpenAICompatibleClient
+from quant_research_platform.agents.client import AgentAction, OpenAIResponsesClient
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
@@ -100,9 +100,13 @@ def test_agent_real_cli_dynamic_binding_and_numerical_feedback(tmp_path):
             {
                 "kind": "run_tool",
                 "tool": "search",
-                "changes": {"expressions": ["x", "-x"]},
+                "changes": [{"path": "expressions", "choice": 0}],
             },
-            {"kind": "run_tool", "tool": "apply", "inputs": {"search": "e0001"}},
+            {
+                "kind": "run_tool",
+                "tool": "apply",
+                "inputs": [{"path": "search", "evidence": "e0001"}],
+            },
             {
                 "kind": "finish",
                 "conclusion": "Applied the selected formula to the later window.",
@@ -133,7 +137,11 @@ def test_agent_retains_failed_attempt_and_rejects_holdout_and_protocol_changes(
     config = agent_config(tmp_path)
     client = ScriptedClient(
         [
-            {"kind": "run_tool", "tool": "search", "changes": {"label": "different"}},
+            {
+                "kind": "run_tool",
+                "tool": "search",
+                "changes": [{"path": "label", "choice": 0}],
+            },
             {"kind": "finish", "conclusion": "The attempt failed.", "evidence": []},
         ]
     )
@@ -213,7 +221,24 @@ def test_generated_artifacts_cannot_be_loaded_as_host_models(tmp_path):
         )
 
 
-def test_http_transport_and_response_schema(monkeypatch):
+@pytest.fixture
+def llm_config():
+    return {
+        "base_url": "https://api.openai.com/v1",
+        "model": "gpt-6-luna",
+        "credential_env": "QRP_TEST_API_KEY",
+        "max_output_tokens": 128000,
+        "reasoning_effort": "high",
+        "timeout_seconds": 300,
+    }
+
+
+@pytest.mark.parametrize(
+    "effort,remaining,expected_timeout", [("none", 1, 1), ("max", 600, 300)]
+)
+def test_http_transport_and_response_schema(
+    monkeypatch, llm_config, effort, remaining, expected_timeout
+):
     received = []
 
     def respond(request):
@@ -221,9 +246,19 @@ def test_http_transport_and_response_schema(monkeypatch):
         return httpx.Response(
             200,
             json={
-                "choices": [
-                    {"message": {"content": '{"kind":"finish","conclusion":"Done"}'}}
-                ]
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "summary": []},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"kind":"finish","conclusion":"Done"}',
+                            }
+                        ],
+                    },
+                ],
             },
         )
 
@@ -234,32 +269,127 @@ def test_http_transport_and_response_schema(monkeypatch):
         lambda **kwargs: real_client(transport=httpx.MockTransport(respond), **kwargs),
     )
     monkeypatch.setenv("QRP_TEST_API_KEY", "synthetic-key")
-    client = OpenAICompatibleClient(
-        {
-            "base_url": "https://api.example.com/v1",
-            "model": "test-model",
-            "credential_env": "QRP_TEST_API_KEY",
-            "max_output_tokens": 100,
-        }
-    )
-    assert client.complete([], timeout=1).kind == "finish"
-    assert received[0].url.path == "/v1/chat/completions"
+    llm_config["reasoning_effort"] = effort
+    client = OpenAIResponsesClient(llm_config)
+    messages = [{"role": "user", "content": "Return a finish action."}]
+    assert client.complete(messages, timeout=remaining).kind == "finish"
+    assert received[0].url.path == "/v1/responses"
     assert received[0].headers["authorization"] == "Bearer synthetic-key"
-    assert json.loads(received[0].content)["max_tokens"] == 100
+    assert set(received[0].extensions["timeout"].values()) == {expected_timeout}
+    body = json.loads(received[0].content)
+    assert body["input"] == messages
+    assert body["model"] == "gpt-6-luna"
+    assert body["max_output_tokens"] == 128000
+    assert body["reasoning"] == {"effort": effort}
+    assert body["store"] is False
+    assert body["service_tier"] == "default"
+    assert body["text"]["verbosity"] == "medium"
+    assert not {"max_tokens", "temperature", "top_p", "messages"} & body.keys()
+    response_format = body["text"]["format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["strict"] is True
+    schema = response_format["schema"]
+    for model in [schema, *schema["$defs"].values()]:
+        assert model["additionalProperties"] is False
+        assert set(model["required"]) == set(model["properties"])
+        assert all("default" not in field for field in model["properties"].values())
     with pytest.raises(ValueError, match="agent_action_fields_invalid"):
         AgentAction(kind="finish", conclusion="Done", code="print(1)")
+
+
+@pytest.mark.parametrize(
+    "status,body,error",
+    [
+        (401, {}, "agent_model_http_status_401"),
+        (
+            200,
+            {"status": "incomplete", "output": []},
+            "agent_model_response_not_completed",
+        ),
+        (
+            200,
+            {
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "No"}],
+                    }
+                ],
+            },
+            "agent_model_refused",
+        ),
+    ],
+)
+def test_responses_failure_is_not_an_action(
+    monkeypatch, llm_config, status, body, error
+):
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(status, json=body)
+            ),
+            **kwargs,
+        ),
+    )
+    monkeypatch.setenv("QRP_TEST_API_KEY", "synthetic-key")
+    with pytest.raises(RuntimeError, match=error):
+        OpenAIResponsesClient(llm_config).complete([], timeout=1)
+
+
+@pytest.mark.parametrize(
+    "field,value,error",
+    [
+        ("reasoning_effort", "ultra", "reasoning_effort"),
+        ("max_output_tokens", True, "response_budget"),
+        ("timeout_seconds", 0, "request_timeout"),
+        ("timeout_seconds", float("inf"), "qrp_json_nonfinite_number"),
+    ],
+)
+def test_llm_config_rejects_invalid_request_settings(llm_config, field, value, error):
+    llm_config[field] = value
+    with pytest.raises(ValueError, match=error):
+        OpenAIResponsesClient(llm_config)
+
+
+def test_action_rejects_duplicate_paths_and_negative_choices():
+    for field, item in (
+        ("changes", {"path": "columns", "choice": 0}),
+        ("inputs", {"path": "search", "evidence": "e0001"}),
+    ):
+        with pytest.raises(ValueError, match="duplicate_path"):
+            AgentAction(kind="run_tool", tool="search", **{field: [item, item]})
+    with pytest.raises(ValueError):
+        AgentAction.model_validate(
+            {
+                "kind": "run_tool",
+                "tool": "search",
+                "changes": [{"path": "columns", "choice": -1}],
+            }
+        )
 
 
 def test_agent_budget_and_model_failure_are_recorded(tmp_path):
     config = agent_config(tmp_path)
     config["budget"]["max_requests"] = 1
     client = ScriptedClient(
-        [{"kind": "run_tool", "tool": "search", "changes": {"label": "forbidden"}}]
+        [
+            {
+                "kind": "run_tool",
+                "tool": "search",
+                "changes": [{"path": "expressions", "choice": 1}],
+            }
+        ]
     )
     root = run_agent(config, client=client)
     report = parse_qrp_json_object((root / "report.json").read_bytes())
     assert report["status"] == "budget_exhausted"
     assert len(report["experiments"]) == 1
+    assert report["experiments"][0]["status"] == "failed"
+    assert report["experiments"][0]["error"] == "ValueError"
 
     class Unavailable:
         def complete(self, messages, *, timeout):
