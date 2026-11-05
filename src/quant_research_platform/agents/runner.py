@@ -17,7 +17,7 @@ import pandas as pd
 
 from quant_research_platform.agents.client import (
     AgentAction,
-    OpenAICompatibleClient,
+    OpenAIResponsesClient,
 )
 from quant_research_platform.agents.execution import (
     _metrics,
@@ -250,7 +250,7 @@ def run_agent(config, *, client=None):
     output = Path(config["output"])
     reject_if_exists(output)
     output.mkdir(parents=True)
-    client = OpenAICompatibleClient(config["llm"]) if client is None else client
+    client = OpenAIResponsesClient(config["llm"]) if client is None else client
     messages = [
         {
             "role": "system",
@@ -258,12 +258,11 @@ def run_agent(config, *, client=None):
                 "You are a quantitative research agent. Fix the supplied label, "
                 "windows, costs and metric. Explore only listed parameter choices. "
                 "Never use the final test period for feedback. Return exactly one "
-                "JSON action matching this schema: "
-            )
-            + json.dumps(AgentAction.model_json_schema())
-            + (
-                ". Use run_tool with a tool name and allowed changes. Bind declared "
-                "inputs to successful evidence IDs such as e0001. Generated Python "
+                "JSON action. Use run_tool with a tool name. Each change selects a "
+                "parameter path and a zero-based choice index from that tool's "
+                "choices. Leave unchanged parameters out of changes. Each input "
+                "binds a declared path to a successful evidence ID such as e0001. "
+                "Use empty lists and null for unused fields. Generated Python "
                 "executes only in a networkless container with /inputs/<alias> and "
                 "/outputs. Only supplied numerical summaries constitute evidence. "
                 "Cite evidence IDs in a finish action. Negative and undefined "
@@ -327,18 +326,22 @@ def run_agent(config, *, client=None):
                 else:
                     template = templates[action.tool]
                     arguments = deepcopy(template["config"])
-                    for path, value in action.changes.items():
-                        if (
-                            path not in template["vary"]
-                            or value not in template["vary"][path]
+                    for change in action.changes:
+                        if change.path not in template["vary"] or change.choice >= len(
+                            template["vary"][change.path]
                         ):
                             raise ValueError("agent_change_outside_declared_choices")
-                        _set_argument(arguments, path, value)
+                        _set_argument(
+                            arguments,
+                            change.path,
+                            template["vary"][change.path][change.choice],
+                        )
                     arguments = _protocol_config(arguments, protocol)
                     bindings = template.get("bindings", {})
-                    if set(action.inputs) != set(bindings):
+                    if {item.path for item in action.inputs} != set(bindings):
                         raise ValueError("agent_input_bindings_mismatch")
-                    for path, prior_identifier in action.inputs.items():
+                    for item in action.inputs:
+                        path, prior_identifier = item.path, item.evidence
                         member = bindings[path]
                         allow_generated = path in {"dataset", "inputs"} and template[
                             "operation"

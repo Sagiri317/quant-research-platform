@@ -148,17 +148,40 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 
 ## 独立研究 agent
 
-agent 通过 OpenAI-compatible `/chat/completions` API 获取结构化行动。
-调用者提供 `base_url`、模型名、凭据环境变量名及单次 `max_output_tokens`。
+agent 通过 OpenAI `/responses` API 获取严格 JSON Schema 行动，客户端复用已安装的 HTTPX。
+`llm` 明确以下六项；示例见 `configs/research-learning/research-agent.json`：
+
+| 配置 | 示例值 | 含义 |
+|---|---|---|
+| `base_url` | `https://api.openai.com/v1` | API 根地址，客户端追加 `/responses` |
+| `model` | `gpt-6-luna` | 本轮使用的模型，由调用者按实际项目权限选择 |
+| `credential_env` | `QRP_RESEARCH_API_KEY` | 当前进程中保存密钥的环境变量名，不能填写密钥本身 |
+| `max_output_tokens` | `128000` | 单次生成上限，包含内部推理和可见输出，并非要求生成这么多 token |
+| `reasoning_effort` | `high` | 可改为 `none`、`low`、`medium`、`high`、`xhigh`、`max`；实际模型必须支持所选档位 |
+| `timeout_seconds` | `300` | 单次网络等待超时，与本轮剩余时间取较小值 |
+
+按 2026-11-05 的 [GPT-6 Luna 官方文档](https://developers.openai.com/api/docs/models/gpt-6-luna)，
+上述模型最大输出为 128,000 tokens，支持表内六种推理强度。更换模型时须重新核对上限和支持档位。
+请求固定使用标准服务档 `service_tier=default`、`text.verbosity=medium`、`store=false`，
+不传 `temperature` / `top_p`，不自动重试或切换模型。
+`store=false` 关闭响应保存检索功能，不等于零数据留存；每次请求显式发送本轮消息历史。
 远程 API 要求 HTTPS；localhost 可用 HTTP。配置中不存密钥，容器不接收该环境变量。
-实际供应商必须支持配置的 JSON 响应模式；不支持时保留失败，不切换假后端。
+Windows 用户环境变量更新后，已经打开的终端不会自动刷新；从新终端启动，或在当前
+PowerShell 执行 `$env:QRP_RESEARCH_API_KEY = [Environment]::GetEnvironmentVariable('QRP_RESEARCH_API_KEY', 'User')`
+后再运行。该命令只刷新当前进程，不打印密钥。
+服务必须支持 Responses 和严格结构化输出；HTTP 失败、未完成响应、拒绝回答和非法行动均明确失败。
+旧 Chat Completions 配置需补上推理强度和超时，并改用支持 Responses 的服务。
 
 任务固定 `protocol.label`、训练/验证/测试窗、`costs` 和评价 `metric`。
 工具模板可用 `protocol:label`、`protocol:train_window`、`protocol:costs.cost_bps`
 引用这些事实，冲突直接拒绝。`tools` 声明允许的操作、基础配置、`vary` 的可选值和
 `metrics` 的数值提取位置。模型只能选这些值，不能改窗口、截止、输出路径或固定成本。
+行动的 `changes` 用参数路径和从 0 开始的候选编号选择，例如
+`[{"path":"columns","choice":0}]` 选择该工具 `vary.columns` 的第一个候选；未列出的参数保持基础配置。
 `bindings` 将参数路径映射到既有产物的相对成员；行动的 `inputs` 选择成功的证据 ID，
-例如 `{"search":"e0001"}`。输出位置始终由 runner 分配。
+例如 `[{"path":"search","evidence":"e0001"}]`。路径不得重复。严格行动格式的所有字段都需返回，
+未使用的列表为 `[]`，未使用的可空字段为 `null`。旧行动中的字典式 `changes` / `inputs`
+已改为上述列表；候选值仍只保存于工具配置，不重复编码。输出位置始终由 runner 分配。
 
 `budget` 显式限定 API 请求数、实验次数和 `wall_seconds`，到期不启动下一实验。
 可信 CLI 和生成代码进程使用剩余时间作为超时，超时清理本次拥有的进程与容器。
