@@ -39,6 +39,7 @@ def research_frame(source, window, columns, *, label=None, context_columns=()):
     selected = [
         "timestamp",
         "asset_id",
+        *spec["primary_key"],
         "eligible",
         *columns,
         *context_columns,

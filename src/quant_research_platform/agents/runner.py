@@ -1,470 +1,499 @@
-"""Run budgeted research loops under a fixed experimental protocol.
+"""A resumable research harness around the platform's existing calculations."""
 
-The caller selects tools, allowed parameter choices, windows, and feedback
-metrics. Each attempt retains its action and result; final-test observations
-are excluded from iterative feedback.
-"""
-
-import json
-import os
 import re
-import sys
 import time
 from copy import deepcopy
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
-from quant_research_platform.agents.client import (
-    AgentAction,
-    OpenAIResponsesClient,
-)
+from quant_research_platform.agents.client import AgentAction, OpenAIResponsesClient
 from quant_research_platform.agents.execution import (
     _metrics,
-    _resolve_artifacts,
-    _run_process,
+    error_feedback,
     run_isolated_python,
+    run_native,
+)
+from quant_research_platform.agents.knowledge import lookup, propose_patch, remember
+from quant_research_platform.agents.protocol import (
+    artifact_references,
+    validate_budget,
+    validate_config,
+)
+from quant_research_platform.agents.session import (
+    BUILTINS,
+    context_messages,
+    publish_report,
+    read_session,
+    replace_json,
+    session_lock,
+    usage_summary,
 )
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
+    parse_qrp_json_object,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
-from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.policy.share_safety import (
-    evidence_json_value_unsafe_reason,
-)
-from quant_research_platform.research.experiments import TrialRecorder
-from quant_research_platform.storage.atomic import (
-    atomic_write_json,
-    reject_if_exists,
-)
-from quant_research_platform.storage.datasets import inspect_dataset
-from quant_research_platform.storage.datasets.reading import (
-    iter_dataset_chunks,
-    open_dataset_session,
-)
-
-OPERATIONS = {
-    "assemble",
-    "fit",
-    "predict",
-    "evaluate",
-    "score",
-    "select",
-    "backtest",
-    "backtest-hft",
-    "calibrate",
-    "statistics-factors",
-    "statistics-model",
-    "statistics-portfolio",
-    "train-policy",
-    "backtest-policy",
-    "search-factors",
-    "apply-formula",
-    "calibrate-uncertainty",
-    "apply-uncertainty",
-    "evaluate-uncertainty",
-    "fit-cost-model",
-    "backtest-cost-model",
-}
-_TUNABLE_PATH = re.compile(
-    r"^(?:model\.(?:model_algorithm|input_factor_columns|input_feature_columns|hyperparameters\.[A-Za-z_][A-Za-z_0-9]*)|candidate_parameters\.[A-Za-z_][A-Za-z_0-9]*|columns|expressions|feature_columns|baseline_columns|hidden_sizes|epochs|learning_rate|ppo\.[A-Za-z_][A-Za-z_0-9]*)$"
-)
+from quant_research_platform.policy.share_safety import sanitize_shared_text
+from quant_research_platform.storage.atomic import atomic_write_json, reject_if_exists
 
 
-def _protocol_config(value, protocol):
-    """Resolve explicit protocol references and reject conflicting scientific fields."""
-    if isinstance(value, str) and value.startswith("protocol:"):
-        selected = protocol
-        for key in value.removeprefix("protocol:").split("."):
-            selected = selected[key]
-        return deepcopy(selected)
-    if isinstance(value, list):
-        return [_protocol_config(item, protocol) for item in value]
-    if isinstance(value, dict):
-        result = {key: _protocol_config(item, protocol) for key, item in value.items()}
-        for key, item in result.items():
-            if (
-                key in {"label", "target_column", "primary_label"}
-                and item != protocol["label"]
-            ):
-                raise ValueError("agent_protocol_label_conflict")
-            if key in {"train_window", "validation_window"} and item != protocol[key]:
-                raise ValueError("agent_protocol_window_conflict")
-            if key in protocol["costs"] and item != protocol["costs"][key]:
-                raise ValueError("agent_protocol_cost_conflict")
-        return result
-    return value
-
-
-def _set_argument(arguments, path, value):
-    parts = path.split(".")
-    for part in parts[:-1]:
-        arguments = (
-            arguments[int(part)] if isinstance(arguments, list) else arguments[part]
-        )
-    key = int(parts[-1]) if isinstance(arguments, list) else parts[-1]
-    arguments[key] = value
-
-
-def _before_holdout(value, holdout_start):
-    if isinstance(value, dict):
-        if set(value) == {"start", "end"}:
-            _, end, closed = time_window_timestamp_interval(TimeWindow(**value))
-            if pd.Timestamp(end) > holdout_start or (
-                closed and pd.Timestamp(end) == holdout_start
-            ):
-                raise ValueError("agent_tool_window_reaches_holdout")
-        for key, item in value.items():
-            if (
-                key
-                in {
-                    "cutoff",
-                    "fit_cutoff",
-                    "selection_cutoff",
-                    "train_cutoff",
-                    "refit_cutoff",
-                }
-                and pd.Timestamp(item) >= holdout_start
-            ):
-                raise ValueError("agent_tool_cutoff_reaches_holdout")
-            _before_holdout(item, holdout_start)
-    elif isinstance(value, list):
-        for item in value:
-            _before_holdout(item, holdout_start)
-
-
-def run_agent(config, *, client=None):
-    """Run a single research loop; failed attempts remain immutable local evidence."""
-    config = _strict_config(
-        config,
-        {"question", "protocol", "tools", "budget", "output", "llm"},
-        {"sandbox"},
-    )
-    protocol = _strict_config(
-        config["protocol"],
-        {
-            "label",
-            "train_window",
-            "validation_window",
-            "test_window",
-            "costs",
-            "metric",
-        },
-        set(),
-    )
-    test_start = pd.Timestamp(
-        time_window_timestamp_interval(TimeWindow(**protocol["test_window"]))[0]
-    )
-    _, train_end, train_closed = time_window_timestamp_interval(
-        TimeWindow(**protocol["train_window"])
-    )
-    train_end = pd.Timestamp(train_end)
-    val_start, val_end, val_closed = time_window_timestamp_interval(
-        TimeWindow(**protocol["validation_window"])
-    )
-    if (
-        not train_end <= pd.Timestamp(val_start) <= pd.Timestamp(val_end) <= test_start
-        or train_closed
-        and train_end == pd.Timestamp(val_start)
-        or val_closed
-        and pd.Timestamp(val_end) == test_start
-    ):
-        raise ValueError("agent_protocol_windows_overlap")
-    budget = _strict_config(
-        config["budget"], {"max_requests", "max_experiments", "wall_seconds"}, set()
-    )
-    if any(type(value) is not int or value < 1 for value in budget.values()):
-        raise ValueError("agent_budget_invalid")
-    public_tools, templates = {}, {}
-    for name, template in config["tools"].items():
-        template = _strict_config(
-            template, {"operation", "config", "vary", "metrics"}, {"bindings"}
-        )
-        if template["operation"] not in OPERATIONS:
-            raise ValueError("agent_operation_not_allowed")
-        template["config"] = _protocol_config(template["config"], protocol)
-        _before_holdout(template["config"], test_start)
-        templates[name] = template
-        for path, choices in template["vary"].items():
-            if (
-                not _TUNABLE_PATH.fullmatch(path)
-                or not isinstance(choices, list)
-                or not choices
-            ):
-                raise ValueError("agent_tunable_not_allowed")
-        public_tools[name] = {
-            "operation": template["operation"],
-            "choices": template["vary"],
-            "inputs": list(template.get("bindings", {})),
-        }
-    sandbox_inputs = {}
-    if "sandbox" in config:
-        for alias, root in config["sandbox"]["inputs"].items():
-            inspection = inspect_dataset(Path(root))
-            if (
-                inspection.date_max is None
-                or pd.Timestamp(inspection.date_max) >= test_start
-            ):
-                raise ValueError("agent_sandbox_input_reaches_holdout")
-            clocks = inspection.spec.get("label_availability_columns", {})
-            labels = [
-                name
-                for name, role in inspection.spec["column_roles"].items()
-                if role == "label"
-            ]
-            if set(labels) != set(clocks):
-                raise ValueError("agent_sandbox_label_maturity_required")
-            if labels:
-                session = open_dataset_session(
-                    Path(root),
-                    columns=tuple(dict.fromkeys([*labels, *clocks.values()])),
-                )
-                with closing_iterator(iter_dataset_chunks(session)) as chunks:
-                    for frame in chunks:
-                        for label, clock in clocks.items():
-                            available = pd.to_datetime(frame[clock], errors="raise")
-                            if (
-                                frame[label].notna()
-                                & (available.isna() | available.ge(test_start))
-                            ).any():
-                                raise ValueError("agent_sandbox_labels_reach_holdout")
-            sandbox_inputs[alias] = {
-                "columns": inspection.spec["column_roles"],
-                "units": inspection.spec.get("column_units", {}),
-                "frequency": inspection.spec["frequency"],
-                "rows": inspection.row_count,
-            }
-    public = {
-        "question": config["question"],
-        "protocol": protocol,
-        "tools": public_tools,
-        "budget": budget,
-        "sandbox_inputs": sandbox_inputs,
+def run_agent(config, *, client=None, control=None, on_event=None):
+    """Create and run a session; control returns queued user messages or /pause."""
+    config, public = validate_config(config)
+    if set(config["tools"]) & set(BUILTINS):
+        raise ValueError("agent_tool_name_reserved")
+    root = Path(config["output"]).resolve()
+    reject_if_exists(root)
+    root.mkdir(parents=True)
+    config["documents"] = {
+        key: str(Path(value).resolve())
+        for key, value in config.get("documents", {}).items()
     }
-    if evidence_json_value_unsafe_reason(public):
-        raise ValueError("agent_public_context_not_shareable")
-    output = Path(config["output"])
-    reject_if_exists(output)
-    output.mkdir(parents=True)
-    client = OpenAIResponsesClient(config["llm"]) if client is None else client
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a quantitative research agent. Fix the supplied label, "
-                "windows, costs and metric. Explore only listed parameter choices. "
-                "Never use the final test period for feedback. Return exactly one "
-                "JSON action. Use run_tool with a tool name. Each change selects a "
-                "parameter path and a zero-based choice index from that tool's "
-                "choices. Leave unchanged parameters out of changes. Each input "
-                "binds a declared path to a successful evidence ID such as e0001. "
-                "Use empty lists and null for unused fields. Generated Python "
-                "executes only in a networkless container with /inputs/<alias> and "
-                "/outputs. Only supplied numerical summaries constitute evidence. "
-                "Cite evidence IDs in a finish action. Negative and undefined "
-                "results are valid. Do not claim unrun experiments succeeded."
-            ),
-        },
-        {"role": "user", "content": json.dumps(public, ensure_ascii=False)},
-    ]
-    deadline = time.monotonic() + budget["wall_seconds"]
-    artifacts, records = {}, []
-    status, conclusion = "budget_exhausted", None
-    try:
-        for request in range(budget["max_requests"]):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            action = client.complete(messages, timeout=remaining)
-            if time.monotonic() >= deadline:
-                break
-            action = (
-                action
-                if isinstance(action, AgentAction)
-                else AgentAction.model_validate(action)
+    if "memory" in config:
+        config["memory"] = str(Path(config["memory"]).resolve())
+    if "sandbox" in config:
+        config["sandbox"]["inputs"] = {
+            key: str(Path(value).resolve())
+            for key, value in config["sandbox"]["inputs"].items()
+        }
+    state = {
+        "version": 1,
+        "id": uuid4().hex,
+        "cwd": str(Path.cwd()),
+        "config": config,
+        "public": public,
+        "status": "ready",
+        "phase": "development",
+        "events": [],
+        "requests": [],
+        "steering": [],
+        "elapsed_seconds": 0.0,
+        "frozen": {},
+        "holdout_viewed": False,
+        "pending_question": None,
+        "conclusion": None,
+        "compactions": 0,
+    }
+    with session_lock(root):
+        replace_json(root / "session.json", state)
+        _Runner(root, state, client, control, on_event).run()
+    return root
+
+
+def resume_agent(
+    root, *, message=None, budget=None, client=None, control=None, on_event=None
+):
+    """Continue the same protocol and artifacts; budget changes are caller-owned."""
+    root = Path(root).resolve()
+    with session_lock(root):
+        state = read_session(root)
+        if state["status"] == "completed":
+            if message or budget:
+                raise ValueError("agent_completed_session_requires_new_research")
+            publish_outputs(root, state)
+            return root
+        if budget:
+            state["config"]["budget"] = validate_budget(
+                {**state["config"]["budget"], **budget}
             )
-            atomic_write_json(
-                output / f"action-{request + 1:04d}.json", action.model_dump()
+            state["public"]["budget"] = state["config"]["budget"]
+        if message:
+            state["steering"].append(sanitize_shared_text(message))
+            state["pending_question"] = None
+        elif state["pending_question"]:
+            if budget:
+                replace_json(root / "session.json", state)
+            return root
+        for event in state["events"]:
+            if event["result"]["status"] == "running":
+                event["result"] = {
+                    "status": "interrupted",
+                    "reason": "outcome_unknown_after_interruption",
+                }
+        for request in state["requests"]:
+            if request["status"] == "running":
+                request["status"] = "interrupted"
+        _Runner(root, state, client, control, on_event).run()
+    return root
+
+
+def publish_outputs(root, state):
+    publish_report(root, state)
+    if state["status"] == "completed" and "memory" in state["config"]:
+        evidence = [item["id"] for item in state["events"] if item["experiment"]]
+        if evidence:
+            remember(
+                {"text": state["conclusion"]["text"], "evidence": evidence},
+                state,
+                "report",
             )
-            if action.kind == "finish":
-                if not action.conclusion or any(
-                    item not in artifacts for item in action.evidence
-                ):
-                    raise ValueError("agent_conclusion_evidence_invalid")
-                conclusion = {"text": action.conclusion, "evidence": action.evidence}
-                status = "completed"
-                break
-            if len(records) >= budget["max_experiments"]:
-                break
-            identifier = f"e{len(records) + 1:04d}"
-            trial_root = output / identifier
-            recorder = TrialRecorder(
-                trial_root / "trial", {"kind": action.kind, "protocol": protocol}
+
+
+class _Runner:
+    def __init__(self, root, state, client, control, on_event):
+        self.root, self.state = root, state
+        self.config = state["config"]
+        self.client = (
+            OpenAIResponsesClient(self.config["llm"]) if client is None else client
+        )
+        self.control, self.on_event = control, on_event
+        self.started = time.monotonic()
+        self.elapsed_before = state["elapsed_seconds"]
+        self.test_start = pd.Timestamp(
+            time_window_timestamp_interval(
+                TimeWindow(**self.config["protocol"]["test_window"])
+            )[0]
+        )
+
+    def checkpoint(self):
+        self.state["elapsed_seconds"] = (
+            self.elapsed_before + time.monotonic() - self.started
+        )
+        replace_json(self.root / "session.json", self.state)
+
+    def remaining(self):
+        return (
+            self.config["budget"]["wall_seconds"]
+            - self.elapsed_before
+            - (time.monotonic() - self.started)
+        )
+
+    def budget_available(self, *, request=False, experiment=False):
+        usage = usage_summary(self.state)
+        budget = self.config["budget"]
+        available = self.remaining() > 0
+        if request:
+            available &= usage["requests"] < budget["max_requests"]
+        if experiment:
+            available &= usage["experiments"] < budget["max_experiments"]
+        if "max_tokens" in budget:
+            available &= (
+                usage["input_tokens"] + usage["output_tokens"] < budget["max_tokens"]
             )
-            recorder.begin()
-            result = {"id": identifier}
-            try:
-                if action.kind == "run_python":
-                    if "sandbox" not in config:
-                        raise ValueError("agent_sandbox_not_configured")
-                    report = run_isolated_python(
-                        action.code,
-                        config["sandbox"],
-                        trial_root / "code",
-                        timeout=max(0.001, deadline - time.monotonic()),
-                    )
-                    result.update(report)
-                    artifact = trial_root / "code" / "results"
-                    if report["status"] == "completed":
-                        result["metrics"] = _metrics(
-                            artifact, config["sandbox"].get("metrics", {})
-                        )
-                else:
-                    template = templates[action.tool]
-                    arguments = deepcopy(template["config"])
-                    for change in action.changes:
-                        if change.path not in template["vary"] or change.choice >= len(
-                            template["vary"][change.path]
-                        ):
-                            raise ValueError("agent_change_outside_declared_choices")
-                        _set_argument(
-                            arguments,
-                            change.path,
-                            template["vary"][change.path][change.choice],
-                        )
-                    arguments = _protocol_config(arguments, protocol)
-                    bindings = template.get("bindings", {})
-                    if {item.path for item in action.inputs} != set(bindings):
-                        raise ValueError("agent_input_bindings_mismatch")
-                    for item in action.inputs:
-                        path, prior_identifier = item.path, item.evidence
-                        member = bindings[path]
-                        allow_generated = path in {"dataset", "inputs"} and template[
-                            "operation"
-                        ] in {
-                            "fit",
-                            "predict",
-                            "evaluate",
-                            "search-factors",
-                            "fit-cost-model",
-                            "statistics-factors",
-                            "statistics-model",
-                        }
-                        resolved = _resolve_artifacts(
-                            f"artifact:{prior_identifier}/{member}",
-                            artifacts,
-                            allow_generated=allow_generated,
-                        )
-                        _set_argument(arguments, path, resolved)
-                    _before_holdout(arguments, test_start)
-                    arguments = _resolve_artifacts(arguments, artifacts)
-                    artifact = trial_root / (
-                        "result.json"
-                        if template["operation"]
-                        in {
-                            "score",
-                            "select",
-                            "calibrate",
-                            "search-factors",
-                            "calibrate-uncertainty",
-                            "evaluate-uncertainty",
-                        }
-                        else "result"
-                    )
-                    output_key = (
-                        "output_root"
-                        if template["operation"] == "assemble"
-                        else "output"
-                    )
-                    arguments[output_key] = str(artifact.resolve())
-                    arguments_file = atomic_write_json(
-                        trial_root / "config.json", arguments
-                    )
-                    exit_code = _run_process(
-                        [
-                            sys.executable,
-                            "-m",
-                            "quant_research_platform.interfaces.cli",
-                            template["operation"],
-                            "--config",
-                            str(arguments_file.resolve()),
-                        ],
-                        timeout=max(0.001, deadline - time.monotonic()),
-                        cwd=Path.cwd(),
-                        env={
-                            **os.environ,
-                            "PYTHONPATH": os.pathsep.join(
-                                filter(
-                                    None,
-                                    (
-                                        str(Path(__file__).resolve().parents[2]),
-                                        os.environ.get("PYTHONPATH"),
-                                    ),
-                                )
-                            ),
-                        },
-                        log=trial_root / "private.log",
-                    )
-                    result.update(
-                        exit_code=exit_code,
-                        status="completed" if exit_code == 0 else "failed",
-                    )
-                    if exit_code == 0:
-                        result["metrics"] = _metrics(artifact, template["metrics"])
-                if result["status"] == "completed":
-                    artifacts[identifier] = {
-                        "path": artifact,
-                        "trusted": action.kind == "run_tool",
-                    }
-                    recorder.finish(result=result)
-                else:
-                    recorder.finish(
-                        error=RuntimeError("experiment_failed"), result=result
-                    )
-            except (Exception, KeyboardInterrupt) as error:
-                recorder.finish(error=error)
-                result.update(status="failed", error=type(error).__name__)
-                if isinstance(error, KeyboardInterrupt):
-                    raise
-            records.append(result)
-            if evidence_json_value_unsafe_reason(result):
-                raise ValueError("agent_tool_summary_not_shareable")
-            messages.extend(
-                (
-                    {
-                        "role": "assistant",
-                        "content": json.dumps(action.model_dump(), ensure_ascii=False),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            result, ensure_ascii=False, allow_nan=False
-                        ),
-                    },
+            if usage["usage_missing"]:
+                raise ValueError("agent_token_budget_usage_unavailable")
+        if not available:
+            self.state["status"] = "budget_exhausted"
+        return available
+
+    def request(self, kind, content):
+        record = {"kind": kind, "status": "running", "usage": None}
+        self.state["requests"].append(record)
+        self.checkpoint()
+        started = time.monotonic()
+        try:
+            method = (
+                self.client.search if kind == "web_search" else self.client.complete
+            )
+            result = method(content, timeout=max(0.001, self.remaining()))
+            record["status"] = "completed"
+            return result
+        except BaseException:
+            record["status"] = "failed"
+            raise
+        finally:
+            record["elapsed_seconds"] = time.monotonic() - started
+            record["usage"] = getattr(self.client, "usage", None)
+            self.checkpoint()
+
+    def artifacts(self):
+        result = {
+            item["id"]: {
+                "path": self.root / item["artifact"],
+                "trusted": item["trusted"],
+            }
+            for item in self.state["events"]
+            if item["result"]["status"] == "completed" and "artifact" in item
+        }
+        for alias, identifier in {
+            **self.state["frozen"],
+            **self.completed_final_steps(),
+        }.items():
+            result[alias] = result[identifier]
+        return result
+
+    def completed_final_steps(self):
+        return {
+            item["action"]["tool"]: item["id"]
+            for item in self.state["events"]
+            if item["phase"] == "final_evaluation"
+            and item["action"]["kind"] == "tool"
+            and item["result"]["status"] == "completed"
+        }
+
+    def poll_control(self):
+        if self.control is None:
+            return True
+        pause = False
+        for message in self.control():
+            if message == "/pause":
+                pause = True
+                continue
+            if message.startswith("/budget "):
+                budget = parse_qrp_json_object(
+                    message.removeprefix("/budget ").encode()
                 )
+                self.config["budget"] = validate_budget(
+                    {**self.config["budget"], **budget}
+                )
+                self.state["public"]["budget"] = self.config["budget"]
+                continue
+            self.state["steering"].append(sanitize_shared_text(message))
+        if pause:
+            self.state["status"] = "paused"
+            self.checkpoint()
+            return False
+        return True
+
+    def new_event(self, action, *, experiment):
+        number = len(self.state["events"]) + 1
+        # A crash may leave an evidence directory before its checkpoint exists.
+        while (self.root / f"e{number:04d}").exists():
+            number += 1
+        identifier = f"e{number:04d}"
+        root = self.root / identifier
+        root.mkdir()
+        atomic_write_json(root / "action.json", action.model_dump())
+        event = {
+            "id": identifier,
+            "phase": self.state["phase"],
+            "action": action.model_dump(),
+            "experiment": experiment,
+            "result": {"status": "running"},
+        }
+        self.state["events"].append(event)
+        self.checkpoint()
+        return event, root
+
+    def finish_event(self, event, result, artifact=None, *, trusted=False):
+        event["result"] = result
+        if artifact is not None and result["status"] == "completed":
+            event.update(
+                artifact=artifact.relative_to(self.root).as_posix(), trusted=trusted
             )
-        atomic_write_json(
-            output / "report.json",
-            {
-                "status": status,
-                "protocol": protocol,
-                "experiments": records,
-                "conclusion": conclusion,
-            },
-        )
-    except BaseException as error:
-        atomic_write_json(
-            output / "report.json",
-            {
+        self.checkpoint()
+        if self.on_event is not None:
+            self.on_event(
+                {
+                    "id": event["id"],
+                    "tool": event["action"]["tool"],
+                    "summary": event["action"]["summary"],
+                    **result,
+                }
+            )
+
+    def execute(self, action, *, final_template=None):
+        native = action.tool in self.config["tools"] or final_template is not None
+        experiment = native or action.tool == "python"
+        if not self.budget_available(
+            experiment=experiment, request=action.tool == "web_search"
+        ):
+            return None
+        event, root = self.new_event(action, experiment=experiment)
+        artifact, trusted = None, False
+        try:
+            arguments = action.arguments()
+            if native:
+                arguments = _strict_config(arguments, set(), {"parameters", "inputs"})
+                template = (
+                    final_template
+                    if final_template is not None
+                    else self.config["tools"][action.tool]
+                )
+                result, artifact = run_native(
+                    template,
+                    arguments.get("parameters", {}),
+                    arguments.get("inputs", {}),
+                    self.artifacts(),
+                    self.config["protocol"],
+                    root,
+                    timeout=max(0.001, self.remaining()),
+                    cwd=Path(self.state["cwd"]),
+                    test_start=self.test_start if final_template is None else None,
+                )
+                trusted = True
+            elif action.tool == "python":
+                arguments = _strict_config(arguments, {"code"}, {"inputs"})
+                sandbox = deepcopy(self.config["sandbox"])
+                artifacts = self.artifacts()
+                for alias, identifier in arguments.get("inputs", {}).items():
+                    if alias in sandbox["inputs"]:
+                        raise ValueError("agent_sandbox_alias_conflict")
+                    sandbox["inputs"][alias] = str(artifacts[identifier]["path"])
+                result = run_isolated_python(
+                    arguments["code"],
+                    sandbox,
+                    root / "code",
+                    timeout=max(0.001, self.remaining()),
+                )
+                artifact = root / "code" / "results"
+                if result["status"] == "completed":
+                    result["metrics"] = _metrics(artifact, sandbox.get("metrics", {}))
+            elif action.tool == "lookup":
+                result = {"status": "completed", **lookup(arguments, self.state)}
+            elif action.tool == "web_search":
+                arguments = _strict_config(arguments, {"query"}, set())
+                if not self.config.get("web_search", False):
+                    raise ValueError("agent_web_search_not_enabled")
+                query = sanitize_shared_text(arguments["query"])
+                response = self.request("web_search", query)
+                atomic_write_json(root / "sources.json", response)
+                result = {
+                    "status": "completed",
+                    "text": response["text"][:6000],
+                    "sources": response["sources"][:12],
+                }
+            elif action.tool == "remember":
+                result = {
+                    "status": "completed",
+                    **remember(arguments, self.state, event["id"]),
+                }
+            elif action.tool == "propose_patch":
+                result, artifact = propose_patch(arguments, self.state, root)
+            else:
+                raise ValueError("agent_tool_unknown")
+        except KeyboardInterrupt:
+            self.finish_event(event, {"status": "interrupted"})
+            raise
+        except Exception as error:
+            result = {
                 "status": "failed",
-                "error": type(error).__name__,
-                "protocol": protocol,
-                "experiments": records,
-            },
-        )
-        raise
-    return output
+                **error_feedback(error, log=root / "private.log"),
+            }
+        self.finish_event(event, result, artifact, trusted=trusted)
+        return event
+
+    def freeze(self, action):
+        arguments = _strict_config(action.arguments(), {"candidates"}, set())
+        candidates = arguments["candidates"]
+        if not candidates or not self.config.get("final_evaluation"):
+            raise ValueError("agent_final_evaluation_requires_candidates_and_steps")
+        artifacts = self.artifacts()
+        step_names = {item["name"] for item in self.config["final_evaluation"]}
+        for alias, identifier in candidates.items():
+            if (
+                not re.fullmatch(r"[A-Za-z][A-Za-z_0-9-]*", alias)
+                or alias in artifacts
+                or alias in step_names
+            ):
+                raise ValueError("agent_candidate_alias_invalid")
+            if identifier not in artifacts or not artifacts[identifier]["trusted"]:
+                raise ValueError("agent_final_candidate_requires_native_artifact")
+
+        available = set(artifacts) | set(candidates)
+        for step in self.config["final_evaluation"]:
+            if set(artifact_references(step["config"])) - available:
+                raise ValueError("agent_final_input_reference_unknown")
+            available.add(step["name"])
+        self.state["frozen"] = candidates
+        self.state["phase"] = "final_evaluation"
+        self.checkpoint()
+
+    def finalize(self):
+        for template in self.config["final_evaluation"]:
+            name = template["name"]
+            if name in self.completed_final_steps():
+                continue
+            if not self.poll_control():
+                return False
+            if not self.budget_available(experiment=True):
+                return False
+            self.state["holdout_viewed"] = True
+            self.checkpoint()
+            action = AgentAction(
+                kind="tool", tool=name, summary=template["description"]
+            )
+            event = self.execute(action, final_template=template)
+            if event is None:
+                return False
+            if event["result"]["status"] != "completed":
+                self.state["status"] = "final_evaluation_failed"
+                return False
+        self.state["phase"] = "reporting"
+        self.checkpoint()
+        return True
+
+    def handle_decision(self, action):
+        event, _ = self.new_event(action, experiment=False)
+        try:
+            prior = {item["id"] for item in self.state["events"][:-1]}
+            if set(action.evidence) - prior:
+                raise ValueError("agent_conclusion_evidence_invalid")
+            if action.kind == "ask_user":
+                if action.arguments():
+                    raise ValueError("agent_question_arguments_must_be_empty")
+                self.state.update(
+                    status="waiting_for_user", pending_question=action.summary
+                )
+            elif action.kind == "freeze":
+                self.freeze(action)
+            elif action.kind == "finish":
+                arguments = _strict_config(action.arguments(), set(), {"outcome"})
+                if (
+                    self.state["phase"] == "development"
+                    and self.config.get("final_evaluation")
+                    and arguments.get("outcome") != "no_candidate"
+                ):
+                    raise ValueError("agent_freeze_before_final_conclusion")
+                self.state["conclusion"] = {
+                    "text": action.summary,
+                    "evidence": action.evidence,
+                }
+                self.state["status"] = "completed"
+            self.finish_event(event, {"status": "completed"})
+        except Exception as error:
+            self.finish_event(event, {"status": "failed", **error_feedback(error)})
+
+    def run(self):
+        self.state["status"] = "running"
+        self.checkpoint()
+        try:
+            while self.state["status"] == "running":
+                if not self.poll_control():
+                    break
+                if self.state["phase"] == "final_evaluation" and not self.finalize():
+                    break
+                if not self.budget_available(request=True):
+                    break
+                messages, omitted = context_messages(self.state)
+                if omitted:
+                    self.state["compactions"] += 1
+                steering_count = len(self.state["steering"])
+                action = self.request("action", messages)
+                if not isinstance(action, AgentAction):
+                    action = AgentAction.model_validate(action)
+                if not self.poll_control():
+                    break
+                if len(self.state["steering"]) != steering_count:
+                    event, _ = self.new_event(action, experiment=False)
+                    self.finish_event(
+                        event, {"status": "superseded", "reason": "new_user_steering"}
+                    )
+                    continue
+                if self.state["phase"] == "reporting" and action.kind != "finish":
+                    event, _ = self.new_event(action, experiment=False)
+                    self.finish_event(
+                        event,
+                        {
+                            "status": "failed",
+                            "reason": "agent_only_report_allowed_after_final",
+                        },
+                    )
+                    continue
+                if action.kind == "tool":
+                    self.execute(action)
+                else:
+                    self.handle_decision(action)
+        except KeyboardInterrupt:
+            self.state["status"] = "paused"
+        except BaseException as error:
+            self.state.update(status="failed", error=error_feedback(error))
+            raise
+        finally:
+            self.checkpoint()
+            publish_outputs(self.root, self.state)
