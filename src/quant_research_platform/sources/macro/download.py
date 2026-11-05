@@ -208,6 +208,62 @@ def fetch_macro(config):
                         _hkma(client, staging, records, str(start), str(end))
                     elif series.source == "eastmoney":
                         _eastmoney(client, staging, records)
+                    elif series.source == "mofcom":
+                        response = _response(
+                            client,
+                            staging,
+                            records,
+                            "financing.json",
+                            "https://data.mofcom.gov.cn/datamofcom/front/gnmy/shrzgmDateQuery",
+                            method="POST",
+                            data={
+                                "start_date": start.strftime("%Y%m"),
+                                "end_date": end.strftime("%Y%m"),
+                            },
+                        )
+                        if not isinstance(response.json(), list):
+                            raise ValueError("mofcom_financing_response_invalid")
+                    elif series.source == "cfets_shibor":
+                        for year in range(start.year, end.year + 1):
+                            response = _response(
+                                client,
+                                staging,
+                                records,
+                                f"shibor-{year}.json",
+                                "https://www.chinamoney.com.cn/ags/ms/cm-u-bk-shibor/ShiborHis",
+                                params={
+                                    "lang": "CN",
+                                    "startDate": max(str(start), f"{year}-01-01"),
+                                    "endDate": min(str(end), f"{year}-12-31"),
+                                },
+                            )
+                            payload = response.json()
+                            if str(payload["head"]["rep_code"]) != "200" or any(
+                                payload["data"].get(key)
+                                for key in ("message", "messageEn")
+                            ):
+                                raise ValueError("cfets_shibor_request_failed")
+                    elif series.source == "chinabond":
+                        from quant_research_platform.sources.macro.chinabond import (
+                            yield_table,
+                        )
+
+                        for year in range(start.year, end.year + 1):
+                            response = _response(
+                                client,
+                                staging,
+                                records,
+                                f"yields-{year}.html",
+                                "https://yield.chinabond.com.cn/cbweb-pbc-web/pbc/historyQuery",
+                                params={
+                                    "startDate": max(str(start), f"{year}-01-01"),
+                                    "endDate": min(str(end), f"{year}-12-31"),
+                                    "gjqx": "0",
+                                    "qxId": "ycqx",
+                                    "locale": "cn_ZH",
+                                },
+                            )
+                            yield_table(response.content)
                     elif series.source == "boj":
                         response = _response(
                             client,

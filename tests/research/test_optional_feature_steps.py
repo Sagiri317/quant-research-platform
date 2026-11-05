@@ -41,8 +41,7 @@ def test_off_steps_do_not_require_industry_or_size(center, scale, expected):
         scale=scale,
     )
     np.testing.assert_allclose(result.feature_x, expected, rtol=1e-14, atol=1e-14)
-    assert result.feature_observed_x.eq(1).all()
-    assert result.feature_missing_x.eq(0).all()
+    assert result.feature_x.notna().all()
     pd.testing.assert_series_equal(result.x, frame.x)
 
 
@@ -118,10 +117,9 @@ def test_optional_steps_keep_missing_observed_and_scope_distinct():
     result = _apply(
         frame, clip="none", industry_neutralize=False, size_neutralize=False
     )
-    np.testing.assert_allclose(result.feature_x.iloc[:3], [-1.0, 0.0, 1.0])
+    np.testing.assert_allclose(result.feature_x.iloc[:3], [-1.0, np.nan, 1.0])
     assert np.isnan(result.feature_x.iloc[3])
-    assert result.feature_missing_x.tolist() == [0, 1, 0, 0]
-    assert result.feature_observed_x.tolist() == [1, 0, 1, 0]
+    assert result.feature_x.notna().tolist() == [1, 0, 1, 0]
 
 
 def test_neutralization_reuses_only_identical_valid_domains(monkeypatch):
@@ -161,8 +159,8 @@ def test_neutralization_reuses_only_identical_valid_domains(monkeypatch):
     np.testing.assert_allclose(
         actual.feature_z, separate.feature_z, rtol=1e-14, atol=1e-14
     )
-    assert actual.feature_observed_x.iloc[0] == 1
-    assert actual.feature_observed_z.iloc[0] == 0
+    assert pd.notna(actual.feature_x.iloc[0])
+    assert pd.isna(actual.feature_z.iloc[0])
 
 
 @pytest.mark.parametrize(
@@ -173,7 +171,7 @@ def test_feature_options_are_typed(options):
         FeatureTransformSpec("a_share_canonical", ("x",), **options)
 
 
-def test_imputation_can_be_disabled_without_changing_observation_flags():
+def test_identity_transform_preserves_nulls():
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2024-01-02"),
@@ -188,76 +186,9 @@ def test_imputation_can_be_disabled_without_changing_observation_flags():
         size_neutralize=False,
         center=False,
         scale=False,
-        impute_missing=False,
     )
     assert np.isnan(result.feature_x.iloc[1])
-    assert result.feature_observed_x.tolist() == [1, 0, 1]
-    assert result.feature_missing_x.tolist() == [0, 1, 0]
-
-
-def test_observation_mask_excludes_fill_without_masking_indicator_signals():
-    frame = pd.DataFrame(
-        {
-            "feature_x": [0.0, 1.0, 2.0],
-            "feature_observed_x": [0, 1, 1],
-            "feature_missing_x": [1, 0, 0],
-            "feature_y": [3.0, 0.0, 5.0],
-            "feature_observed_y": [1, 0, 1],
-        }
-    )
-    original = frame.copy()
-    columns = ("feature_x", "feature_y", "feature_missing_x", "feature_observed_x")
-    assert transforms.feature_observation_columns(columns, frame.columns) == (
-        "feature_observed_x",
-        "feature_observed_y",
-    )
-    result = transforms.mask_unobserved_features(frame, columns, frame.columns)
-    assert result.feature_x.isna().tolist() == [True, False, False]
-    assert result.feature_y.isna().tolist() == [False, True, False]
-    pd.testing.assert_series_equal(result.feature_missing_x, frame.feature_missing_x)
-    pd.testing.assert_series_equal(result.feature_observed_x, frame.feature_observed_x)
-    pd.testing.assert_frame_equal(frame, original)
-    with pytest.raises(ValueError, match="feature_observation_column_missing"):
-        transforms.mask_unobserved_features(
-            frame.drop(columns="feature_observed_x"), ("feature_x",), frame.columns
-        )
-    with pytest.raises(ValueError, match="invalid_feature_observation_flag"):
-        transforms.mask_unobserved_features(
-            frame.assign(feature_observed_x=[0, 1, 2]), ("feature_x",), frame.columns
-        )
-    for invalid in (np.nan, 2, 1):
-        with pytest.raises(ValueError, match="invalid_feature_missing_flag"):
-            transforms.model_observed_input_mask(
-                frame.assign(feature_missing_x=[1, 0, invalid]),
-                ("feature_x",),
-                frame.columns,
-            )
-
-
-@pytest.mark.parametrize(
-    "columns",
-    [("feature_x", "feature_y"), ("feature_missing_x", "feature_observed_y")],
-)
-def test_observed_mask_distinguishes_fill_missing_and_structural_unavailability(
-    columns,
-):
-    frame = pd.DataFrame(
-        {
-            "feature_x": pd.array([100, 10, None, 100, 0, 100], dtype="Int64"),
-            "feature_observed_x": [0, 1, 0, 0, 0, 0],
-            "feature_missing_x": [1, 0, 1, 0, 1, 1],
-            "feature_y": pd.array([5, 100, 8, 7, 0, None], dtype="Int64"),
-            "feature_observed_y": [1, 0, 1, 1, 0, 1],
-            "feature_missing_y": [0, 1, 0, 0, 1, 0],
-        },
-        index=[8, 3, 9, 4, 1, 2],
-    )
-    original = frame.copy()
-    result = transforms.model_observed_input_mask(frame, columns, frame.columns)
-    pd.testing.assert_series_equal(
-        result, pd.Series([True, True, True, False, False, False], index=frame.index)
-    )
-    pd.testing.assert_frame_equal(frame, original)
+    assert result.feature_x.notna().tolist() == [1, 0, 1]
 
 
 @pytest.mark.parametrize(
@@ -289,12 +220,11 @@ def test_zero_variance_convention_depends_on_requested_math(center, scale, defin
         diagnostics=diagnostic,
     )
     if defined:
-        assert result.feature_x.eq(0).all()
-        assert result.feature_observed_x.tolist() == [1, 1, 0]
+        assert result.feature_x.iloc[:2].eq(0).all()
+        assert pd.isna(result.feature_x.iloc[2])
+        assert result.feature_x.notna().tolist() == [1, 1, 0]
     else:
         assert result.feature_x.isna().all()
-        assert result.feature_observed_x.eq(0).all()
-        assert result.feature_missing_x.eq(0).all()
     assert diagnostic["zero_variance_by_factor"]["x"] == int(scale)
 
 
@@ -352,7 +282,7 @@ def test_missing_total_size_never_falls_back_to_float():
         frame.assign(log_total_market_cap=np.nan), industry_neutralize=False
     )
     assert actual.feature_x.isna().all()
-    assert actual.feature_observed_x.eq(0).all()
+    assert actual.feature_x.isna().all()
     assert (
         _apply(frame, industry_neutralize=False, size_neutralize=False)
         .feature_x.notna()
@@ -476,16 +406,3 @@ def test_non_dyadic_exact_fit_does_not_become_standardized_alpha():
             target[order], industry[order], sizes[order], rescale=True
         )
         np.testing.assert_array_equal(actual, np.zeros(120))
-
-
-@pytest.mark.parametrize("dtype", ["int64", "uint64"])
-def test_observation_mask_preserves_integer_order_and_nulls(dtype):
-    start = 2**63 - 4 if dtype == "int64" else 2**63 + 1
-    values = np.arange(4, dtype=dtype) + start
-    frame = pd.DataFrame({"feature_x": values, "feature_observed_x": [1, 0, 1, 1]})
-    result = transforms.mask_unobserved_features(frame, ("feature_x",), frame.columns)
-    assert str(result.feature_x.dtype) == ("Int64" if dtype == "int64" else "UInt64")
-    assert result.feature_x.iloc[[0, 2, 3]].tolist() == values[[0, 2, 3]].tolist()
-    assert result.feature_x.isna().tolist() == [False, True, False, False]
-    assert result.feature_x.rank().tolist()[2:] == [2.0, 3.0]
-    np.testing.assert_array_equal(frame.feature_x, values)

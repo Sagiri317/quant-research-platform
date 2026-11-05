@@ -438,22 +438,21 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
     times = pd.date_range("2020-01-02", periods=len(dates), freq="100ms")
     frame["timestamp"] = frame.timestamp.map(dict(zip(dates, times, strict=True)))
     frame["forward_return_20d_available_at"] = frame.timestamp
-    frame["feature_observed_x"] = 1.0
-    frame.loc[frame.timestamp.eq(times[2]), "feature_observed_x"] = 0.0
+    frame.loc[frame.timestamp.eq(times[2]), "feature_x"] = np.nan
     frame.loc[frame.timestamp.eq(times[4]), "forward_return_20d"] = np.nan
     frame.loc[frame.timestamp.eq(times[6]), "eligible"] = False
     frame.loc[frame.timestamp.eq(times[8]), "forward_return_20d_available_at"] = (
         pd.Timestamp("2021-01-01")
     )
-    frame.loc[
-        frame.timestamp.eq(times[1]) & frame.asset_id.eq("0"), "feature_observed_x"
-    ] = 0.0
+    frame.loc[frame.timestamp.eq(times[1]) & frame.asset_id.eq("0"), "feature_x"] = (
+        np.nan
+    )
     if empty_labels:
         frame["forward_return_20d"] = np.nan
     spec = make_demo_research_dataset_spec(
         data_id="batched_statistics",
         factor_columns=(),
-        feature_columns=("feature_x", "feature_observed_x"),
+        feature_columns=("feature_x",),
         label_columns=("forward_return_20d",),
         filter_columns=("eligible",),
         context_columns=(

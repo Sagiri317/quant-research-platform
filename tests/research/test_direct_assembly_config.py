@@ -67,7 +67,7 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
         rtol=1e-13,
         atol=1e-14,
     )
-    assert actual.feature_observed_momentum_20d.eq(1).all()
+    assert actual.feature_momentum_20d.notna().all()
 
 
 def test_disabled_steps_accept_input_without_unneeded_context_and_persist_options(
@@ -81,7 +81,6 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
         "size_neutralize": False,
         "center": False,
         "scale": False,
-        "impute_missing": False,
     }
     output = assembler.assemble(
         _config(
@@ -98,7 +97,6 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
         spec["feature_transforms"][0][name] == value for name, value in options.items()
     )
     assert spec["column_units"]["feature_momentum_20d"] == "return"
-    assert spec["column_units"]["feature_observed_momentum_20d"] == "dimensionless"
 
 
 def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_path):
@@ -176,7 +174,6 @@ def test_declared_industry_pairs_have_independent_native_feature_and_target_resi
                     "size_neutralize": False,
                     "center": False,
                     "scale": False,
-                    "impute_missing": False,
                 },
                 label_columns=["model_target"],
                 target_transform="industry_size_residual",
@@ -188,7 +185,7 @@ def test_declared_industry_pairs_have_independent_native_feature_and_target_resi
     # orthogonal to +/-1, and residual targets retain their return units.
     np.testing.assert_allclose(actual.feature_momentum_20d, residual, atol=1e-12)
     np.testing.assert_allclose(actual.model_target, 0.001 * residual, atol=1e-14)
-    assert actual.feature_observed_momentum_20d.eq(1).all()
+    assert actual.feature_momentum_20d.notna().all()
     assert actual.model_target_available_at.eq(pd.Timestamp("2024-02-01")).all()
 
 
@@ -479,7 +476,7 @@ def test_input_column_selection_bounds_business_candidates_but_keeps_dependencie
     assert spec["factor_columns"] == ["momentum_20d"]
     assert spec["label_columns"] == []
     assert spec["context_columns"] == []
-    assert read_dataset(output).feature_observed_momentum_20d.eq(1).all()
+    assert read_dataset(output).feature_momentum_20d.notna().all()
     config["factor_columns"] = ["log_total_market_cap"]
     config["output_root"] = str(tmp_path / "invalid_factor")
     with pytest.raises(ValueError, match="assemble_factor_not_selected"):

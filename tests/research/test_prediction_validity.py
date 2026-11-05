@@ -20,7 +20,6 @@ from tests.research.direct_model_test_support import fit_frame, predict_frame
     "algorithm,input_column",
     [
         ("linear_regression", "feature_x"),
-        ("linear_regression", "feature_missing_x"),
         ("linear_regression", "x"),
     ],
 )
@@ -88,16 +87,15 @@ def test_transform_prediction_publication_keeps_real_domain(
 
 
 @pytest.mark.parametrize(
-    "algorithm,impute,groups",
+    "algorithm,groups",
     [
-        ("linear_regression", True, ("processed", "pre_neutral")),
-        ("linear_regression", False, ("missing", "observed")),
-        ("linear_regression", True, ("pre_neutral", "pre_neutral")),
-        ("linear_regression", False, ("processed", "pre_neutral", "raw")),
+        ("linear_regression", ("processed", "pre_neutral")),
+        ("linear_regression", ("pre_neutral", "pre_neutral")),
+        ("linear_regression", ("processed", "pre_neutral", "raw")),
     ],
 )
-def test_mixed_feature_families_keep_structural_failure_out_of_models(
-    tmp_path, algorithm, impute, groups
+def test_mixed_feature_families_keep_nulls_and_partial_samples(
+    tmp_path, algorithm, groups
 ):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.models.persisted import load_model
@@ -152,28 +150,18 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
             factor_columns=[x, y],
             feature_recipe="a_share_canonical",
             feature_groups=["raw", "processed", "pre_neutral"],
-            feature_transform={"impute_missing": impute},
         )
     )
     values = read_dataset(produced)
     date = values.loc[values.timestamp.eq("2024-01-02")].reset_index(drop=True)
-    assert date[f"feature_missing_{x}"].iloc[102:106].tolist() == [1, 0, 0, 1]
-    assert date[f"feature_observed_{x}"].iloc[102:106].eq(0).all()
-    if impute:
-        assert date[f"feature_{x}"].iloc[102] == 0
-    else:
-        assert pd.isna(date[f"feature_{x}"].iloc[102])
-    assert date[f"feature_{x}"].iloc[103:105].isna().all()
+    assert date[f"feature_{x}"].iloc[102:106].isna().all()
     failed = values.loc[values.timestamp.eq("2024-01-03")]
     assert failed[f"feature_{x}"].isna().all()
-    assert failed[[f"feature_missing_{x}", f"feature_observed_{x}"]].eq(0).all().all()
-    assert failed[f"feature_observed_{y}"].eq(1).all()
+    assert failed[f"feature_{y}"].notna().all()
     prefixes = {
         "raw": "",
         "processed": "feature_",
         "pre_neutral": "feature_pre_neutral_",
-        "missing": "feature_missing_",
-        "observed": "feature_observed_pre_neutral_",
     }
     inputs = [
         prefixes[group] + factor
@@ -220,11 +208,8 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
         }
     )
     fitted, _ = load_model(model)
-    consumes_processed = groups[0] in ("processed", "missing")
     expected = training.loc[
-        (training.timestamp.eq("2024-01-02") & training.asset_id.lt("asset_103"))
-        if consumes_processed
-        else ~(training.timestamp.eq("2024-01-02") & training.asset_id.eq("asset_105"))
+        ~(training.timestamp.eq("2024-01-02") & training.asset_id.eq("asset_105"))
     ]
     assert fitted.metadata["rows_after_input_label_dropna"] == len(expected)
     assert fitted.metadata["input_columns"] == [*factors, *features]
@@ -252,7 +237,7 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
     pd.testing.assert_frame_equal(
         prediction[["timestamp", "asset_id"]], expected_keys.reset_index(drop=True)
     )
-    if algorithm == "linear_regression" and impute and consumes_processed:
+    if algorithm == "linear_regression" and groups[0] == "processed":
         from quant_research_platform.artifacts.explanations import read_explanation
         from quant_research_platform.research.models.explanations import explain
 
@@ -277,18 +262,18 @@ def test_mixed_feature_families_keep_structural_failure_out_of_models(
 
 
 @pytest.mark.parametrize(
-    "factor,group,impute,options,identity",
+    "factor,group,options,identity",
     [
-        ("x", "processed", False, {}, True),
-        ("x", "pre_neutral", True, {"industry_neutralize": True}, True),
-        ("log_total_market_cap", "processed", True, {"size_neutralize": True}, True),
-        ("x", "processed", False, {"clip": "mad"}, False),
-        ("x", "processed", False, {"center": True}, False),
-        ("x", "processed", False, {"scale": True}, False),
+        ("x", "processed", {}, True),
+        ("x", "pre_neutral", {"industry_neutralize": True}, True),
+        ("log_total_market_cap", "processed", {"size_neutralize": True}, True),
+        ("x", "processed", {"clip": "mad"}, False),
+        ("x", "processed", {"center": True}, False),
+        ("x", "processed", {"scale": True}, False),
     ],
 )
 def test_identity_features_keep_ordinary_missing_dates(
-    tmp_path, factor, group, impute, options, identity
+    tmp_path, factor, group, options, identity
 ):
     raw = pd.DataFrame(
         {
@@ -312,7 +297,6 @@ def test_identity_features_keep_ordinary_missing_dates(
             "size_neutralize": False,
             "center": False,
             "scale": False,
-            "impute_missing": impute,
             "output_groups": ("processed", "pre_neutral"),
             **options,
         },
@@ -320,28 +304,19 @@ def test_identity_features_keep_ordinary_missing_dates(
     frame = apply_feature_transforms(raw, (recipe,))
     suffix = ("pre_neutral_" if group == "pre_neutral" else "") + factor
     column = "feature_" + suffix
-    assert frame[f"feature_missing_{suffix}"].iloc[3:].eq(int(identity)).all()
-    assert frame[f"feature_observed_{suffix}"].iloc[3:].eq(0).all()
-    if identity and impute:
-        assert frame[column].iloc[3:].eq(0).all()
-    else:
-        assert frame[column].iloc[3:].isna().all()
+    assert frame[column].iloc[3:].isna().all()
     case = fit_frame(
         tmp_path / "fit",
         frame.iloc[:6],
         ModelSpec(
             model_id="identity",
-            model_algorithm=(
-                "xgboost_regressor" if identity and not impute else "linear_regression"
-            ),
+            model_algorithm=("xgboost_regressor" if identity else "linear_regression"),
             input_factor_columns=("y",),
             input_feature_columns=(column,),
             target_column="label",
         ),
     )
-    assert case.result.metadata["rows_after_input_label_dropna"] == (
-        6 if identity else 3
-    )
+    assert case.result.metadata["rows_after_input_label_dropna"] == 6
     future = pd.concat(
         (
             frame.iloc[6:],
@@ -355,7 +330,7 @@ def test_identity_features_keep_ordinary_missing_dates(
         case,
         window={"start": "2024-01-03", "end": "2024-01-03"},
     )
-    assert actual.asset_id.tolist() == (["a", "b", "c"] if identity else [])
+    assert actual.asset_id.tolist() == ["a", "b", "c"]
 
 
 def test_causal_current_rank_permutation_and_exact_native_lookup(tmp_path):

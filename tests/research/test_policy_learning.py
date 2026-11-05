@@ -1,5 +1,6 @@
 """Learned decisions share real account, causality and persistence rules."""
 
+import pickle
 from dataclasses import asdict
 
 import numpy as np
@@ -37,7 +38,7 @@ from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_hft_portfolio import parameters, quotes, schedule
 
 
-def hft_episode(root, *, day="2024-01-02", task="execution"):
+def hft_episode(root, *, day="2024-01-02", task="execution", missing_features=False):
     panel = pd.concat(
         [quotes(date, assets=("a",)) for date in ("2024-01-02", "2024-01-03")],
         ignore_index=True,
@@ -45,6 +46,9 @@ def hft_episode(root, *, day="2024-01-02", task="execution"):
     daily = write_daily_inputs(root / "daily", panel)
     roles = dict.fromkeys(panel.columns, "context")
     roles.update(timestamp="timestamp", asset_id="key", eligible="mask")
+    if missing_features:
+        panel["signal"] = [2.0, np.nan, 2.0, np.nan, 10000.0, 10000.0]
+        roles["signal"] = "factor"
     spec = ProcessedDataSpec(
         data_id="hft_panel",
         market_id="a_share",
@@ -69,7 +73,7 @@ def hft_episode(root, *, day="2024-01-02", task="execution"):
         "kind": "hft",
         "task": task,
         "asset_ids": ["a"],
-        "feature_columns": ["mid", "ask_vol1"],
+        "feature_columns": ["signal"] if missing_features else ["mid", "ask_vol1"],
         "window": {"start": day + "T01:30:00", "end": day + "T01:30:06"},
         "account": {
             "panel": str(root / "quotes"),
@@ -154,7 +158,7 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
 
 @pytest.mark.parametrize("n_envs", [1, 2])
 def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
-    episode = hft_episode(tmp_path / "inputs", task="inventory")
+    episode = hft_episode(tmp_path / "inputs", task="inventory", missing_features=True)
     model = train_policy(
         {
             "episodes": [episode],
@@ -175,6 +179,10 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
     )
     facts = parse_qrp_json_object((model / "policy.json").read_bytes())
     assert facts["actual_timesteps"] == 8
+    frozen = (model / "feature_scaler.pkl").read_bytes()
+    scaler = pickle.loads(frozen)
+    assert scaler.medians == (2.0,)
+    assert scaler.columns == ("signal",)
     later = {
         **episode,
         "window": {"start": "2024-01-03T01:30:00", "end": "2024-01-03T01:30:06"},
@@ -189,6 +197,14 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
         }
     )
     assert list(read_portfolio_ledger_artifact(output / "ledger").iter_chunks())
+    assert (model / "feature_scaler.pkl").read_bytes() == frozen
+    env = TradingEnv([later], feature_scaler=scaler)
+    try:
+        observation, _ = env.reset(seed=1)
+        assert pd.isna(env.decision.features.signal.iloc[0])
+        assert observation[0] == 2.0
+    finally:
+        env.close()
     with pytest.raises(ValueError, match="not_out_of_sample"):
         backtest_policy(
             {
@@ -329,6 +345,7 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         column_units={"label": "decimal_return"},
         label_availability_columns={"label": "label_available_at"},
     )
+    frame.loc[frame.signal.eq(2.0), "signal"] = np.nan
     write_dataset(tmp_path / "training", frame, spec=spec)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
@@ -353,6 +370,8 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         }
     )
     assert parse_qrp_json_object((model / "model.json").read_bytes())["device"] == "cpu"
+    frozen = (model / "feature_scaler.pkl").read_bytes()
+    assert pickle.loads(frozen).medians == (4.0,)
     output = backtest_cost_model(
         {
             "model": str(model),
@@ -366,15 +385,16 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     assert np.isfinite(
         summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())["nav"]
     )
+    assert (model / "feature_scaler.pkl").read_bytes() == frozen
     data = read_dataset(inputs["dataset"]).rename(columns={"signal": "feature_signal"})
-    data["feature_observed_signal"] = data.asset_id.ne("a0").astype(float)
+    data.loc[data.asset_id.eq("a0"), "feature_signal"] = np.nan
     observed_spec = make_demo_research_dataset_spec(
         data_id="observed",
         factor_columns=(),
         feature_columns=("feature_signal",),
         label_columns=("label",),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap", "feature_observed_signal"),
+        context_columns=("float_market_cap",),
     )
     write_dataset(tmp_path / "observed", data, spec=observed_spec)
     episode["feature_columns"] = ["feature_signal"]
@@ -383,8 +403,8 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     try:
         observation, _ = env.reset(seed=1)
         assert np.isnan(env.decision.features.loc["a0", "feature_signal"])
-        assert observation[0] == observation[len(assets)] == 0
-        assert observation[1] == observation[len(assets) + 1] == 1
+        assert np.isnan(observation[0])
+        assert observation[1] == 1
     finally:
         env.close()
 

@@ -112,9 +112,7 @@ def research_configuration(*, factors=CORE6_FACTORS, enhanced=True):
                 "model_id": "pv_all_" + algorithm,
                 "model_algorithm": algorithm,
                 "input_feature_columns": [
-                    prefix + factor
-                    for factor in factors
-                    for prefix in ("feature_", "feature_missing_")
+                    prefix + factor for factor in factors for prefix in ("feature_",)
                 ],
                 "sample_filter_mode": "eligible",
                 "hyperparameters": dict(parameters),

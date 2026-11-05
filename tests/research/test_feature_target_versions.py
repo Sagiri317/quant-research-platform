@@ -13,7 +13,6 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
-    model_observed_input_mask,
 )
 from quant_research_platform.research.labels.targets import a_share_model_target
 from quant_research_platform.research.protocols.a_share import research_dataset_catalog
@@ -57,11 +56,8 @@ def test_feature_groups_share_clipping_and_keep_independent_domains():
             pd.testing.assert_series_equal(result[column], expected[column])
     assert pd.notna(result.feature_pre_neutral_factor.iloc[0])
     assert pd.isna(result.feature_factor.iloc[0])
-    assert result.feature_observed_pre_neutral_factor.iloc[1] == 0
-    assert result.feature_observed_pre_neutral_other.iloc[1] == 1
-    assert not model_observed_input_mask(
-        result, ("feature_pre_neutral_factor",), result.columns
-    ).iloc[1]
+    assert pd.isna(result.feature_pre_neutral_factor.iloc[1])
+    assert pd.notna(result.feature_pre_neutral_other.iloc[1])
     pd.testing.assert_series_equal(result.factor, frame.factor)
 
 
@@ -450,7 +446,7 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
         np.testing.assert_allclose(
             group.model_target, expected_sign * residual / 64, rtol=1e-12, atol=1e-17
         )
-        assert group.feature_observed_momentum_20d.eq(1).all()
+        assert group.feature_momentum_20d.notna().all()
         assert group.model_target_available_at.eq(day + pd.Timedelta(days=1)).all()
     model = fit(
         {

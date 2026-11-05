@@ -159,7 +159,6 @@ def validate_evaluation_science(metadata):
             "selector",
             "columns",
             "column_units",
-            "observed_columns",
             "feature_transforms",
             "signal_units",
             "label_units",
@@ -177,7 +176,6 @@ def validate_evaluation_science(metadata):
         for key in (
             "columns",
             "column_units",
-            "observed_columns",
             "signal_units",
             "label_units",
             "label_availability_columns",
@@ -191,11 +189,9 @@ def validate_evaluation_science(metadata):
             for unit in facts[key].values()
         ):
             raise ValueError("evaluation_input_units_invalid")
-        if (
-            set(facts["column_units"]) != set(facts["columns"])
-            or set(facts["signal_units"]) != set(facts["observed_columns"])
-            or set(facts["label_units"]) != set(facts["label_availability_columns"])
-        ):
+        if set(facts["column_units"]) != set(facts["columns"]) or set(
+            facts["label_units"]
+        ) != set(facts["label_availability_columns"]):
             raise ValueError("evaluation_input_facts_invalid")
         for label, availability in facts["label_availability_columns"].items():
             if (
@@ -204,13 +200,11 @@ def validate_evaluation_science(metadata):
                 or facts["label_units"][label] != facts["column_units"].get(label)
             ):
                 raise ValueError("evaluation_input_facts_invalid")
-        for signal, companions in facts["observed_columns"].items():
-            if (
-                facts["columns"].get(signal) not in {"factor", "feature"}
-                or type(companions) is not list
-                or any(column not in facts["columns"] for column in companions)
-                or facts["signal_units"][signal] != facts["column_units"].get(signal)
-            ):
+        for signal, unit in facts["signal_units"].items():
+            if facts["columns"].get(signal) not in {
+                "factor",
+                "feature",
+            } or unit != facts["column_units"].get(signal):
                 raise ValueError("evaluation_input_facts_invalid")
         if facts["label_units"] != metadata["input_facts"]["label_units"]:
             raise ValueError("evaluation_label_units_mismatch")

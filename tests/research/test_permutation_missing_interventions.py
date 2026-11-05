@@ -24,7 +24,7 @@ def _example():
         pd.DataFrame({"a": [1.0, 2.0, 3.0], "b": [2.0, 3.0, 4.0]}), missing="impute"
     )
     result = SimpleNamespace(
-        prediction_model=LinearScaledPredictor((0.0, 1.0, 1.0, 0.0, 0.0), scaler),
+        prediction_model=LinearScaledPredictor((0.0, 1.0, 1.0), scaler),
         metadata={
             "input_columns": ["a", "b"],
             "target_column": "label",

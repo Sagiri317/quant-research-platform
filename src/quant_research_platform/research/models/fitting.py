@@ -34,13 +34,6 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
-    feature_observation_columns,
-    mask_unobserved_features,
-    model_input_validity_columns,
-    model_observed_input_mask,
-)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
@@ -379,11 +372,9 @@ def _legal_training_rows(
     *,
     fitting_cutoff: object,
     availability_column: str,
-    declared_columns=(),
 ):
     """Select all legal rows without learning preprocessing."""
-    validity = model_input_validity_columns(spec.input_columns, declared_columns)
-    columns = tuple(dict.fromkeys((*spec.input_columns, *validity)))
+    columns = spec.input_columns
     missing = sorted(set(columns).difference(frame.columns))
     if missing:
         raise ValueError(f"missing_model_columns: {', '.join(missing)}")
@@ -398,10 +389,9 @@ def _legal_training_rows(
         feature_columns=(),
         target_column=spec.target_column,
     )
-    keep &= model_observed_input_mask(frame, spec.input_columns, declared_columns)
-    masked = mask_unobserved_features(frame, spec.input_columns, declared_columns)
+    keep &= frame.loc[:, spec.input_columns].notna().any(axis=1)
     filtered, metadata = apply_filter_mode(
-        masked, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
+        frame, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
     )
     return filtered.loc[keep.loc[filtered.index]], metadata
 
@@ -412,13 +402,9 @@ def _collect_training_frame(
     *,
     fitting_cutoff: object,
     availability_column: str | None = None,
-    declared_columns=(),
     trading_calendar=None,
 ) -> PreparedTraining:
-    validity_columns = model_input_validity_columns(
-        spec.input_columns, declared_columns
-    )
-    required = set((*spec.input_columns, *validity_columns))
+    required = set(spec.input_columns)
     required.add(spec.target_column)
     required.add("timestamp")
     required.add("eligible")
@@ -439,7 +425,6 @@ def _collect_training_frame(
                 ),
                 *spec.input_columns,
                 *sequence_context_columns(spec.model_algorithm),
-                *validity_columns,
                 spec.target_column,
                 "eligible",
                 *availability_columns,
@@ -461,19 +446,14 @@ def _collect_training_frame(
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
             if spec.model_algorithm in SEQUENCE_ALGORITHMS:
-                observed = model_observed_input_mask(
-                    chunk, spec.input_columns, declared_columns
-                )
+                observed = chunk.loc[:, spec.input_columns].notna().any(axis=1)
                 if spec.model_algorithm in DEEPLOB_ALGORITHMS:
                     observed = pd.Series(True, index=chunk.index)
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
                 )
-                context = mask_unobserved_features(
-                    chunk, spec.input_columns, declared_columns
-                )
                 sequence_context.append(
-                    context.loc[
+                    chunk.loc[
                         observed,
                         [
                             "asset_id",
@@ -488,7 +468,6 @@ def _collect_training_frame(
                 spec,
                 fitting_cutoff=fitting_cutoff,
                 availability_column=availability_columns[0],
-                declared_columns=declared_columns,
             )
             if spec.model_algorithm in DEEPLOB_ALGORITHMS:
                 filtered = filtered.loc[
@@ -651,15 +630,12 @@ def model_training_read_columns(
     label_column: str,
     sample_filter_mode,
     availability_column=None,
-    declared_columns=(),
 ) -> tuple[str, ...]:
     return tuple(
         dict.fromkeys(
             (
                 *primary_key,
                 *input_columns,
-                *canonical_feature_validity_columns(input_columns, declared_columns),
-                *feature_observation_columns(input_columns, declared_columns),
                 label_column,
                 "eligible",
                 *(

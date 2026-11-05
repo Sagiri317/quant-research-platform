@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from quant_research_platform.contracts.validation import _validate_column_tuple
 
 FEATURE_RECIPES = {"a_share_canonical", "a_share_quantile_1_99"}
-FEATURE_PREFIXES = ("feature_", "feature_missing_", "feature_observed_")
 
 
 def inherited_feature_transforms(declared, manifest, columns):
@@ -37,7 +36,6 @@ class FeatureTransformSpec:
     size_neutralize: bool = True
     center: bool = True
     scale: bool = True
-    impute_missing: bool = True
     size_column: str = "log_total_market_cap"
     output_groups: tuple[str, ...] = ("processed",)
 
@@ -74,7 +72,6 @@ class FeatureTransformSpec:
             "size_neutralize",
             "center",
             "scale",
-            "impute_missing",
         ):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"invalid_feature_{name}")
@@ -95,8 +92,7 @@ class FeatureTransformSpec:
     @property
     def output_columns(self) -> tuple[str, ...]:
         return tuple(
-            prefix + ("pre_neutral_" if group == "pre_neutral" else "") + column
+            "feature_" + ("pre_neutral_" if group == "pre_neutral" else "") + column
             for group in self.output_groups
             for column in self.source_columns
-            for prefix in FEATURE_PREFIXES
         )

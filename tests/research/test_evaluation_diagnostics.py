@@ -1058,17 +1058,17 @@ def test_prediction_alias_owns_only_unconsumed_input_columns(
 
     frame, _spec, config = explicit_evaluation
     frame = frame.loc[frame.x.notna()].copy()
-    frame = frame.assign(
-        feature_x=frame.x, feature_observed_x=1, feature_missing_x=0
-    ).rename(columns={"short_available_at": "settled_clock"})
+    frame = frame.assign(feature_x=frame.x).rename(
+        columns={"short_available_at": "settled_clock"}
+    )
     inputs = write_evaluation_input(
         tmp_path / "features",
         frame,
-        features=("feature_x", "feature_observed_x", "feature_missing_x"),
+        features=("feature_x",),
         labels=("short", "long"),
     )
     predictions, metadata = read_predictions(Path(config["predictions"]["pred"]))
-    # Valid binary scores would silently change the ordinary feature's mask.
+    # Prediction aliases cannot replace a consumed feature or label clock.
     predictions["prediction_score"] = [0.0, 1.0, 1.0]
     prediction_path = write_prediction_outputs(
         output_path=tmp_path / "binary-predictions",
@@ -1100,15 +1100,14 @@ def test_prediction_alias_owns_only_unconsumed_input_columns(
     for alias in (
         "pred",
         "x",
-        "feature_missing_x",
-        "feature_observed_x",
+        "unused_feature",
         "settled_clock",
     ):
         case = deepcopy(config)
         case["output"] = str(tmp_path / ("evaluation-" + alias))
         case["evaluation"]["signals"][1]["source_column"] = alias
         case["predictions"] = {alias: str(prediction_path)}
-        if alias in {"feature_observed_x", "settled_clock"}:
+        if alias == "settled_clock":
             read_count = len(reads)
             with pytest.raises(
                 ValueError, match="^evaluation_prediction_input_column_conflict$"
@@ -1126,7 +1125,6 @@ def test_prediction_alias_owns_only_unconsumed_input_columns(
         ]
         facts = manifest["metadata"]["input_facts"]
         assert alias not in facts["columns"]
-        assert facts["observed_columns"] == {"feature_x": ["feature_observed_x"]}
         if expected is None:
             expected = actual
             metrics = actual["metrics"].set_index(["signal", "label"])

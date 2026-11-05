@@ -15,6 +15,11 @@ from quant_research_platform.sources.macro.interim import (
     materialize_interim_data,
     normalize_alfred,
     read_release_csv,
+    resolve_source_conflicts,
+)
+from quant_research_platform.sources.macro.publication import (
+    estimate_initial_archive_times,
+    estimated_release_at,
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
@@ -60,7 +65,7 @@ def test_date_end_upper_bound_uses_source_dst():
     ]
 
 
-def test_policy_surprise_units_do_not_imply_historical_availability():
+def test_policy_surprise_keeps_units_and_declares_historical_snapshot_assumption():
     payload = b"Date,Surprise,Orthogonalized Surprise\n2023-12-13,-8.17,-5.32\n"
     result = _normalize_response(
         payload,
@@ -69,8 +74,9 @@ def test_policy_surprise_units_do_not_imply_historical_availability():
     )[0]
     assert result.value.iloc[0] == pytest.approx(-8.17)
     assert result.unit.iloc[0] == "bp"
-    assert result.timestamp.iloc[0] == pd.Timestamp("2026-11-05T00:00:00Z")
-    assert result.availability_basis.iloc[0] == "retrieval_only"
+    assert result.timestamp.iloc[0] == pd.Timestamp("2023-12-13T23:00:00Z")
+    assert result.availability_basis.iloc[0] == "inferred_snapshot_release"
+    assert result.published_at.isna().all()
 
 
 def test_public_download_and_native_source_roundtrip(tmp_path, monkeypatch):
@@ -120,7 +126,7 @@ def test_public_download_and_native_source_roundtrip(tmp_path, monkeypatch):
     assert len(frame) == 3
     assert frame.value.isna().sum() == 1
     assert set(frame.value.dropna()) == {100, 110}
-    assert frame.timestamp.min() == pd.Timestamp("2014-01-03T06:00:00")
+    assert frame.timestamp.min() == pd.Timestamp("2014-01-02T22:30:00")
     with pytest.raises(OutputAlreadyExistsError):
         fetch_macro(
             {
@@ -156,6 +162,140 @@ def test_explicit_original_release_timestamp_and_timezone_requirement(tmp_path):
     pd.DataFrame([row]).to_csv(path, index=False)
     with pytest.raises(ValueError, match="timezone_required"):
         read_release_csv(path)
+
+
+@pytest.mark.parametrize(
+    "name,observation,expected",
+    [
+        ("us_fed_assets", "2024-07-03", "2024-07-05T21:30Z"),
+        ("us_broad_dollar", "2024-05-24", "2024-05-28T21:15Z"),
+        ("us_m2", "2024-01-01", "2024-02-27T23:00Z"),
+        ("eu_ecb_assets", "2015-04-03", "2015-04-10T16:00Z"),
+        ("jp_boj_assets", "2024-01-01", "2024-02-10T09:00Z"),
+        ("cn_m2", "2024-01-01", "2024-02-20T10:00Z"),
+        ("global_usd_credit", "2024-01-01", "2024-07-31T21:59:59Z"),
+    ],
+)
+def test_buffered_publication_rules_use_history_holidays_and_local_clocks(
+    name, observation, expected
+):
+    assert estimated_release_at(name, pd.Series([observation])).iloc[0] == pd.Timestamp(
+        expected
+    )
+
+
+def test_initial_archive_estimate_preserves_later_revision_and_missing_value():
+    frame = normalize_alfred(
+        _vintage_zip(),
+        "us_fed_assets",
+        {
+            "retrieved_at": "2026-11-05T00:00Z",
+            "url": "https://alfred.stlouisfed.org/",
+        },
+    )
+    actual = estimate_initial_archive_times(frame)
+    assert actual.timestamp.iloc[0] == pd.Timestamp("2014-01-02T22:30Z")
+    assert actual.timestamp.iloc[1] == frame.timestamp.iloc[1]
+    assert actual.value.iloc[1] == 110
+    assert pd.isna(actual.value.iloc[2])
+    pd.testing.assert_series_equal(actual.vintage_date, frame.vintage_date)
+
+
+def test_source_priority_is_per_observation_and_keeps_selected_revisions():
+    frame = pd.DataFrame(
+        {
+            "series_id": ["cn_m2"] * 4 + ["hk_hibor_1m"] * 2,
+            "observation_date": pd.to_datetime(
+                ["2020-01-01"] * 3 + ["2020-02-01"] + ["2020-01-02"] * 2
+            ),
+            "timestamp": pd.to_datetime(
+                [
+                    "2020-02-20",
+                    "2020-02-15",
+                    "2020-02-21",
+                    "2020-03-20",
+                    "2020-01-03",
+                    "2020-01-03",
+                ],
+                utc=True,
+            ),
+            "retrieved_at": pd.Timestamp("2026-11-05", tz="UTC"),
+            "source_id": [
+                "eastmoney",
+                "pbc_government_reprint",
+                "pbc_government_reprint",
+                "eastmoney",
+                "hkma",
+                "hkma_historical_page",
+            ],
+            "value": [999.0, 1.0, 2.0, 3.0, 4.0, 999.0],
+        }
+    )
+    actual = resolve_source_conflicts(frame)
+    assert sorted(actual.value.tolist()) == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_official_shibor_and_chinabond_parsers_preserve_curve_and_nulls():
+    record = {"retrieved_at": "2026-11-05T00:00Z", "url": "https://example.org/"}
+    shibor = _normalize_response(
+        json.dumps(
+            {"records": [{"showDateCN": "2024-01-02", "1W": "1.8", "3M": None}]}
+        ).encode(),
+        ["cn_shibor_1w", "cn_shibor_3m"],
+        record,
+    )
+    assert shibor[0].value.astype(float).iloc[0] == 1.8
+    assert pd.isna(shibor[1].value.iloc[0])
+    rows = [
+        ["曲线名称", "日期", "3月", "6月", "1年", "3年", "5年", "7年", "10年", "30年"],
+        [
+            "中债国债收益率曲线",
+            "2024-01-02",
+            "1",
+            "1",
+            "2.1",
+            "2.3",
+            "2",
+            "2",
+            "2.7",
+            "3",
+        ],
+        [
+            "中债商业银行普通债收益率曲线(AAA)",
+            "2024-01-02",
+            "9",
+            "9",
+            "9",
+            "9",
+            "9",
+            "9",
+            "9",
+            "9",
+        ],
+        [
+            "中债中短期票据收益率曲线(AAA)",
+            "2024-01-02",
+            "3",
+            "3",
+            "3",
+            "3.4",
+            "3",
+            "3",
+            "3",
+            "3",
+        ],
+    ]
+    payload = (
+        "<table>"
+        + "".join(
+            "<tr>" + "".join("<td>" + v + "</td>" for v in row) + "</tr>"
+            for row in rows
+        )
+        + "</table>"
+    ).encode()
+    names = ["cn_treasury_1y", "cn_treasury_3y", "cn_treasury_10y", "cn_credit_aaa_3y"]
+    actual = _normalize_response(payload, names, record)
+    assert [float(f.value.iloc[0]) for f in actual] == [2.1, 2.3, 2.7, 3.4]
 
 
 def test_hkma_recorded_api_failure_preserves_valid_pages_and_other_sources(

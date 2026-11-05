@@ -56,8 +56,6 @@ def _expected(data, native, scaling):
     weights = np.array([1 / 3] * 3 + [1 / 2] * 2)
     if not native:
         matrix = matrix.fillna(matrix.median())
-        for column in ("x", "z"):
-            matrix[column + "__missing"] = data[column].isna().astype(float)
     if scaling:
         for column in matrix:
             observed = matrix[column].notna()
@@ -127,7 +125,7 @@ def test_actual_estimator_inputs_and_native_roundtrip(
     pd.testing.assert_frame_equal(data, original_data, check_exact=True)
     if not native:
         assert scaler.medians == (25.5, 7.0)
-        assert scaler.columns == ("x", "z", "x__missing", "z__missing")
+        assert scaler.columns == ("x", "z")
     frozen = scaler.to_payload()
     future = data[["x", "z"]].copy()
     future.loc[0] = [np.nan, np.nan]

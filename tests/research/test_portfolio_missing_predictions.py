@@ -274,10 +274,7 @@ def test_neutrality_diagnostics_use_stock_leg_and_disclose_unknown_reference(unk
         assert diagnostics[f"{phase}_exposure:size"] == pytest.approx(0.0, abs=1e-14)
 
 
-@pytest.mark.parametrize("technical_fill", [False, True])
-def test_prediction_domain_ignores_original_input_missingness(
-    technical_fill,
-):
+def test_prediction_domain_ignores_original_input_missingness():
     frame = pd.DataFrame(
         {
             "asset_id": ["a", "b", "c"],
@@ -287,12 +284,6 @@ def test_prediction_domain_ignores_original_input_missingness(
             "feature_y": [2.0, np.nan, np.nan],
         }
     )
-    if technical_fill:
-        for name in ("x", "y"):
-            frame[f"feature_observed_{name}"] = (
-                frame[f"feature_{name}"].notna().astype(int)
-            )
-            frame[f"feature_{name}"] = frame[f"feature_{name}"].fillna(0.0)
     result = daily._prediction_alpha(
         frame,
         _Forecasts(lambda *_: False),

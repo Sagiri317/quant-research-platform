@@ -275,7 +275,7 @@ CSMAR、reference 与 Venvoo 导入按实际使用字节记录来源 SHA256；re
 - `timestamp` 必须结合表的经济含义解释：可能是日频会话坐标、事件时间或来源除权日期，不能统一当作信息可用时间。公告、经济生效、观察/下载、本地接收和标签成熟是不同坐标。具体时区和精度以来源/市场约定为准；有时区时刻规范为 UTC，不用运行机器时区猜测无时区字段。
 - `label_available_at` 或约定映射的 `<label>_available_at` 是标签可用于拟合/评分的真实下界。标签预测期限的单位由 `horizon_unit` 声明，目前为 `market_sessions` 或 `milliseconds`；`lookahead`、`entry_rule`、`exit_rule` 和 `label_timing` 不能由列名猜测。见 [contracts/labels.py](../src/quant_research_platform/contracts/labels.py) 和 [contracts/experiments.py](../src/quant_research_platform/contracts/experiments.py)。
 - A 股日频标签经济开盘事件与 EOD 复权成熟时点分别保存；退出会话 UTC 07:00 是当前现代交易时钟的收盘下界，不能写成开盘即可用。高频保留供应商事件时间，没有接收时钟。
-- `eligible` 描述所声明研究选择，`can_enter`/`can_exit` 描述相应执行条件；真实观测、缺失伴随列描述数据事实。它们互不替代，不用交易许可来证明价格标签不存在。完整 PANEL/因子/标签列见 [A 股 catalog](../src/quant_research_platform/markets/implementations/a_share/processed/catalog.py)。
+- `eligible` 描述所声明研究选择，`can_enter`/`can_exit` 描述相应执行条件；数值及其空值描述数据事实。它们互不替代，不用交易许可来证明价格标签不存在。完整 PANEL/因子/标签列见 [A 股 catalog](../src/quant_research_platform/markets/implementations/a_share/processed/catalog.py)。
 
 ### 单位与缺失
 
@@ -286,11 +286,9 @@ A 股 raw 价格为原股价格、数量为真实股数；复权价格及复权�
 收益以比例表达时 0.01 表示 1%，不得二次百分比换算。
 
 NULL/NaN 只表示该字段没有数值，不能单独区分未采集、源缺失、结构不可计算、损坏、缺行、未知或不适用。
-真实 0 不等于缺失，未知也不等于 False；来源诊断、状态和观测伴随列保存原因。
-标签不可插补；模型缺失处理按 [拟合与预处理约定](a-share.md#514-模型与预处理)在合法训练域估计并冻结。`feature_`、`feature_missing_`、`feature_observed_`
-的现有输出关系由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，
-特征支持列不自动成为模型 X，模型列序由拟合约定保存。规范特征以 missing/observed 两位区分普通缺失与结构不可用，
-模型按实际使用的完整列族判断样本资格，数值 NULL 本身不足以判断。
+真实 0 不等于缺失，未知也不等于 False。数值缺失统一用 NULL/NaN；来源状态和必要诊断保存原因，不新增每个特征的 miss/observed 列。
+标签不可插补；模型缺失处理按[拟合与预处理约定](a-share.md#514-模型与预处理)在合法训练域估计并冻结。
+特征输出由 [FeatureTransformSpec](../src/quant_research_platform/contracts/features.py) 定义，特征支持列不自动成为模型 X，模型列序由拟合约定保存。
 
 ### CSMAR equity_changes：报表来源与科目粒度
 

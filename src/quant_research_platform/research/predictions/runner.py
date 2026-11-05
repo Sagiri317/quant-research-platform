@@ -23,9 +23,6 @@ from quant_research_platform.contracts.time import (
     PredictionWindow,
     _window_payload,
 )
-from quant_research_platform.research.features.transforms import (
-    model_input_validity_columns,
-)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import (
@@ -91,10 +88,6 @@ def predict(config: Mapping) -> Path:
                 "asset_id",
                 *result.metadata["input_columns"],
                 *sequence_context_columns(algorithm),
-                *model_input_validity_columns(
-                    tuple(result.metadata["input_columns"]),
-                    session.spec["column_roles"],
-                ),
                 *required_filter_columns(result.metadata["sample_filter_mode"]),
             )
         )
@@ -119,7 +112,6 @@ def predict(config: Mapping) -> Path:
                     frame,
                     result.metadata,
                     read_window,
-                    declared_columns=session.spec["column_roles"],
                     include_context=sequence,
                 )
                 if usable.empty:

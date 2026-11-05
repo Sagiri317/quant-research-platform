@@ -5,6 +5,7 @@ Evaluation writes the native portfolio ledger and task-specific metrics without
 updating the saved policy or normalization statistics.
 """
 
+import pickle
 from functools import partial
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
+from quant_research_platform.contracts.policies import PolicyDecision
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
 )
@@ -27,7 +29,8 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
-from quant_research_platform.research.policies.accounts import _episode
+from quant_research_platform.research.models.scaler import ModelMatrixScaler
+from quant_research_platform.research.policies.accounts import _episode, _stream
 from quant_research_platform.research.policies.environments import TradingEnv
 from quant_research_platform.research.policies.execution_schedules import (
     execution_fraction,
@@ -112,7 +115,40 @@ def train_policy(config):
     old_threads = torch.get_num_threads()
     try:
         torch.set_num_threads(config["threads"])
-        factories = [partial(TradingEnv, episodes) for _ in range(config["n_envs"])]
+        observations = []
+        for episode in episodes:
+            with _stream(episode) as stream:
+                try:
+                    event = next(stream)
+                    while True:
+                        if isinstance(event, PolicyDecision):
+                            observations.append(
+                                event.features.reindex(episode["asset_ids"])[
+                                    episode["feature_columns"]
+                                ]
+                            )
+                            target = (
+                                event.quantities.reindex(
+                                    event.features.index, fill_value=0
+                                )
+                                if episode["kind"] == "hft"
+                                else pd.Series(0.0, index=event.features.index)
+                            )
+                            event = stream.send(target)
+                        else:
+                            event = next(stream)
+                except StopIteration:
+                    pass
+        if not observations:
+            raise ValueError("policy_episode_no_decisions")
+        feature_scaler = ModelMatrixScaler.fit(
+            pd.concat(observations, ignore_index=True), missing="impute", scaling=False
+        )
+        del observations
+        factories = [
+            partial(TradingEnv, episodes, feature_scaler=feature_scaler)
+            for _ in range(config["n_envs"])
+        ]
         with closing_iterator(
             VecNormalize(
                 (DummyVecEnv if len(factories) == 1 else SubprocVecEnv)(factories),
@@ -137,6 +173,9 @@ def train_policy(config):
             def write(staging):
                 model.save(staging / "policy.zip")
                 environment.save(staging / "normalization.pkl")
+                (staging / "feature_scaler.pkl").write_bytes(
+                    pickle.dumps(feature_scaler)
+                )
                 atomic_write_json(staging / "policy.json", facts)
 
             atomic_write_directory(output, write)
@@ -188,6 +227,8 @@ def backtest_policy(config):
             for key in ("kind", "task", "asset_ids", "feature_columns")
         ):
             raise ValueError("policy_backtest_spaces_mismatch")
+        # Like the policy itself, this is a trusted local fitted artifact.
+        env.feature_scaler = pickle.loads((root / "feature_scaler.pkl").read_bytes())
         normalization = VecNormalize.load(
             root / "normalization.pkl", DummyVecEnv([lambda: env])
         )

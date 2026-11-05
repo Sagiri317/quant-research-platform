@@ -183,7 +183,6 @@ def assemble_research_dataset(
                 "size_column",
                 "center",
                 "scale",
-                "impute_missing",
             )
         }
     return assemble(config)

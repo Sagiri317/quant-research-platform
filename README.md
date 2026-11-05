@@ -62,7 +62,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 [操作示例](configs/) 中的路径需替换为实际已准备输入。
 [分批因子组装](configs/assemble-factor-batches.json)指定各批输入和所需列，只拼接原始因子。
 [已有特征复用](configs/assemble-existing-features.json)读取已经生成的特征，不重复处理；
-保留 eligible 资格列，并自动带上已声明的观测/缺失标志。该示例生成无标签特征输入，训练时需另选标签及其成熟时间列。
+保留 eligible 资格列与特征中的实际空值。该示例生成无标签特征输入，训练时需另选标签及其成熟时间列。
 
 [隔夜与日内收益准备](configs/prepare-on-id.json)、[共同样本分层评价](configs/evaluate-stratified-a-share.json)与
 [已保存日表的统计汇总](configs/statistics-stratified-a-share.json)分别调用 prepare、evaluate、statistics-factors。

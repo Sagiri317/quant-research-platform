@@ -12,12 +12,6 @@ def linear_feature_importance(
     coefficients: np.ndarray,
 ) -> dict[str, float]:
     values = np.abs(coefficients[1:])
-    if len(values) == 2 * len(spec.input_columns):
-        values = (
-            values[: len(spec.input_columns)] + values[len(spec.input_columns) :]
-            if spec.training_scaling
-            else values[: len(spec.input_columns)]
-        )
     return {
         column: float(abs(value))
         for column, value in zip(spec.input_columns, values, strict=True)
@@ -30,22 +24,12 @@ def estimator_feature_importance(
 ) -> dict[str, float] | None:
     if hasattr(predictor, "feature_importances_"):
         values = np.asarray(predictor.feature_importances_, dtype="float64")
-        if len(values) == 2 * len(spec.input_columns):
-            values = (
-                values[: len(spec.input_columns)] + values[len(spec.input_columns) :]
-            )
         return {
             column: float(value)
             for column, value in zip(spec.input_columns, values, strict=True)
         }
     if hasattr(predictor, "coef_"):
         values = np.abs(np.ravel(np.asarray(predictor.coef_, dtype="float64")))
-        if len(values) == 2 * len(spec.input_columns):
-            values = (
-                values[: len(spec.input_columns)] + values[len(spec.input_columns) :]
-                if spec.training_scaling
-                else values[: len(spec.input_columns)]
-            )
         return {
             column: float(abs(value))
             for column, value in zip(spec.input_columns, values, strict=True)

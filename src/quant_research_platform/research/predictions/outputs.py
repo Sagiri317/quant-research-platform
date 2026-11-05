@@ -6,17 +6,10 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
-from quant_research_platform.research.features.transforms import (
-    mask_unobserved_features,
-    model_input_validity_columns,
-    model_observed_input_mask,
-)
 from quant_research_platform.research.filtering import apply_filter_mode
 
 
-def prediction_rows(
-    frame, metadata, window, *, declared_columns=(), include_context=False
-):
+def prediction_rows(frame, metadata, window, *, include_context=False):
     """Select observed model inputs while retaining temporarily ineligible
     sequence context.
     """
@@ -38,21 +31,13 @@ def prediction_rows(
             mode=metadata["sample_filter_mode"],
             metadata_key="sample_filter_mode",
         )
-    validity = model_input_validity_columns(
-        tuple(metadata["input_columns"]), declared_columns
-    )
-    for column in tuple(dict.fromkeys((*metadata["input_columns"], *validity))):
+    for column in metadata["input_columns"]:
         strict_finite_numeric_series(
             filtered[column],
             error=f"invalid_prediction_input: {column}",
             allow_null=True,
         )
-    observed = model_observed_input_mask(
-        filtered, metadata["input_columns"], declared_columns
-    )
-    filtered = mask_unobserved_features(
-        filtered, metadata["input_columns"], declared_columns
-    )
+    observed = filtered.loc[:, metadata["input_columns"]].notna().any(axis=1)
     if include_context and metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
         return filtered.sort_values(["timestamp", "asset_id"], kind="stable")
     return filtered.loc[observed].sort_values(["timestamp", "asset_id"], kind="stable")

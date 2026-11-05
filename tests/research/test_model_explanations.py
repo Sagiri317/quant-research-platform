@@ -297,8 +297,8 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     effects = (
         predictor.scaler.transform(selected[["x", "y"]]).to_numpy() - center
     ) * coef
-    # Attribute each input and its missing indicator to the original feature.
-    expected = effects[:, :2] + effects[:, 2:]
+    # Contributions retain the original feature coordinates.
+    expected = effects
     actual = (
         tables["contributions"]
         .set_index(["timestamp", "asset_id", "feature"])
@@ -900,7 +900,9 @@ def test_background_seed_default_matches_explicit_and_rejects_null(tmp_path):
         explain(config)
 
 
-def test_imputed_native_importance_has_no_grouped_direction(tmp_path, monkeypatch):
+def test_imputed_native_importance_uses_original_feature_coordinates(
+    tmp_path, monkeypatch
+):
     import quant_research_platform.research.models.explanations as owner
     from quant_research_platform.research.models.scaler import (
         LinearScaledPredictor,
@@ -910,9 +912,9 @@ def test_imputed_native_importance_has_no_grouped_direction(tmp_path, monkeypatc
     case, frame, config = _case(tmp_path)
     training = pd.DataFrame({"x": [0.0, 1.0, np.nan, 3.0], "y": [0.0, 1.0, 2.0, 3.0]})
     scaler = ModelMatrixScaler.fit(training, missing="impute")
-    predictor = LinearScaledPredictor((0.0, 1.0, 0.0, -2.0, 0.0), scaler)
+    predictor = LinearScaledPredictor((0.0, 1.0, 0.0), scaler)
     case.result.prediction_model = predictor
-    case.result.metadata["feature_importance"] = {"x": 3.0, "y": 0.0}
+    case.result.metadata["feature_importance"] = {"x": 1.0, "y": 0.0}
     monkeypatch.setattr(owner, "load_model", lambda path: (case.result, case.facts))
     probe = pd.DataFrame(
         {
@@ -922,16 +924,14 @@ def test_imputed_native_importance_has_no_grouped_direction(tmp_path, monkeypatc
     )
     scores = predictor.predict(probe)
     assert scores[1] - scores[0] == pytest.approx(1.0 / scaler.scale_[0])
-    assert scores[2] - scores[0] == pytest.approx(-2.0 / scaler.scale_[2])
+    assert scores[2] == pytest.approx(scores[0])
     frame.loc[frame.asset_id.eq("a"), "x"] = np.nan
     frame.to_parquet(config["inputs"], index=False)
     _, tables = read_explanation(explain(config))
     native = tables["native_importance"].set_index("feature")
-    assert native.loc["x", "value"] == 3.0
-    assert native.signed_value.isna().all()
-    assert native.kind.eq(
-        "sum_absolute_standardized_coefficients_with_missing_indicator"
-    ).all()
+    assert native.loc["x", "value"] == 1.0
+    assert native.loc["x", "signed_value"] == 1.0
+    assert native.kind.eq("absolute_standardized_coefficient").all()
     assert native.status.eq("DEFINED").all()
     predictions = tables["predictions"]
     contributions = (

@@ -38,9 +38,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations.engine import (
     build_evaluation_result_from_frames,
 )
-from quant_research_platform.research.features.transforms import (
-    feature_observation_columns,
-)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
@@ -178,14 +175,6 @@ def evaluate(config):
                 "timestamp",
                 "asset_id",
                 *ordinary,
-                *feature_observation_columns(
-                    tuple(
-                        signal.source_column
-                        for signal in spec.signals
-                        if signal.source_kind == "feature"
-                    ),
-                    declared["column_roles"],
-                ),
                 *spec.label_columns,
                 *spec.label_availability_columns.values(),
                 *required_filter_columns(spec.filter_mode),
@@ -344,7 +333,6 @@ def evaluate(config):
         prepared(),
         spec=spec,
         asset_column="asset_id",
-        declared_columns=declared["column_roles"],
         response_diagnostics=response,
         source_columns_by_kind={
             kind: tuple(
@@ -442,10 +430,6 @@ def _evaluation_source_facts(source, session, *, columns, signals, availability)
             "selector": selector,
             "columns": {column: roles[column] for column in columns},
             "column_units": {column: units.get(column) for column in columns},
-            "observed_columns": {
-                column: list(feature_observation_columns((column,), roles))
-                for column in signals
-            },
             "feature_transforms": transforms,
             "signal_units": {column: units.get(column) for column in signals},
             "label_units": {label: units.get(label) for label in availability},
@@ -682,7 +666,6 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
                     "asset_id",
                     "eligible",
                     *signals,
-                    *feature_observation_columns(signals, declared["column_roles"]),
                     *spec.label_columns,
                     *availability.values(),
                     *(

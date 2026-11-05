@@ -401,8 +401,7 @@ def _write_native(root, frame, *, signals, labels, availability, units=None, raw
 def test_real_observed_values_and_per_label_maturity(tmp_path):
     frame, config = _fixture(tmp_path)
     frame = frame.rename(columns={"x": "feature_x"})
-    frame["feature_x"] = [0.0, 0.0, 2.0, 3.0]
-    frame["feature_observed_x"] = [1, 0, 1, 1]
+    frame["feature_x"] = [0.0, np.nan, 2.0, 3.0]
     frame["later"] = [3.0, 2.0, 1.0, 4.0]
     frame["later_clock"] = [
         pd.Timestamp("2023-01-02"),
@@ -428,12 +427,10 @@ def test_real_observed_values_and_per_label_maturity(tmp_path):
     peer = frame.rename(
         columns={
             "feature_x": "feature_z",
-            "feature_observed_x": "feature_observed_z",
             "later_clock": "peer_later_clock",
         }
     ).copy()
     peer["feature_z"] = [9.0, 8.0, 7.0, 6.0]
-    peer["feature_observed_z"] = [1, 1, 1, 1]
     peer.loc[peer.asset_id.eq("c"), "peer_later_clock"] = pd.Timestamp("2025-01-01")
     peer_path = _write_native(
         tmp_path / "peer-observed",

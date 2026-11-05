@@ -1,4 +1,4 @@
-"""Transform eligible cross sections and preserve declared feature-observation masks."""
+"""Transform eligible cross sections while preserving missing values."""
 
 from __future__ import annotations
 
@@ -9,139 +9,9 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.features import (
-    FEATURE_PREFIXES,
     FeatureTransformSpec,
 )
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
-
-
-def canonical_feature_validity_columns(input_columns, declared_columns):
-    """Resolve declared canonical families, with each source value before its flags."""
-    declared = set(declared_columns)
-    dependencies = []
-    for column in input_columns:
-        for prefix in reversed(FEATURE_PREFIXES):
-            if column.startswith(prefix):
-                suffix = column[len(prefix) :]
-                value = FEATURE_PREFIXES[0] + suffix
-                if value in declared and any(
-                    companion + suffix in declared for companion in FEATURE_PREFIXES[1:]
-                ):
-                    dependencies.extend(
-                        companion + suffix
-                        for companion in FEATURE_PREFIXES
-                        if companion + suffix in declared
-                    )
-                    break
-    return tuple(dict.fromkeys(dependencies))
-
-
-def feature_observation_columns(columns, declared_columns):
-    """Return declared observation companions, without interpreting ordinary names."""
-    declared = set(declared_columns)
-    return tuple(
-        dict.fromkeys(
-            "feature_observed_" + column[len("feature_") :]
-            for column in columns
-            if column.startswith("feature_")
-            and "feature_observed_" + column[len("feature_") :] in declared
-        )
-    )
-
-
-def _feature_observation_masks(frame, flags):
-    for flag in flags:
-        if flag not in frame:
-            raise ValueError(f"feature_observation_column_missing: {flag}")
-        observed = strict_finite_numeric_series(
-            frame[flag], error=f"invalid_feature_observation_flag: {flag}"
-        )
-        if not observed.isin((0, 1)).all():
-            raise ValueError(f"invalid_feature_observation_flag: {flag}")
-        column = "feature_" + flag[len("feature_observed_") :]
-        yield column, observed.eq(1)
-
-
-def mask_unobserved_features(
-    frame: pd.DataFrame, columns, declared_columns
-) -> pd.DataFrame:
-    """Exclude technical fill values using the full declared input schema."""
-    flags = feature_observation_columns(columns, declared_columns)
-    if not flags:
-        return frame
-    result = frame.copy()
-    for column, observed in _feature_observation_masks(frame, flags):
-        values = frame[column]
-        if (
-            isinstance(values.dtype, np.dtype)
-            and values.dtype.kind in "iu"
-            and (~observed).any()
-        ):
-            prefix = "UInt" if values.dtype.kind == "u" else "Int"
-            nullable = f"{prefix}{values.dtype.itemsize * 8}"
-            values = values.astype(nullable)
-        result[column] = values.where(observed)
-    return result
-
-
-def model_input_validity_columns(input_columns, declared_columns):
-    """Return structural and direct-input validity columns required by model
-    consumers.
-    """
-    return tuple(
-        dict.fromkeys(
-            (
-                *canonical_feature_validity_columns(input_columns, declared_columns),
-                *feature_observation_columns(input_columns, declared_columns),
-                *input_columns,
-            )
-        )
-    )
-
-
-def model_observed_input_mask(frame, input_columns, declared_columns):
-    """Require usable consumed families and at least one original observation."""
-    originals = tuple(
-        dict.fromkeys(
-            (
-                canonical_feature_validity_columns((column,), declared_columns)
-                or (column,)
-            )[0]
-            for column in input_columns
-        )
-    )
-    flags = feature_observation_columns(originals, declared_columns)
-    observed = {
-        column: frame[column].notna() & flag
-        for column, flag in _feature_observation_masks(frame, flags)
-    }
-    observed = pd.DataFrame(
-        {
-            column: observed[column] if column in observed else frame[column].notna()
-            for column in originals
-        },
-        index=frame.index,
-    )
-    keep = observed.any(axis=1)
-    canonical = canonical_feature_validity_columns(input_columns, declared_columns)
-    for column in originals:
-        if column not in canonical:
-            continue
-        usable = observed[column].copy()
-        missing = "feature_missing_" + column[len("feature_") :]
-        if missing in canonical:
-            ordinary_missing = strict_finite_numeric_series(
-                frame[missing], error=f"invalid_feature_missing_flag: {missing}"
-            )
-            observation = "feature_observed_" + column[len("feature_") :]
-            if not ordinary_missing.isin((0, 1)).all() or (
-                observation in canonical
-                and (ordinary_missing.eq(1) & frame[observation].eq(1)).any()
-            ):
-                raise ValueError(f"invalid_feature_missing_flag: {missing}")
-            usable |= ordinary_missing.eq(1)
-        keep &= usable
-    return keep
 
 
 def apply_feature_transforms(
@@ -163,7 +33,6 @@ def apply_feature_transforms(
         size_column=recipe.size_column,
         center=recipe.center,
         scale=recipe.scale,
-        impute_missing=recipe.impute_missing,
         diagnostics=diagnostics,
         output_groups=recipe.output_groups,
     )
@@ -397,7 +266,6 @@ def a_share_feature_pipeline(
     size_neutralize: bool = True,
     center: bool = True,
     scale: bool = True,
-    impute_missing: bool = True,
     output_groups: tuple[str, ...] = ("processed",),
 ) -> pd.DataFrame:
     """Clip, neutralize, center and scale in that fixed order on eligible rows."""
@@ -409,7 +277,6 @@ def a_share_feature_pipeline(
         size_neutralize,
         center,
         scale,
-        impute_missing,
         size_column=size_column,
         output_groups=output_groups,
     )
@@ -470,31 +337,12 @@ def a_share_feature_pipeline(
     result = frame.copy()
     for group_name in output_groups:
         group_frame = winsorized if group_name == "pre_neutral" else residualized
-        context_present = (
-            winsorized[industry_column].notna()
-            if industry_neutralize and group_name == "processed"
-            else pd.Series(True, index=scoped.index)
-        )
         for factor in factor_columns:
             values = group_frame[factor]
-            raw_missing = scoped[factor].isna()
-            needs_fit = (
-                recipe.clip != "none"
-                or center
-                or scale
-                or (
-                    group_name == "processed"
-                    and (
-                        industry_neutralize
-                        or (size_neutralize and factor != size_column)
-                    )
-                )
-            )
             suffix = ("pre_neutral_" if group_name == "pre_neutral" else "") + factor
             if variance_counts is not None:
                 variance_counts.setdefault(suffix, 0)
             scoped_feature = pd.Series(np.nan, index=scoped.index, dtype="float64")
-            identifiable = pd.Series(False, index=scoped.index)
             for positions in time_groups.values():
                 group = values.iloc[positions]
                 observed = group.dropna()
@@ -507,24 +355,5 @@ def a_share_feature_pipeline(
                     variance_counts[suffix] += 1
                 transformed = _center_scale(group, center=center, scale=scale)
                 scoped_feature.iloc[positions] = transformed
-                identifiable.iloc[positions] = (
-                    not needs_fit or transformed.notna().any()
-                )
-            final_missing = raw_missing | scoped_feature.isna()
-            context_valid = context_present
-            if group_name == "processed" and needs_size and factor != size_column:
-                context_valid = context_valid & scoped[size_column].notna()
-            ordinary_missing = raw_missing & identifiable & context_valid
-            feature = pd.Series(np.nan, index=result.index, dtype="float64")
-            feature.loc[scoped.index] = scoped_feature.mask(
-                ordinary_missing & impute_missing, 0.0
-            )
-            missing = pd.Series(0, index=result.index, dtype="int8")
-            observed = pd.Series(0, index=result.index, dtype="int8")
-            missing.loc[scoped.index] = ordinary_missing.astype("int8")
-            observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
-            for prefix, values in zip(
-                FEATURE_PREFIXES, (feature, missing, observed), strict=True
-            ):
-                feature_values[prefix + suffix] = values
+            feature_values["feature_" + suffix] = scoped_feature.reindex(result.index)
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)

@@ -24,10 +24,6 @@ from quant_research_platform.research.datasets.statistics import (
     _statistics_label_availability,
     _statistics_window_bounds,
 )
-from quant_research_platform.research.features.transforms import (
-    feature_observation_columns,
-    mask_unobserved_features,
-)
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
 )
@@ -108,7 +104,6 @@ def build_a_share_factor_statistics_tables(
                 primary_label,
                 availability,
                 *factors,
-                *feature_observation_columns(factors, spec.column_roles),
                 *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
             )
         )
@@ -153,7 +148,6 @@ def build_a_share_factor_statistics_tables(
             )
             if mature.empty:
                 continue
-            mature = mask_unobserved_features(mature, factors, spec.column_roles)
             if "rank_ic" in analyses:
                 ranks.extend(
                     cross_sectional_rank_ic(

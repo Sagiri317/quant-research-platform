@@ -138,8 +138,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
 
     assert result["feature_factor"].isna().all()
-    assert result["feature_missing_factor"].tolist() == [0, 0]
-    assert result["feature_observed_factor"].tolist() == [0, 0]
+    assert result.feature_factor.isna().all()
 
 
 def test_missing_factor_in_other_industry_does_not_change_valid_neutralization():
@@ -168,8 +167,7 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         result = operation(frame, factor_columns=("factor",), **kwargs)
         pd.testing.assert_frame_equal(result.iloc[:100], expected)
         if operation is a_share_feature_pipeline:
-            assert result.feature_observed_factor.iloc[:100].eq(1).all()
-            assert result.feature_missing_factor.iloc[-1] == 1
+            assert result.feature_factor.iloc[:100].notna().all()
         else:
             assert result.factor.iloc[:100].notna().all()
             assert pd.isna(result.factor.iloc[-1])
@@ -334,8 +332,7 @@ def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variati
         }
     )
     actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
-    assert actual.feature_observed_factor.eq(1).all()
-    assert actual.feature_missing_factor.eq(0).all()
+    assert actual.feature_factor.notna().all()
     if variation == 0:
         assert actual.feature_factor.eq(0.0).all()
     else:
@@ -380,13 +377,12 @@ def test_industry_size_span_is_zero_but_resolvable_signal_survives(
     assert residual.factor.eq(0.0).all()
     actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert actual.feature_factor.eq(0.0).all()
-    assert actual.feature_observed_factor.eq(1).all()
-    assert actual.feature_missing_factor.eq(0).all()
+    assert actual.feature_factor.notna().all()
     changed = frame.copy()
     changed.loc[60, "factor"] = changed.loc[60, "factor"] + 1e-6
     perturbed = a_share_feature_pipeline(changed, factor_columns=("factor",))
     assert perturbed.feature_factor.ne(0.0).any()
-    assert perturbed.feature_observed_factor.eq(1).all()
+    assert perturbed.feature_factor.notna().all()
 
 
 def test_auxiliary_size_winsorization_matches_full_configuration():
@@ -417,9 +413,8 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
     frame.loc[1, "log_total_market_cap"] = np.nan
     frame.loc[2, "industry_level1_code"] = None
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
-    assert result.feature_factor.iloc[0] == 0.0
+    assert pd.isna(result.feature_factor.iloc[0])
     assert result.feature_factor.iloc[1:3].isna().all()
-    assert result.feature_missing_factor.iloc[:3].tolist() == [1, 0, 0]
 
 
 def test_nonzero_size_variation_is_identifiable():
@@ -469,7 +464,7 @@ def test_canonical_industry_residuals_keep_same_code_standards_distinct():
     before = frame.copy(deep=True)
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert result["feature_factor"].eq(0.0).all()
-    assert result["feature_observed_factor"].eq(1.0).all()
+    assert result.feature_factor.notna().all()
     pd.testing.assert_frame_equal(frame, before)
     assert result["industry_level1_code"].eq("A").all()
 
@@ -572,8 +567,7 @@ def test_native_neutralization_zscore_preserves_units_and_persistence(tmp_path, 
     )
     actual = read_dataset(root)
     assert len(actual) == 100
-    assert actual.feature_observed_earnings_yield.eq(1).all()
-    assert actual.feature_missing_earnings_yield.eq(0).all()
+    assert actual.feature_earnings_yield.notna().all()
     np.testing.assert_allclose(
         actual.feature_earnings_yield, expected, rtol=3e-14, atol=3e-14
     )

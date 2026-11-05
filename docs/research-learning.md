@@ -61,8 +61,8 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 母单限额在账户执行处约束：有延迟、部分成交或等待动作时也不能反向买回或超额执行。
 该母单不改变其他股票的目标。
 
-观测包含当时特征、缺失标志、持仓与可卖仓位、现金、剩余时间和母单剩余比例。
-已声明 `feature_observed_*` 的技术填充值按缺失处理。日频只允许 factor/feature；
+观测包含当时特征、持仓与可卖仓位、现金、剩余时间和母单剩余比例。
+特征直接保留空值。普通神经模型和 PPO 的插补参数只在训练域拟合并冻结，不追加缺失指示列。日频只允许 factor/feature；
 高频还允许原生盘口当前字段，不开放任意 context 列。上游仍须正确声明特征的可用时点；
 列角色本身不能证明外部自制数据没有前视。
 
@@ -71,8 +71,9 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 不模拟真实排队位置，也不保证母单完成。日频策略目标与 benchmark-enhanced 优化器
 是两个独立决策入口，不能同时指定。
 
-`backtest-policy` 冻结读取 `policy.zip`、`normalization.pkl` 与 `policy.json`，
-评价窗口必须晚于拟合截止，期间不更新归一化。只加载可信本地模型产物。
+训练先遍历有界 episode 的真实决策特征，以公共 `ModelMatrixScaler` 拟合中位数。
+`backtest-policy` 冻结读取 `policy.zip`、`feature_scaler.pkl`、`normalization.pkl` 与 `policy.json`，
+评价窗口必须晚于拟合截止，期间不更新插补或归一化。只加载可信本地模型产物。
 基线可选：执行任务的 `immediate`、`twap`、`vwap`，库存的 `hold`，组合的
 `hold`、`equal_weight`。TWAP/VWAP 给出截至当前时刻的累计目标，实际成交仍依赖后续报价。
 VWAP 需预先声明 `volume_curve` 的 `as_of`、`fractions`、`cumulative_volume`；
@@ -132,9 +133,11 @@ VWAP 需预先声明 `volume_curve` 的 `as_of`、`fractions`、`cumulative_volu
 输入是固定股票池的完整、有成熟标签的连续面板；目标单位必须为 `decimal_return`。
 `return_end_column` 明确各期经济结束点：同一截面结束点相同，前一期结束点等于
 下一期决策时刻，最终结束点不晚于 `cutoff`。不能把重叠的 20 日标签当成逐期资产收益。
-特征缺失、未知成熟或资产不齐时失败，不能通过删行拼接不连续时期。
+未知成熟或资产不齐时失败，不能通过删行拼接不连续时期。特征缺失由公共
+`ModelMatrixScaler` 使用训练中位数填补；训练列全空时无法估计并明确失败。
 
-训练缩放只估计于本次训练域。每期以漂移后的持仓为起点，双边换手
+插补与缩放只估计于本次训练域，保存为 `feature_scaler.pkl`，回测冻结复用。
+每期以漂移后的持仓为起点，双边换手
 `T = sum(abs(w - previous_weight))`，净收益近似为
 `(1-cost_bps/10000 × T) × (1+w·r)-1`，目标为负平均净收益加收益方差惩罚。
 这是连续权重和线性成本的训练近似，不包含离散股数、T+1、最低佣金或实际容量。

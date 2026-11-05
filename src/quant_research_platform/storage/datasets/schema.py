@@ -817,7 +817,6 @@ def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any
         "size_column": transform.size_column,
         "center": transform.center,
         "scale": transform.scale,
-        "impute_missing": transform.impute_missing,
     }
 
 
@@ -1284,7 +1283,6 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
             "size_column",
             "center",
             "scale",
-            "impute_missing",
         }:
             raise ValueError("dataset_feature_transforms_invalid")
         sources = _require_string_list(

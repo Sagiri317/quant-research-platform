@@ -824,9 +824,7 @@ def statistics_tables(ledgers, *, window, config):
 
 def inventory_inputs(config, window, *, prediction_path=None, decision_columns=None):
     """Open the same explicit market inputs for training and native backtests."""
-    from quant_research_platform.research.features.transforms import (
-        mask_unobserved_features,
-    )
+
     from quant_research_platform.research.protocols.a_share_hft import PANEL_COLUMNS
 
     daily = _strict_config(
@@ -910,10 +908,6 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
                     quotes = materialize_dataset_session(
                         panel.filtered_view(day_window)
                     )
-                    if decision_columns is not None:
-                        quotes = mask_unobserved_features(
-                            quotes, decision_columns, panel.spec["column_roles"]
-                        )
                     predictions = pd.DataFrame()
                     if prediction_path is not None:
                         predictions, facts = read_predictions(

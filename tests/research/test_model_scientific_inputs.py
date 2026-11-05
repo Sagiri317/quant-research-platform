@@ -232,9 +232,8 @@ def _canonical():
 
 
 @pytest.mark.parametrize("batch_rows", [1, 1000])
-@pytest.mark.parametrize("indicator", ["feature_missing_x", "feature_observed_x"])
-def test_declared_feature_companions_close_projection_and_keep_producer_domains(
-    tmp_path, monkeypatch, batch_rows, indicator
+def test_null_features_keep_domains_through_projection(
+    tmp_path, monkeypatch, batch_rows
 ):
     from quant_research_platform.research.evaluations import runner
 
@@ -245,6 +244,7 @@ def test_declared_feature_companions_close_projection_and_keep_producer_domains(
         lambda session: original(session, batch_rows=batch_rows),
     )
     frame = _canonical()
+    indicator = "feature_x"
     case = fit_frame(tmp_path, frame, _linear(column=indicator, feature=True))
     assert case.result.metadata["rows_after_input_label_dropna"] == 2
     spec = _evaluation("feature_x")
@@ -268,7 +268,6 @@ def test_declared_feature_companions_close_projection_and_keep_producer_domains(
         [frame.iloc[:2], frame.iloc[2:]],
         spec=spec,
         asset_column="asset_id",
-        declared_columns=declared["column_roles"],
     ) as direct:
         direct_metrics = pd.concat(
             [chunk[0] for chunk in direct.output_chunks], ignore_index=True
@@ -290,32 +289,6 @@ def test_declared_feature_companions_close_projection_and_keep_producer_domains(
         )
     )
     assert len(read_predictions(prediction)[0]) == 2
-
-
-@pytest.mark.parametrize("invalid", ["missing", "nonbinary", "null"])
-def test_declared_observation_companion_cannot_disappear_or_be_invalid(
-    tmp_path, invalid
-):
-    frame = _canonical()
-    case = fit_frame(tmp_path, frame, _linear(column="feature_x", feature=True))
-    if invalid == "missing":
-        frame = frame.drop(columns="feature_observed_x")
-    else:
-        frame.loc[0, "feature_observed_x"] = 2 if invalid == "nonbinary" else np.nan
-    frame.to_parquet(case.config["inputs"], index=False)
-    config = evaluation_config(
-        case.config["inputs"],
-        tmp_path / "evaluation",
-        _evaluation("feature_x"),
-        start="2024-01-01",
-        end="2024-01-02",
-    )
-    config["input_spec"] = case.config["input_spec"]
-    with pytest.raises(
-        ValueError, match="dataset_column_not_found|invalid_feature_observation_flag"
-    ):
-        evaluate(config)
-    assert not (tmp_path / "evaluation").exists()
 
 
 @pytest.mark.parametrize(
@@ -420,30 +393,6 @@ def test_canonical_observation_projection_matches_factor_statistics(tmp_path):
     with artifact.table("factor_diagnostics.parquet") as statistics:
         assert statistics.input_date_count.eq(2).all()
         assert statistics.observation_count.eq(1).all()
-    # An observation flag selected as its own signal stays a separate finite signal.
-    spec = _evaluation("feature_x")
-    from dataclasses import replace
-
-    spec = replace(
-        spec,
-        signals=(
-            *spec.signals,
-            SignalSpec(
-                signal_id="observed",
-                source_kind="feature",
-                source_column="feature_observed_x",
-            ),
-        ),
-    )
-    with build_evaluation_result_from_frames(
-        [frame],
-        spec=spec,
-        asset_column="asset_id",
-        declared_columns=declared["column_roles"],
-    ) as result:
-        metrics = pd.concat([chunk[0] for chunk in result.output_chunks])
-    assert metrics.loc[metrics.signal.eq("signal"), "n_obs"].tolist() == [2, 0]
-    assert metrics.loc[metrics.signal.eq("observed"), "n_obs"].tolist() == [3, 3]
 
 
 def test_declared_outputs_resolve_prefixed_source_name_without_a_name_ban(tmp_path):
@@ -463,7 +412,7 @@ def test_declared_outputs_resolve_prefixed_source_name_without_a_name_ban(tmp_pa
     )
     produced = apply_feature_transforms(frame, (recipe,))
     case = fit_frame(
-        tmp_path, produced, _linear(column="feature_missing_missing_x", feature=True)
+        tmp_path, produced, _linear(column="feature_missing_x", feature=True)
     )
     spec = _evaluation("feature_missing_x")
     declared = case.config["input_spec"]

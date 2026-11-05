@@ -299,10 +299,9 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
         estimator=build_estimator_from_model_spec(spec),
     )
     fitted = result
-    assert fitted.metadata["scaler"]["input_columns"] == ["feature"]
-    assert fitted.metadata["scaler"]["columns"] == ["feature", "feature__missing"]
-    assert fitted.prediction_model.scaler.mean_ == (1.5, 0.0)
-    assert fitted.prediction_model.scaler.scale_ == (0.5, 1.0)
+    assert fitted.metadata["scaler"]["columns"] == ["feature"]
+    assert fitted.prediction_model.scaler.mean_ == (1.5,)
+    assert fitted.prediction_model.scaler.scale_ == (0.5,)
     assert fitted.metadata["rows_after_input_label_dropna"] == 2
     assert fitted.metadata["train_end"] == "2024-01-01"
     frame.loc[2:, ["feature", "model_target"]] = [[1e9, -1e9], [-1e9, 1e9]]
@@ -1719,19 +1718,18 @@ def test_label_maturity_preserves_ineligible_observations_for_unfiltered_evaluat
     ).index.tolist() == [0]
 
 
-def test_flag_only_model_rejects_all_original_inputs_missing():
+def test_null_only_model_rows_cannot_enter_training():
     from quant_research_platform.research.models.fitting import (
         _collect_training_frame,
         model_training_read_columns,
     )
 
-    inputs = ("feature_missing_x", "feature_observed_x")
+    inputs = ("feature_x",)
     columns = model_training_read_columns(
         ("timestamp", "asset_id"),
         inputs,
         label_column="label",
         sample_filter_mode="unfiltered",
-        declared_columns=(*inputs, "feature_x"),
     )
     assert "feature_x" in columns
     frame = pd.DataFrame(
@@ -1741,9 +1739,7 @@ def test_flag_only_model_rejects_all_original_inputs_missing():
             "eligible": [True] * 3,
             "label_available_at": pd.to_datetime(["2024-01-02"] * 3),
             "label": [0.1, 0.2, 0.3],
-            "feature_x": [2.0, 0.0, np.nan],
-            "feature_missing_x": [0, 1, 1],
-            "feature_observed_x": [1, 0, 0],
+            "feature_x": [2.0, np.nan, np.nan],
         }
     )
     prepared = _collect_training_frame(
@@ -1756,7 +1752,6 @@ def test_flag_only_model_rejects_all_original_inputs_missing():
             sample_filter_mode="unfiltered",
         ),
         fitting_cutoff=pd.Timestamp("2024-01-02"),
-        declared_columns=frame.columns,
     )
     training = prepared.training
     assert training.asset_id.tolist() == ["a"]

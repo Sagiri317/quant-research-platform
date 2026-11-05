@@ -1,5 +1,6 @@
 """Differentiable long-only allocation, evaluated by native share accounting."""
 
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +27,7 @@ from quant_research_platform.research.datasets.learning import (
     research_frame,
 )
 from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -136,7 +138,6 @@ def fit_cost_model(config):
         label=config["label"],
         availability=availability,
         cutoff=config["cutoff"],
-        columns=config["feature_columns"],
     )
     if len(frame) != len(source) or frame.empty:
         raise ValueError("cost_learning_complete_mature_panel_required")
@@ -161,8 +162,9 @@ def fit_cost_model(config):
         or pd.Timestamp(ends[-1, 0]) > pd.Timestamp(config["cutoff"])
     ):
         raise ValueError("cost_learning_nonoverlapping_consecutive_returns_required")
+    scaler = ModelMatrixScaler.fit(indexed[config["feature_columns"]], missing="impute")
     x = (
-        indexed[config["feature_columns"]]
+        scaler.transform(indexed[config["feature_columns"]])
         .to_numpy(dtype=np.float64)
         .reshape(len(times), len(assets), -1)
     )
@@ -173,8 +175,6 @@ def fit_cost_model(config):
     )
     if (y <= -1).any():
         raise ValueError("cost_learning_return_outside_domain")
-    mean, scale = x.mean(axis=(0, 1)), x.std(axis=(0, 1))
-    scale[scale == 0] = 1
     output = Path(config["output"])
     reject_if_exists(output)
     recorder = TrialRecorder(
@@ -188,9 +188,7 @@ def fit_cost_model(config):
         torch.manual_seed(config["seed"])
         device = get_device(config["device"])
         model = CostAwareAllocator(x.shape[-1], config["hidden_sizes"]).to(device)
-        features = torch.as_tensor(
-            (x - mean) / scale, dtype=torch.float32, device=device
-        )
+        features = torch.tensor(x, dtype=torch.float32, device=device)
         returns = torch.tensor(y, dtype=torch.float32, device=device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
         for _ in range(config["epochs"]):
@@ -211,8 +209,6 @@ def fit_cost_model(config):
             "kind": "cost_aware_allocator",
             "device": str(device),
             "config": config,
-            "mean": mean.tolist(),
-            "scale": scale.tolist(),
             "periods": len(times),
             "train_mean_net_return": float(net.mean()),
             "train_mean_turnover": float(turnover.mean()),
@@ -224,6 +220,7 @@ def fit_cost_model(config):
 
         def write(staging):
             torch.save(model.cpu().state_dict(), staging / "weights.pt")
+            (staging / "feature_scaler.pkl").write_bytes(pickle.dumps(scaler))
             atomic_write_json(staging / "model.json", facts)
 
         atomic_write_directory(output, write)
@@ -247,6 +244,8 @@ def backtest_cost_model(config):
     config = _strict_config(config, {"model", "episode", "output", "device"}, set())
     root = Path(config["model"])
     facts = parse_qrp_json_object((root / "model.json").read_bytes())
+    # Only load artifacts produced by trusted local training.
+    scaler = pickle.loads((root / "feature_scaler.pkl").read_bytes())
     episode = _episode(config["episode"])
     training = facts["config"]
     if (
@@ -278,7 +277,9 @@ def backtest_cost_model(config):
                 event = next(stream)
                 while True:
                     if isinstance(event, PolicyDecision):
-                        x = event.features.reindex(assets).to_numpy(dtype=float)
+                        x = scaler.transform(event.features.reindex(assets)).to_numpy(
+                            dtype=float
+                        )
                         if (
                             not np.isfinite(x).all()
                             or event.nav <= 0
@@ -292,8 +293,8 @@ def backtest_cost_model(config):
                         with torch.no_grad():
                             weights = (
                                 model(
-                                    torch.as_tensor(
-                                        (x - facts["mean"]) / facts["scale"],
+                                    torch.tensor(
+                                        x,
                                         dtype=torch.float32,
                                         device=device,
                                     ),

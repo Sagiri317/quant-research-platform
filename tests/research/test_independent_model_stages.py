@@ -359,8 +359,7 @@ def test_evaluation_masks_imputed_features_before_cross_section_transform(
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": list("abc"),
             "eligible": True,
-            "feature_x": [1.0, 0.0, 3.0],
-            "feature_observed_x": [1, 0, 1],
+            "feature_x": [1.0, np.nan, 3.0],
             "label": [1.0, 100.0, 3.0],
             "label_available_at": pd.Timestamp("2020-01-01"),
         }
@@ -368,7 +367,7 @@ def test_evaluation_masks_imputed_features_before_cross_section_transform(
     root = write_evaluation_input(
         tmp_path / "input",
         frame,
-        features=("feature_x", "feature_observed_x"),
+        features=("feature_x",),
         labels=("label",),
     )
     spec = EvaluationSpec(

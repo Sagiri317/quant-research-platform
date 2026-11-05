@@ -124,7 +124,7 @@ class SequencePredictor:
             )
         network.load_state_dict(self.state)
         network.to(device).eval()
-        columns = self.scaler.input_columns or self.scaler.columns
+        columns = self.scaler.columns
         deep = self.algorithm in DEEPLOB_ALGORITHMS
         classification = self.algorithm == "deeplob_classifier"
         length = self.parameters["sequence_length"]

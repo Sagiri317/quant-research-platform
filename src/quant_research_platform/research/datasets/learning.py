@@ -12,10 +12,6 @@ from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     strict_timestamp_series,
 )
-from quant_research_platform.research.features.transforms import (
-    feature_observation_columns,
-    mask_unobserved_features,
-)
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     materialize_dataset_session,
@@ -26,7 +22,6 @@ from quant_research_platform.storage.datasets.reading import (
 def research_frame(source, window, columns, *, label=None, context_columns=()):
     """Read a bounded panel and return its source session and maturity column.
 
-    Feature observation flags turn technical fills back into missing values.
     Labels and their availability clocks are read only when explicitly requested.
     """
     columns = tuple(columns)
@@ -47,7 +42,6 @@ def research_frame(source, window, columns, *, label=None, context_columns=()):
         "eligible",
         *columns,
         *context_columns,
-        *feature_observation_columns(columns, spec["column_roles"]),
     ]
     if "segment_id" in spec["column_roles"]:
         selected.append("segment_id")
@@ -60,7 +54,6 @@ def research_frame(source, window, columns, *, label=None, context_columns=()):
     frame = materialize_dataset_session(
         session.projected_view(tuple(dict.fromkeys(selected)))
     )
-    frame = mask_unobserved_features(frame, columns, spec["column_roles"])
     frame["timestamp"] = strict_timestamp_series(
         frame.timestamp, error="research_timestamp_invalid"
     )

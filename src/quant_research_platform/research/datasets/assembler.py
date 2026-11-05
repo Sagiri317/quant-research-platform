@@ -29,7 +29,6 @@ from quant_research_platform.markets.implementations.a_share.ids import MARKET_I
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
-    canonical_feature_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     a_share_eligibility,
@@ -784,7 +783,7 @@ def assemble(config: Mapping) -> Path:
         raise ValueError("assemble_feature_not_selected")
     if not factors and not reused_features:
         raise ValueError("research_factor_or_feature_columns_required")
-    # A selected feature and its declared companions remain one producer's facts.
+    # Each selected feature has exactly one producer.
     feature_producers = {}
     for column in tuple(reused_features):
         candidates = [
@@ -795,14 +794,7 @@ def assemble(config: Mapping) -> Path:
         if len(candidates) != 1:
             raise ValueError("duplicate_research_output_columns: " + column)
         name = candidates[0]
-        declared = actual_specs[name].required_columns
-        companions = (column, *canonical_feature_validity_columns((column,), declared))
-        for companion in companions:
-            if companion in feature_producers and feature_producers[companion] != name:
-                raise ValueError("duplicate_research_output_columns: " + companion)
-            feature_producers[companion] = name
-            if companion not in reused_features:
-                reused_features.append(companion)
+        feature_producers[column] = name
     feature_lineage = {}
     for name, session in sessions.items():
         columns = {
@@ -899,7 +891,6 @@ def assemble(config: Mapping) -> Path:
         "size_column",
         "center",
         "scale",
-        "impute_missing",
     }:
         raise ValueError("assemble_feature_transform_invalid")
     if config["market_id"] != "a_share" and (recipe is not None or options):
@@ -1096,8 +1087,6 @@ def assemble(config: Mapping) -> Path:
         for group in transform.output_groups:
             for factor in transform.source_columns:
                 suffix = ("pre_neutral_" if group == "pre_neutral" else "") + factor
-                for prefix in ("feature_missing_", "feature_observed_"):
-                    units[prefix + suffix] = "dimensionless"
                 source_unit = consumed_specs[producers[factor]].column_units.get(factor)
                 if transform.scale:
                     units["feature_" + suffix] = "dimensionless"
@@ -1161,7 +1150,6 @@ def assemble(config: Mapping) -> Path:
                             "size_column",
                             "center",
                             "scale",
-                            "impute_missing",
                         )
                     }
                     if transforms

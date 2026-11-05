@@ -1,4 +1,4 @@
-"""Normalize macro vintages without inventing historical publication timestamps."""
+"""Normalize macro vintages with explicit historical publication assumptions."""
 
 import io
 import json
@@ -13,6 +13,10 @@ import pandas as pd
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.sources.macro.catalog import SERIES
+from quant_research_platform.sources.macro.publication import (
+    estimate_initial_archive_times,
+    estimated_release_at,
+)
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -83,10 +87,10 @@ def _frame(name, values, dates, *, record, timezone, vintage=None, end_dates=Non
     output["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
     output["source_url"] = record["url"]
     if vintage is None:
-        output["timestamp"] = output["retrieved_at"]
+        output["timestamp"] = estimated_release_at(name, output.observation_date)
         output["vintage_date"] = pd.NaT
         output["realtime_end_date"] = pd.Series(pd.NA, index=output.index, dtype="str")
-        output["availability_basis"] = "retrieval_only"
+        output["availability_basis"] = "inferred_snapshot_release"
     else:
         output["vintage_date"] = pd.to_datetime(vintage)
         output["timestamp"] = date_end_available(output.vintage_date, timezone)
@@ -127,6 +131,28 @@ def _normalize_response(payload, names, record, *, incomplete=False):
     source = SERIES[names[0]].source
     if source == "alfred":
         return [normalize_alfred(payload, names[0], record)]
+    if source == "chinabond":
+        from quant_research_platform.sources.macro.chinabond import yield_table
+
+        data = yield_table(payload)
+        frames = []
+        for name in names:
+            curve = (
+                "中债中短期票据收益率曲线(AAA)"
+                if name == "cn_credit_aaa_3y"
+                else "中债国债收益率曲线"
+            )
+            selected = data.loc[data["曲线名称"].eq(curve)]
+            frames.append(
+                _frame(
+                    name,
+                    selected[name.rsplit("_", 1)[1].replace("y", "年")],
+                    selected["日期"],
+                    record=record,
+                    timezone="Asia/Shanghai",
+                )
+            )
+        return frames
     if source == "sf_fed":
         data = pd.read_csv(io.BytesIO(payload))
         # The publisher's chart declares basis points; current PCA weights are ex post.
@@ -154,6 +180,19 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             )
         ]
     document = json.loads(payload)
+    if source == "mofcom":
+        data = pd.DataFrame(document)
+        if data.empty:
+            return []
+        return [
+            _frame(
+                names[0],
+                data[SERIES[names[0]].code],
+                pd.to_datetime(data.date.astype(str), format="%Y%m"),
+                record=record,
+                timezone="Asia/Shanghai",
+            )
+        ]
     if source == "boj":
         items = document["RESULTSET"]
         if (
@@ -179,6 +218,9 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             raise ValueError("hkma_response_not_successful")
         data = pd.DataFrame(document["result"]["records"])
         date_column, timezone = "end_of_date", "Asia/Hong_Kong"
+    elif source == "cfets_shibor":
+        data = pd.DataFrame(document["records"])
+        date_column, timezone = "showDateCN", "Asia/Shanghai"
     else:
         data = pd.DataFrame(document["result"]["data"])
         date_column, timezone = "REPORT_DATE", "Asia/Shanghai"
@@ -211,7 +253,12 @@ def validate_observations(frame):
     if frame[list(KEY)].isna().any().any():
         raise ValueError("macro_observation_key_missing")
     if not frame.availability_basis.isin(
-        ("release_timestamp", "release_date_end", "archive_date_end", "retrieval_only")
+        (
+            "release_timestamp",
+            "release_date_end",
+            "archive_date_end",
+            "inferred_snapshot_release",
+        )
     ).all():
         raise ValueError("macro_availability_basis_invalid")
     for name, group in frame.groupby("series_id", sort=False):
@@ -286,6 +333,33 @@ def read_release_csv(path):
     return validate_observations(data)
 
 
+def resolve_source_conflicts(frame):
+    """Prefer official current API/release values over secondary snapshots.
+
+    Keep revisions within the selected source. Same-key upstream corrections use
+    the latest retrieval; source and retrieval facts remain on the retained row.
+    """
+    priority = frame.source_id.map(
+        {
+            "eastmoney": 0,
+            "hkma_historical_page": 1,
+            "hkma": 2,
+            "pbc_government_reprint": 2,
+        }
+    ).fillna(2)
+    frame = frame.loc[
+        priority.eq(
+            priority.groupby([frame.series_id, frame.observation_date]).transform("max")
+        )
+    ]
+    return (
+        frame.sort_values("retrieved_at", kind="stable")
+        .drop_duplicates(list(KEY), keep="last")
+        .sort_values(["timestamp", "series_id", "observation_date"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+
 @dataclass(frozen=True)
 class MacroImportResult:
     artifact_roots: dict[str, Path]
@@ -312,7 +386,11 @@ def materialize_interim_data(
         manifest = read_qrp_json_file(raw_root / "download.json")[1]
         for key, metadata in manifest["sources"].items():
             records = metadata["responses"]
-            if metadata["status"] != "downloaded" and metadata["source"] == "hkma":
+            if metadata["status"] != "downloaded" and metadata["source"] in {
+                "hkma",
+                "cfets_shibor",
+                "chinabond",
+            }:
                 records = [record for record in records if record["status_code"] == 200]
                 incomplete.extend(metadata["series_ids"])
             elif metadata["status"] != "downloaded":
@@ -335,16 +413,12 @@ def materialize_interim_data(
                 )
             if chunks:
                 data = pd.concat(chunks, ignore_index=True)
-                # A vintage spanning adjacent download batches appears in both files.
-                economic = [*KEY, "value", "unit", "frequency", "realtime_end_date"]
-                distinct = data.drop_duplicates(economic)
-                if distinct.duplicated(list(KEY)).any():
-                    raise ValueError("macro_conflicting_source_versions")
-                frames.append(distinct)
+                frames.append(data)
             sources[key] = metadata
     if not frames:
         raise ValueError("macro_no_observations")
     frame = validate_observations(pd.concat(frames, ignore_index=True))
+    frame = resolve_source_conflicts(estimate_initial_archive_times(frame))
     if start_date is not None:
         frame = frame.loc[frame.observation_date.ge(pd.Timestamp(start_date))]
     if end_date is not None:
@@ -383,7 +457,11 @@ def materialize_interim_data(
                 "skipped": skipped,
                 "incomplete": incomplete,
             },
-            "parameters": {"publication_date_convention": "next_local_midnight"},
+            "parameters": {
+                "publication_date_convention": "next_local_midnight",
+                "snapshot_availability": "buffered_historical_release_estimate",
+                "initial_archive_enrollment": "estimated_original_release",
+            },
             "inputs": {"raw_root": str(raw_root)},
         },
     )

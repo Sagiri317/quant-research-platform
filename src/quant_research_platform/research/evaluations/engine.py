@@ -36,11 +36,7 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    _industry_group_codes,
-    feature_observation_columns,
-    mask_unobserved_features,
-)
+from quant_research_platform.research.features.transforms import _industry_group_codes
 from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
@@ -315,7 +311,6 @@ def build_evaluation_result_from_frames(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-    declared_columns=None,
     response_diagnostics=None,
 ) -> EvaluationResult:
     state = _EvaluationStreamingState(
@@ -327,7 +322,6 @@ def build_evaluation_result_from_frames(
             spec=spec,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
-            declared_columns=declared_columns,
             summary_state=state,
             response_diagnostics=response_diagnostics,
         )
@@ -337,7 +331,6 @@ def build_evaluation_result_from_frames(
             spec=spec,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
-            declared_columns=declared_columns,
             summary_state=state,
         )
     )
@@ -402,7 +395,6 @@ def _iter_single_asset_time_series_output_chunks(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-    declared_columns=None,
     summary_state: _EvaluationStreamingState | None = None,
     response_diagnostics=None,
 ) -> Iterator[_EvaluationOutputChunk]:
@@ -427,7 +419,6 @@ def _iter_single_asset_time_series_output_chunks(
         spec=spec,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
-        declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
         for filtered, filter_metadata, ordinal_signals in work_frames:
@@ -592,7 +583,6 @@ def _iter_evaluation_output_chunks(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-    declared_columns=None,
     summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield bounded pairs and optionally consume them into research summaries."""
@@ -601,7 +591,6 @@ def _iter_evaluation_output_chunks(
         spec=spec,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
-        declared_columns=declared_columns,
     )
     with closing_iterator(work_frames):
         for filtered, filter_metadata, ordinal_signals in work_frames:
@@ -704,16 +693,10 @@ def _iter_evaluation_work_frames(
     spec: EvaluationSpec,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-    declared_columns=None,
 ) -> Iterator[tuple[pd.DataFrame, dict[str, object], pd.DataFrame | None]]:
     from quant_research_platform.research.filtering import apply_filter_mode
 
     label_columns = spec.label_columns
-    feature_columns = tuple(
-        signal.source_column
-        for signal in spec.signals
-        if signal.source_kind == "feature"
-    )
     required = {
         "timestamp",
         asset_column,
@@ -739,14 +722,7 @@ def _iter_evaluation_work_frames(
             missing = sorted(required.difference(frame.columns))
             if missing:
                 raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
-            schema = frame.columns if declared_columns is None else declared_columns
-            observation_columns = feature_observation_columns(feature_columns, schema)
             selected = [column for column in work_columns if column in frame.columns]
-            selected.extend(
-                column
-                for column in observation_columns
-                if column in frame and column not in selected
-            )
 
             projected = frame.loc[:, selected]
             filtered, filter_metadata = apply_filter_mode(
@@ -754,9 +730,8 @@ def _iter_evaluation_work_frames(
             )
             filter_metadata["timestamps"] = projected.timestamp
             filter_metadata["asset_ids"] = projected[asset_column]
-            observed = mask_unobserved_features(filtered, feature_columns, schema)
             normalized = normalize_signal_frame(
-                observed,
+                filtered,
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,
@@ -765,7 +740,7 @@ def _iter_evaluation_work_frames(
             yield (
                 normalized,
                 filter_metadata,
-                _ordinal_signal_frame(observed, spec, asset_column),
+                _ordinal_signal_frame(filtered, spec, asset_column),
             )
 
 
@@ -791,9 +766,7 @@ def _prepare_scoped_frame(raw, source, *, spec, cutoff):
     selected, metadata = apply_filter_mode(
         raw, mode=spec.filter_mode, metadata_key="filter_mode"
     )
-    selected = mask_unobserved_features(
-        selected, source["signal_columns"], source["declared"]["column_roles"]
-    ).copy()
+    selected = selected.copy()
     for column in source["signal_columns"]:
         selected[column] = selected[column].where(np.isfinite(selected[column]))
     for label, availability in source["availability"].items():

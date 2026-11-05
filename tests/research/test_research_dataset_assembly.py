@@ -989,7 +989,6 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
             "size_column": "log_total_market_cap",
             "center": True,
             "scale": True,
-            "impute_missing": True,
         },
     ]
 

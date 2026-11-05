@@ -277,9 +277,8 @@ def test_mad_preserves_complete_canonical_features_under_units_change(tmp_path):
     np.testing.assert_allclose(
         actual.feature_factor, scaled.feature_factor, rtol=1e-13, atol=1e-13
     )
-    pd.testing.assert_frame_equal(
-        actual[["feature_missing_factor", "feature_observed_factor"]],
-        scaled[["feature_missing_factor", "feature_observed_factor"]],
+    pd.testing.assert_series_equal(
+        actual.feature_factor.isna(), scaled.feature_factor.isna()
     )
     roles = dict.fromkeys(actual.columns, ColumnRole.CONTEXT)
     roles.update(

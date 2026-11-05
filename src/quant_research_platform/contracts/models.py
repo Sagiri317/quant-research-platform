@@ -563,7 +563,7 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
     if scaler is not None:
         if (
             type(scaler) is not dict
-            or set(scaler) - {"input_columns", "medians", "native_missing"}
+            or set(scaler) - {"medians", "native_missing"}
             != {
                 "columns",
                 "scaling",
@@ -572,20 +572,12 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
             }
             or type(scaler.get("scaling")) is not bool
             or scaler["scaling"] != metadata["training_scaling"]
-            or ("medians" in scaler) != ("input_columns" in scaler)
             or (
                 "native_missing" in scaler
                 and (scaler["native_missing"] is not True or "medians" in scaler)
             )
-            or (
-                "medians" in scaler
-                and (
-                    type(scaler["medians"]) is not list
-                    or type(scaler["input_columns"]) is not list
-                )
-            )
-            or scaler.get("input_columns", scaler["columns"])
-            != metadata["input_columns"]
+            or ("medians" in scaler and type(scaler["medians"]) is not list)
+            or scaler["columns"] != metadata["input_columns"]
             or (
                 "medians" in scaler
                 and (
@@ -594,9 +586,6 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
                         type(value) in {int, float} and np.isfinite(value)
                         for value in scaler["medians"]
                     )
-                    or scaler["columns"]
-                    != metadata["input_columns"]
-                    + [f"{column}__missing" for column in metadata["input_columns"]]
                 )
             )
             or type(scaler["weighted_mean"]) is not list

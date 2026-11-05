@@ -57,7 +57,7 @@ def test_train_only_missingness_roundtrip(tmp_path, algorithm):
         "linear_regression",
     }:
         assert scaler.medians == (5.0, 6.0)
-        assert scaler.transform(data[["x", "z"]]).shape == (6, 4)
+        assert scaler.transform(data[["x", "z"]]).shape == (6, 2)
     else:
         assert scaler.native_missing
         assert scaler.transform(data[["x", "z"]]).isna().sum().sum() == 2
@@ -183,24 +183,18 @@ def test_native_missing_training_column_roundtrips_without_imputation(
 
 
 @pytest.mark.parametrize("algorithm", ["linear_regression", "xgboost_regressor"])
-@pytest.mark.parametrize("technical_fill", [False, True])
+@pytest.mark.parametrize("features", [False, True])
 def test_all_original_training_inputs_missing_has_no_training_samples(
-    algorithm, technical_fill
+    algorithm, features
 ):
     data = frame().assign(x=np.nan, z=np.nan)
     model = spec(algorithm)
-    if technical_fill:
-        data = data.rename(columns={"x": "feature_x", "z": "feature_z"}).assign(
-            feature_x=0.0,
-            feature_z=0.0,
-            feature_observed_x=0.0,
-            feature_observed_z=0.0,
-            feature_missing_z=1.0,
-        )
+    if features:
+        data = data.rename(columns={"x": "feature_x", "z": "feature_z"})
         model = replace(
             model,
             input_factor_columns=(),
-            input_feature_columns=("feature_x", "feature_z", "feature_missing_z"),
+            input_feature_columns=("feature_x", "feature_z"),
         )
     with pytest.raises(ValueError, match="model_training_sample_empty"):
         fit_model(
@@ -208,7 +202,6 @@ def test_all_original_training_inputs_missing_has_no_training_samples(
             model,
             fit_windows=[{"start": "2024-01-01", "end": "2024-01-03"}],
             fit_cutoff="2024-01-03",
-            declared_columns=data.columns,
         )
 
 

@@ -5,9 +5,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.datasets import assembler
-from quant_research_platform.research.features.transforms import (
-    mask_unobserved_features,
-)
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
@@ -75,7 +72,7 @@ def test_projection_selects_unique_support_producer_without_order_preference(
             assembler.assemble(config)
         return
     actual = read_dataset(assembler.assemble(config))
-    assert actual.feature_observed_momentum_20d.eq(1).all()
+    assert actual.feature_momentum_20d.notna().all()
     config.update(
         inputs=dict(reversed(list(inputs.items()))),
         base_input_data_id="left",
@@ -132,16 +129,12 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     actual = read_dataset(reused)
     columns = [
         "feature_momentum_20d",
-        "feature_missing_momentum_20d",
-        "feature_observed_momentum_20d",
     ]
     pd.testing.assert_frame_equal(
         actual[columns], read_dataset(produced)[columns], check_exact=True
     )
-    assert actual.feature_observed_momentum_20d.tolist() == [1.0, 0.0, 1.0, 1.0]
-    assert mask_unobserved_features(
-        actual, ["feature_momentum_20d"], actual.columns
-    ).feature_momentum_20d.isna().tolist() == [False, True, False, False]
+    assert actual.feature_momentum_20d.notna().tolist() == [1.0, 0.0, 1.0, 1.0]
+    assert actual.feature_momentum_20d.isna().tolist() == [False, True, False, False]
     facts = inspect_dataset(reused)
     assert facts.spec["factor_columns"] == []
     assert facts.spec["feature_transforms"] == []
@@ -224,9 +217,8 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
         }
     )
     fitted, model_facts = load_model(model)
-    # The second row has no original observed model input; technical zero fill
-    # and its missingness flag do not turn it into a training observation.
-    assert actual.feature_observed_momentum_20d.eq(0).tolist() == [
+    # A row with no observed model input cannot enter training.
+    assert actual.feature_momentum_20d.isna().tolist() == [
         False,
         True,
         False,
@@ -334,8 +326,6 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
         assert spec["column_units"].get("feature_" + suffix) == (
             "dimensionless" if scale is not False else source_unit
         )
-        for prefix in ("feature_missing_", "feature_observed_"):
-            assert spec["column_units"][prefix + suffix] == "dimensionless"
         np.testing.assert_allclose(actual["feature_" + suffix], expected)
     if "raw" in groups:
         assert spec["column_units"].get("momentum_20d") == source_unit
@@ -383,16 +373,17 @@ def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, fe
     config = _config(tmp_path, source, feature_columns=[feature])
     config.pop("feature_recipe")
     if feature == "feature_momentum_20d":
-        with pytest.raises(ValueError, match="assemble_feature_output_conflict"):
-            assembler.assemble(config)
-        config["feature_recipe"] = None
         output = assembler.assemble(config)
         np.testing.assert_array_equal(read_dataset(output)[feature], frame[feature])
+        config["feature_recipe"] = "a_share_canonical"
+        config["output_root"] = str(tmp_path / "conflict")
+        with pytest.raises(ValueError, match="assemble_feature_output_conflict"):
+            assembler.assemble(config)
         return
     output = assembler.assemble(config)
     actual = read_dataset(output)
     np.testing.assert_array_equal(actual[feature], frame[feature])
-    assert actual.feature_observed_momentum_20d.eq(1).all()
+    assert actual.feature_momentum_20d.notna().all()
     assert (
         inspect_dataset(output).spec["feature_transforms"][0]["recipe_id"]
         == "a_share_canonical"

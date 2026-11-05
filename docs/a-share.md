@@ -27,7 +27,7 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 |---|---|---|
 | 数据与 PIT | CSMAR 市场事实、Choice 原生请求归档及事件版本适配、合法可用时点与修订传播 | 每项研究单独检查原始数据与历史修订的覆盖 |
 | 场景与因子 | 配置选择 pv_all、pv_nf_expectations、fusion_nf_core、fusion_nf_expectations；价量库50项与3项路径机制，另有共享 beta/残差波动率、3项行业风格残差因子、Fundamental19、预期4与3项预期机制，保留 PV25/CORE6 选择 | 按各因子所需来源确定可计算范围 |
-| 特征与标签 | 横截面资格、MAD/中性化/zscore、缺失指示、成熟标签、20日模型目标与辅助期限 | 缺少必要事实的真实样本仍不可用 |
+| 特征与标签 | 横截面资格、MAD/中性化/zscore、空值、成熟标签、20日模型目标与辅助期限 | 缺少必要事实的真实样本仍不可用 |
 | 模型与预测 | OLS、LASSO、XGBoost、LSTM、Transformer，共享可配置季度扩展训练、预测和评价 | 实际候选和窗口随原生产物保存 |
 | 组合与推断 | 配置简单分位数组合或 CSI500/CSI1000 增强，选择日/周/月再平衡；复用自融资账本、成本/风险/容量/归因及预注册统计 | 实际交易受现金、交易状态和流动性约束 |
 | 报告与展示 | 独立操作、显式数值产物、CLI/API 和只读研究图片 | 图表和报告使用实际研究结果 |
@@ -948,7 +948,7 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 有配方时默认 `["raw", "processed"]`，无配方时默认 `["raw"]`。
 每组覆盖本次显式选择的全部 `factor_columns`，不提供逐因子处理开关。
 `processed` 列名为 `feature_<factor>`；`pre_neutral` 为 `feature_pre_neutral_<factor>`，
-各自有对应 `feature_missing_…` 与 `feature_observed_…` 伴随列。
+两组都直接保留空值，不生成缺失或观测伴随列。
 只输出处理组时，原始因子只作为计算依赖读取，不混入输出因子列；上游原始产物不变。
 组共用裁剪结果，各列/组仍独立决定有效域；只选择 `pre_neutral` 不要求行业/规模上下文。
 原生配方保存 `output_groups`，操作参数保存 `feature_groups` 与实际 `input_columns`；
@@ -961,7 +961,7 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 
 `assemble.feature_recipe=null` 保留原始因子；`label_columns=[]` 可生成仅供预测的无标签数据集。
 选用配方后，`feature_transform` 可分别设置 `clip`、`industry_neutralize`、`size_neutralize`、
-`center`、`scale`、`impute_missing`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
+`center`、`scale`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
 上述其余字段为布尔值。`size_column` 默认 `log_total_market_cap`，也可显式选择
 `log_float_market_cap`；仅启用规模中性化且处理其他因子时依赖所选规模列。
 配置及原生特征元数据保存实际 `size_column`。
@@ -1046,33 +1046,11 @@ zscore 之后不再裁剪。
 
 #### 5.10.4 缺失语义
 
-原始经济因子的缺失继续保留 NaN。
+原始经济因子及规范特征都用 NULL/NaN 表示缺失；真实零保持零。中性化、缩放或上下文不足只使依赖它的特征为空，不生成伴随标记，也不在特征层补零。
 
-模型矩阵中的普通输入缺失：
+普通模型可使用部分已知的输入；每个训练或预测样本须至少有一个实际输入。树模型保留原生 NaN，线性和普通序列模型通过公共 `ModelMatrixScaler` 在合法训练域拟合中位数，预测与解释冻结沿用，不增加缺失指示列。某训练列全空时无法估计中位数，插补模型明确失败。标签不插补，DeepLOB 仍要求完整有效盘口。
 
-```text
-feature value = 0  # 模型矩阵中缺失特征的填充值
-feature_missing = 1
-observed = 0
-```
-
-已观测有限值：
-
-```text
-feature_missing = 0
-observed = 1
-```
-
-结构/上下文前提失败时，该特征/行必须明确不可用；中性化失败不得通过 `.fillna(0)` 进入模型。
-三列 (feature, feature_missing, feature_observed) 的编码：已观察有效为(z,0,1)，
-结构不可用或不符合研究资格为(NULL,0,0)。feature_missing=1 表示变换可定义、必需上下文有效，
-但原始因子普通缺失。此时，
-`impute_missing=true` 输出(0,1,0)，关闭后保留(NULL,1,0)。这里的零是技术填充值，
-不承诺在关闭中心化或中性化后等于截面均值；结构无效和标签缺失始终不插补。
-训练、验证、OOS及预测使用方的必需主键域，共用该模型实际输入的唯一有效性规则；即使只选missing/observed
-标记，也必须检查完整声明结构定义中对应的来源 feature，不能因为标记为有限数而绕过。
-该关系只适用于已声明的规范输出，不凭普通外部列名前缀建立依赖。模型按实际缺失策略处理普通缺值：原生 NaN 或训练期中位数插补。样本须满足每个实际使用规范列族的 missing 或 observed 为1，
-且至少一个实际原始输入已观察；raw、pre-neutral 与 processed 可混用，未使用列族不影响资格。原始输入和转换规格保留可复核原因。
+raw、pre-neutral 和 processed 可混用，未使用的列不影响资格。原始输入、转换规格及必要诊断保留原因；数据集与统计始终使用未插补值。
 
 统计和组合直接使用 PRED 的真实键与分数，不重新打开模型目录或历史 X，不重复模型输入资格判断。
 仍对齐当前上下文键、研究资格及因果时点；未提供预测的资产信号为 NULL，持仓和 benchmark 会计全集不随之裁剪。
@@ -1178,7 +1156,6 @@ timestamp
 eligible
 原始经济因子
 规范特征
-feature_missing 指示变量
 经济前瞻收益
 标签 available_at 字段
 model_target
@@ -1228,7 +1205,7 @@ can_enter / can_exit 未来执行列
 
 单次 fit 只训练一个明确模型，不自动展开参数搜索。候选输入列、标签、种子、权重及窗口随原生模型保存。
 `training_scaling` 在线性和序列模型默认开启，XGBoost 默认关闭。缩放器只用合法训练样本估计，预测冻结沿用。
-需要插补的模型使用训练中位数和缺失标志；XGBoost 保留原生缺失。每行至少有一个真实输入，标签不插补。
+需要插补的模型使用训练中位数，不附加缺失标志；XGBoost 保留原生缺失。每行至少有一个真实输入，标签不插补。
 训练零方差列的 scale=1，预测新值继续按冻结均值和尺度变换。
 
 LSTM 和 Transformer 按资产构造截至当前时点的观察序列，`sequence_length` 表示观察条数，不是日历天数。

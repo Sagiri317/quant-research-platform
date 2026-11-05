@@ -1242,7 +1242,6 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
                 "size_column": "log_total_market_cap",
                 "center": True,
                 "scale": True,
-                "impute_missing": True,
             }
         ]
         identities.append(canonical_json_hash(payload))

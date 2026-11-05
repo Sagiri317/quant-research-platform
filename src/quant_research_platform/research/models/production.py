@@ -49,7 +49,6 @@ def fit_model(
     fit_cutoff,
     candidate_parameters=None,
     label_availability_column=None,
-    declared_columns=(),
     trading_calendar=None,
 ):
     """Fit one candidate on its legal observed domain."""
@@ -83,7 +82,6 @@ def fit_model(
         spec,
         fitting_cutoff=cutoff,
         availability_column=label_availability_column,
-        declared_columns=declared_columns,
         trading_calendar=trading_calendar,
     )
     if prepared.training.empty:
@@ -236,7 +234,6 @@ def fit(config: Mapping) -> Path:
             label_column=spec.target_column,
             sample_filter_mode=spec.sample_filter_mode,
             availability_column=availability,
-            declared_columns=declared["column_roles"],
         )
         columns = tuple(
             dict.fromkeys((*columns, *sequence_context_columns(spec.model_algorithm)))
@@ -312,7 +309,6 @@ def fit(config: Mapping) -> Path:
             fit_cutoff=cutoff,
             candidate_parameters=config.get("candidate_parameters"),
             label_availability_column=availability,
-            declared_columns=declared["column_roles"],
             trading_calendar=calendar,
         )
         from quant_research_platform.research.models.persisted import save_model

@@ -19,7 +19,6 @@ class ModelMatrixScaler:
     columns: tuple[str, ...]
     mean_: tuple[float, ...]
     scale_: tuple[float, ...]
-    input_columns: tuple[str, ...] = ()
     medians: tuple[float, ...] = ()
     native_missing: bool = False
     scaling: bool = True
@@ -40,7 +39,7 @@ class ModelMatrixScaler:
         if type(scaling) is not bool:
             raise ValueError("model_training_scaling_invalid")
         columns = tuple(str(column) for column in frame.columns)
-        input_columns, medians = (), ()
+        medians = ()
         if frame.empty or not columns or frame.columns.has_duplicates:
             raise ValueError("model_scaler_columns_invalid")
         if missing is not None:
@@ -80,16 +79,9 @@ class ModelMatrixScaler:
             if np.isnan(values).all(axis=0).any():
                 raise ValueError("model_training_feature_all_missing")
             medians = tuple(float(value) for value in np.nanmedian(values, axis=0))
-            if set(columns) & {f"{column}__missing" for column in columns}:
-                raise ValueError("model_missing_indicator_name_collision")
-            expanded = pd.DataFrame(values, index=frame.index, columns=columns).fillna(
+            frame = pd.DataFrame(values, index=frame.index, columns=columns).fillna(
                 dict(zip(columns, medians, strict=True))
             )
-            for column in columns:
-                expanded[f"{column}__missing"] = frame[column].isna().astype(float)
-            input_columns = columns
-            frame = expanded
-            columns = tuple(expanded.columns)
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))
         if not scaling:
@@ -97,7 +89,6 @@ class ModelMatrixScaler:
                 columns,
                 (0.0,) * len(columns),
                 (1.0,) * len(columns),
-                input_columns=input_columns,
                 medians=medians,
                 scaling=False,
             )
@@ -116,14 +107,11 @@ class ModelMatrixScaler:
             columns=columns,
             mean_=tuple(float(value) for value in mean),
             scale_=tuple(float(value) for value in scale),
-            input_columns=input_columns,
             medians=medians,
         )
 
     def input_matrix(self, frame: pd.DataFrame) -> pd.DataFrame:
-        if tuple(str(column) for column in frame.columns) != (
-            self.input_columns or self.columns
-        ):
+        if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
         if not self.medians:
             return frame
@@ -134,12 +122,10 @@ class ModelMatrixScaler:
                     error=f"invalid_model_scaler_column: {column}",
                     allow_null=True,
                 ).to_numpy(dtype="float64")
-                for column in self.input_columns
+                for column in self.columns
             },
             index=frame.index,
-        ).fillna(dict(zip(self.input_columns, self.medians, strict=True)))
-        for column in self.input_columns:
-            result[f"{column}__missing"] = frame[column].isna().astype(float)
+        ).fillna(dict(zip(self.columns, self.medians, strict=True)))
         return result
 
     def transform(self, frame: pd.DataFrame) -> pd.DataFrame:
@@ -171,14 +157,7 @@ class ModelMatrixScaler:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            **(
-                {
-                    "input_columns": list(self.input_columns),
-                    "medians": list(self.medians),
-                }
-                if self.medians
-                else {}
-            ),
+            **({"medians": list(self.medians)} if self.medians else {}),
             **({"native_missing": True} if self.native_missing else {}),
             "columns": list(self.columns),
             "scaling": self.scaling,

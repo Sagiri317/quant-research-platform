@@ -1,6 +1,6 @@
 """Expose native trading accounts as Gymnasium decision environments.
 
-Observations contain current features, missingness, holdings, cash, and time.
+Observations contain current features, holdings, cash, and time.
 Actions request inventory or portfolio targets; fills, fees, and tradeability
 remain the account engine's responsibility. Rewards use its realized ledger.
 """
@@ -25,7 +25,7 @@ class TradingEnv(gym.Env):
 
     metadata = {"render_modes": []}
 
-    def __init__(self, episodes, *, on_batch=None):
+    def __init__(self, episodes, *, on_batch=None, feature_scaler=None):
         self.episodes = [_episode(value) for value in episodes]
         if not self.episodes:
             raise ValueError("policy_episodes_required")
@@ -53,10 +53,11 @@ class TradingEnv(gym.Env):
         self.observation_space = spaces.Box(
             -np.inf,
             np.inf,
-            (len(self.assets) * (2 * len(self.columns) + 2) + 3,),
+            (len(self.assets) * (len(self.columns) + 2) + 3,),
             dtype=np.float32,
         )
         self.on_batch = on_batch
+        self.feature_scaler = feature_scaler
         self._context = None
         self.done = True
 
@@ -135,12 +136,12 @@ class TradingEnv(gym.Env):
         if self.done:
             return np.zeros(self.observation_space.shape, dtype=np.float32)
         decision = self.decision
-        values = decision.features.reindex(self.assets)[self.columns].to_numpy(
-            dtype=np.float64
-        )
+        features = decision.features.reindex(self.assets)[self.columns]
+        if self.feature_scaler is not None:
+            features = self.feature_scaler.transform(features)
+        values = features.to_numpy(dtype=np.float64)
         if np.isinf(values).any():
             raise ValueError("policy_feature_infinite")
-        available = np.isfinite(values)
         denominator = max(abs(decision.nav), 1.0)
         holding = decision.quantities.reindex(
             self.assets, fill_value=0
@@ -170,14 +171,13 @@ class TradingEnv(gym.Env):
         )
         result = np.concatenate(
             (
-                np.where(available, values, 0).ravel(),
-                available.ravel(),
+                values.ravel(),
                 holding.fillna(0) / denominator,
                 sellable.fillna(0) / denominator,
                 [decision.cash / denominator, 1 - elapsed, remaining],
             )
         ).astype(np.float32)
-        if not np.isfinite(result).all():
+        if np.isinf(result).any() or not np.isfinite(result[values.size :]).all():
             raise ValueError("policy_observation_nonfinite")
         return result
 

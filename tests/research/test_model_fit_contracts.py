@@ -183,9 +183,7 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
             for key, value in reference.metadata.items()
             if key not in numerical
         }
-        assert result.metadata["scaler"]["input_columns"] == list(
-            specs[0].input_columns
-        )
+        assert result.metadata["scaler"]["columns"] == list(specs[0].input_columns)
         assert set(result.metadata["feature_importance"]) == set(
             reference.metadata["feature_importance"]
         )

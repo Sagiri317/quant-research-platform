@@ -209,15 +209,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     specs: list[ResearchDatasetSpec] = []
     for scenario_id in SCENARIO_IDS:
         factor_columns = dataset_factor_columns(scenario_id)
-        feature_columns = tuple(
-            feature
-            for factor in factor_columns
-            for feature in (
-                f"feature_{factor}",
-                f"feature_missing_{factor}",
-                f"feature_observed_{factor}",
-            )
-        )
+        feature_columns = tuple(f"feature_{factor}" for factor in factor_columns)
         labels = (*forward_label_columns(), MODEL_TARGET_COLUMN)
         context = (
             *forward_label_available_columns(),

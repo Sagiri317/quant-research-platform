@@ -405,10 +405,6 @@ def backtest_a_share(
             dict.fromkeys((*dataset_business_columns, candidate.size_cap_column))
         )
     if decision_columns is not None:
-        from quant_research_platform.research.features.transforms import (
-            feature_observation_columns,
-        )
-
         if any(
             declared_columns.get(column) not in {"feature", "factor"}
             for column in decision_columns
@@ -419,7 +415,6 @@ def backtest_a_share(
                 (
                     *dataset_business_columns,
                     *decision_columns,
-                    *feature_observation_columns(decision_columns, declared_columns),
                 )
             )
         )
@@ -857,13 +852,7 @@ def backtest_a_share(
             if decision_columns is not None and (
                 not explicit_decisions or not dataset.empty
             ):
-                from quant_research_platform.research.features.transforms import (
-                    mask_unobserved_features,
-                )
-
-                current = mask_unobserved_features(
-                    dataset, decision_columns, declared_columns
-                ).set_index("asset_id")
+                current = dataset.set_index("asset_id")
                 marks = view.valuation.set_index("asset_id").close
                 decision_assets = current.index.union(held_units.index)
                 target_override = yield PolicyDecision(

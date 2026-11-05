@@ -13,16 +13,18 @@
 - `vintage_date`、`realtime_end_date` 保留归档修订区间，另存 `retrieved_at`、`source_timezone`、来源和原始单位。
 - `availability_basis=release_timestamp` 使用带时区的真实发布时刻。
 - 只有发布日期时，`release_date_end` 使用来源当地下一午夜作为保守可用上界，处理夏令时；不伪称知道准确发布时间。
-- ALFRED 的 `archive_date_end` 同样使用版本日期的 America/Chicago 下一午夜。归档首次收录以前的历史值，不倒填成当时可见。
-- 无历史版本证据的当前快照使用 `retrieval_only`，只自本次获取时可用。较早的观测日期不意味着可以用于较早回测。
+- ALFRED 的 `archive_date_end` 同样使用版本日期的 America/Chicago 下一午夜。后续修订按归档顺序保留；最早版本早于归档收录的历史采用下述显式推断。
+- 无历史版本证据的当前快照及延迟归档的首个版本使用 `inferred_snapshot_release`：按观测期与略保守的发布规则推断历史可用时刻，`published_at` 仍留空。获取日期仅为来源事实，不再作为这类历史研究的门槛。
 
-[ALFRED 实时区间下载](https://alfred.stlouisfed.org/help/downloaddata)保留初值及修订。一个查询跨多个下载批次时，相同版本只保留一份；同键冲突值直接失败。历史缺失值不补零，修订也不会改写已过去决策的输入。
+[ALFRED 实时区间下载](https://alfred.stlouisfed.org/help/downloaddata)保留初值及修订。一个查询跨多个下载批次时，相同版本只保留一份；同键上游更正取最近获取版本；跨来源逐序列、逐观测期选择较可信来源。HKMA 当前官方结构化 API 优先旧页面，央行政府转载原公告优先东方财富快照，其他归档修订全部保留。历史缺失值不补零，修订也不会改写已过去决策的输入。
 
-HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山联储政策冲击的当前下载均不提供本接口已核实的历史版本链，因此按 `retrieval_only` 导入。BIS 信贷单位为百万美元，BOJ 为亿日元；美国 ON RRP 为十亿美元，Fed 资产与 TGA 为百万美元。
+HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山联储政策冲击的当前下载均不提供本接口已核实的历史版本链，因此按 `inferred_snapshot_release` 导入。BIS 信贷单位为百万美元，BOJ 为亿日元；美国 ON RRP 为十亿美元，Fed 资产与 TGA 为百万美元。
 
-[旧金山联储政策冲击](https://www.frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises/)采用官方图表 CSV 的 `Surprise`，单位为基点。它是公告附近期货变化的主成分，包含事后估计权重；不能把下载到的最新版当成公告当时已冻结的交易信号。工作簿和图表可能属于不同数值版本，不自动拼接或替换。
+[旧金山联储政策冲击](https://www.frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises/)采用官方图表 CSV 的 `Surprise`，单位为基点。它是公告附近期货变化的主成分，包含事后估计权重；本地研究按用户认可的近似，在事件日收盘后使用当前快照；这不证明 PCA 权重或该数值当时已经冻结。工作簿和图表可能属于不同数值版本，不自动拼接或替换。
 
-官方接口的覆盖并不统一。SOFR、IORB 有各自起始日；IOER 已终止。新旧美元指数保持独立；信用利差受发布方当前历史下载范围限制。中国资金利率、公开市场操作、社融和债券曲线可从有授权的官方或供应商发布文件接入，不能用其他利率代理或补零冒充缺失指标。下载及规范表元数据记录实际覆盖。
+上述推断是已声明的研究假设，不能消除当前修订快照或事后估计造成的潜在前视偏差。它不改变真实数值，不伪造历史版本。时间规则由 `sources/macro/publication.py` 统一负责：H.4.1 下一工作日17:30、H.10 下一周一17:15、美国隔夜利率下一工作日、M2次月第四个公布周收盘；ECB周表缓冲到下一周五18:00；中国月报次月20日18:00、香港当日末、日本月末资产次月10日、当座账户次月20日、BIS季度首日后第7个月末。已取得的逐期公告/目录可替换通用估计，但当前修订值配历史发布日期仍标推断。
+
+官方接口的覆盖并不统一。SOFR、IORB 有各自起始日；IOER 已终止。新旧美元指数保持独立；信用利差受发布方当前历史下载范围限制。Shibor 使用 CFETS 官方历史接口，国债与 AAA 中短期票据使用中债官方日终曲线，均按来源的一年查询上限分年请求；社融增量使用商务部转载的央行数据。公开市场操作、社融存量等仍可通过明确的发布文件接入，不能用其他利率代理或补零冒充缺失指标。下载及规范表元数据记录实际覆盖，独立年度请求的成功响应可保留为不完整来源。
 
 精确发布文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at` 或 `release_date` 其中一列。`published_at` 必须显式含 UTC 偏移；每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
 

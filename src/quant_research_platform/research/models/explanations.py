@@ -44,9 +44,6 @@ from quant_research_platform.contracts.time import (
     prediction_window_mask,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    model_input_validity_columns,
-)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import prediction_callable
@@ -139,10 +136,6 @@ def _prediction_frames(session, result, window, *, extra=()):
                 "asset_id",
                 *metadata["input_columns"],
                 *sequence_context_columns(metadata["model_algorithm"]),
-                *model_input_validity_columns(
-                    tuple(metadata["input_columns"]),
-                    session.spec["column_roles"],
-                ),
                 *required_filter_columns(metadata["sample_filter_mode"]),
                 *extra,
             )
@@ -157,7 +150,6 @@ def _prediction_frames(session, result, window, *, extra=()):
                 frame,
                 metadata,
                 window,
-                declared_columns=session.spec["column_roles"],
                 include_context=metadata["model_algorithm"] in SEQUENCE_ALGORITHMS,
             )
             for _, block in usable.groupby("timestamp", sort=True):
@@ -439,11 +431,6 @@ def _attributions(result, context, indices, method, background, output_space):
     else:
         raise ValueError("explanation_method_invalid")
     contributions = np.asarray(contributions, dtype="float64")
-    if getattr(getattr(predictor, "scaler", None), "medians", ()):
-        contributions = (
-            contributions[:, : len(columns)] + contributions[:, len(columns) :]
-        )
-        method_facts["missing_indicators"] = "aggregated_with_original_feature"
     base = np.broadcast_to(np.asarray(base, dtype="float64"), (len(selected),)).copy()
     if contributions.shape != (len(selected), len(columns)):
         raise ValueError("explanation_contributions_invalid")
@@ -495,23 +482,8 @@ def _native_importance(result, facts):
         coefficients, _ = _linear_parameters(predictor)
         kind, unit = "absolute_standardized_coefficient", facts["label_unit"]
         if not predictor.scaler.scaling:
-            kind = "absolute_raw_input_coefficient_excluding_missing_indicator"
-            signed = dict(
-                zip(
-                    result.metadata["input_columns"],
-                    coefficients[: len(result.metadata["input_columns"])],
-                    strict=True,
-                )
-            )
-        elif predictor.scaler.medians:
-            # Value and missingness are distinct standardized coordinates. Their
-            # absolute magnitudes can be grouped, but their signs cannot describe
-            # one feature-effect direction (unlike realized row contributions).
-            kind = "sum_absolute_standardized_coefficients_with_missing_indicator"
-        else:
-            signed = dict(
-                zip(result.metadata["input_columns"], coefficients, strict=True)
-            )
+            kind = "absolute_raw_input_coefficient"
+        signed = dict(zip(result.metadata["input_columns"], coefficients, strict=True))
     else:
         kind = "xgboost_" + (predictor.estimator.importance_type or "gain")
         unit = "normalized_native_importance"

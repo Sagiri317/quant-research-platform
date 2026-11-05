@@ -2451,13 +2451,11 @@ def test_feature_missing_held_asset_keeps_saved_prediction(
 ):
     frames, fee_frame, output_window = _inputs()
     frames["dataset"]["feature_x"] = 1.0
-    frames["dataset"]["feature_missing_x"] = 0.0
     second = pd.Timestamp(output_window.start) + pd.offsets.BDay(1)
     invalid = frames["dataset"].asset_id.eq("b") & frames["dataset"].timestamp.ge(
         second
     )
     frames["dataset"].loc[invalid, "feature_x"] = np.nan
-    frames["dataset"].loc[invalid, "feature_missing_x"] = 1.0
     exit_rows = frames["execution"].asset_id.eq("b") & frames["execution"].timestamp.ge(
         second
     )
