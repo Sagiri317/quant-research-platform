@@ -66,19 +66,21 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 高频还允许原生盘口当前字段，不开放任意 context 列。上游仍须正确声明特征的可用时点；
 列角色本身不能证明外部自制数据没有前视。
 
-日频动作在当日决策之后进入原有下一会话成交；高频动作只在严格后续报价生效，
-保留延迟、盘口容量、买卖单位、费用、T+1、现金和权益处理。报价主动成交是研究模拟，
-不模拟真实排队位置，也不保证母单完成。日频策略目标与 benchmark-enhanced 优化器
+日频动作在当日决策之后进入原有下一会话成交；高频动作在严格后续报价受理，
+保留延迟、盘口容量、买卖单位、费用、T+1、现金和权益处理。默认主动成交；显式提供
+`passive` 与 `trades` 时使用[被动委托模型](a-share-hft.md#被动委托信号与执行基准)，按队列假设等待后续成交。
+两种执行方式均不保证母单完成。日频策略目标与 benchmark-enhanced 优化器
 是两个独立决策入口，不能同时指定。
 
 训练先遍历有界 episode 的真实决策特征，以公共 `ModelMatrixScaler` 拟合中位数。
 `backtest-policy` 冻结读取 `policy.zip`、`feature_scaler.pkl`、`normalization.pkl` 与 `policy.json`，
 评价窗口必须晚于拟合截止，期间不更新插补或归一化。只加载可信本地模型产物。
-基线可选：执行任务的 `immediate`、`twap`、`vwap`，库存的 `hold`，组合的
+基线可选：执行任务的 `immediate`、`twap`、`vwap`、`almgren_chriss`、`signal_ac`，库存的 `hold`，组合的
 `hold`、`equal_weight`。TWAP/VWAP 给出截至当前时刻的累计目标，实际成交仍依赖后续报价。
 VWAP 需预先声明 `volume_curve` 的 `as_of`、`fractions`、`cumulative_volume`；
 两条曲线从 0 到 1，成交量累计比例单调，`as_of` 必须早于 episode。
 末尾不会为了完成率虚构成交；应同时比较短缺、费用、完成率与净值。
+AC 参数、公式和信号调整的近似边界见上述高频文档。
 
 [执行示例](../configs/research-learning/train-policy-execution.json)、
 [库存示例](../configs/research-learning/train-policy-inventory.json)和

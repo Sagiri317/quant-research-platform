@@ -133,7 +133,6 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     pd.testing.assert_frame_equal(
         actual[columns], read_dataset(produced)[columns], check_exact=True
     )
-    assert actual.feature_momentum_20d.notna().tolist() == [1.0, 0.0, 1.0, 1.0]
     assert actual.feature_momentum_20d.isna().tolist() == [False, True, False, False]
     facts = inspect_dataset(reused)
     assert facts.spec["factor_columns"] == []

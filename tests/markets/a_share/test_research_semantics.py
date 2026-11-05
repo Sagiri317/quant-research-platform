@@ -138,7 +138,6 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
     result = a_share_feature_pipeline(frame, factor_columns=("factor",))
 
     assert result["feature_factor"].isna().all()
-    assert result.feature_factor.isna().all()
 
 
 def test_missing_factor_in_other_industry_does_not_change_valid_neutralization():
