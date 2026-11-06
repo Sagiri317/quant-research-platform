@@ -103,11 +103,14 @@ class PassiveOrders:
         participation,
         *,
         face_value_per_share=None,
+        instrument_types=None,
     ):
         self.config = config
         self.minimum_commission = assumptions.minimum_commission
         self.participation = participation
-        markets, minimum, increment, maximum = stock_order_limits(market_types, day)
+        markets, minimum, increment, maximum = stock_order_limits(
+            market_types, day, instrument_types
+        )
         self.limits = dict(
             zip(
                 market_types.index,

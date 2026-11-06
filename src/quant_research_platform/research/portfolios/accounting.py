@@ -802,7 +802,13 @@ def execute_stock_target(
     markets = np.full(len(frame), None, dtype=object)
     minimum, increment, maximum = (np.full(len(frame), np.nan) for _ in range(3))
     markets[eligible], minimum[eligible], increment[eligible], maximum[eligible] = (
-        stock_order_limits(frame.loc[eligible, "market_type"], execution_date)
+        stock_order_limits(
+            frame.loc[eligible, "market_type"],
+            execution_date,
+            frame.loc[eligible, "instrument_type"]
+            if "instrument_type" in frame
+            else None,
+        )
     )
     market_masks = {market: markets == market for market in set(markets[eligible])}
     prepared = {

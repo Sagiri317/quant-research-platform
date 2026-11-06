@@ -257,7 +257,14 @@ def _parse_rate(value: str) -> float:
 
 
 def _canonical_market(value: str) -> str:
-    values = {"沪深": "a_share", "沪市": "shanghai", "深市": "shenzhen"}
+    values = {
+        "沪深": "a_share",
+        "沪市": "shanghai",
+        "深市": "shenzhen",
+        "沪深ETF": "etf",
+        "沪市ETF": "shanghai_etf",
+        "深市ETF": "shenzhen_etf",
+    }
     try:
         return values[value]
     except KeyError as exc:

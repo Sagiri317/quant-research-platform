@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.portfolios import (
+    A_SHARE_INSTRUMENT_TYPES,
     ExecutionAssumptions,
     TradeCostComponents,
     _quantity_equal,
@@ -24,9 +25,15 @@ from quant_research_platform.contracts.validation import (
 
 _CHARGE_CODES = frozenset({"BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE"})
 _ALL_FEE_CODES = _CHARGE_CODES | frozenset({"EXCHANGE_HANDLING_FEE", "REGULATORY_FEE"})
-_RULE_MARKETS = frozenset({"a_share", "shanghai", "shenzhen"})
+_MARKET_GROUPS = {
+    "a_share": ("shanghai", "shenzhen"),
+    "etf": ("shanghai_etf", "shenzhen_etf"),
+}
+_RUNTIME_MARKETS = frozenset(
+    market for group in _MARKET_GROUPS.values() for market in group
+)
+_RULE_MARKETS = _RUNTIME_MARKETS | _MARKET_GROUPS.keys()
 EXECUTION_LOOKAHEAD_SESSIONS = 1
-_RUNTIME_MARKETS = frozenset({"shanghai", "shenzhen"})
 _RUNTIME_SIDES = frozenset({"buy", "sell"})
 _BASES = frozenset({"amount", "face_value"})
 MARKET_TYPE_TO_NAME = MappingProxyType(
@@ -34,12 +41,22 @@ MARKET_TYPE_TO_NAME = MappingProxyType(
 )
 
 
-def stock_order_limits(market_types: pd.Series, execution_date: date):
-    """Return limit-order minimum, increment and maximum in shares."""
+def stock_order_limits(
+    market_types: pd.Series, execution_date: date, instrument_types=None
+):
+    """Return fee market and limit-order sizes for cash stocks and ETFs."""
     market_types = strict_integer_series(
         market_types, error="a_share_market_type_invalid"
     )
     markets = market_types.map(market_name_for_type)
+    if instrument_types is not None:
+        kinds = instrument_types.reindex(market_types.index)
+        if not kinds.isin(A_SHARE_INSTRUMENT_TYPES).all():
+            raise ValueError("a_share_instrument_type_invalid")
+        etf = kinds.ne("stock")
+        if (etf & ~market_types.isin((1, 4))).any():
+            raise ValueError("a_share_etf_market_type_invalid")
+        markets = markets.where(~etf, markets + "_etf")
     star = market_types.eq(32).to_numpy()
     growth = market_types.eq(16).to_numpy() & (execution_date >= date(2020, 8, 24))
     return (
@@ -488,7 +505,7 @@ def _validate_fee_intervals(rules: tuple[FeeRule, ...]) -> None:
     for rule in rules:
         if not rule.included_in_ledger:
             continue
-        markets = _RUNTIME_MARKETS if rule.market == "a_share" else (rule.market,)
+        markets = _MARKET_GROUPS.get(rule.market, (rule.market,))
         for market in markets:
             grouped.setdefault((rule.fee_code, market, rule.side), []).append(rule)
     for values in grouped.values():
@@ -500,7 +517,7 @@ def _validate_fee_intervals(rules: tuple[FeeRule, ...]) -> None:
 
 def _market_matches(rule_market: str, requested_market: str) -> bool:
     return rule_market == requested_market or (
-        rule_market == "a_share" and requested_market in _RUNTIME_MARKETS
+        requested_market in _MARKET_GROUPS.get(rule_market, ())
     )
 
 

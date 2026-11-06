@@ -9,6 +9,30 @@ from quant_research_platform.agents.session import read_session
 from tests.agents.support import ScriptedClient, agent_config
 
 
+def test_report_csv_lookup_preserves_values_and_pagination(tmp_path):
+    source = tmp_path / "summary.csv"
+    content = "组合,净收益_pct,费用_pct\n底仓增强,-0.25,0.10\n"
+    source.write_text(content, encoding="utf-8")
+    state = {"config": {"documents": {"summary": str(source)}}}
+    matches = lookup({"scope": "documents", "query": "底仓增强"}, state)
+    assert matches["matches"][0]["excerpt"] == "底仓增强,-0.25,0.10"
+    first = lookup(
+        {"scope": "documents", "query": "", "key": "summary", "page_size": 12},
+        state,
+    )
+    rest = lookup(
+        {
+            "scope": "documents",
+            "query": "",
+            "key": "summary",
+            "offset": first["next_offset"],
+        },
+        state,
+    )
+    assert first["text"] + rest["text"] == content
+    assert rest["next_offset"] is None
+
+
 def test_patch_is_reviewable_and_original_source_is_unchanged(tmp_path, monkeypatch):
     config = agent_config(tmp_path)
     source = tmp_path / "experiment.py"

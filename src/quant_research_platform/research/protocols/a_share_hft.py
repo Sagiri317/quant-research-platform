@@ -36,6 +36,7 @@ PANEL_COLUMNS = (
     *KEY,
     "session_date",
     "exchange",
+    "instrument_type",
     "segment_id",
     "eligible",
     "last_price",

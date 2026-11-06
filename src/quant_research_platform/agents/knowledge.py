@@ -46,6 +46,7 @@ def lookup(arguments, state):
                 ".yml",
                 ".yaml",
                 ".txt",
+                ".csv",
             }:
                 raise ValueError("agent_document_must_be_text_or_code")
             documents[name] = sanitize_shared_text(path.read_text(encoding="utf-8"))

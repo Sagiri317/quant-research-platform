@@ -139,7 +139,47 @@ def test_sessions_gaps_and_missing_order_history_are_not_zero():
     assert continuous_session(local, pd.Series(["SSE", "SSE"])).tolist() == ["pm", ""]
 
 
-def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch):
+def test_etf_sessions_include_historical_shanghai_fund_close():
+    timestamps = pd.Series(
+        pd.to_datetime(
+            [
+                "2023-11-06 06:59:57",
+                "2023-11-06 07:00:00",
+                "2023-11-06 06:58:00",
+                "2026-07-03 06:58:00",
+                "2026-07-06 06:58:00",
+            ]
+        )
+    )
+    assert continuous_session(
+        timestamps,
+        pd.Series(["SSE", "SSE", "SZSE", "SSE", "SSE"]),
+        pd.Series(["equity_etf"] * 5),
+    ).tolist() == ["pm", "", "", "pm", ""]
+    instruments = [
+        {
+            "wind_code": "518880.SZ",
+            "asset_id": "518880",
+            "exchange": "SSE",
+            "instrument_type": "gold_etf",
+        }
+    ]
+    raw = raw_quotes((145959000, 150000000)).assign(
+        date=20231106, wind_code="518880.SZ"
+    )
+    panel = build_panel(
+        normalize(raw, "hft_quotes", instruments),
+        normalize(raw_events("hft_orders").iloc[:0], "hft_orders", instruments),
+        normalize(raw_events("hft_trades").iloc[:0], "hft_trades", instruments),
+        max_gap_seconds=6,
+    )
+    assert panel.timestamp.tolist() == [pd.Timestamp("2023-11-06 06:59:59")]
+    assert panel.instrument_type.tolist() == ["gold_etf"]
+    assert panel.exchange.tolist() == ["SSE"]
+
+
+@pytest.mark.parametrize("instrument_type", ["stock", "equity_etf"])
+def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrument_type):
     raw = tmp_path / "raw" / "20180214"
     raw.mkdir(parents=True)
     for stream, name in STREAM_FILES.items():
@@ -151,7 +191,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch):
             "source_id": "venvoo",
             "raw_root": str(raw.parent),
             "outputs": outputs,
-            "instruments": INSTRUMENTS,
+            "instruments": [dict(INSTRUMENTS[0], instrument_type=instrument_type)],
             "revision": "a" * 40,
             "start_date": "2018-02-14",
             "end_date": "2018-02-14",
@@ -255,7 +295,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch):
                 "fee_code": code,
                 "effective_date": pd.Timestamp("2018-01-01"),
                 "end_date": pd.Timestamp("2018-12-31"),
-                "market": "a_share",
+                "market": "a_share" if instrument_type == "stock" else "etf",
                 "side": side,
                 "basis": "amount",
                 "rate": rate,
@@ -287,33 +327,48 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch):
     monkeypatch.setattr(
         high_frequency, "materialize_dataset_session", record_quote_read
     )
-    destination = high_frequency.backtest(
-        {
-            "panel": inputs["hft_panel"],
-            "predictions": str(predictions),
-            "fee_schedule": str(tmp_path / "fees"),
-            "daily_inputs": write_daily_inputs(
-                tmp_path / "daily", pd.concat((history, panel), ignore_index=True)
-            ),
-            "window": forecast_window,
-            "output": str(tmp_path / "accounts"),
-            "parameters": {
-                "initial_capital": 10000.0,
-                "initial_inventory": {"000001.SZ": 100},
-                "maximum_inventory": {"000001.SZ": 200},
-                "restore_at": None,
-                "buy_threshold": 0.0,
-                "sell_threshold": -1.0,
-                "latency_ms": 0,
-                "participation_rate": 1.0,
-                "minimum_commission": 5.0,
-            },
-        }
-    )
+    account_config = {
+        "panel": inputs["hft_panel"],
+        "predictions": str(predictions),
+        "fee_schedule": str(tmp_path / "fees"),
+        "daily_inputs": write_daily_inputs(
+            tmp_path / "daily", pd.concat((history, panel), ignore_index=True)
+        ),
+        "window": forecast_window,
+        "output": str(tmp_path / "accounts"),
+        "parameters": {
+            "initial_capital": 10000.0,
+            "initial_inventory": {"000001.SZ": 100},
+            "maximum_inventory": {"000001.SZ": 200},
+            "restore_at": None,
+            "buy_threshold": 0.0,
+            "sell_threshold": -1.0,
+            "latency_ms": 0,
+            "participation_rate": 1.0,
+            "minimum_commission": 5.0,
+        },
+    }
+    destination = high_frequency.backtest(account_config)
     ledger = read_portfolio_ledger_artifact(destination)
     assert len(quote_reads) == 1
-    assert ledger.metadata["account_semantics"] == "shared_cash_continuous_inventory_t1"
+    assert (
+        ledger.metadata["account_semantics"]
+        == "shared_cash_continuous_inventory_by_instrument"
+    )
     assert sum(len(batch.trades) for batch in ledger.iter_chunks()) == 1
+    held = high_frequency.backtest(
+        {
+            **account_config,
+            "predictions": None,
+            "output": str(tmp_path / "holding"),
+        }
+    )
+    held_batches = list(read_portfolio_ledger_artifact(held).iter_chunks())
+    assert not any(batch.trades for batch in held_batches)
+    expected = 10000.0 + 100 * (panel.mid.iloc[-1] - panel.mid.iloc[-2])
+    assert sum(
+        row.value for row in held_batches[-1].valuations if row.phase == "end"
+    ) == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("bad_time", [246000000, -1, 93000000.5])

@@ -20,6 +20,7 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.contracts.models import _validate_model_prediction_window
 from quant_research_platform.contracts.policies import PolicyDecision, policy_target
 from quant_research_platform.contracts.portfolios import (
+    A_SHARE_INSTRUMENT_TYPES,
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
     ExecutedTrade,
@@ -129,7 +130,7 @@ def _parameters(value, *, policy=False):
         if not isinstance(restore, str):
             raise ValueError("hft_restore_time_invalid")
         clock = time.fromisoformat(restore)
-        if clock.tzinfo is not None or not time(13) <= clock < time(14, 57):
+        if clock.tzinfo is not None or not time(13) <= clock < time(15):
             raise ValueError("hft_restore_time_invalid")
         params["restore_at"] = clock.isoformat()
     return params
@@ -186,6 +187,7 @@ def inventory_batches(
     units = pd.Series(params["initial_inventory"], dtype="float64").reindex(
         assets, fill_value=0.0
     )
+    instrument_types = pd.Series("stock", index=assets)
     lives = pd.Series(dtype="datetime64[ns]")
     marks = pd.Series(dtype="float64")
     sources = {}
@@ -306,7 +308,7 @@ def inventory_batches(
         fill_id = f"{sequence}:{asset}"
         cash = fsum((cash, -notional, *(-costs)))
         units[asset] += quantity
-        if quantity > 0:
+        if quantity > 0 and instrument_types[asset] != "gold_etf":
             bought_today[asset] += quantity
         if execution_order is not None:
             remaining_order -= quantity
@@ -352,6 +354,14 @@ def inventory_batches(
         )
         if quotes.duplicated(["timestamp", "asset_id"]).any():
             raise ValueError("hft_quote_key_duplicate")
+        if "instrument_type" in quotes:
+            kinds = quotes[["asset_id", "instrument_type"]].drop_duplicates()
+            if (
+                kinds.asset_id.duplicated().any()
+                or not kinds.instrument_type.isin(A_SHARE_INSTRUMENT_TYPES).all()
+            ):
+                raise ValueError("hft_instrument_type_invalid")
+            instrument_types.update(kinds.set_index("asset_id").instrument_type)
         opening_marks = projected.open.reindex(units.index).astype("float64")
         observed = quotes.loc[
             quotes.timestamp.le(start) & quotes.eligible & np.isfinite(quotes.mid)
@@ -414,7 +424,7 @@ def inventory_batches(
                 ),
             ),
         )
-        if decision_columns is None:
+        if decision_columns is None and not predictions.empty:
             if "signal_processing" in params:
                 predictions = process_prediction_signals(
                     predictions, quotes, params["signal_processing"]
@@ -428,7 +438,11 @@ def inventory_batches(
                 )
             ]
         interactive = decision_columns is not None
-        decisions = {} if interactive else _decisions(quotes, predictions, latency_ns)
+        decisions = (
+            {}
+            if interactive or predictions.empty
+            else _decisions(quotes, predictions, latency_ns)
+        )
         destinations = (
             {
                 (signal_at, asset): (execution_at, asset)
@@ -471,6 +485,7 @@ def inventory_batches(
                 assumptions,
                 params["participation_rate"],
                 face_value_per_share=projected.get("face_value_per_share"),
+                instrument_types=instrument_types,
             )
         for stamp, group in quotes.groupby("timestamp", sort=False):
             at = pd.Timestamp(stamp)
@@ -547,6 +562,7 @@ def inventory_batches(
                         "target_quantity": targets,
                         "sellable_quantity": sellable,
                         "market_type": projected.market_type.reindex(units.index),
+                        "instrument_type": instrument_types.reindex(units.index),
                         "mark_price": marks.fillna(0.0),
                         "buy_price": current.ask_px1.reindex(units.index),
                         "sell_price": current.bid_px1.reindex(units.index),
@@ -979,7 +995,7 @@ def backtest(config):
                 "end": window.end.isoformat(),
             },
             "parameters": params,
-            "account_semantics": "shared_cash_continuous_inventory_t1",
+            "account_semantics": "shared_cash_continuous_inventory_by_instrument",
             "execution": (
                 "observed_depth_passive_queue_no_market_feedback_or_receive_clock"
                 if "passive" in params

@@ -9,6 +9,7 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.markets.implementations.a_share.execution import (
+    FeeSchedule,
     round_stock_orders,
     stock_order_limits,
 )
@@ -54,6 +55,50 @@ def test_limit_order_quantity_rules(market, requested, available, expected):
 )
 def test_growth_board_maximum_has_effective_date(day, maximum):
     assert stock_order_limits(pd.Series([16]), day)[3].item() == maximum
+
+
+def test_etfs_use_fund_fees_and_hundred_unit_orders_in_mixed_account():
+    orders = stock_orders(
+        {"stock": 0, "equity": 0, "gold": 0},
+        {
+            "stock": 350,
+            "equity": 350,
+            "gold": 350,
+        },
+    )
+    orders["instrument_type"] = pd.Series(
+        {
+            "stock": "stock",
+            "equity": "equity_etf",
+            "gold": "gold_etf",
+        }
+    )
+    orders["market_type"] = pd.Series({"stock": 1, "equity": 4, "gold": 1})
+    stock_fees = _schedule()
+    fund_rules = tuple(
+        replace(
+            rule,
+            market="etf",
+            rate=0.0001 if rule.fee_code == "BROKER_COMMISSION" else 0.0,
+        )
+        for rule in stock_fees.rules
+    )
+    result = execute_stock_target(
+        orders,
+        cash=10000.0,
+        execution_date=DAY,
+        fee_schedule=FeeSchedule(stock_fees.rules + fund_rules, "mixed"),
+        assumptions=SETTINGS,
+    )
+    rows = result.asset_ledger.set_index("asset_id")
+    assert rows.executed_quantity.to_dict() == {
+        "stock": 300,
+        "equity": 300,
+        "gold": 300,
+    }
+    assert rows.loc[["equity", "gold"], "transfer_fee_cost"].tolist() == [0.0, 0.0]
+    assert rows.loc["stock", "transfer_fee_cost"] > 0.0
+    assert rows.commission_cost.tolist() == [5.0, 5.0, 5.0]
 
 
 def test_sells_fund_shared_cash_buys_without_selling_todays_purchase():

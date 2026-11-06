@@ -4,7 +4,9 @@
 
 ## 来源与时钟
 
-`prepare-source` 的 `source_id=venvoo` 读取 `<raw_root>/<YYYYMMDD>/行情.parquet`、`逐笔委托.parquet`、`逐笔成交.parquet`，按显式证券列表过滤并分批写入原生数据集。证券列表分别指定 `wind_code`、项目 `asset_id`、`exchange`（SSE/SZSE），不从代码后缀猜市场。
+`prepare-source` 的 `source_id=venvoo` 读取 `<raw_root>/<YYYYMMDD>/行情.parquet`、`逐笔委托.parquet`、`逐笔成交.parquet`，按显式证券列表过滤并分批写入原生数据集。证券列表分别指定 `wind_code`、项目 `asset_id`、`exchange`（SSE/SZSE）。`instrument_type` 支持 `stock`、`equity_etf` 和 `gold_etf`，省略时为 `stock`，并随原生来源与面板保存，供交易时段划分及账户执行使用。
+
+ETF 示例见 [prepare-source-etf.json](../configs/high-frequency/prepare-source-etf.json)。该归档把上海 ETF 的供应商代码也写作 `.SZ`，示例中的 `510300.SZ`、`510500.SZ`、`518880.SZ` 均显式映射为 `SSE`；`159915.SZ` 映射为 `SZSE`。请按供应商实际代码筛选，并独立声明真实交易所。来源说明和单日实际覆盖均已核对。[数据集说明](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)
 
 配置记录实际仓库 revision，输出保存所选本地文件 SHA256、证券映射与事件时间语义。证券价格除以 10000 转成 CNY，数量为股；`HHMMSSmmm` 按 Asia/Shanghai 解释后转成 UTC 无时区纳秒时间戳。筛选后源流的顺序编号用于区分同一毫秒的多个事件，不代表未筛选文件的物理行号。
 
@@ -16,7 +18,7 @@
 
 `prepare` 分别生成 `hft_panel`、`hft_factors`、`hft_labels`，逐笔统计使用 `hft_event_factors`，冻结 Hawkes 强度使用 `hft_hawkes_factors`；`assemble` 按显式列组装。原 `a_share_hft` 配方仍只选择原有 18 项因子。配置示例依次为 `prepare-source-hft.json`、`prepare-hft-panel.json`、`prepare-hft-factors.json`、`prepare-hft-labels.json`、`assemble-hft.json`；扩展见 [high-frequency 配置](../configs/high-frequency/)。
 
-面板按股票、日期、连续竞价时段分片。上午 09:30—11:30、下午 13:00 起；深圳及 2018-08-20 起的上海在 14:57 前结束连续竞价，较早上海到 15:00。集合竞价不进入当前模拟。午休、隔夜、非法最优盘口或超过 `max_gap_seconds`（默认 6 秒）的间隔会断开短期计算。
+面板按证券、日期、连续竞价时段分片。上午 09:30—11:30、下午 13:00 起。深圳连续竞价截止 14:57，上海股票从 2018-08-20 起截止 14:57。上海股票 ETF 和黄金 ETF 在 2026-07-06 之前截止 15:00，此后截止 14:57。终点采用左闭右开区间。午休、隔夜、非法最优盘口或超过 `max_gap_seconds`（默认 6 秒）的间隔会断开短期计算。[上海基金收盘集合竞价生效通知](https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml)
 
 原有 18 项因子包含买卖价差、相对价差、一/五/十档不平衡、微价格偏离、OFI 与深度标准化 OFI、3/30/60 秒收益、60 秒波动，以及可观察成交、委托和撤单流。流量区间为 `(前一报价, 当前报价]`。归档外或没有可确认方向的流量不补零；窗口端点不足时保留缺失。
 
@@ -46,9 +48,13 @@
 
 `backtest-hft` 接收报价面板、已保存预测、原生费率表、时间窗、交易参数及新输出路径，并通过 `daily_inputs` 显式提供日频行情、证券、交易日历、公司行动和可选的特殊权益事件。来源的项目 `asset_id` 必须与日频证券一致；示例将 `000001.SZ` 的项目标识映射为 `000001`。
 
+`daily_inputs` 服务于持仓估值、上市生命周期、交易日和权益核算。ETF 研究可独立准备这些基础事实。`predictions=null` 运行相同初始持仓与现金的持有基准，比较时保持窗口、估值输入及账户参数一致。
+
 一个回测只有一个多股票账户。`initial_capital` 包含显式 `initial_inventory` 的市值，其余为可用现金；`initial_inventory`、`maximum_inventory` 都按证券指定股数。初始持仓按起始时刻已观察到的 mid 估值，没有更近报价时用当日开盘价。现金、股票、应收股息和权益锁股跨日继承。未持仓股票不需要估值；持仓缺少必要权益或估值事实时明确失败。
 
-日频与高频共用股票数量规则、费用及权益处理。成交使用整数股，申报的整手、零股和最大单笔数量按板块及生效日期计算，不再接受任意 `lot_size`。默认主动执行卖出先于买入，多股票买入共享剩余现金并按比例缩量。只有以前交易日买入且未被权益事件锁定的股票可以卖出，当天买入次日才解锁。公司行动沿用日频现有近似，包括登记日及缺失支付日政策；若初始持仓涉及回测开始之前的登记日，不能凭当前底仓推断历史应得权益，须将账户起点提前到登记日。
+日频与高频共用数量规则、费用及权益处理。成交使用整数数量，股票申报的整手、零股和最大单笔数量按板块及生效日期计算。股票 ETF 和黄金 ETF 按 100 份申报、单笔最大 100 万份。默认主动执行卖出先于买入，多证券买入共享剩余现金并按比例缩量。高频账户中，股票与股票 ETF 当日买入的数量次日解锁，黄金 ETF 当日买入可再卖出；权益锁定的数量仍受约束。公司行动沿用日频现有近似，包括登记日及缺失支付日政策；若初始持仓涉及回测开始之前的登记日，须将账户起点提前到登记日。
+
+费率表用 `etf`、`shanghai_etf`、`shenzhen_etf` 声明 ETF 规则，原生参考 CSV 对应 `沪深ETF`、`沪市ETF`、`深市ETF`。主动与被动执行按证券类型选择费率。股票和 ETF 共同回测时，费用表须分别覆盖各自市场。首轮 2023 年费用核验、佣金假设及研究窗口见 [ETF 高频周末准备](../reports/ETF高频周末准备.md)。
 
 决策只能在严格后续、延迟已满且属于同一连续片段的报价执行；买入按 ask、卖出按 bid，数量不超过该侧一档盘口量乘参与率。统一费用包含有效期内的佣金、印花税、过户费和每笔最低佣金；超最大申报量的拆单按实际拆分计佣金。盘口和账户约束不能满足的部分保留未成交原因。
 

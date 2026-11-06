@@ -1,5 +1,6 @@
 """Shared cash, trading-day locks and actual corporate rights in quote accounts."""
 
+from dataclasses import replace
 from datetime import date
 
 import numpy as np
@@ -214,6 +215,61 @@ def test_t1_prevents_fabricated_end_of_day_restoration(tmp_path):
         == 200
     )
     assert any(row.text == "INCOMPLETE" for row in batches[-1].diagnostics)
+
+
+@pytest.mark.parametrize(
+    "instrument_type,expected", [("equity_etf", [200, -100]), ("gold_etf", [200, -200])]
+)
+def test_etf_settlement_fees_and_restore_in_native_ledger(
+    tmp_path, instrument_type, expected
+):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "06:50:00", "06:50:03"),
+    ).assign(instrument_type=instrument_type)
+    signals = panel[["asset_id", "timestamp"]].assign(
+        prediction_score=[1.0, 0.0, 0.0, 0.0]
+    )
+    fees = FeeSchedule(
+        tuple(
+            replace(
+                rule,
+                market="etf",
+                rate=0.0001 if rule.fee_code == "BROKER_COMMISSION" else 0.0,
+            )
+            for rule in schedule().rules
+        ),
+        "etf-fees",
+    )
+    params = parameters(("a",), restore_at="14:50")
+    params["minimum_commission"] = 5.0
+
+    def produce(emit):
+        for batch in inventory_batches(
+            [(daily_view(panel), panel, signals)],
+            fees,
+            params,
+            TimeWindow("2024-01-02", "2024-01-02"),
+        ):
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital("hft_inventory", 5000.0, "CNY", "cash_equity"),
+        metadata={"window": {"start": "2024-01-02", "end": "2024-01-02"}},
+        produce=produce,
+    )
+    batches = list(read_portfolio_ledger_artifact(root).iter_chunks())
+    assert [trade.quantity for batch in batches for trade in batch.trades] == expected
+    flows = [flow for batch in batches for flow in batch.cashflows]
+    assert sum(flow.amount for flow in flows if flow.kind == "commission_cost") == -10.0
+    assert not any(
+        flow.kind in {"stamp_duty_cost", "transfer_fee_cost"} for flow in flows
+    )
+    # Two bid/ask crossings cost quantity * 0.01, plus two 5 CNY commissions.
+    nav = sum(row.value for row in batches[-1].valuations if row.phase == "end")
+    assert nav == pytest.approx(5000 - sum(abs(q) for q in expected) * 0.01 - 10)
 
 
 def test_registered_dividend_remains_a_claim_until_paid(tmp_path):

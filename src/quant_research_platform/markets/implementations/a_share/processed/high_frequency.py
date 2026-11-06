@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.ids import validate_input_market
+from quant_research_platform.contracts.portfolios import A_SHARE_INSTRUMENT_TYPES
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -64,7 +65,12 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
         .drop_duplicates(["asset_id", "timestamp"], keep="last")
         .copy()
     )
-    quotes["session"] = continuous_session(quotes.timestamp, quotes.exchange)
+    quotes["instrument_type"] = quotes.get("instrument_type", "stock")
+    if not quotes.instrument_type.isin(A_SHARE_INSTRUMENT_TYPES).all():
+        raise ValueError("hft_instrument_type_invalid")
+    quotes["session"] = continuous_session(
+        quotes.timestamp, quotes.exchange, quotes.instrument_type
+    )
     quotes = quotes.loc[quotes.session.ne("")]
     sources = {
         name: (
@@ -73,7 +79,9 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
                 [
                     "asset_id",
                     "session_date",
-                    continuous_session(frame.timestamp, frame.exchange),
+                    continuous_session(
+                        frame.timestamp, frame.exchange, frame.get("instrument_type")
+                    ),
                 ],
                 sort=False,
             ).indices,

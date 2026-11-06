@@ -209,10 +209,10 @@ def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(values.dropna().unique()))
 
 
-def continuous_session(timestamps, exchange):
+def continuous_session(timestamps, exchange, instrument_types=None):
     """Classify timestamps into continuous trading sessions under historical
     exchange hours.
-    Shanghai closing-auction minutes are excluded from 2018-08-20 onward.
+    Shanghai stocks gained a closing auction in 2018; funds followed in 2026.
     """
     local = (
         pd.to_datetime(timestamps).dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")
@@ -223,8 +223,17 @@ def continuous_session(timestamps, exchange):
         + local.dt.second
         + local.dt.microsecond / 1e6
     )
+    etf = (
+        False
+        if instrument_types is None
+        else instrument_types.isin(("equity_etf", "gold_etf"))
+    )
     closing = np.where(
-        exchange.eq("SSE") & local.dt.date.lt(pd.Timestamp("2018-08-20").date()),
+        exchange.eq("SSE")
+        & (
+            local.dt.date.lt(pd.Timestamp("2018-08-20").date())
+            | (etf & local.dt.date.lt(pd.Timestamp("2026-07-06").date()))
+        ),
         15 * 3600,
         14 * 3600 + 57 * 60,
     )

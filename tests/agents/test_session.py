@@ -245,6 +245,9 @@ def test_negative_research_can_finish_without_final_evaluation(tmp_path):
     assert final_evaluation_status(state) == "not_started"
     assert "holdout_viewed" not in state
     assert state["status"] == "completed"
+    assert (root / "report.md").read_text(encoding="utf-8").count(
+        "The proposed formula was undefined."
+    ) == 1
 
 
 def test_context_compaction_keeps_constraints_and_retrievable_history(tmp_path):

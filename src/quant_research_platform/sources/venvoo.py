@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.dataset as ds
 
 from quant_research_platform.contracts.data import InterimDataSpec
+from quant_research_platform.contracts.portfolios import A_SHARE_INSTRUMENT_TYPES
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import _hash_file_content
@@ -32,10 +33,16 @@ def instrument_mapping(instruments):
         raise ValueError("level2_instruments_required")
     mapping = {}
     for item in instruments:
-        if type(item) is not dict or set(item) != {"wind_code", "asset_id", "exchange"}:
+        if (
+            type(item) is not dict
+            or not {"wind_code", "asset_id", "exchange"} <= item.keys()
+            or item.keys() - {"wind_code", "asset_id", "exchange", "instrument_type"}
+        ):
             raise ValueError("level2_instrument_fields_invalid")
         if any(type(value) is not str or not value for value in item.values()):
             raise ValueError("level2_instrument_value_invalid")
+        if item.get("instrument_type", "stock") not in A_SHARE_INSTRUMENT_TYPES:
+            raise ValueError("level2_instrument_type_invalid")
         code = item["wind_code"].upper()
         if code in mapping or item["exchange"] not in {"SSE", "SZSE"}:
             raise ValueError("level2_instrument_identity_invalid")
@@ -79,6 +86,7 @@ def interim_spec(stream):
         "source_row",
         "asset_id",
         "exchange",
+        "instrument_type",
         "timestamp",
         "session_date",
         *(("event_kind", "side") if stream != "hft_quotes" else ()),
@@ -119,6 +127,9 @@ def normalize(frame, stream, instruments):
     )
     work["exchange"] = codes.map(
         {code: item["exchange"] for code, item in mapping.items()}
+    )
+    work["instrument_type"] = codes.map(
+        {code: item.get("instrument_type", "stock") for code, item in mapping.items()}
     )
     raw_time = pd.to_numeric(work.pop("time"), errors="raise")
     hour, minute, second, millis = (

@@ -320,6 +320,8 @@ def publish_report(root, state):
         )
     lines.extend(["", "## 假设与过程", ""])
     for event in state["events"]:
+        if event["action"]["kind"] == "finish":
+            continue
         lines.extend([f"- {event['id']}：{event['action']['summary']}"])
         if "reason" in event["result"]:
             lines.append(f"  结果原因：{event['result']['reason']}。")
@@ -334,7 +336,7 @@ def publish_report(root, state):
             "",
             state["conclusion"]["text"] if state["conclusion"] else "尚未完成结论。",
             "",
-            "数值来自实际计算产物；自然语言结论需要结合这些证据复核。失败与未定义不代表零收益或无风险。",
+            "请结合所引用的资料、工具结果和原生产物复核结论，并按各项证据的实际样本与计算范围解释数值。",
         ]
     )
     lines.append(

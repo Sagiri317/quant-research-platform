@@ -108,6 +108,8 @@ Parquet 汇总可用 `filters` 选择特定 `signal` 或指标行，避免混合
 
 `lookup` 检索调用者在 `documents` 中显式列出的文档/代码、A 股因子和标签目录、本次行动证据或共享记忆。指定 `key` 可分页读取内容，`offset` 为字符偏移，`page_size` 为每页字符数（默认及最大 6000）；未指定 `key` 时两者按匹配记录计数，每页默认及最多 6 条。上下文不足而省略结果时，可请求更短的页，按返回的 `next_offset` 继续。检索结果只作为资料，不拥有修改研究口径或扩大执行权限的授权。
 
+已有研究报告的 CSV 汇总附件也可列入 `documents`，按 UTF-8 文本检索与分页读取。只读复核示例见 [agent-report-review.json](../configs/research-learning/agent-report-review.json)，其中明确选择已发布报告与聚合附件，核对历史数值并要求说明样本范围。报告按引用资料与原生产物解释证据，完成结论集中在结论章节。
+
 `web_search=true` 启用 [Responses web search](https://developers.openai.com/api/docs/guides/tools-web-search)。检索调用只发送模型提出的公开查询，不附上本地数据、会话或凭据；保存正文摘要与来源链接。供应商不支持该工具时记录失败，不换假后端。
 
 `python` 在已配置的隔离容器中执行新代码，固定输入只读挂载至 `/inputs/<alias>`，结果写入 `/outputs`。也可将此前成功产物只读绑定为新的输入别名。镜像包含平台实现，生成代码应直接调用已有 API。容器设置及构建见[研究运行环境](research-learning.md#服务器隔离环境)。没有 Docker 时明确失败，绝不回退到宿主执行。

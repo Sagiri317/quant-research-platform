@@ -16,6 +16,7 @@ from quant_research_platform.contracts.validation import (
 )
 
 A_SHARE_EQUITY_EVENTS_DATA_ID = "a_share_equity_events"
+A_SHARE_INSTRUMENT_TYPES = frozenset({"stock", "equity_etf", "gold_etf"})
 EQUITY_EVENT_COLUMNS = (
     "source_asset_id",
     "asset_id",
