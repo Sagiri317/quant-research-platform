@@ -185,6 +185,15 @@ def normalize(frame, stream, instruments):
             np.where(work.trade_code.isin(["0", "T", "", "\x00"]), "trade", "unknown"),
         )
         work["side"] = work.bs_flag.map({"B": "buy", "S": "sell"})
+        cancellations = work.exchange.eq("SZSE") & work.trade_code.eq("C")
+        work.loc[cancellations, "side"] = np.nan
+        # Shenzhen cancellations identify the cancelled side by its sole order index.
+        for side, own, other in (
+            ("buy", "bid_order_id", "ask_order_id"),
+            ("sell", "ask_order_id", "bid_order_id"),
+        ):
+            identified = work[own].gt(0) & work[own].lt(2**64 - 1) & work[other].eq(0)
+            work.loc[cancellations & identified, "side"] = side
     return (
         work.drop(columns="wind_code")
         .sort_values(["timestamp", "asset_id", "source_row"], kind="stable")

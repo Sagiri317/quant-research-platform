@@ -86,6 +86,8 @@ def raw_events(stream):
     else:
         frame["bs_flag"] = "B"
         frame.loc[1, "trade_code"] = "C"
+        frame.loc[1, "bs_flag"] = " "
+        frame.loc[1, "ask_order_id"] = 0
     return frame.loc[:, source_columns(stream)]
 
 
@@ -102,6 +104,7 @@ def test_source_units_cancellation_and_snapshot_math():
     assert np.isnan(panel.observed_trade_volume.iloc[0])
     assert panel.observed_trade_volume.iloc[1] == 0
     assert panel.observed_cancel_volume.iloc[1] == 200
+    assert panel.observed_signed_cancel_volume.iloc[1] == 200
     assert panel.observed_trade_volume.iloc[2] == 300
     np.testing.assert_allclose(factors.imbalance_10, 0.5)
     np.testing.assert_allclose(factors.relative_spread.iloc[0], 0.02 / 10)
@@ -123,6 +126,15 @@ def test_source_units_cancellation_and_snapshot_math():
     )
     assert units["realized_volatility_60s"] == "dimensionless"
     assert units["observed_trade_volume_30s"] == "shares"
+
+
+def test_shenzhen_cancellation_side_requires_one_known_order_index():
+    frame = pd.concat([raw_events("hft_trades").iloc[[1]]] * 7, ignore_index=True)
+    frame["bid_order_id"] = pd.Series([7, 0, 7, 0, None, 2**64 - 1, 0], dtype="UInt64")
+    frame["ask_order_id"] = pd.Series([0, 9, 9, 0, 0, 0, 2**64 - 1], dtype="UInt64")
+    result = normalize(frame, "hft_trades", INSTRUMENTS)
+    assert result.side.iloc[:2].tolist() == ["buy", "sell"]
+    assert result.side.iloc[2:].isna().all()
 
 
 def test_sessions_gaps_and_missing_order_history_are_not_zero():
@@ -221,7 +233,11 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
             "inputs": inputs,
             "time_window": window,
             "output_root": str(tmp_path / "research"),
-            "factor_columns": ["relative_spread", "imbalance_1"],
+            "factor_columns": [
+                "relative_spread",
+                "imbalance_1",
+                "observed_cancel_flow_imbalance",
+            ],
             "label_columns": ["future_mid_return_3s"],
         }
     )
@@ -229,6 +245,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     assert len(result) == 4
     assert result.future_mid_return_3s.notna().sum() == 3
     assert result.eligible.all()
+    assert result.observed_cancel_flow_imbalance.iloc[1] == 1.0
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
