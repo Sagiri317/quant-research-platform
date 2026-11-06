@@ -36,6 +36,8 @@ ETF 示例见 [prepare-source-etf.json](../configs/high-frequency/prepare-source
 
 ## Hawkes 与 DeepLOB
 
+Hawkes 数值优化按已观察事件数缩放负对数似然和梯度，并按相同比例换算目标收敛容差。保存的 `negative_log_likelihood` 使用总负对数似然单位。
+
 `fit-hawkes` 显式指定股票、训练窗、截止时刻、初始参数和优化参数，拟合买卖两维共享指数核：`lambda_i(t)=mu_i+sum_j alpha[i,j]*beta*sum(exp(-beta*(t-s_j)))`。时间单位为秒，`alpha` 为分支矩阵，谱半径上限必须小于 1。似然采用连续片段内积分和事件前强度，同毫秒事件共享跳变前历史；未知方向不强行归类，片段初始历史设为零并披露。参数保存至独立 `model.json`；`hft_hawkes_factors` 只能在拟合截止之后输出买/卖强度、失衡和激发比例。计算用线性递推及解析似然梯度，具体似然约定可参照[指数核推导](https://stmorse.github.io/journal/hawkes-LL.html)。
 
 `deeplob_regressor` 和 `deeplob_classifier` 复用已有序列模型的拟合、缩放、保存、加载和预测。结构采用[DeepLOB](https://arxiv.org/abs/1808.03668)的空间卷积、Inception 与 LSTM；本项目时间卷积使用只向过去填充的适配，不声称完整复现论文训练设置。默认序列长 100、卷积通道 32、Inception 通道 64、隐藏层 64，调用者可明确调整。

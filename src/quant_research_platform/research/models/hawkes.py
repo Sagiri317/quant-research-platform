@@ -238,10 +238,16 @@ def fit_hawkes(config):
     if set(assets) != observed_assets or (totals == 0).any():
         raise ValueError("hawkes_observed_history_insufficient")
     initial = np.r_[mu, alpha.ravel(), beta]
+    event_count = float(totals.sum())
+
+    def objective(theta):
+        # Scale the objective and tolerance together to condition large samples.
+        loss, gradient = negative_log_likelihood(theta, segments)
+        return loss / event_count, gradient / event_count
+
     fitted = minimize(
-        negative_log_likelihood,
+        objective,
         initial,
-        args=(segments,),
         jac=True,
         method="SLSQP",
         bounds=[(1e-10, None)] * 2 + [(0, None)] * 4 + [(1e-8, None)],
@@ -251,7 +257,7 @@ def fit_hawkes(config):
                 "fun": lambda x: maximum - branching_radius(x[2:6].reshape(2, 2)),
             }
         ],
-        options={"maxiter": config["max_iterations"], "ftol": tolerance},
+        options={"maxiter": config["max_iterations"], "ftol": tolerance / event_count},
     )
     if (
         not fitted.success
@@ -272,7 +278,7 @@ def fit_hawkes(config):
         "observed_event_counts": totals.astype(int).tolist(),
         "unknown_side_trades_excluded": unknown,
         "segments": len(segments),
-        "negative_log_likelihood": float(fitted.fun),
+        "negative_log_likelihood": float(fitted.fun * event_count),
         "iterations": int(fitted.nit),
         "semantics": (
             "shared_observed_signed_trades_seconds_"

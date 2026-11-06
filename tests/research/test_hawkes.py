@@ -1,5 +1,7 @@
 """Independent likelihood/gradient, timestamp ties, and native fit-to-factor flow."""
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -151,6 +153,19 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, monkeypatch):
         )
     assert indexed_assets and set(indexed_assets) == {"000001.SZ"}
     params, _ = load_hawkes(model)
+    theta = np.r_[params[0], params[1].ravel(), params[2]]
+    expected_loss, _ = negative_log_likelihood(
+        theta,
+        [
+            (
+                np.array([0.0, 2.0, 5.0, 10.0]),
+                np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]),
+                12.0,
+            )
+        ],
+    )
+    facts = json.loads((model / "model.json").read_text())
+    assert facts["negative_log_likelihood"] == pytest.approx(expected_loss)
     window = {"start": "2018-02-15T01:30:00", "end": "2018-02-15T01:30:13"}
     config = {
         "market_id": "a_share",
