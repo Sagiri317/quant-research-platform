@@ -298,12 +298,47 @@ def backtest_cost_model(config: Config) -> None:
     _echo_result(backtest_cost_model(read_qrp_json_file(config)[1]))
 
 
-@app.command("research-agent")
-def research_agent(config: Config) -> None:
-    """Run one externally configured, budgeted research agent."""
-    from quant_research_platform.agents.runner import run_agent
+@app.command("agent")
+def agent(
+    config: Annotated[Path | None, typer.Option("--config")] = None,
+    resume: Annotated[Path | None, typer.Option("--resume")] = None,
+    message: Annotated[str | None, typer.Option("--message")] = None,
+    budget: Annotated[Path | None, typer.Option("--budget")] = None,
+    interactive: Annotated[bool, typer.Option("--interactive")] = False,
+    status: Annotated[bool, typer.Option("--status")] = False,
+) -> None:
+    """Start, inspect or resume a research session; optionally chat while it runs."""
+    from quant_research_platform.agents.runner import resume_agent, run_agent
+    from quant_research_platform.agents.session import read_session, usage_summary
 
-    _echo_result(run_agent(read_qrp_json_file(config)[1]))
+    if (config is None) == (resume is None):
+        raise ValueError("agent_choose_config_or_resume")
+    if config is not None and (message is not None or budget is not None or status):
+        raise ValueError("agent_resume_options_require_session")
+    if status:
+        state = read_session(resume)
+        _echo_result(
+            {
+                "status": state["status"],
+                "phase": state["phase"],
+                "pending_question": state["pending_question"],
+                **usage_summary(state),
+            }
+        )
+        return
+    settings = read_qrp_json_file(config)[1] if config is not None else None
+    limits = read_qrp_json_file(budget)[1] if budget is not None else None
+    if interactive:
+        from quant_research_platform.agents.chat import chat_agent
+
+        result = chat_agent(
+            config=settings, resume=resume, message=message, budget=limits
+        )
+    elif resume is not None:
+        result = resume_agent(resume, message=message, budget=limits)
+    else:
+        result = run_agent(settings)
+    _echo_result(result)
 
 
 def _echo_result(result) -> None:

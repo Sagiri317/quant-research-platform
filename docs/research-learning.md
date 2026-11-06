@@ -19,7 +19,7 @@ CLI 只解析配置并调用同一个 Python 函数。操作之间由调用者�
 | `evaluate-uncertainty` | `research.predictions.uncertainty.evaluate_uncertainty` | 成熟样本覆盖率与区间宽度 |
 | `fit-cost-model` | `research.policies.cost_aware.fit_cost_model` | PyTorch 权重、训练缩放与成本近似说明 |
 | `backtest-cost-model` | `research.policies.cost_aware.backtest_cost_model` | 原生日频账本 |
-| `research-agent` | `agents.runner.run_agent` | 每次行动、试验记录、产物与结论报告 |
+| `agent` | `agents.runner.run_agent` | 每次行动、试验记录、产物与结论报告 |
 
 例如：
 
@@ -28,7 +28,7 @@ qrp train-policy --config configs/research-learning/train-policy-execution.json
 qrp backtest-policy --config configs/research-learning/backtest-policy-execution.json
 qrp search-factors --config configs/research-learning/search-factors.json
 qrp apply-formula --config configs/research-learning/apply-formula.json
-qrp research-agent --config configs/research-learning/research-agent.json
+qrp agent --config configs/research-learning/agent.json
 ```
 
 `agents/` 是研究操作的调用者，不属于研究算法。`research/policies/` 连接 Gymnasium、
@@ -146,64 +146,9 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 这些限制由 `backtest-cost-model` 的原生日频账户处理；训练目标与实际费用后净值需分别报告。
 回测股票池及特征顺序必须一致，窗口晚于训练截止。
 
-## 独立研究 agent
+## 独立研究 Agent
 
-agent 通过 OpenAI `/responses` API 获取严格 JSON Schema 行动，客户端复用已安装的 HTTPX。
-`llm` 明确以下六项；示例见 `configs/research-learning/research-agent.json`：
-
-| 配置 | 示例值 | 含义 |
-|---|---|---|
-| `base_url` | `https://api.openai.com/v1` | API 根地址，客户端追加 `/responses` |
-| `model` | `gpt-6-luna` | 本轮使用的模型，由调用者按实际项目权限选择 |
-| `credential_env` | `QRP_RESEARCH_API_KEY` | 当前进程中保存密钥的环境变量名，不能填写密钥本身 |
-| `max_output_tokens` | `128000` | 单次生成上限，包含内部推理和可见输出，并非要求生成这么多 token |
-| `reasoning_effort` | `high` | 可改为 `none`、`low`、`medium`、`high`、`xhigh`、`max`；实际模型必须支持所选档位 |
-| `timeout_seconds` | `300` | 单次网络等待超时，与本轮剩余时间取较小值 |
-
-按 2026-11-05 的 [GPT-6 Luna 官方文档](https://developers.openai.com/api/docs/models/gpt-6-luna)，
-上述模型最大输出为 128,000 tokens，支持表内六种推理强度。更换模型时须重新核对上限和支持档位。
-请求固定使用标准服务档 `service_tier=default`、`text.verbosity=medium`、`store=false`，
-不传 `temperature` / `top_p`，不自动重试或切换模型。
-`store=false` 关闭响应保存检索功能，不等于零数据留存；每次请求显式发送本轮消息历史。
-远程 API 要求 HTTPS；localhost 可用 HTTP。配置中不存密钥，容器不接收该环境变量。
-Windows 用户环境变量更新后，已经打开的终端不会自动刷新；从新终端启动，或在当前
-PowerShell 执行 `$env:QRP_RESEARCH_API_KEY = [Environment]::GetEnvironmentVariable('QRP_RESEARCH_API_KEY', 'User')`
-后再运行。该命令只刷新当前进程，不打印密钥。
-服务必须支持 Responses 和严格结构化输出；HTTP 失败、未完成响应、拒绝回答和非法行动均明确失败。
-旧 Chat Completions 配置需补上推理强度和超时，并改用支持 Responses 的服务。
-
-任务固定 `protocol.label`、训练/验证/测试窗、`costs` 和评价 `metric`。
-工具模板可用 `protocol:label`、`protocol:train_window`、`protocol:costs.cost_bps`
-引用这些事实，冲突直接拒绝。`tools` 声明允许的操作、基础配置、`vary` 的可选值和
-`metrics` 的数值提取位置。模型只能选这些值，不能改窗口、截止、输出路径或固定成本。
-行动的 `changes` 用参数路径和从 0 开始的候选编号选择，例如
-`[{"path":"columns","choice":0}]` 选择该工具 `vary.columns` 的第一个候选；未列出的参数保持基础配置。
-`bindings` 将参数路径映射到既有产物的相对成员；行动的 `inputs` 选择成功的证据 ID，
-例如 `[{"path":"search","evidence":"e0001"}]`。路径不得重复。严格行动格式的所有字段都需返回，
-未使用的列表为 `[]`，未使用的可空字段为 `null`。旧行动中的字典式 `changes` / `inputs`
-已改为上述列表；候选值仍只保存于工具配置，不重复编码。输出位置始终由 runner 分配。
-
-`budget` 显式限定 API 请求数、实验次数和 `wall_seconds`，到期不启动下一实验。
-可信 CLI 和生成代码进程使用剩余时间作为超时，超时清理本次拥有的进程与容器。
-HTTPX 的 timeout 限制连接和 I/O 等待，并非整个 HTTP 请求的绝对时钟；慢响应及清理
-可能超过任务墙钟预算，返回后会再次检查截止。没有无限重试。
-`max_output_tokens` 是单次响应上限，请求数上限不是精确费用上限。
-
-`run_tool` 在宿主调用已声明的可信 QRP CLI。`run_python` 只在隔离容器内执行，
-无 Docker 或容器失败时明确记录失败，绝不退回宿主执行生成代码。
-输入只读挂载到 `/inputs/<alias>`，结果写到 `/outputs`；生成代码可调用镜像中的
-QRP 读取器和数值库。sandbox 输入必须是开发数据集：所有行早于 test_start，
-任何非空标签都有成熟时点且早于 test_start。含测试期的总目录不能直接挂载。
-
-发给模型的内容限问题、固定协议、允许参数、输入列角色/单位/频率/行数以及显式
-选定的数值汇总；不发送原始行、宿主路径或进程日志。汇总定义由调用者检查，
-数值类型约束不等于自动隐私证明。生成代码产物只能通过允许的数据读取入口交给
-可信操作，不能作为宿主 pickle、模型或策略加载。
-
-每次行动保存为 `action-*.json`；每个 `e0001` 等实验目录保留配置、试验记录、
-产物及本地私有日志。`report.json` 区分完成、预算耗尽及失败，结论引用成功证据 ID。
-报告中的自然语言来自外部模型，需要研究者结合真实产物复核；失败、未定义或负结果
-不能被文字结论改写为成功。最终测试由调用者在迭代结束后另行运行，不反馈给这轮 agent。
+使用 `qrp agent` 启动或恢复量化研究会话。完整的配置、工具、交互、记忆、冻结评价和报告约定见 [Agent 文档](agent.md)；示例为 `configs/research-learning/agent.json`。
 
 ## 服务器隔离环境
 

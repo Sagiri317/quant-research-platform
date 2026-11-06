@@ -16,72 +16,31 @@ from quant_research_platform.contracts.json_codec import (
 )
 
 
-class ParameterChoice(BaseModel):
-    """Select a zero-based entry from one tool parameter's declared choices."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    path: str
-    choice: int = Field(ge=0)
-
-
-class ArtifactInput(BaseModel):
-    """Bind one declared tool input to a successful experiment's evidence ID."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-    path: str
-    evidence: str
-
-
 class AgentAction(BaseModel):
-    """One proposed experiment or conclusion; execution policy belongs to the runner."""
+    """One tool call, question, frozen selection or evidence-backed conclusion."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    kind: Literal["run_tool", "run_python", "finish"]
+    kind: Literal["tool", "ask_user", "freeze", "finish"]
     tool: str | None = None
-    changes: list[ParameterChoice] = Field(default_factory=list)
-    inputs: list[ArtifactInput] = Field(default_factory=list)
-    code: str | None = None
-    conclusion: str | None = None
+    arguments_json: str = "{}"
+    summary: str = Field(min_length=1)
     evidence: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_action(self):
-        for selections in (self.changes, self.inputs):
-            if len({item.path for item in selections}) != len(selections):
-                raise ValueError("agent_action_duplicate_path")
-        if self.kind == "run_tool":
-            valid = (
-                self.tool
-                and self.code is None
-                and self.conclusion is None
-                and not self.evidence
-            )
-        elif self.kind == "run_python":
-            valid = (
-                self.code
-                and self.tool is None
-                and not self.changes
-                and not self.inputs
-                and self.conclusion is None
-                and not self.evidence
-            )
-        else:
-            valid = (
-                self.conclusion
-                and self.tool is None
-                and self.code is None
-                and not self.changes
-                and not self.inputs
-            )
-        if not valid:
+        if (self.kind == "tool") != bool(self.tool):
             raise ValueError("agent_action_fields_invalid")
+        self.arguments()
         return self
+
+    def arguments(self):
+        return parse_qrp_json_object(self.arguments_json.encode("utf-8"))
 
     @classmethod
     def response_schema(cls):
         """Make all action fields explicit as required by strict Structured Outputs."""
         schema = cls.model_json_schema()
-        for model in [schema, *schema["$defs"].values()]:
+        for model in [schema, *schema.get("$defs", {}).values()]:
             model["required"] = list(model["properties"])
             for field in model["properties"].values():
                 field.pop("default", None)
@@ -92,6 +51,7 @@ class OpenAIResponsesClient:
     """Transport only; provider credentials are read outside experiment containers."""
 
     def __init__(self, config):
+        self.usage = None
         self.config = _strict_config(
             config,
             {
@@ -135,6 +95,44 @@ class OpenAIResponsesClient:
             raise ValueError("agent_request_timeout_invalid")
 
     def complete(self, messages, *, timeout):
+        payload = self._request(
+            messages,
+            timeout=timeout,
+            text={
+                "verbosity": "medium",
+                "format": {
+                    "type": "json_schema",
+                    "name": "research_action",
+                    "strict": True,
+                    "schema": AgentAction.response_schema(),
+                },
+            },
+        )
+        return AgentAction.model_validate(
+            parse_qrp_json_object(self._text(payload).encode("utf-8"))
+        )
+
+    def search(self, query, *, timeout):
+        """Search public sources without sending local research context."""
+        payload = self._request(
+            [{"role": "user", "content": query}],
+            timeout=timeout,
+            tools=[{"type": "web_search"}],
+            tool_choice="required",
+            include=["web_search_call.action.sources"],
+        )
+        citations = []
+        for item in payload["output"]:
+            for part in item.get("content", []):
+                for annotation in part.get("annotations", []):
+                    if annotation["type"] == "url_citation":
+                        citations.append(
+                            {key: annotation[key] for key in ("url", "title")}
+                        )
+        return {"text": self._text(payload), "sources": citations}
+
+    def _request(self, messages, *, timeout, **options):
+        self.usage = None
         credential = os.environ[self.config["credential_env"]]
         with httpx.Client(
             timeout=min(timeout, self.config["timeout_seconds"]), follow_redirects=False
@@ -147,24 +145,21 @@ class OpenAIResponsesClient:
                     "input": messages,
                     "max_output_tokens": self.config["max_output_tokens"],
                     "reasoning": {"effort": self.config["reasoning_effort"]},
-                    "text": {
-                        "verbosity": "medium",
-                        "format": {
-                            "type": "json_schema",
-                            "name": "research_action",
-                            "strict": True,
-                            "schema": AgentAction.response_schema(),
-                        },
-                    },
                     "store": False,
                     "service_tier": "default",
+                    **options,
                 },
             )
         if response.status_code != 200:
             raise RuntimeError(f"agent_model_http_status_{response.status_code}")
         payload = response.json()
+        self.usage = payload.get("usage")
         if payload["status"] != "completed":
             raise RuntimeError("agent_model_response_not_completed")
+        return payload
+
+    @staticmethod
+    def _text(payload):
         text = []
         for item in payload["output"]:
             if item["type"] == "message":
@@ -173,7 +168,4 @@ class OpenAIResponsesClient:
                         raise RuntimeError("agent_model_refused")
                     if part["type"] == "output_text":
                         text.append(part["text"])
-        content = "".join(text)
-        return AgentAction.model_validate(
-            parse_qrp_json_object(content.encode("utf-8"))
-        )
+        return "".join(text)

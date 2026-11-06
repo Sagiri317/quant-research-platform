@@ -38,9 +38,9 @@
 - `research.policies.cost_aware.fit_cost_model(config)` / `backtest_cost_model(config)`：连续权重训练近似与原生日频验证
 - `research.factors.search.search_factors(config)` / `apply_formula(config)`：训练域搜索、验证域选型与冻结应用
 - `research.predictions.uncertainty.calibrate_uncertainty(config)` / `apply_uncertainty(config)` / `evaluate_uncertainty(config)`：冻结残差区间及独立覆盖评价
-- `agents.runner.run_agent(config)`：在固定协议和预算下调用研究操作；生成 Python 只进入隔离容器
+- `agents.runner.run_agent(config)` / `resume_agent(root)`：固定口径的研究会话、工具循环与冻结评价；生成 Python 只进入隔离容器，CLI 为 `qrp agent`
 
-这些新增操作的配置、产物、单位、资源安排和验证边界见[策略学习与研究 agent](research-learning.md)。
+策略学习操作的配置、产物、单位与资源安排见[研究学习文档](research-learning.md)；Agent 的交互、记忆、报告及验证边界见[Agent 文档](agent.md)。
 宏观来源、决策时钟和因子见[宏观流动性](macro-liquidity.md)；微观结构、DeepLOB 和队列模型见[A 股高频](a-share-hft.md)。
 
 各阶段的 config 使用 JSON 值，包括路径字符串和时间窗口对象；底层 Python 存储 API

@@ -1,0 +1,896 @@
+{
+  "question": "在固定发现窗口提出并比较因子公式，在随后开发样本上完成基线比较、统计评价、模型与费用后回测。冻结 formula 和 model 两个候选后执行最终评价并报告；无有效候选时保留负结果，不改研究口径以追求高分。",
+  "protocol": {
+    "label": "label",
+    "train_window": {
+      "start": "2022-12-01",
+      "end": "2022-12-05"
+    },
+    "validation_window": {
+      "start": "2022-12-07",
+      "end": "2022-12-08"
+    },
+    "test_window": {
+      "start": "2023-01-04",
+      "end": "2023-01-06"
+    },
+    "costs": {
+      "initial_nav": 100000.0,
+      "slippage_bps": 0.0,
+      "impact_bps": 0.0,
+      "adv_participation": 1.0,
+      "adv_sensitivities": [
+        1.0
+      ],
+      "minimum_commission": 0.0
+    },
+    "metric": "candidate_ic"
+  },
+  "tools": {
+    "search": {
+      "operation": "search-factors",
+      "description": "Propose causal expressions using x; compare the signs and select a discovery candidate. Inputs are dimensionless x and decimal-return label.",
+      "config": {
+        "dataset": "data/research/agent-source",
+        "columns": [
+          "x"
+        ],
+        "baseline_columns": [],
+        "label": "protocol:label",
+        "train_window": "protocol:train_window",
+        "validation_window": "protocol:validation_window",
+        "train_cutoff": "2022-12-06",
+        "selection_cutoff": "2022-12-09",
+        "method": "random",
+        "budget": 2,
+        "max_depth": 1,
+        "windows": [
+          2
+        ],
+        "seed": 1,
+        "output": "assigned"
+      },
+      "parameters": {
+        "expressions": "One or two causal formula strings, e.g. rank(x), -x. Operators: +,-,*,/,abs,sign,logabs,rank,delay,mean,std."
+      },
+      "bindings": {},
+      "metrics": {
+        "discovery_rank_ic": {
+          "member": "",
+          "column": "validation_score",
+          "reduction": "mean"
+        }
+      },
+      "facts": {
+        "selected_expression": {
+          "member": "",
+          "path": "selected_expression"
+        },
+        "candidates": {
+          "member": "",
+          "path": "candidates"
+        }
+      }
+    },
+    "apply": {
+      "operation": "apply-formula",
+      "description": "Apply the frozen discovery formula to later development dates. Bind search to the search evidence.",
+      "config": {
+        "search": "bound",
+        "dataset": "data/research/agent-source",
+        "input_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-03"
+        },
+        "output_window": {
+          "start": "2022-12-12",
+          "end": "2023-01-03"
+        },
+        "output": "assigned"
+      },
+      "parameters": {},
+      "bindings": {
+        "search": ""
+      },
+      "metrics": {}
+    },
+    "assemble": {
+      "operation": "assemble",
+      "description": "Join the candidate factor with the baseline x, labels, maturity and portfolio context. Bind inputs.formula.path to apply evidence.",
+      "config": {
+        "market_id": "a_share",
+        "dataset_id": "agent_candidate",
+        "base_input_data_id": "source",
+        "inputs": {
+          "source": "data/research/agent-source",
+          "formula": {
+            "path": "bound",
+            "columns": [
+              "discovered_factor"
+            ]
+          }
+        },
+        "factor_columns": [
+          "x",
+          "discovered_factor"
+        ],
+        "feature_columns": [],
+        "feature_recipe": null,
+        "label_columns": [
+          "label"
+        ],
+        "filter_columns": [
+          "eligible"
+        ],
+        "context_columns": [
+          "float_market_cap",
+          "total_market_cap"
+        ],
+        "time_window": {
+          "start": "2022-12-12",
+          "end": "2023-01-03"
+        },
+        "output_root": "assigned"
+      },
+      "parameters": {},
+      "bindings": {
+        "inputs.formula.path": ""
+      },
+      "metrics": {}
+    },
+    "evaluate": {
+      "operation": "evaluate",
+      "description": "Compare candidate and baseline on later development days; inspect their separate IC and coverage. Bind inputs to assembled evidence.",
+      "config": {
+        "inputs": "bound",
+        "output": "assigned",
+        "window": {
+          "start": "2022-12-29",
+          "end": "2023-01-03"
+        },
+        "cutoff": "2023-01-03T18:00:00",
+        "sample_role": "development",
+        "evaluation": {
+          "evaluation_id": "agent_factors",
+          "market_id": "a_share",
+          "research_dataset_id": "agent_candidate",
+          "signals": [
+            {
+              "signal_id": "candidate",
+              "source_kind": "factor",
+              "source_column": "discovered_factor"
+            },
+            {
+              "signal_id": "baseline",
+              "source_kind": "factor",
+              "source_column": "x"
+            }
+          ],
+          "label_columns": [
+            "label"
+          ],
+          "n_groups": 2,
+          "filter_mode": "eligible"
+        }
+      },
+      "parameters": {},
+      "bindings": {
+        "inputs": ""
+      },
+      "metrics": {
+        "candidate_ic": {
+          "member": "metrics.parquet",
+          "column": "ic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "baseline_ic": {
+          "member": "metrics.parquet",
+          "column": "ic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "baseline"
+            ]
+          ]
+        },
+        "paired_count": {
+          "member": "metrics.parquet",
+          "column": "n_obs",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "eligible_count": {
+          "member": "daily_coverage.parquet",
+          "column": "eligible_rows",
+          "reduction": "mean"
+        },
+        "mature_count": {
+          "member": "daily_coverage.parquet",
+          "column": "mature_rows",
+          "reduction": "mean"
+        },
+        "candidate_rankic_std": {
+          "member": "ic_summary.parquet",
+          "column": "std_rankic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "candidate_positive_rankic_rate": {
+          "member": "ic_summary.parquet",
+          "column": "positive_rankic_rate",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        }
+      }
+    },
+    "statistics": {
+      "operation": "statistics-factors",
+      "description": "Calculate native factor inference; undefined small-sample inference must remain undefined. Bind dataset to assembled evidence.",
+      "config": {
+        "dataset": "bound",
+        "output": "assigned",
+        "window": {
+          "start": "2022-12-29",
+          "end": "2023-01-03"
+        },
+        "label_cutoff": "2023-01-03T18:00:00",
+        "analyses": [
+          "rank_ic"
+        ],
+        "evaluation": {
+          "factors": [
+            "x",
+            "discovered_factor"
+          ],
+          "primary_label": "protocol:label"
+        },
+        "statistics": {
+          "hac_lag": 0,
+          "factor_fdr_families": {
+            "proposals": [
+              "x",
+              "discovered_factor"
+            ]
+          }
+        }
+      },
+      "parameters": {},
+      "bindings": {
+        "dataset": ""
+      },
+      "metrics": {
+        "candidate_hac_standard_error": {
+          "member": "factor_diagnostics.parquet",
+          "column": "standard_error",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "candidate_hac_p_value": {
+          "member": "factor_diagnostics.parquet",
+          "column": "p_value",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "candidate_fdr_p_value": {
+          "member": "factor_diagnostics.parquet",
+          "column": "fdr_adjusted_p_value",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "inference_date_count": {
+          "member": "factor_diagnostics.parquet",
+          "column": "observation_count",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        }
+      }
+    },
+    "fit": {
+      "operation": "fit",
+      "description": "Fit a candidate on Dec 12-23 only, after formula discovery. Bind inputs to assembled evidence; the later development and final dates remain excluded.",
+      "config": {
+        "market_id": "a_share",
+        "inputs": "bound",
+        "output": "assigned",
+        "fit_windows": [
+          {
+            "start": "2022-12-12",
+            "end": "2022-12-23"
+          }
+        ],
+        "fit_cutoff": "2022-12-26",
+        "label_unit": "decimal_return",
+        "model": {
+          "model_id": "agent_linear",
+          "model_algorithm": "linear_regression",
+          "input_factor_columns": [
+            "discovered_factor"
+          ],
+          "input_feature_columns": [],
+          "sample_filter_mode": "eligible",
+          "hyperparameters": {},
+          "random_seed": 1,
+          "training_scaling": true,
+          "target_column": "protocol:label"
+        }
+      },
+      "parameters": {
+        "model.input_factor_columns": "A list chosen from x and discovered_factor; use x for the baseline and discovered_factor for the candidate."
+      },
+      "bindings": {
+        "inputs": ""
+      },
+      "metrics": {}
+    },
+    "predict": {
+      "operation": "predict",
+      "description": "Predict on the later development dates. Bind model to fitted-model evidence and inputs to assembled evidence.",
+      "config": {
+        "model": "bound",
+        "inputs": "bound",
+        "output": "assigned",
+        "prediction_window": {
+          "start": "2022-12-29",
+          "end": "2023-01-03"
+        },
+        "sample_role": "development"
+      },
+      "parameters": {},
+      "bindings": {
+        "model": "",
+        "inputs": ""
+      },
+      "metrics": {}
+    },
+    "backtest": {
+      "operation": "backtest",
+      "description": "Run the native A-share share-account backtest including fees. Bind predictions.0.path to prediction evidence. Keep initial cash, costs and selection rule fixed.",
+      "config": {
+        "candidate": {
+          "candidate_id": "agent_candidate",
+          "selection_group": "global",
+          "construction": "quantile_equal_weight",
+          "prediction_selector": "champion",
+          "top_quantile": 0.5,
+          "rebalance_schedule": "daily",
+          "benchmark_id": null
+        },
+        "inputs": {
+          "dataset": "data/research/agent-source",
+          "panel": "data/processed/a_share/market_panel_1d",
+          "execution": "data/processed/a_share/execution_mask",
+          "calendar": "data/interim/a_share/trading_calendar",
+          "fees": "data/interim/a_share/a_share_fee_schedule",
+          "market_bars": "data/interim/a_share/market_bars_1d",
+          "stock_master": "data/interim/a_share/stock_master",
+          "corporate_actions": "data/interim/a_share/corporate_actions"
+        },
+        "predictions": [
+          {
+            "path": "bound",
+            "window": {
+              "start": "2022-12-29",
+              "end": "2023-01-03"
+            }
+          }
+        ],
+        "output": "assigned",
+        "output_window": {
+          "start": "2022-12-29",
+          "end": "2023-01-03"
+        },
+        "input_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-03"
+        },
+        "formal_dataset_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-03"
+        },
+        "prediction_window": {
+          "start": "2022-12-29",
+          "end": "2023-01-03"
+        },
+        "assumptions": "protocol:costs",
+        "sample_role": "development"
+      },
+      "parameters": {},
+      "bindings": {
+        "predictions.0.path": ""
+      },
+      "metrics": {
+        "net_pnl": {
+          "member": "",
+          "column": "net_pnl",
+          "reduction": "mean"
+        },
+        "fees": {
+          "member": "",
+          "column": "fees",
+          "reduction": "mean"
+        },
+        "nav": {
+          "member": "",
+          "column": "nav",
+          "reduction": "mean"
+        }
+      }
+    }
+  },
+  "final_evaluation": [
+    {
+      "operation": "apply-formula",
+      "description": "Apply the frozen discovery formula to later development dates. Bind search to the search evidence.",
+      "config": {
+        "search": "artifact:formula",
+        "dataset": "data/research/agent-source",
+        "input_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-06"
+        },
+        "output_window": "protocol:test_window",
+        "output": "assigned"
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {},
+      "name": "final_apply"
+    },
+    {
+      "operation": "assemble",
+      "description": "Join the candidate factor with the baseline x, labels, maturity and portfolio context. Bind inputs.formula.path to apply evidence.",
+      "config": {
+        "market_id": "a_share",
+        "dataset_id": "agent_candidate",
+        "base_input_data_id": "source",
+        "inputs": {
+          "source": "data/research/agent-source",
+          "formula": {
+            "path": "artifact:final_apply",
+            "columns": [
+              "discovered_factor"
+            ]
+          }
+        },
+        "factor_columns": [
+          "x",
+          "discovered_factor"
+        ],
+        "feature_columns": [],
+        "feature_recipe": null,
+        "label_columns": [
+          "label"
+        ],
+        "filter_columns": [
+          "eligible"
+        ],
+        "context_columns": [
+          "float_market_cap",
+          "total_market_cap"
+        ],
+        "time_window": "protocol:test_window",
+        "output_root": "assigned"
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {},
+      "name": "final_assemble"
+    },
+    {
+      "operation": "evaluate",
+      "description": "Compare candidate and baseline on later development days; inspect their separate IC and coverage. Bind inputs to assembled evidence.",
+      "config": {
+        "inputs": "artifact:final_assemble",
+        "output": "assigned",
+        "window": "protocol:test_window",
+        "cutoff": "2023-01-09",
+        "sample_role": "test",
+        "evaluation": {
+          "evaluation_id": "agent_factors",
+          "market_id": "a_share",
+          "research_dataset_id": "agent_candidate",
+          "signals": [
+            {
+              "signal_id": "candidate",
+              "source_kind": "factor",
+              "source_column": "discovered_factor"
+            },
+            {
+              "signal_id": "baseline",
+              "source_kind": "factor",
+              "source_column": "x"
+            }
+          ],
+          "label_columns": [
+            "label"
+          ],
+          "n_groups": 2,
+          "filter_mode": "eligible"
+        }
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {
+        "candidate_ic": {
+          "member": "metrics.parquet",
+          "column": "ic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "baseline_ic": {
+          "member": "metrics.parquet",
+          "column": "ic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "baseline"
+            ]
+          ]
+        },
+        "paired_count": {
+          "member": "metrics.parquet",
+          "column": "n_obs",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "eligible_count": {
+          "member": "daily_coverage.parquet",
+          "column": "eligible_rows",
+          "reduction": "mean"
+        },
+        "mature_count": {
+          "member": "daily_coverage.parquet",
+          "column": "mature_rows",
+          "reduction": "mean"
+        },
+        "candidate_rankic_std": {
+          "member": "ic_summary.parquet",
+          "column": "std_rankic",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        },
+        "candidate_positive_rankic_rate": {
+          "member": "ic_summary.parquet",
+          "column": "positive_rankic_rate",
+          "reduction": "mean",
+          "filters": [
+            [
+              "signal",
+              "==",
+              "candidate"
+            ]
+          ]
+        }
+      },
+      "name": "final_evaluate"
+    },
+    {
+      "operation": "statistics-factors",
+      "description": "Calculate native factor inference; undefined small-sample inference must remain undefined. Bind dataset to assembled evidence.",
+      "config": {
+        "dataset": "artifact:final_assemble",
+        "output": "assigned",
+        "window": "protocol:test_window",
+        "label_cutoff": "2023-01-09",
+        "analyses": [
+          "rank_ic"
+        ],
+        "evaluation": {
+          "factors": [
+            "x",
+            "discovered_factor"
+          ],
+          "primary_label": "protocol:label"
+        },
+        "statistics": {
+          "hac_lag": 0,
+          "factor_fdr_families": {
+            "proposals": [
+              "x",
+              "discovered_factor"
+            ]
+          }
+        },
+        "sample_role": "test"
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {
+        "candidate_hac_standard_error": {
+          "member": "factor_diagnostics.parquet",
+          "column": "standard_error",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "candidate_hac_p_value": {
+          "member": "factor_diagnostics.parquet",
+          "column": "p_value",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "candidate_fdr_p_value": {
+          "member": "factor_diagnostics.parquet",
+          "column": "fdr_adjusted_p_value",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        },
+        "inference_date_count": {
+          "member": "factor_diagnostics.parquet",
+          "column": "observation_count",
+          "reduction": "mean",
+          "filters": [
+            [
+              "factor_id",
+              "==",
+              "discovered_factor"
+            ],
+            [
+              "fdr_method",
+              "==",
+              "BY"
+            ]
+          ]
+        }
+      },
+      "name": "final_statistics"
+    },
+    {
+      "operation": "predict",
+      "description": "Predict on the later development dates. Bind model to fitted-model evidence and inputs to assembled evidence.",
+      "config": {
+        "model": "artifact:model",
+        "inputs": "artifact:final_assemble",
+        "output": "assigned",
+        "prediction_window": "protocol:test_window",
+        "sample_role": "test"
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {},
+      "name": "final_predict"
+    },
+    {
+      "operation": "backtest",
+      "description": "Run the native A-share share-account backtest including fees. Bind predictions.0.path to prediction evidence. Keep initial cash, costs and selection rule fixed.",
+      "config": {
+        "candidate": {
+          "candidate_id": "agent_candidate",
+          "selection_group": "global",
+          "construction": "quantile_equal_weight",
+          "prediction_selector": "champion",
+          "top_quantile": 0.5,
+          "rebalance_schedule": "daily",
+          "benchmark_id": null
+        },
+        "inputs": {
+          "dataset": "data/research/agent-source",
+          "panel": "data/processed/a_share/market_panel_1d",
+          "execution": "data/processed/a_share/execution_mask",
+          "calendar": "data/interim/a_share/trading_calendar",
+          "fees": "data/interim/a_share/a_share_fee_schedule",
+          "market_bars": "data/interim/a_share/market_bars_1d",
+          "stock_master": "data/interim/a_share/stock_master",
+          "corporate_actions": "data/interim/a_share/corporate_actions"
+        },
+        "predictions": [
+          {
+            "path": "artifact:final_predict",
+            "window": "protocol:test_window"
+          }
+        ],
+        "output": "assigned",
+        "output_window": "protocol:test_window",
+        "input_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-06"
+        },
+        "formal_dataset_window": {
+          "start": "2022-12-01",
+          "end": "2023-01-06"
+        },
+        "prediction_window": "protocol:test_window",
+        "assumptions": "protocol:costs",
+        "sample_role": "test"
+      },
+      "parameters": {},
+      "bindings": {},
+      "metrics": {
+        "net_pnl": {
+          "member": "",
+          "column": "net_pnl",
+          "reduction": "mean"
+        },
+        "fees": {
+          "member": "",
+          "column": "fees",
+          "reduction": "mean"
+        },
+        "nav": {
+          "member": "",
+          "column": "nav",
+          "reduction": "mean"
+        }
+      },
+      "name": "final_backtest"
+    },
+    {
+      "name": "final_curve",
+      "operation": "plot",
+      "description": "Render the final native account curve from its saved ledger.",
+      "parameters": {},
+      "metrics": {},
+      "config": {
+        "kind": "curve",
+        "inputs": "artifact:final_backtest",
+        "output": "curve.png",
+        "timezone": "Asia/Shanghai",
+        "sample_role": "test"
+      }
+    }
+  ],
+  "budget": {
+    "max_requests": 40,
+    "max_experiments": 30,
+    "wall_seconds": 3600,
+    "max_context_chars": 48000
+  },
+  "output": "results/agent-session",
+  "llm": {
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-6-luna",
+    "credential_env": "QRP_RESEARCH_API_KEY",
+    "max_output_tokens": 128000,
+    "reasoning_effort": "high",
+    "timeout_seconds": 300
+  },
+  "memory": "results/agent-memory",
+  "web_search": true,
+  "documents": {
+    "research_methods": "docs/research-learning.md",
+    "agent_usage": "docs/agent.md",
+    "factor_formula_api": "src/quant_research_platform/research/factors/search.py",
+    "evaluation_api": "src/quant_research_platform/research/evaluations/runner.py",
+    "portfolio_api": "src/quant_research_platform/research/portfolios/production.py"
+  },
+  "sandbox": {
+    "image": "qrp-research:local",
+    "inputs": {
+      "development": "data/research/development_only"
+    },
+    "user": "1000:1000",
+    "cpus": 4,
+    "memory": "8g",
+    "pids_limit": 256,
+    "metrics": {
+      "score": {
+        "member": "metrics.json",
+        "column": "score",
+        "reduction": "mean"
+      }
+    }
+  }
+}

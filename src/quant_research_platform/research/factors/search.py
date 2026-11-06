@@ -164,6 +164,11 @@ def search_factors(config):
         },
         {"timesteps", "ppo", "device", "expressions"},
     )
+    expressions = config.get("expressions", config["columns"])
+    if not isinstance(expressions, list) or any(
+        not isinstance(item, str) for item in expressions
+    ):
+        raise ValueError("factor_search_expressions_must_be_string_list")
     for name in ("budget", "max_depth"):
         if type(config[name]) is not int or config[name] < 1:
             raise ValueError("factor_search_budget_invalid")
@@ -257,7 +262,7 @@ def search_factors(config):
         return f"({left}{operator}{right})"
 
     try:
-        for expression in config.get("expressions", config["columns"]):
+        for expression in expressions:
             candidate(expression)
         if config["method"] == "random":
             # Attempts, including duplicates, have a finite declared budget.
@@ -386,17 +391,29 @@ def apply_formula(config):
     )
     spec = session.spec
     frame["discovered_factor"] = formula_values(frame, expression, columns)
+    output_columns = list(
+        dict.fromkeys(
+            [
+                *spec["primary_key"],
+                "timestamp",
+                "asset_id",
+                "eligible",
+                "discovered_factor",
+            ]
+        )
+    )
     frame = frame.loc[
         window_mask(frame, config["output_window"]),
-        ["timestamp", "asset_id", "eligible", "discovered_factor"],
+        output_columns,
     ]
     output_spec = DataSpec(
         data_id="discovered_factor",
         frequency=spec["frequency"],
         grain="asset_timestamp",
-        primary_key=("timestamp", "asset_id"),
+        primary_key=tuple(spec["primary_key"]),
         partition_columns=(),
         column_roles={
+            **{column: spec["column_roles"][column] for column in spec["primary_key"]},
             "timestamp": "timestamp",
             "asset_id": "key",
             "eligible": "mask",

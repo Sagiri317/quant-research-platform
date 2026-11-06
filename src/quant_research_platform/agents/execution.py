@@ -9,21 +9,186 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from contextlib import suppress
+from copy import deepcopy
 from math import isfinite
 from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
 
+from quant_research_platform.agents.protocol import (
+    before_holdout,
+    bind_protocol,
+    set_argument,
+)
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
+from quant_research_platform.policy.share_safety import (
+    evidence_json_value_unsafe_reason,
+)
 from quant_research_platform.storage.atomic import (
+    atomic_write_json,
     atomic_write_text,
     reject_if_exists,
 )
+
+
+def error_feedback(error, *, log=None):
+    """Expose machine error codes and generated-code line numbers, never log values."""
+    result = {"error": type(error).__name__}
+    message = str(error)
+    if re.fullmatch(r"[a-z][a-z0-9_]{2,100}", message):
+        result["reason"] = message
+    if log is not None and log.exists():
+        with log.open("rb") as handle:
+            handle.seek(max(0, log.stat().st_size - 8192))
+            tail = handle.read().decode("utf-8", errors="replace")
+        lines = tail.splitlines()
+        if lines:
+            match = re.fullmatch(r"([a-z][a-z0-9_]{2,100})(?::.*)?", lines[-1])
+            if match:
+                result["reason"] = match[1]
+            match = re.match(r"([A-Za-z]+(?:Error|Exception)):", lines[-1])
+            if match:
+                result["error"] = match[1]
+        locations = re.findall(r'File "/experiment.py", line ([0-9]+)', tail)
+        if locations:
+            result["code_line"] = int(locations[-1])
+    return result
+
+
+def run_native(
+    template,
+    parameters,
+    inputs,
+    artifacts,
+    protocol,
+    root,
+    *,
+    timeout,
+    test_start=None,
+    cwd=None,
+):
+    """Call the existing CLI with fixed scientific fields and fresh output paths."""
+    if set(parameters) - set(template["parameters"]):
+        raise ValueError("agent_parameter_not_declared")
+    arguments = deepcopy(template["config"])
+    for path, value in parameters.items():
+        set_argument(arguments, path, value)
+    arguments = bind_protocol(arguments, protocol)
+    bindings = template.get("bindings", {})
+    if set(inputs) != set(bindings):
+        raise ValueError("agent_input_bindings_mismatch")
+    for path, identifier in inputs.items():
+        allow_generated = (
+            path in {"dataset", "inputs"} or path.startswith("inputs.")
+        ) and template["operation"] in {
+            "fit",
+            "predict",
+            "evaluate",
+            "search-factors",
+            "fit-cost-model",
+            "statistics-factors",
+            "statistics-model",
+            "assemble",
+        }
+        resolved = _resolve_artifacts(
+            f"artifact:{identifier}/{bindings[path]}",
+            artifacts,
+            allow_generated=allow_generated,
+        )
+        set_argument(arguments, path, resolved)
+    if test_start is not None:
+        before_holdout(arguments, test_start)
+    arguments = _resolve_artifacts(arguments, artifacts)
+    operation = template["operation"]
+    suffix = (
+        ".json"
+        if operation
+        in {
+            "score",
+            "select",
+            "calibrate",
+            "search-factors",
+            "calibrate-uncertainty",
+            "evaluate-uncertainty",
+        }
+        else ""
+    )
+    if operation == "plot":
+        suffix = Path(template["config"]["output"]).suffix
+        if suffix not in {".png", ".svg", ".pdf"}:
+            raise ValueError("agent_plot_suffix_invalid")
+    artifact = root / ("result" + suffix)
+    arguments["output_root" if operation in {"assemble", "prepare"} else "output"] = (
+        str(artifact.resolve())
+    )
+    config_file = atomic_write_json(root / "config.json", arguments)
+    exit_code = _run_process(
+        [
+            sys.executable,
+            "-m",
+            "quant_research_platform.interfaces.cli",
+            operation,
+            "--config",
+            str(config_file.resolve()),
+        ],
+        timeout=timeout,
+        cwd=Path.cwd() if cwd is None else cwd,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                filter(
+                    None,
+                    (
+                        str(Path(__file__).resolve().parents[2]),
+                        os.environ.get("PYTHONPATH"),
+                    ),
+                )
+            ),
+        },
+        log=root / "private.log",
+    )
+    result = {
+        "exit_code": exit_code,
+        "status": "completed" if exit_code == 0 else "failed",
+    }
+    if exit_code == 0:
+        result["metrics"] = _metrics(artifact, template["metrics"])
+        if template.get("facts"):
+            result["facts"] = _facts(artifact, template["facts"])
+    else:
+        result.update(
+            error_feedback(
+                RuntimeError("agent_native_operation_failed"), log=root / "private.log"
+            )
+        )
+    return result, artifact
+
+
+def _facts(output, definitions):
+    """Read caller-declared aggregate metadata, never an arbitrary raw table."""
+    result = {}
+    for name, definition in definitions.items():
+        definition = _strict_config(definition, {"member", "path"}, set())
+        source = (
+            (output / definition["member"]).resolve()
+            if definition["member"]
+            else output.resolve()
+        )
+        if not source.is_relative_to(output.resolve()) or source.suffix != ".json":
+            raise ValueError("agent_fact_source_invalid")
+        value = parse_qrp_json_object(source.read_bytes())
+        for key in definition["path"].split("."):
+            value = value[key]
+        result[name] = value
+    if evidence_json_value_unsafe_reason(result):
+        raise ValueError("agent_fact_not_shareable")
+    return result
 
 
 def _run_process(args, *, timeout, cwd, log, env=None):
@@ -145,7 +310,14 @@ def run_isolated_python(code, config, output, *, timeout):
         code = _run_process(
             args, timeout=timeout, cwd=output, log=output / "private.log"
         )
-        return {"exit_code": code, "status": "completed" if code == 0 else "failed"}
+        result = {"exit_code": code, "status": "completed" if code == 0 else "failed"}
+        if code:
+            result.update(
+                error_feedback(
+                    RuntimeError("agent_python_failed"), log=output / "private.log"
+                )
+            )
+        return result
     except BaseException as error:
         primary = error
         raise
@@ -193,9 +365,10 @@ def _resolve_artifacts(value, artifacts, *, allow_generated=False):
 def _metrics(output, definitions):
     """Extract declared numeric aggregates; missing observations remain undefined."""
     result = {}
+    ledger_summaries = {}
     for name, definition in definitions.items():
         definition = _strict_config(
-            definition, {"member", "column", "reduction"}, set()
+            definition, {"member", "column", "reduction"}, {"filters"}
         )
         source = (
             (output / definition["member"]).resolve()
@@ -205,9 +378,11 @@ def _metrics(output, definitions):
         if not source.is_relative_to(output.resolve()):
             raise ValueError("agent_metric_path_escape")
         if source.suffix == ".parquet":
-            values = pd.read_parquet(source, columns=[definition["column"]])[
-                definition["column"]
-            ]
+            values = pd.read_parquet(
+                source,
+                columns=[definition["column"]],
+                filters=definition.get("filters"),
+            )[definition["column"]]
         elif source.suffix == ".json":
             value = parse_qrp_json_object(source.read_bytes())
             for key in definition["column"].split("."):
@@ -215,6 +390,20 @@ def _metrics(output, definitions):
             if value is not None and type(value) not in {int, float}:
                 raise ValueError("agent_metric_numeric_required")
             values = pd.Series([value], dtype=float)
+        elif source.is_dir():
+            from quant_research_platform.artifacts.portfolio_ledger import (
+                read_portfolio_ledger_artifact,
+                summarize_portfolio_ledger,
+            )
+
+            if source not in ledger_summaries:
+                ledger = read_portfolio_ledger_artifact(source)
+                ledger_summaries[source] = summarize_portfolio_ledger(
+                    ledger.capital, ledger.iter_chunks()
+                )
+            values = pd.Series(
+                [ledger_summaries[source][definition["column"]]], dtype=float
+            )
         else:
             raise ValueError("agent_metric_format_invalid")
         if not pd.api.types.is_numeric_dtype(values):

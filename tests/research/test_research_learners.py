@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.datasets.learning import research_frame
@@ -22,40 +21,8 @@ from quant_research_platform.research.predictions.uncertainty import (
     evaluate_uncertainty,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.learning import learning_panel
 from tests.research.direct_model_test_support import fit_frame, predict_frame
-
-
-def learning_panel(root):
-    stamps = pd.date_range("2020-01-01", periods=12).repeat(3)
-    frame = pd.DataFrame(
-        {
-            "timestamp": stamps,
-            "asset_id": ["a", "b", "c"] * 12,
-            "x": [1.0, 2.0, 3.0] * 12,
-            "eligible": True,
-            "label": [0.1, 0.2, 0.3] * 12,
-            "label_available_at": stamps + pd.Timedelta(hours=1),
-        }
-    )
-    spec = DataSpec(
-        data_id="learning",
-        frequency="1d",
-        grain="asset_timestamp",
-        primary_key=("timestamp", "asset_id"),
-        partition_columns=(),
-        column_roles={
-            "timestamp": "timestamp",
-            "asset_id": "key",
-            "x": "factor",
-            "eligible": "mask",
-            "label": "label",
-            "label_available_at": "context",
-        },
-        column_units={"label": "decimal_return"},
-        label_availability_columns={"label": "label_available_at"},
-    )
-    write_dataset(root, frame, spec=spec)
-    return frame, spec
 
 
 def test_learning_panel_checks_its_axis_when_dataset_keys_are_wider(tmp_path):
@@ -125,6 +92,11 @@ def test_formula_search_retains_undefined_and_applies_frozen_selection(
                 "policy_kwargs": {"net_arch": [8]},
             },
         )
+    if method == "random":
+        for malformed in ("x", [1]):
+            with pytest.raises(ValueError, match="expressions_must_be_string_list"):
+                search_factors({**config, "expressions": malformed})
+        assert not (tmp_path / "search.json").exists()
     saved = search_factors(config)
     result = parse_qrp_json_object(saved.read_bytes())
     assert result["selected_expression"] == "x"
