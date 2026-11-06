@@ -143,7 +143,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         _ordered_context(
             predictor.history,
             spec.input_columns,
-            sequence_context_columns(spec.model_algorithm),
+            sequence_context_columns(spec.model_algorithm, spec.hyperparameters),
         )
         importance = None
     elif spec.model_algorithm == "linear_regression":
@@ -228,13 +228,14 @@ def _fit_model_result(
     spec: ModelSpec,
     *,
     estimator: object,
+    validation=None,
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
         result = _fit_linear_model_result(prepared_training, spec)
     elif spec.model_algorithm in SEQUENCE_ALGORITHMS:
         from quant_research_platform.research.models.neural import fit_sequence
 
-        predictor = fit_sequence(prepared_training, spec)
+        predictor, curve = fit_sequence(prepared_training, spec, validation)
         result = ModelFitResult(
             metadata=model_metadata(
                 spec,
@@ -244,6 +245,7 @@ def _fit_model_result(
             ),
             prediction_model=predictor,
         )
+        result.metadata["learning_curve"] = curve
     else:
         result = _fit_estimator_model_result(
             prepared_training, spec, estimator=estimator
@@ -424,7 +426,7 @@ def _collect_training_frame(
                     else ()
                 ),
                 *spec.input_columns,
-                *sequence_context_columns(spec.model_algorithm),
+                *sequence_context_columns(spec.model_algorithm, spec.hyperparameters),
                 spec.target_column,
                 "eligible",
                 *availability_columns,
@@ -447,7 +449,7 @@ def _collect_training_frame(
             chunk = chunk.reset_index(drop=True)
             if spec.model_algorithm in SEQUENCE_ALGORITHMS:
                 observed = chunk.loc[:, spec.input_columns].notna().any(axis=1)
-                if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+                if sequence_context_columns(spec.model_algorithm, spec.hyperparameters):
                     observed = pd.Series(True, index=chunk.index)
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
@@ -459,7 +461,9 @@ def _collect_training_frame(
                             "asset_id",
                             "timestamp",
                             *spec.input_columns,
-                            *sequence_context_columns(spec.model_algorithm),
+                            *sequence_context_columns(
+                                spec.model_algorithm, spec.hyperparameters
+                            ),
                         ],
                     ]
                 )

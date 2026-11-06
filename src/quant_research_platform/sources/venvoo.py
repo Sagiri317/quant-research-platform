@@ -112,7 +112,7 @@ def interim_spec(stream):
     )
 
 
-def normalize(frame, stream, instruments):
+def normalize(frame, stream, instruments, *, clock_counts=None):
     mapping = instrument_mapping(instruments)
     required = set(source_columns(stream))
     if not required <= set(frame):
@@ -131,7 +131,15 @@ def normalize(frame, stream, instruments):
     work["instrument_type"] = codes.map(
         {code: item.get("instrument_type", "stock") for code, item in mapping.items()}
     )
-    raw_time = pd.to_numeric(work.pop("time"), errors="raise")
+    raw_time = pd.to_numeric(work.pop("time"), errors="raise").astype("float64")
+    if (raw_time % 1 != 0).any():
+        raise ValueError("level2_time_invalid")
+    # Vendor daytime exports mix second-only and millisecond clock encodings.
+    seconds_clock = raw_time.between(10_000, 999_999)
+    if clock_counts is not None:
+        clock_counts["HHMMSS"] += int(seconds_clock.sum())
+        clock_counts["HHMMSSmmm"] += int((~seconds_clock).sum())
+    raw_time.loc[seconds_clock] *= 1000
     hour, minute, second, millis = (
         raw_time // 10_000_000,
         raw_time // 100_000 % 100,
@@ -140,13 +148,7 @@ def normalize(frame, stream, instruments):
     )
     if (
         raw_time.isna().any()
-        or (
-            (raw_time % 1 != 0)
-            | (hour < 0)
-            | (hour > 23)
-            | (minute > 59)
-            | (second > 59)
-        ).any()
+        or ((hour < 0) | (hour > 23) | (minute > 59) | (second > 59)).any()
     ):
         raise ValueError("level2_time_invalid")
     day = pd.to_datetime(work.pop("date").astype(str), format="%Y%m%d", errors="raise")
@@ -202,7 +204,14 @@ def normalize(frame, stream, instruments):
 
 
 def materialize_interim_data(
-    *, raw_root, output_roots, data_ids, instruments, revision, start_date, end_date
+    *,
+    raw_root,
+    output_roots,
+    data_ids,
+    instruments,
+    revision,
+    start_date,
+    end_date,
 ):
     from quant_research_platform.contracts.time import TimeWindow
 
@@ -233,8 +242,9 @@ def materialize_interim_data(
         }
         symbols = [item["wind_code"].upper() for item in instruments]
         spec = interim_spec(stream)
+        clock_counts = {"HHMMSS": 0, "HHMMSSmmm": 0}
 
-        def frames(files, stream, symbols, spec):
+        def frames(files, stream, symbols, spec, clock_counts):
             for path in files:
                 source = ds.dataset(path, format="parquet")
                 scanner = source.scanner(
@@ -248,7 +258,12 @@ def materialize_interim_data(
                 for batch in scanner.to_batches():
                     if not batch.num_rows:
                         continue
-                    frame = normalize(batch.to_pandas(), stream, instruments)
+                    frame = normalize(
+                        batch.to_pandas(),
+                        stream,
+                        instruments,
+                        clock_counts=clock_counts,
+                    )
                     if not frame.session_date.eq(pd.Timestamp(path.parent.name)).all():
                         raise ValueError("level2_source_date_mismatch")
                     frame["source_row"] += offset
@@ -265,7 +280,7 @@ def materialize_interim_data(
         output = Path(output_roots[stream])
         write_dataset(
             output,
-            frames(files, stream, symbols, spec),
+            frames(files, stream, symbols, spec, clock_counts),
             spec=spec,
             metadata={
                 "source_evidence": {
@@ -274,6 +289,7 @@ def materialize_interim_data(
                     "source_hashes": hashes,
                     "instruments": instruments,
                     "timestamp_semantics": "vendor_event_time_no_receive_clock",
+                    "clock_encoding_counts": clock_counts,
                 },
             },
         )

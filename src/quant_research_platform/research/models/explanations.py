@@ -135,7 +135,9 @@ def _prediction_frames(session, result, window, *, extra=()):
                 "timestamp",
                 "asset_id",
                 *metadata["input_columns"],
-                *sequence_context_columns(metadata["model_algorithm"]),
+                *sequence_context_columns(
+                    metadata["model_algorithm"], metadata["hyperparameters"]
+                ),
                 *required_filter_columns(metadata["sample_filter_mode"]),
                 *extra,
             )

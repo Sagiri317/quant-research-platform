@@ -28,6 +28,20 @@ from tests.helpers.high_frequency import daily_view, write_daily_inputs
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
 
 
+def test_source_mixed_second_and_millisecond_clocks():
+    raw = raw_quotes((93000, 93003123, 150001))
+    counts = {"HHMMSS": 0, "HHMMSSmmm": 0}
+    normalized = normalize(raw, "hft_quotes", INSTRUMENTS, clock_counts=counts)
+    expected = normalize(
+        raw.assign(time=[93000000, 93003123, 150001000]), "hft_quotes", INSTRUMENTS
+    )
+    pd.testing.assert_frame_equal(normalized, expected)
+    assert counts == {"HHMMSS": 2, "HHMMSSmmm": 1}
+    assert normalized.timestamp.iloc[1] == pd.Timestamp("2018-02-14T01:30:03.123")
+    with pytest.raises(ValueError, match="level2_time_invalid"):
+        normalize(raw.assign(time=[93060, 93003123, 150001]), "hft_quotes", INSTRUMENTS)
+
+
 def test_hft_prepare_rejects_conflicting_declared_market(tmp_path):
     from dataclasses import replace
 

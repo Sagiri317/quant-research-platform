@@ -11,11 +11,13 @@ import pandas as pd
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     DEEPLOB_ALGORITHMS,
+    SEQUENCE_ALGORITHMS,
     ModelSpec,
     _fit_windows,
     _model_spec,
     _resolve_candidate_parameters,
     _target_definition,
+    _thaw_model_hyperparameters,
     model_spec_payload,
     sequence_context_columns,
     validate_model_facts,
@@ -50,12 +52,21 @@ def fit_model(
     candidate_parameters=None,
     label_availability_column=None,
     trading_calendar=None,
+    validation_frames=None,
+    validation_cutoff=None,
 ):
     """Fit one candidate on its legal observed domain."""
     cutoff = strict_timestamp_series(
         pd.Series([fit_cutoff]), error="invalid_fit_cutoff"
     ).iloc[0]
     windows = _fit_windows(fit_windows, cutoff)
+    if candidate_parameters is not None and spec.hyperparameters:
+        raise ValueError("candidate_parameters_conflict_with_hyperparameters")
+    if candidate_parameters is not None and spec.model_algorithm in SEQUENCE_ALGORITHMS:
+        spec = replace(spec, hyperparameters=candidate_parameters)
+        candidate_parameters = None
+    if (validation_frames is None) != (validation_cutoff is None):
+        raise ValueError("sequence_validation_configuration_invalid")
 
     def scoped():
         with closing_iterator(iter(frames)) as source:
@@ -86,9 +97,27 @@ def fit_model(
     )
     if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
+    validation = None
+    if validation_frames is not None:
+        if spec.model_algorithm not in SEQUENCE_ALGORITHMS or validation_cutoff is None:
+            raise ValueError("sequence_validation_configuration_invalid")
+        validation = fitting._collect_training_frame(
+            validation_frames,
+            spec,
+            fitting_cutoff=validation_cutoff,
+            availability_column=label_availability_column,
+            trading_calendar=trading_calendar,
+        )
+        if validation.training.empty:
+            raise ValueError("model_validation_sample_empty")
+        validation_start = validation.training.timestamp.min()
+        if (
+            cutoff >= validation_start
+            or pd.Timestamp(prepared.row_counts["label_available_max"])
+            >= validation_start
+        ):
+            raise ValueError("model_validation_training_overlap")
     if candidate_parameters is not None:
-        if spec.hyperparameters:
-            raise ValueError("candidate_parameters_conflict_with_hyperparameters")
         spec = replace(
             spec,
             hyperparameters=_resolve_candidate_parameters(
@@ -96,7 +125,10 @@ def fit_model(
             ),
         )
     result = fitting._fit_model_result(
-        prepared, spec, estimator=build_estimator_from_model_spec(spec)
+        prepared,
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+        validation=validation,
     )
     return result
 
@@ -121,6 +153,7 @@ def fit(config: Mapping) -> Path:
             "input_spec",
             "family_id",
             "trading_calendar",
+            "validation",
         },
     )
     output = Path(config["output"])
@@ -135,6 +168,18 @@ def fit(config: Mapping) -> Path:
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
     windows = _fit_windows(config["fit_windows"], cutoff)
+    validation = config.get("validation")
+    validation_windows = ()
+    if validation is not None:
+        validation = _strict_config(validation, {"windows", "cutoff"}, set())
+        validation_windows = _fit_windows(
+            validation["windows"], pd.Timestamp(validation["cutoff"])
+        )
+        if (
+            spec.model_algorithm not in SEQUENCE_ALGORITHMS
+            or pd.Timestamp(validation_windows[0].start) <= cutoff
+        ):
+            raise ValueError("model_validation_training_overlap")
     assets = config.get("asset_ids")
     if assets is not None and (
         type(assets) is not list
@@ -145,7 +190,7 @@ def fit(config: Mapping) -> Path:
         raise ValueError("training_asset_ids_invalid")
     options = _dataset_input_options(
         source,
-        discovery_windows=windows,
+        discovery_windows=(*windows, *validation_windows),
         row_filters=(("asset_id", "in", tuple(assets)),) if assets is not None else (),
     )
     selected_columns = options.get("columns")
@@ -221,7 +266,7 @@ def fit(config: Mapping) -> Path:
         "fit_windows": [_window_payload(w) for w in windows],
         "fit_cutoff": time_value_isoformat(cutoff, preserve_datetime=True),
         "candidate_parameters": config.get(
-            "candidate_parameters", dict(spec.hyperparameters)
+            "candidate_parameters", _thaw_model_hyperparameters(spec.hyperparameters)
         ),
         "label_unit": config["label_unit"],
         "target_definition": _target_definition(
@@ -236,6 +281,8 @@ def fit(config: Mapping) -> Path:
         "selection_cutoff": None if selection is None else selection["cutoff"],
         "input_spec": config.get("input_spec"),
     }
+    if validation is not None:
+        facts["validation"] = validation
     validate_model_facts(facts, expected=selected if selection is not None else None)
     recorder = TrialRecorder(output.with_name(output.name + ".trial"), facts)
     recorder.begin()
@@ -248,12 +295,20 @@ def fit(config: Mapping) -> Path:
             availability_column=availability,
         )
         columns = tuple(
-            dict.fromkeys((*columns, *sequence_context_columns(spec.model_algorithm)))
+            dict.fromkeys(
+                (
+                    *columns,
+                    *sequence_context_columns(
+                        spec.model_algorithm,
+                        config.get("candidate_parameters", spec.hyperparameters),
+                    ),
+                )
+            )
         )
         if spec.training_weighting.half_life_periods is not None:
             columns = (*columns, "market_type")
 
-        def checked_frames():
+        def checked_frames(read_windows):
             import pyarrow as pa
 
             from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -265,7 +320,7 @@ def fit(config: Mapping) -> Path:
                 if set(declared["primary_key"]) == {"timestamp", "asset_id"}
                 else ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
             )
-            for window in windows:
+            for window in read_windows:
                 frames = iter_dataset_chunks(
                     session.filtered_view(window).projected_view(columns)
                 )
@@ -305,13 +360,17 @@ def fit(config: Mapping) -> Path:
                 )
             )
         result = fit_model(
-            checked_frames(),
+            checked_frames(windows),
             spec,
             fit_windows=windows,
             fit_cutoff=cutoff,
             candidate_parameters=config.get("candidate_parameters"),
             label_availability_column=availability,
             trading_calendar=calendar,
+            validation_frames=checked_frames(validation_windows)
+            if validation is not None
+            else None,
+            validation_cutoff=validation["cutoff"] if validation is not None else None,
         )
         from quant_research_platform.research.models.persisted import save_model
 

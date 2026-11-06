@@ -72,12 +72,12 @@ PROBABILITY_COLUMNS = ("probability_down", "probability_flat", "probability_up")
 CLASSIFICATION_METRICS = ("log_loss", "brier", "accuracy", "macro_f1")
 
 
-def sequence_context_columns(algorithm):
-    return (
-        ("session_date", "segment_id", "eligible")
-        if algorithm in DEEPLOB_ALGORITHMS
-        else ()
+def sequence_context_columns(algorithm, parameters=None):
+    groups = (parameters or {}).get(
+        "sequence_group_columns",
+        ("session_date", "segment_id") if algorithm in DEEPLOB_ALGORITHMS else (),
     )
+    return (*groups, *(("eligible",) if algorithm in DEEPLOB_ALGORITHMS else ()))
 
 
 def model_context_window(facts, window):
@@ -87,7 +87,8 @@ def model_context_window(facts, window):
         return window
     start = (
         pd.Timestamp(window.start).normalize()
-        if algorithm in DEEPLOB_ALGORITHMS
+        if "session_date"
+        in sequence_context_columns(algorithm, facts["candidate_parameters"])
         else pd.Timestamp(facts["fit_windows"][-1]["end"])
     )
     return PredictionWindow(
@@ -147,9 +148,23 @@ def sequence_parameters(algorithm, parameters):
         if "class_threshold" not in parameters:
             raise ValueError("classification_threshold_required")
         defaults["class_threshold"] = parameters["class_threshold"]
-    if set(parameters) - set(defaults):
+    if set(parameters) - (set(defaults) | {"sequence_group_columns"}):
         raise ValueError("sequence_parameters_unknown")
     defaults.update(parameters)
+    groups = defaults.get("sequence_group_columns", ())
+    if (
+        type(groups) not in (tuple, list)
+        or any(
+            type(column) is not str
+            or not column
+            or column in {"asset_id", "timestamp", "eligible"}
+            for column in groups
+        )
+        or len(set(groups)) != len(groups)
+    ):
+        raise ValueError("sequence_boundary_invalid")
+    if "sequence_group_columns" in defaults:
+        defaults["sequence_group_columns"] = list(groups)
     for name in (
         "sequence_length",
         "hidden_size",
@@ -444,9 +459,44 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
         "feature_importance",
         "feature_importance_status",
         "training_target_mean",
+        "learning_curve",
     }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
+    if "learning_curve" in metadata:
+        curve = metadata["learning_curve"]
+        if (
+            type(curve) is not dict
+            or set(curve)
+            != {
+                "metric",
+                "training_loss_scope",
+                "validation_loss_scope",
+                "epochs",
+                "sequence_lengths",
+            }
+            or metadata["model_algorithm"] not in SEQUENCE_ALGORITHMS
+        ):
+            raise ValueError("invalid_learning_curve")
+        points = curve["epochs"]
+        parameters = sequence_parameters(
+            metadata["model_algorithm"], metadata["hyperparameters"]
+        )
+        if type(points) is not list or len(points) != parameters["epochs"]:
+            raise ValueError("invalid_learning_curve")
+        for epoch, point in enumerate(points, 1):
+            if (
+                type(point) is not dict
+                or set(point) != {"epoch", "training_loss", "validation_loss"}
+                or point["epoch"] != epoch
+            ):
+                raise ValueError("invalid_learning_curve")
+            for name in ("training_loss", "validation_loss"):
+                loss = point[name]
+                if loss is None and name == "validation_loss":
+                    continue
+                if type(loss) not in (int, float) or not np.isfinite(loss) or loss < 0:
+                    raise ValueError("invalid_learning_curve")
     if "training_target_mean" in metadata and (
         type(metadata["training_target_mean"]) not in {int, float}
         or not np.isfinite(metadata["training_target_mean"])

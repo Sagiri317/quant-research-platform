@@ -12,7 +12,6 @@ from quant_research_platform.artifacts.outputs.prediction import read_prediction
 from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
-from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     canonical_json_hash,
@@ -47,6 +46,9 @@ from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,
     ResearchValuationMarks,
     execute_stock_target,
+)
+from quant_research_platform.research.portfolios.inventory_analysis import (
+    inventory_daily_economics,
 )
 from quant_research_platform.research.portfolios.passive import (
     PassiveOrders,
@@ -742,43 +744,8 @@ def statistics_tables(ledgers, *, window, config):
     )
     daily, summaries = [], []
     for candidate_id, ledger in ledgers.items():
-        economic = _LedgerEconomics(ledger.capital)
-        days = {}
-        with closing_iterator(ledger.iter_chunks()) as batches:
-            for batch in batches:
-                before = [row for row in batch.valuations if row.phase == "before"]
-                after = [row for row in batch.valuations if row.phase == "end"]
-                at = pd.Timestamp(after[0].timestamp_ns)
-                day = at.normalize()
-                if day not in days:
-                    days[day] = dict(
-                        candidate_id=candidate_id,
-                        entry_at=pd.Timestamp(before[0].timestamp_ns),
-                        nav_before=fsum(row.value for row in before),
-                        cost=0.0,
-                        requested=0.0,
-                        traded=0.0,
-                    )
-                row = days[day]
-                increment = economic.consume(batch)
-                row["cost"] += increment["fees"]
-                row["requested"] += fsum(
-                    item.number
-                    for item in batch.diagnostics
-                    if item.name == "requested_turnover_notional"
-                )
-                amounts = [trade.notional for trade in batch.trades]
-                row["traded"] += (fsum(map(abs, amounts)) + abs(fsum(amounts))) / 2
-                row.update(
-                    end_at=at,
-                    nav_end=fsum(item.value for item in after),
-                    cash_post=next(
-                        item.value
-                        for item in after
-                        if item.asset_id == PORTFOLIO_CASH_ASSET_ID
-                    ),
-                )
-        selected = pd.DataFrame(days.values())
+        selected, economic = inventory_daily_economics(ledger)
+        selected["candidate_id"] = candidate_id
         if selected.empty or not selected.entry_at.lt(selected.end_at).all():
             raise ValueError("hft_statistics_empty_interval")
         denominator = selected.nav_before.where(selected.nav_before > 0)
@@ -825,7 +792,7 @@ def statistics_tables(ledgers, *, window, config):
             performance_rows(
                 selected,
                 capital=ledger.capital,
-                economic=economic.summary(),
+                economic=economic,
                 daily_complete=complete,
                 sample_role=config["sample_role"],
             )

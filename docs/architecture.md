@@ -21,6 +21,9 @@
 - `sources.macro.download.fetch_macro(config)`：获取显式宏观历史与版本，独立记录来源失败
 - `markets.prepare.prepare(config)`：指定已准备表或原生源，生成一个市场数据表
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
+- `research.features.book_normalization.normalize_book(config)` 使用显式交易日轴及历史回看长度，保存因果标准化盘口与每日参数
+- `research.evaluations.time_series.evaluate_time_series(config)` 生成日级单资产指标、共同样本比较与统计推断
+- `research.portfolios.inventory_analysis.analyze_inventory(config)` 从策略与持有基准账本计算日级经济分解
 - `research.models.production.fit(config)`：一次真实拟合及只追加的试验记录；选择后的最终重新拟合仍用该函数
 - `research.models.hawkes.fit_hawkes(config)`：在明确逐笔训练窗内拟合指数核，保存参数与截止时点
 - `research.predictions.runner.predict(config)`：读取保存模型，按保存列顺序做新预测；`artifacts.outputs.prediction.read_predictions(path)` / `iter_predictions(path)` 只读已有预测
@@ -255,6 +258,12 @@ IC、EWMA 协方差、中性化及标签校准复用稳定的向量化汇总。
 标签始终不填补。普通模型每行至少有一个实际输入；部分缺失由原生 NaN 模型处理，
 或由公共 `ModelMatrixScaler` 使用合法训练样本中位数填补，预测冻结复用，不追加指示列。
 DeepLOB 的完整盘口要求属于算法输入域，仍排除不完整盘口。
+序列模型通过 `hyperparameters.sequence_group_columns` 声明额外边界列。资产始终独立，
+LSTM/Transformer 默认使用资产历史，DeepLOB 默认使用 `session_date,segment_id`。
+高频调用方可显式给三类模型传入相同边界列。模型保存边界配置，预测和解释复用该配置。
+`fit.validation` 可声明 `windows,cutoff`，训练截止须早于验证窗口且训练标签已成熟。
+学习曲线保存每轮在线加权训练损失、轮末逐行等权验证损失和训练序列长度分布。
+预处理与回归目标尺度均由训练样本估计。验证窗口和最终重新拟合范围由调用方分别安排。
 PPO 和成本感知模型同样复用训练中位数；PPO 从有界训练 episode 的真实决策特征拟合，
 仅 PPO 所需观察归一化继续由 VecNormalize 负责。原始环境观察保留空值，基准策略不凭空填特征。
 

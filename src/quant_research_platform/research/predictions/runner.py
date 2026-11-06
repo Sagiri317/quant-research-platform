@@ -87,7 +87,9 @@ def predict(config: Mapping) -> Path:
                 "timestamp",
                 "asset_id",
                 *result.metadata["input_columns"],
-                *sequence_context_columns(algorithm),
+                *sequence_context_columns(
+                    algorithm, result.metadata["hyperparameters"]
+                ),
                 *required_filter_columns(result.metadata["sample_filter_mode"]),
             )
         )

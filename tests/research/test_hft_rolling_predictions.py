@@ -79,3 +79,23 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
         backtest({**config, "predictions": [], "output": str(tmp_path / "holding")})
     )
     assert summarize_portfolio_ledger(held.capital, held.iter_chunks())["nav"] == 5000.0
+    from quant_research_platform.research.portfolios.inventory_analysis import (
+        analyze_inventory,
+    )
+    from quant_research_platform.storage.datasets import read_dataset
+
+    analysis = read_dataset(
+        analyze_inventory(
+            {
+                "ledger": config["output"],
+                "benchmark": str(tmp_path / "holding"),
+                "output": str(tmp_path / "analysis"),
+            }
+        )
+    )
+    assert analysis.incremental_net_pnl.sum() == pytest.approx(-5.0)
+    assert analysis.execution_to_mark_pnl.sum() == pytest.approx(-5.0)
+    assert analysis.intraday_inventory_pnl.sum() == pytest.approx(0.0)
+    assert analysis.decomposition_residual.abs().max() < 1e-9
+    assert analysis.fill_events.sum() == 3
+    assert analysis.maximum_fill_wait_seconds.max() > 0

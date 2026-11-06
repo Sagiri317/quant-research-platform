@@ -124,3 +124,53 @@ def test_xgboost_cpu_training_and_native_roundtrip(tmp_path):
         tuple(result.metadata["input_columns"]), result.prediction_model
     )
     assert np.isfinite(predict_frame(pd.read_parquet(inputs))).all()
+
+
+@pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
+def test_explicit_sequence_groups_and_historical_learning_curve(tmp_path, algorithm):
+    inputs = data(tmp_path)
+    frame = pd.read_parquet(inputs)
+    frame["episode"] = (frame.timestamp.dt.day - 1) // 2
+    frame.to_parquet(inputs, index=False)
+    config = fit_config(tmp_path, inputs)
+    config["input_spec"]["column_roles"]["episode"] = "context"
+    config["model"].update(
+        model_algorithm=algorithm,
+        hyperparameters={
+            "device": "cpu",
+            "hidden_size": 4,
+            "epochs": 2,
+            "sequence_length": 3,
+            "sequence_group_columns": ["episode"],
+        },
+    )
+    config["validation"] = {
+        "windows": [{"start": "2020-01-04", "end": "2020-01-06"}],
+        "cutoff": "2020-01-06",
+    }
+    if algorithm == "transformer_regressor":
+        config["candidate_parameters"] = config["model"]["hyperparameters"]
+        config["model"]["hyperparameters"] = {}
+    result, facts = load_model(fit(config))
+    assert facts["validation"] == config["validation"]
+    curve = result.metadata["learning_curve"]
+    assert curve["sequence_lengths"]["max"] == 2
+    assert result.prediction_model.scaler.mean_ == pytest.approx((2.0,))
+    validation = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
+    predicted = result.prediction_model.predict(validation)
+    expected_mse = np.mean((predicted - validation.label.to_numpy()) ** 2)
+    assert curve["epochs"][-1]["validation_loss"] == pytest.approx(
+        expected_mse, rel=1e-6
+    )
+    changed = validation.copy()
+    changed.loc[changed.episode.eq(1), "x"] += 1000
+    np.testing.assert_allclose(
+        result.prediction_model.predict(changed)[validation.episode.eq(2)],
+        predicted[validation.episode.eq(2)],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    config["output"] = str(tmp_path / "overlap")
+    config["validation"]["windows"][0]["start"] = "2020-01-03"
+    with pytest.raises(ValueError, match="model_validation_training_overlap"):
+        fit(config)

@@ -79,3 +79,17 @@ ETF 示例见 [prepare-source-etf.json](../configs/high-frequency/prepare-source
 `parameters.signal_processing` 是按顺序执行的显式管线：按秒半衰期 EWMA、按观察数滚动均值/中位数、随机游走 Kalman、阈值、软阈值 `deadband`、迟滞。Kalman 的过程方差单位是信号平方/秒，观测与初始方差为信号平方。每股票、会话及连续片段独立，计算保留执行窗口之前的当日历史预热；缺失滤波值不下目标单，已保存预测不被覆盖。
 
 `backtest-policy` 增加 `almgren_chriss` 和 `signal_ac`，仍共用既有 `TradingEnv` 和股数账户。AC 剩余比例为 `sinh(k*(T-t))/sinh(k*T)`，`k=sqrt(risk_aversion/temporary_impact)*price_volatility`；零风险厌恶退化为 TWAP。风险厌恶单位为 1/CNY，价格波动为 CNY/股/根号秒，临时冲击系数为 CNY·秒/股²；参数 `as_of` 必须早于执行开始。信号版按买卖方向增加 `gain*signal*f*(1-f)`，累计进度不回退；这是明确的启发式调整，不宣称重新求解最优控制。费用仍由账户计入，不把调度参数的理论成本重复收费。参照[Almgren–Chriss 论文](https://www.smallake.kr/wp-content/uploads/2016/03/optliq.pdf)。
+
+## 显式预处理、学习诊断与日级解释
+
+序列模型的 `sequence_group_columns` 由调用方声明。高频配置通常传入 `["session_date", "segment_id"]`，日频配置按自己的历史分组。共享模型消费这些边界列及数值输入。每次拟合的窗口、验证窗口、轮数、batch、学习率和设备均来自显式配置。
+
+`normalize-book` 调用 `research.features.book_normalization.normalize_book`。配置明确 `inputs,output,dataset_id,sessions,lookback_sessions`。每个资产当天的 40 列盘口使用之前指定数量完整交易日的有效盘口观察计算总体均值和标准差，开盘后参数固定。某个必要历史日缺失时保持缺失，常数列使用尺度 1。输出单位为 `zscore`，元数据保存每天实际均值、尺度及观察数。后续模型设置 `training_scaling=false`。执行与经济估值读取原始盘口。
+
+`fit.validation` 使用 `windows` 和 `cutoff` 显式指定历史验证样本。模型产物保存每轮学习曲线及实际序列长度统计。正式全历史拟合和历史验证诊断分别调用，训练域按各次真实用途保存。
+
+`evaluate-time-series` 明确预测集合、因子、标签、交易日轴及资产，输出 `daily` 和 `inference` 两个原生数据集。`comparison_groups` 声明共同样本集合，`comparisons` 声明共同域上的左右差值，`inference_groups` 声明多重检验族。自身与共同域均保存每日配对数和输入数。HAC lag、bootstrap 块长、次数、种子、置信度及 FDR 方法来自 `statistics`。缺失交易日保留在统计轴上，合法的日级点估计继续输出。
+
+`analyze-inventory` 明确 `ledger,benchmark,output`，核对同资本、初始持有和账户窗口，从原生账本分解盘中及隔夜库存价格损益、成交相对账本估值的差额、权益股数变化、应收股息变化、股息现金、回收现金和显性费用。输出逐日基准与增量损益、库存暴露、成交等待时间、底仓恢复状态及分解残差。股息到账与应收减少分别列示，合计反映经济收益。
+
+Venvoo 来源入口统一处理已观察到的日间 `HHMMSS` 短编码和 `HHMMSSmmm` 毫秒编码。转换后继续检查时分秒范围，保存到 UTC 时间轴。每个 interim 来源清单记录两类编码的实际行数，修正范围由来源输入决定。

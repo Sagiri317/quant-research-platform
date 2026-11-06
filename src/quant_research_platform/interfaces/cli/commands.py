@@ -98,6 +98,36 @@ def fit(config: Config) -> None:
     _echo_result(fit(read_qrp_json_file(config)[1]))
 
 
+@app.command("normalize-book")
+def normalize_book(config: Config) -> None:
+    """Normalize daily books using explicit preceding trading sessions."""
+    from quant_research_platform.research.features.book_normalization import (
+        normalize_book,
+    )
+
+    _echo_result(normalize_book(read_qrp_json_file(config)[1]))
+
+
+@app.command("evaluate-time-series")
+def evaluate_time_series(config: Config) -> None:
+    """Compare saved signals on explicit daily and common-sample domains."""
+    from quant_research_platform.research.evaluations.time_series import (
+        evaluate_time_series,
+    )
+
+    _echo_result(evaluate_time_series(read_qrp_json_file(config)[1]))
+
+
+@app.command("analyze-inventory")
+def analyze_inventory(config: Config) -> None:
+    """Decompose inventory P&L against an explicit holding benchmark."""
+    from quant_research_platform.research.portfolios.inventory_analysis import (
+        analyze_inventory,
+    )
+
+    _echo_result(analyze_inventory(read_qrp_json_file(config)[1]))
+
+
 @app.command("fit-hawkes")
 def fit_hawkes(config: Config) -> None:
     """Fit an exponential Hawkes model on explicit observed event intervals."""
