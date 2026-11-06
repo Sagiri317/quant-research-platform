@@ -17,7 +17,6 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
     canonical_json_hash,
 )
-from quant_research_platform.contracts.models import _validate_model_prediction_window
 from quant_research_platform.contracts.policies import PolicyDecision, policy_target
 from quant_research_platform.contracts.portfolios import (
     A_SHARE_INSTRUMENT_TYPES,
@@ -32,7 +31,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.contracts.time import (
-    PredictionWindow,
     TimeWindow,
     time_window_timestamp_interval,
 )
@@ -843,7 +841,7 @@ def statistics_tables(ledgers, *, window, config):
     }
 
 
-def inventory_inputs(config, window, *, prediction_path=None, decision_columns=None):
+def inventory_inputs(config, window, *, prediction_paths=(), decision_columns=None):
     """Open the same explicit market inputs for training and native backtests."""
 
     from quant_research_platform.research.protocols.a_share_hft import PANEL_COLUMNS
@@ -926,6 +924,29 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
         corporate_actions_root=daily["corporate_actions"],
         equity_events_root=daily.get("equity_events"),
     )
+    prediction_frames = []
+    for path in prediction_paths:
+        frame, facts = read_predictions(
+            Path(path),
+            columns=("timestamp", "asset_id", "prediction_score"),
+            time_window=TimeWindow(start, end),
+        )
+        if facts["model_facts"]["market_id"] != "a_share":
+            raise ValueError("hft_prediction_market_mismatch")
+        prediction_frames.append(
+            frame.loc[frame.asset_id.isin(config["parameters"]["maximum_inventory"])]
+        )
+    prediction_days = {}
+    if prediction_frames:
+        predictions = pd.concat(prediction_frames, ignore_index=True)
+        if predictions.duplicated(["timestamp", "asset_id"]).any():
+            raise ValueError("hft_prediction_keys_overlap")
+        prediction_days = {
+            day: frame
+            for day, frame in predictions.groupby(
+                predictions.timestamp.dt.normalize(), sort=False
+            )
+        }
 
     def sessions():
         with closing_iterator(daily_sessions) as views:
@@ -937,17 +958,7 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
                     quotes = materialize_dataset_session(
                         panel.filtered_view(day_window)
                     )
-                    predictions = pd.DataFrame()
-                    if prediction_path is not None:
-                        predictions, facts = read_predictions(
-                            Path(prediction_path), time_window=day_window
-                        )
-                        if facts["model_facts"]["market_id"] != "a_share":
-                            raise ValueError("hft_prediction_market_mismatch")
-                        _validate_model_prediction_window(
-                            facts["model_facts"],
-                            PredictionWindow(window.start, window.end),
-                        )
+                    predictions = prediction_days.pop(view.timestamp, pd.DataFrame())
                 yield view, quotes, predictions
 
     return sessions(), schedule, trade_session
@@ -970,8 +981,10 @@ def backtest(config):
     )
     params = _parameters(config["parameters"])
     window = TimeWindow(**config["window"])
+    if not isinstance(config["predictions"], list):
+        raise ValueError("hft_prediction_paths_required")
     sessions, schedule, trade_session = inventory_inputs(
-        config, window, prediction_path=config["predictions"]
+        config, window, prediction_paths=config["predictions"]
     )
 
     def produce(emit):

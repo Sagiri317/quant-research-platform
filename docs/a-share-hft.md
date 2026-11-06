@@ -48,7 +48,7 @@ ETF 示例见 [prepare-source-etf.json](../configs/high-frequency/prepare-source
 
 `backtest-hft` 接收报价面板、已保存预测、原生费率表、时间窗、交易参数及新输出路径，并通过 `daily_inputs` 显式提供日频行情、证券、交易日历、公司行动和可选的特殊权益事件。来源的项目 `asset_id` 必须与日频证券一致；示例将 `000001.SZ` 的项目标识映射为 `000001`。
 
-`daily_inputs` 服务于持仓估值、上市生命周期、交易日和权益核算。ETF 研究可独立准备这些基础事实。`predictions=null` 运行相同初始持仓与现金的持有基准，比较时保持窗口、估值输入及账户参数一致。
+`daily_inputs` 服务于持仓估值、上市生命周期、交易日和权益核算。ETF 研究可独立准备这些基础事实。`predictions` 是原生预测目录列表，例如 `["results/hft/day1", "results/hft/day2"]`。各产物使用自身保存的训练截止及预测窗口，账户在预测产物切换时连续结转。调用者负责训练和选择预测产物，同一证券同一时刻存在多份预测时明确报错。`predictions=[]` 运行相同初始持仓与现金的持有基准，比较时保持窗口、估值输入及账户参数一致。
 
 一个回测只有一个多股票账户。`initial_capital` 包含显式 `initial_inventory` 的市值，其余为可用现金；`initial_inventory`、`maximum_inventory` 都按证券指定股数。初始持仓按起始时刻已观察到的 mid 估值，没有更近报价时用当日开盘价。现金、股票、应收股息和权益锁股跨日继承。未持仓股票不需要估值；持仓缺少必要权益或估值事实时明确失败。
 

@@ -329,7 +329,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     )
     account_config = {
         "panel": inputs["hft_panel"],
-        "predictions": str(predictions),
+        "predictions": [str(predictions)],
         "fee_schedule": str(tmp_path / "fees"),
         "daily_inputs": write_daily_inputs(
             tmp_path / "daily", pd.concat((history, panel), ignore_index=True)
@@ -359,7 +359,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     held = high_frequency.backtest(
         {
             **account_config,
-            "predictions": None,
+            "predictions": [],
             "output": str(tmp_path / "holding"),
         }
     )
