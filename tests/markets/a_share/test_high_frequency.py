@@ -44,6 +44,42 @@ def test_source_mixed_second_and_millisecond_clocks():
         normalize(raw.assign(time=[93060, 93003123, 150001]), "hft_quotes", INSTRUMENTS)
 
 
+@pytest.mark.parametrize("stream", ["hft_orders", "hft_trades"])
+def test_source_preserves_nullable_unsigned_event_identifiers(tmp_path, stream):
+    identifiers = [name for name in source_columns(stream) if name.endswith("_id")]
+    expected = [7, 8, 9, 10, 2**53 + 1, None, 2**64 - 1, 0]
+    for day, values in (("20180214", expected[:4]), ("20180215", expected[4:])):
+        raw = tmp_path / "raw" / day
+        raw.mkdir(parents=True)
+        frame = raw_events(stream).assign(date=int(day))
+        for name in identifiers:
+            frame[name] = pd.Series(values, dtype="UInt64")
+        pq.write_table(
+            pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
+                None
+            ),
+            raw / STREAM_FILES[stream],
+        )
+    output = tmp_path / "interim"
+    prepare_source(
+        {
+            "source_id": "venvoo",
+            "raw_root": str(tmp_path / "raw"),
+            "outputs": {stream: str(output)},
+            "instruments": INSTRUMENTS,
+            "revision": "a" * 40,
+            "start_date": "2018-02-14",
+            "end_date": "2018-02-15",
+        }
+    )
+    result = read_dataset(output).sort_values("timestamp")
+    for name in identifiers:
+        pd.testing.assert_series_equal(
+            result[name].reset_index(drop=True),
+            pd.Series(expected, dtype="UInt64", name=name),
+        )
+
+
 def test_hft_prepare_rejects_conflicting_declared_market(tmp_path):
     from dataclasses import replace
 

@@ -262,7 +262,9 @@ def materialize_interim_data(
                     if not batch.num_rows:
                         continue
                     frame = normalize(
-                        batch.to_pandas(),
+                        batch.to_pandas(
+                            types_mapper={pa.uint64(): pd.UInt64Dtype()}.get
+                        ),
                         stream,
                         instruments,
                         clock_counts=clock_counts,
@@ -275,7 +277,7 @@ def materialize_interim_data(
                 if offset == 0:
                     empty = pa.Table.from_batches(
                         [], schema=scanner.projected_schema
-                    ).to_pandas()
+                    ).to_pandas(types_mapper={pa.uint64(): pd.UInt64Dtype()}.get)
                     yield normalize(empty, stream, instruments).loc[
                         :, spec.required_columns
                     ]
