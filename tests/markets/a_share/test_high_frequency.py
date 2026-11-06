@@ -37,6 +37,8 @@ def test_source_mixed_second_and_millisecond_clocks():
     )
     pd.testing.assert_frame_equal(normalized, expected)
     assert counts == {"HHMMSS": 2, "HHMMSSmmm": 1}
+    assert normalized.timestamp.dtype == np.dtype("datetime64[ns]")
+    assert normalized.session_date.dtype == np.dtype("datetime64[ns]")
     assert normalized.timestamp.iloc[1] == pd.Timestamp("2018-02-14T01:30:03.123")
     with pytest.raises(ValueError, match="level2_time_invalid"):
         normalize(raw.assign(time=[93060, 93003123, 150001]), "hft_quotes", INSTRUMENTS)

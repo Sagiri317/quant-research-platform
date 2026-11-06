@@ -156,9 +156,12 @@ def normalize(frame, stream, instruments, *, clock_counts=None):
         hour * 3_600_000 + minute * 60_000 + second * 1000 + millis, unit="ms"
     )
     work["timestamp"] = (
-        clock.dt.tz_localize("Asia/Shanghai").dt.tz_convert("UTC").dt.tz_localize(None)
+        clock.dt.tz_localize("Asia/Shanghai")
+        .dt.tz_convert("UTC")
+        .dt.tz_localize(None)
+        .astype("datetime64[ns]")
     )
-    work["session_date"] = day
+    work["session_date"] = day.astype("datetime64[ns]")
     price_columns = [
         column
         for column in work
