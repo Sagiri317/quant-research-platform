@@ -151,6 +151,33 @@ def test_partial_fills_consume_each_print_once_and_charge_one_commission(tmp_pat
     )
 
 
+def test_cash_limited_passive_order_keeps_native_ledger_quantities(tmp_path):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:06", "01:30:09"),
+    )
+    panel["bid_vol1"] = 100.0
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    batches, summary = replay(
+        tmp_path,
+        panel,
+        signals,
+        [(4, "a", "sell", 130, 9.99), (5, "a", "sell", 100, 9.99)],
+        minimum=5,
+        capital=2504,
+    )
+    # Cash of 1504 covers 100 shares at 9.99 plus 5 commission, but not 200.
+    assert [trade.quantity for batch in batches for trade in batch.trades] == [30, 70]
+    assert summary["nav"] == pytest.approx(2500)
+    assert min(
+        value.value
+        for batch in batches
+        for value in batch.valuations
+        if value.asset_id == "__cash__"
+    ) == pytest.approx(500)
+
+
 @pytest.mark.parametrize(
     "model,expected", [("conservative", []), ("probability", [10])]
 )

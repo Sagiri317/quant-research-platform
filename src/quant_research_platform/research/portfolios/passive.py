@@ -359,7 +359,7 @@ class PassiveOrders:
                         low = middle
                     else:
                         high = middle - 1
-                quantity = low * increment if low * increment >= minimum else 0
+                quantity = int(low * increment) if low * increment >= minimum else 0
             if not quantity or required(quantity) > free:
                 diagnostics.append(
                     PortfolioDiagnostic(
