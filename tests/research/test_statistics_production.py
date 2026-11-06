@@ -26,6 +26,8 @@ from quant_research_platform.research.models.statistics import (
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets.reading import open_dataset_session
+from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
@@ -141,7 +143,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         selection["cutoff"] = str(cutoff)
     metadata = {
         **model_stats._model_target_metadata(
-            config, spec, TimeWindow(dates[0], cutoff)
+            config, data_spec_payload(spec), TimeWindow(dates[0], cutoff)
         ),
         "selection_cutoffs": [str(cutoff)],
         "sample_role": "validation",
@@ -157,8 +159,10 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         },
     }
     statistics_tables = build_a_share_statistics_tables(
-        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(
+            layout.research_dataset_root("a_share", spec.data_id),
+            time_window=TimeWindow(dates[0], cutoff),
+        ),
         config=config,
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="prediction",
@@ -168,8 +172,13 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     )
     statistics_tables.update(
         build_a_share_factor_statistics_tables(
-            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(
+                layout.research_dataset_root("a_share", spec.data_id),
+                time_window=TimeWindow(
+                    pd.Timestamp("2014-01-02") if full_factor_history else dates[0],
+                    cutoff,
+                ),
+            ),
             config=config,
             time_window=TimeWindow(
                 pd.Timestamp("2014-01-02") if full_factor_history else dates[0], cutoff
@@ -248,8 +257,10 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     paired_metadata = metadata
     factor_paired_metadata = factor_metadata
     paired_tables = build_a_share_statistics_tables(
-        dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(
+            layout.research_dataset_root("a_share", spec.data_id),
+            time_window=TimeWindow(dates[0], cutoff),
+        ),
         config=quarterly_config,
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="quarterly_prediction",
@@ -260,8 +271,10 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     )
     paired_tables.update(
         build_a_share_factor_statistics_tables(
-            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(
+                layout.research_dataset_root("a_share", spec.data_id),
+                time_window=TimeWindow(dates[0], cutoff),
+            ),
             config=quarterly_config,
             time_window=TimeWindow(dates[0], cutoff),
         )
@@ -346,8 +359,10 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             "training_weighting": {"half_life_periods": 756, "role": "robustness"},
         }
         robustness_tables = build_a_share_statistics_tables(
-            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(
+                layout.research_dataset_root("a_share", spec.data_id),
+                time_window=TimeWindow(dates[0], cutoff),
+            ),
             config=robustness_config,
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="quarterly_prediction",
@@ -358,8 +373,10 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         )
         robustness_tables.update(
             build_a_share_factor_statistics_tables(
-                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-                dataset_spec=spec,
+                dataset_session=open_dataset_session(
+                    layout.research_dataset_root("a_share", spec.data_id),
+                    time_window=TimeWindow(dates[0], cutoff),
+                ),
                 config=robustness_config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
@@ -596,8 +613,10 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         for selection in model["selections"].values():
             selection["cutoff"] = str(cutoff)
         statistics_tables = build_a_share_statistics_tables(
-            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(
+                layout.research_dataset_root("a_share", spec.data_id),
+                time_window=TimeWindow(dates[0], cutoff),
+            ),
             config=config,
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="prediction",
@@ -607,8 +626,10 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         )
         statistics_tables.update(
             build_a_share_factor_statistics_tables(
-                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-                dataset_spec=spec,
+                dataset_session=open_dataset_session(
+                    layout.research_dataset_root("a_share", spec.data_id),
+                    time_window=TimeWindow(dates[0], cutoff),
+                ),
                 config=config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
@@ -1103,7 +1124,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         metadata = {
             **model_stats._model_target_metadata(
                 config,
-                spec,
+                data_spec_payload(spec),
                 TimeWindow(dates[0], cutoff),
             ),
             "sample_role": access,
@@ -1111,8 +1132,10 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         }
         factor_metadata = metadata
         statistics_tables = build_a_share_statistics_tables(
-            dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(
+                layout.research_dataset_root("a_share", spec.data_id),
+                time_window=TimeWindow(dates[0], cutoff),
+            ),
             config=config,
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="selected_prediction",
@@ -1128,8 +1151,10 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         )
         statistics_tables.update(
             build_a_share_factor_statistics_tables(
-                dataset_path=layout.research_dataset_root("a_share", spec.data_id),
-                dataset_spec=spec,
+                dataset_session=open_dataset_session(
+                    layout.research_dataset_root("a_share", spec.data_id),
+                    time_window=TimeWindow(dates[0], cutoff),
+                ),
                 config=config,
                 time_window=TimeWindow(dates[0], cutoff),
             )
@@ -1458,8 +1483,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         config["comparison_model_id"] = family
         factor_window = TimeWindow(history[0], cutoff)
         factor_tables = build_a_share_factor_statistics_tables(
-            dataset_path=source,
-            dataset_spec=spec,
+            dataset_session=open_dataset_session(source, time_window=factor_window),
             config=config,
             time_window=factor_window,
         )
@@ -1479,8 +1503,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 retain_values=True,
             )
             tables = build_a_share_statistics_tables(
-                dataset_path=source,
-                dataset_spec=spec,
+                dataset_session=open_dataset_session(source, time_window=window),
                 prediction_id="horizon_predictions",
                 model_entries={
                     ("explicit_horizon", family): {

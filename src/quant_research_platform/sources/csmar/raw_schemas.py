@@ -7,7 +7,6 @@ import io
 import re
 import sys
 from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -17,31 +16,17 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 
-
-@dataclass(frozen=True)
-class RawFileMetadata:
-    """Metadata parsed from a raw CSMAR export file name."""
-
-    dataset: str
-    market_scope: str
-    start_date: str
-    end_date: str
-    export_date: str
-    extension: str
-    part: str | None = None
-
-
 FILENAME_RE = re.compile(
     r"^csmar__(?P<dataset>[a-z0-9_]+)__"
-    r"(?P<market_scope>[a-z0-9_]+)__"
-    r"(?:(?P<start>\d{8})_(?P<end>\d{8})|(?P<full>full))__"
-    r"(?:(?:part-(?P<part>\d{2})__)?)"
-    r"export-(?P<export>\d{8})\.(?P<extension>csv)$"
+    r"[a-z0-9_]+__"
+    r"(?:\d{8}_\d{8}|full)__"
+    r"(?:part-\d{2}__)?"
+    r"export-\d{8}\.csv$"
 )
 
 
-def parse_raw_filename(path: str | Path) -> RawFileMetadata:
-    """Parse the recommended raw CSMAR file name format."""
+def infer_dataset_from_raw_filename(path: str | Path) -> str:
+    """Read the registered dataset from the recommended raw filename format."""
 
     name = Path(path).name
     match = FILENAME_RE.match(name)
@@ -52,15 +37,7 @@ def parse_raw_filename(path: str | Path) -> RawFileMetadata:
     if dataset not in _field_mappings.RAW_TABLE_CONTRACTS:
         raise ValueError(f"Unknown CSMAR dataset in filename: {dataset}")
 
-    return RawFileMetadata(
-        dataset=dataset,
-        market_scope=match.group("market_scope"),
-        start_date="full" if match.group("full") else match.group("start"),
-        end_date="full" if match.group("full") else match.group("end"),
-        export_date=match.group("export"),
-        extension=match.group("extension"),
-        part=match.group("part"),
-    )
+    return dataset
 
 
 def infer_dataset_from_native_export(path: str | Path) -> str:

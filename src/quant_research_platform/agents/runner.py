@@ -28,6 +28,7 @@ from quant_research_platform.agents.session import (
     read_session,
     replace_json,
     session_lock,
+    token_usage,
     usage_summary,
 )
 from quant_research_platform.contracts.json_codec import (
@@ -74,10 +75,8 @@ def run_agent(config, *, client=None, control=None, on_event=None):
         "steering": [],
         "elapsed_seconds": 0.0,
         "frozen": {},
-        "holdout_viewed": False,
         "pending_question": None,
         "conclusion": None,
-        "compactions": 0,
     }
     with session_lock(root):
         replace_json(root / "session.json", state)
@@ -192,14 +191,16 @@ class _Runner:
             )
             result = method(content, timeout=max(0.001, self.remaining()))
             record["status"] = "completed"
-            return result
         except BaseException:
             record["status"] = "failed"
             raise
         finally:
             record["elapsed_seconds"] = time.monotonic() - started
-            record["usage"] = getattr(self.client, "usage", None)
+            record["usage"] = token_usage(getattr(self.client, "usage", None))
             self.checkpoint()
+        if "max_tokens" in self.config["budget"] and record["usage"] is None:
+            raise ValueError("agent_token_budget_usage_unavailable")
+        return result
 
     def artifacts(self):
         result = {
@@ -403,8 +404,6 @@ class _Runner:
                 return False
             if not self.budget_available(experiment=True):
                 return False
-            self.state["holdout_viewed"] = True
-            self.checkpoint()
             action = AgentAction(
                 kind="tool", tool=name, summary=template["description"]
             )
@@ -460,9 +459,7 @@ class _Runner:
                     break
                 if not self.budget_available(request=True):
                     break
-                messages, omitted = context_messages(self.state)
-                if omitted:
-                    self.state["compactions"] += 1
+                messages, _ = context_messages(self.state)
                 steering_count = len(self.state["steering"])
                 action = self.request("action", messages)
                 if not isinstance(action, AgentAction):
@@ -475,7 +472,11 @@ class _Runner:
                         event, {"status": "superseded", "reason": "new_user_steering"}
                     )
                     continue
-                if self.state["phase"] == "reporting" and action.kind != "finish":
+                if self.state["phase"] == "reporting" and not (
+                    action.kind == "finish"
+                    or action.kind == "tool"
+                    and action.tool == "lookup"
+                ):
                     event, _ = self.new_event(action, experiment=False)
                     self.finish_event(
                         event,

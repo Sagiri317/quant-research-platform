@@ -764,7 +764,7 @@ def test_raw_export_discovery_contract_keeps_csv_only(
         _collect_raw_export(csv_export, "trading_calendar"), expected
     )
     with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
-        raw_schemas.parse_raw_filename(xlsx_export)
+        raw_schemas.infer_dataset_from_raw_filename(xlsx_export)
 
 
 def test_csmar_preparation_evidence_is_selected_content_only(tmp_path: Path) -> None:

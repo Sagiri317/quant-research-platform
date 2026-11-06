@@ -83,7 +83,7 @@ def test_same_timestamp_pre_jump_intensity_and_prefix_invariance():
         )
 
 
-def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path):
+def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, monkeypatch):
     panels, all_trades = [], []
     for day in (20180214, 20180215):
         raw = raw_events("hft_trades")
@@ -104,31 +104,52 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path):
     paths = {name: str(tmp_path / name) for name in ("hft_panel", "hft_trades")}
     write_dataset(
         paths["hft_panel"],
-        pd.concat(panels, ignore_index=True),
+        pd.concat(
+            [*panels, *(panel.assign(asset_id="excluded") for panel in panels)],
+            ignore_index=True,
+        ),
         spec=next(item for item in processed_specs() if item.data_id == "hft_panel"),
     )
     write_dataset(
         paths["hft_trades"],
-        pd.concat(all_trades, ignore_index=True),
+        pd.concat(
+            [
+                *all_trades,
+                *(trades.assign(asset_id="excluded") for trades in all_trades),
+            ],
+            ignore_index=True,
+        ),
         spec=interim_spec("hft_trades"),
     )
-    model = fit_hawkes(
-        {
-            "inputs": paths,
-            "asset_ids": ["000001.SZ"],
-            "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
-            "fit_cutoff": "2018-02-15T00:00:00",
-            "initial_parameters": {
-                "baseline": [0.2, 0.2],
-                "branching": [[0.1, 0.1], [0.1, 0.1]],
-                "decay": 1.0,
-            },
-            "max_branching": 0.9,
-            "max_iterations": 200,
-            "tolerance": 1e-8,
-            "output": str(tmp_path / "model"),
-        }
-    )
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    indexed_assets = []
+    original = ExactPrimaryKeyIndex.add_table
+
+    def observe(self, table):
+        indexed_assets.extend(table.column("asset_id").to_pylist())
+        return original(self, table)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ExactPrimaryKeyIndex, "add_table", observe)
+        model = fit_hawkes(
+            {
+                "inputs": paths,
+                "asset_ids": ["000001.SZ"],
+                "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+                "fit_cutoff": "2018-02-15T00:00:00",
+                "initial_parameters": {
+                    "baseline": [0.2, 0.2],
+                    "branching": [[0.1, 0.1], [0.1, 0.1]],
+                    "decay": 1.0,
+                },
+                "max_branching": 0.9,
+                "max_iterations": 200,
+                "tolerance": 1e-8,
+                "output": str(tmp_path / "model"),
+            }
+        )
+    assert indexed_assets and set(indexed_assets) == {"000001.SZ"}
     params, _ = load_hawkes(model)
     window = {"start": "2018-02-15T01:30:00", "end": "2018-02-15T01:30:13"}
     config = {

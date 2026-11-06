@@ -2,6 +2,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.agents import execution
@@ -90,3 +91,26 @@ def test_owned_process_timeout_and_numeric_feedback(tmp_path):
                 }
             },
         )
+
+
+def test_parquet_metrics_require_a_regular_file_not_a_dataset_directory(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    outside = tmp_path / "private.parquet"
+    pd.DataFrame({"value": [99.0]}).to_parquet(outside)
+    directory = output / "metrics.parquet"
+    directory.mkdir()
+    (directory / "part.parquet").symlink_to(outside)
+    definitions = {
+        "score": {
+            "member": "metrics.parquet",
+            "column": "value",
+            "reduction": "mean",
+        }
+    }
+    with pytest.raises(ValueError, match="agent_metric_file_required"):
+        execution._metrics(output, definitions)
+    regular = output / "regular.parquet"
+    pd.DataFrame({"value": [1.0, None, 3.0]}).to_parquet(regular)
+    definitions["score"]["member"] = regular.name
+    assert execution._metrics(output, definitions) == {"score": 2.0}

@@ -5,7 +5,11 @@ import json
 import pytest
 
 from quant_research_platform.agents.runner import resume_agent, run_agent
-from quant_research_platform.agents.session import context_messages, read_session
+from quant_research_platform.agents.session import (
+    context_messages,
+    final_evaluation_status,
+    read_session,
+)
 from quant_research_platform.storage.datasets import read_dataset
 from tests.agents.support import ScriptedClient, agent_config
 
@@ -165,7 +169,7 @@ def test_freeze_runs_native_final_step_and_forbids_further_tuning(tmp_path):
     state = read_session(root)
     assert state["phase"] == "reporting"
     assert state["status"] == "completed"
-    assert state["holdout_viewed"] is True
+    assert final_evaluation_status(state) == "completed"
     assert state["events"][2]["action"]["tool"] == "final_formula"
     assert (
         state["events"][3]["result"]["reason"]
@@ -181,7 +185,46 @@ def test_freeze_runs_native_final_step_and_forbids_further_tuning(tmp_path):
         )
 
 
-def test_negative_research_can_finish_without_viewing_holdout(tmp_path):
+def test_reporting_can_page_omitted_evidence_without_reopening_development(tmp_path):
+    config = final_config(tmp_path)
+    config["budget"]["max_context_chars"] = 10000
+    search = call("search")
+    search["summary"] = "Compare the candidate to the baseline. " * 400
+    actions = [
+        search,
+        {
+            "kind": "freeze",
+            "summary": "Freeze the development formula.",
+            "arguments_json": '{"candidates":{"candidate":"e0001"}}',
+        },
+        call("lookup", scope="evidence", query="", key="e0001", page_size=512),
+        call(
+            "lookup", scope="evidence", query="", key="e0001", offset=512, page_size=512
+        ),
+        finish(),
+    ]
+    client = ScriptedClient(actions)
+    root = run_agent(config, client=client)
+    state = read_session(root)
+    original = state["events"][0]
+    text = json.dumps(
+        {"action": original["action"], "result": original["result"]}, ensure_ascii=False
+    )
+    assert state["status"] == "completed"
+    _, omitted = context_messages(state)
+    assert omitted > 0
+    for offset, event, message in zip(
+        (0, 512), state["events"][3:5], client.messages[3:5], strict=True
+    ):
+        assert event["phase"] == "reporting"
+        assert event["result"]["status"] == "completed"
+        assert event["result"]["text"] == text[offset : offset + 512]
+        assert event["result"]["next_offset"] == offset + 512
+        received = json.loads(json.loads(message)[-1]["content"])
+        assert received["result"]["text"] == event["result"]["text"]
+
+
+def test_negative_research_can_finish_without_final_evaluation(tmp_path):
     config = final_config(tmp_path)
     client = ScriptedClient(
         [
@@ -199,7 +242,8 @@ def test_negative_research_can_finish_without_viewing_holdout(tmp_path):
     root = run_agent(config, client=client)
     state = read_session(root)
     assert state["events"][0]["result"]["metrics"] == {"score": None}
-    assert state["holdout_viewed"] is False
+    assert final_evaluation_status(state) == "not_started"
+    assert "holdout_viewed" not in state
     assert state["status"] == "completed"
 
 
@@ -217,7 +261,6 @@ def test_context_compaction_keeps_constraints_and_retrievable_history(tmp_path):
     root = run_agent(config, client=ScriptedClient([*actions, finish()]))
     state = read_session(root)
     messages, omitted = context_messages(state)
-    assert state["compactions"] > 0
     assert omitted > 0
     assert len(state["events"]) == 5
     assert "train_window" in messages[1]["content"]
@@ -282,6 +325,56 @@ def test_interrupted_final_step_resumes_without_duplicate_computation(tmp_path):
     assert (root / "e0003/result/spec.json").read_bytes() == before
 
 
+def test_interrupted_unrecorded_final_output_retries_same_frozen_config(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.agents import runner
+
+    native = runner.run_native
+    interrupted = False
+
+    def interrupt_after_output(template, *args, **kwargs):
+        nonlocal interrupted
+        result = native(template, *args, **kwargs)
+        if template.get("name") == "final_formula" and not interrupted:
+            interrupted = True
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(runner, "run_native", interrupt_after_output)
+    root = run_agent(
+        final_config(tmp_path),
+        client=ScriptedClient(
+            [
+                call("search"),
+                {
+                    "kind": "freeze",
+                    "summary": "Freeze the development formula.",
+                    "arguments_json": '{"candidates":{"candidate":"e0001"}}',
+                },
+            ]
+        ),
+    )
+    state = read_session(root)
+    assert state["status"] == "paused"
+    assert final_evaluation_status(state) == "interrupted"
+    original = (root / "e0003/result/spec.json").read_bytes()
+    resume_agent(root, client=ScriptedClient([finish()]))
+    state = read_session(root)
+    assert state["status"] == "completed"
+    assert final_evaluation_status(state) == "completed"
+    before = json.loads((root / "e0003/config.json").read_bytes())
+    after = json.loads((root / "e0004/config.json").read_bytes())
+    assert before.pop("output") != after.pop("output")
+    assert before == after
+    assert (root / "e0003/result/spec.json").read_bytes() == original
+    assert (root / "e0004/result/spec.json").read_bytes() == original
+    assert [item["result"]["status"] for item in state["events"][2:4]] == [
+        "interrupted",
+        "completed",
+    ]
+
+
 def test_completed_session_can_finish_memory_publication_after_io_failure(tmp_path):
     config = agent_config(tmp_path)
     memory_path = tmp_path / "memory"
@@ -295,15 +388,44 @@ def test_completed_session_can_finish_memory_publication_after_io_failure(tmp_pa
     assert len(list(memory_path.glob("*.json"))) == 1
 
 
-def test_token_budget_rejects_missing_supplier_usage(tmp_path):
+@pytest.mark.parametrize(
+    "usage",
+    [
+        None,
+        {},
+        {"input_tokens": 1},
+        {"input_tokens": 1, "output_tokens": -1},
+        {"input_tokens": True, "output_tokens": 1},
+        {"input_tokens": 1, "output_tokens": "2"},
+    ],
+)
+def test_token_budget_rejects_unusable_supplier_usage_before_accepting_finish(
+    tmp_path, usage
+):
     config = agent_config(tmp_path)
     config["budget"]["max_tokens"] = 10000
-    client = ScriptedClient([call("lookup", scope="catalog", query="momentum")])
-    client.usage = None
+    client = ScriptedClient([finish()])
+    client.usage = usage
     with pytest.raises(ValueError, match="usage_unavailable"):
         run_agent(config, client=client)
     state = read_session(config["output"])
     assert len(state["requests"]) == 1
+    assert state["requests"][0]["usage"] is None
+    assert state["events"] == []
+    assert state["status"] == "failed"
+
+
+def test_token_budget_counts_valid_usage_and_stops_following_requests(tmp_path):
+    config = agent_config(tmp_path)
+    config["budget"]["max_tokens"] = 10
+    client = ScriptedClient([call("lookup", scope="catalog", query="momentum")])
+    client.usage = {"input_tokens": 4, "output_tokens": 6, "total_tokens": 10}
+    root = run_agent(config, client=client)
+    state = read_session(root)
+    assert state["status"] == "budget_exhausted"
+    assert len(state["requests"]) == 1
+    assert state["requests"][0]["usage"] == {"input_tokens": 4, "output_tokens": 6}
+    assert state["events"] == []
 
 
 def test_pause_keeps_queued_steering_and_orphan_output_is_not_overwritten(tmp_path):

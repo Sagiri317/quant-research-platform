@@ -19,8 +19,8 @@ from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
     _infer_dataset_from_header,
     infer_dataset_from_native_export,
+    infer_dataset_from_raw_filename,
     iter_export_csv_records,
-    parse_raw_filename,
     read_export_header,
     validate_export_header,
 )
@@ -296,7 +296,7 @@ def _requested_raw_datasets(
 
 def _raw_dataset_candidate(path: Path) -> str | None:
     try:
-        return parse_raw_filename(path).dataset
+        return infer_dataset_from_raw_filename(path)
     except ValueError:
         pass
     try:

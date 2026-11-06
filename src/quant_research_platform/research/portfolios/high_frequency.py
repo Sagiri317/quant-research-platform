@@ -470,6 +470,7 @@ def inventory_batches(
                 schedule,
                 assumptions,
                 params["participation_rate"],
+                face_value_per_share=projected.get("face_value_per_share"),
             )
         for stamp, group in quotes.groupby("timestamp", sort=False):
             at = pd.Timestamp(stamp)
@@ -558,6 +559,10 @@ def inventory_batches(
                         "can_exit": permissions,
                     }
                 )
+                if "face_value_per_share" in projected:
+                    orders["face_value_per_share"] = (
+                        projected.face_value_per_share.reindex(units.index)
+                    )
                 account = execute_stock_target(
                     orders,
                     cash=cash,
@@ -833,8 +838,15 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
         {"equity_events"},
     )
     start, end = pd.Timestamp(window.start).date(), pd.Timestamp(window.end).date()
+    asset_filter = (
+        ("asset_id", "in", tuple(config["parameters"]["maximum_inventory"])),
+    )
     panel = open_dataset_session(
-        **_dataset_input_options(config["panel"], time_window=TimeWindow(start, end))
+        **_dataset_input_options(
+            config["panel"],
+            time_window=TimeWindow(start, end),
+            row_filters=asset_filter,
+        )
     )
     if panel.spec.get("market_id") != "a_share" or panel.spec["data_id"] != "hft_panel":
         raise ValueError("hft_panel_required")
@@ -848,6 +860,7 @@ def inventory_inputs(config, window, *, prediction_path=None, decision_columns=N
                 **_dataset_input_options(
                     config["trades"],
                     time_window=TimeWindow(start, end),
+                    row_filters=asset_filter,
                 ),
                 "columns": (
                     "timestamp",

@@ -5,6 +5,9 @@ from bisect import bisect_right, insort
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    market_type_calendar_state,
+)
 from quant_research_platform.research.factors.macro_liquidity.definitions import (
     COMPOSITES,
     PRESSURE_COMPONENTS,
@@ -16,6 +19,13 @@ from quant_research_platform.research.factors.macro_liquidity.definitions import
 from quant_research_platform.research.features.transforms import _industry_group_codes
 
 DEFAULT_WINDOWS = {"D": 60, "W": 26, "M": 24, "Q": 12, "event": 20}
+BETA_INPUT_COLUMNS = (
+    "listing_date",
+    "period_return",
+    "market_type",
+    "signal_session",
+    "return_available_at",
+)
 
 
 def parameters(values):
@@ -339,7 +349,9 @@ def liquidity_beta(
     return result.where(enough).to_numpy()
 
 
-def calculate_macro_factors(observations, panel, *, columns, config, states=None):
+def calculate_macro_factors(
+    observations, panel, *, columns, config, states=None, calendar=None
+):
     """Broadcast macro histories; equity interactions operate cross-sectionally."""
     config = parameters(config)
     work = panel.sort_values(["timestamp", "asset_id"], kind="stable").reset_index(
@@ -378,45 +390,97 @@ def calculate_macro_factors(observations, panel, *, columns, config, states=None
             output[column] = output["ml_" + state] * value
     beta_columns = [name for name in columns if RECIPES[name][0] == "beta"]
     output[beta_columns] = np.nan
-    if beta_columns and {"listing_date", "period_return"} <= set(work.columns):
-        if "return_available_at" not in work:
-            raise ValueError("liquidity_beta_requires_observed_return_clock")
+    if (
+        beta_columns
+        and calendar is not None
+        and set(BETA_INPUT_COLUMNS) <= set(work.columns)
+    ):
         clocks = pd.to_datetime(work.return_available_at, utc=True).dt.tz_localize(None)
-        if (clocks > work.timestamp).any() or clocks.isna().any():
-            raise ValueError("liquidity_beta_return_not_available")
+        # Unknown or immature returns are unusable, not a reason to invent a close.
+        clocks = clocks.where(clocks.le(work.timestamp))
         variables = {RECIPES[name][1] for name in beta_columns}
         historical = macro_states(
             observations,
-            clocks,
+            clocks.dropna(),
             columns=[f"ml_{name}_level" for name in variables],
             config=config,
         ).set_index("timestamp")
         listing = work.listing_date
-        prior = listing.groupby(work.asset_id, sort=False).shift()
-        segment = listing.ne(prior).fillna(True).groupby(work.asset_id).cumsum()
-        for _, group in work.loc[listing.notna()].groupby(
+        previous = work.groupby("asset_id", sort=False)[
+            ["listing_date", "market_type"]
+        ].shift()
+        segment = (
+            (
+                listing.ne(previous.listing_date)
+                | work.market_type.ne(previous.market_type)
+            )
+            .fillna(True)
+            .groupby(work.asset_id)
+            .cumsum()
+        )
+        calendars = {
+            market: market_type_calendar_state(calendar, market).sort_index()
+            for market in work.market_type.dropna().unique()
+        }
+        calendar_coverage = {
+            market: state.index.to_series().diff().gt(pd.Timedelta(days=1)).cumsum()
+            for market, state in calendars.items()
+        }
+        for _, group in work.loc[listing.notna() & work.market_type.notna()].groupby(
             [work.asset_id, segment], sort=False
         ):
+            market = group.market_type.iloc[0]
+            calendar_state = calendars[market]
+            sessions = calendar_state.index[calendar_state.fillna(False)]
+            signals = pd.DatetimeIndex(group.signal_session)
+            if (
+                calendar_state.reindex(signals).eq(False).any()
+                or signals.has_duplicates
+            ):
+                raise ValueError("liquidity_beta_signal_session_invalid")
+            axis = sessions[(sessions >= signals.min()) & (sessions <= signals.max())]
+            if axis.empty:
+                continue
+            # Unknown calendar dates cannot prove which observations belong in W.
+            boundary = calendar_coverage[market].reindex(axis).diff().gt(0)
+            boundary.iloc[0] = signals.min() < axis[0]
+            known_window = (
+                boundary.rolling(config["beta_window"] - 1, min_periods=1).sum().eq(0)
+            )
+            returns = group.set_index("signal_session").period_return.reindex(axis)
+            market_returns = (
+                group.set_index("signal_session").market_return.reindex(axis)
+                if "market_return" in group
+                else None
+            )
             for variable in variables:
-                level = historical.loc[
-                    clocks.loc[group.index], f"ml_{variable}_level"
-                ].to_numpy()
-                shocks = np.r_[np.nan, np.diff(level)]
+                level = pd.Series(
+                    historical[f"ml_{variable}_level"]
+                    .reindex(clocks.loc[group.index])
+                    .to_numpy(),
+                    index=signals,
+                ).reindex(axis)
+                shocks = level.diff().mask(boundary)
                 for kind in ("beta", "partial_beta"):
                     name = f"ml_{variable}_{kind}"
                     if name not in beta_columns:
                         continue
-                    if kind == "partial_beta" and "market_return" not in group:
-                        output.loc[group.index, name] = np.nan
+                    if kind == "partial_beta" and market_returns is None:
                         continue
-                    output.loc[group.index, name] = liquidity_beta(
-                        group.period_return,
+                    result = liquidity_beta(
+                        returns,
                         shocks,
-                        market_returns=group.market_return
+                        market_returns=market_returns
                         if kind == "partial_beta"
                         else None,
                         window=config["beta_window"],
                         min_observations=config["beta_min_observations"],
                         min_changes=config["beta_min_changes"],
+                    )
+                    output.loc[group.index, name] = (
+                        pd.Series(result, index=axis)
+                        .where(known_window)
+                        .reindex(signals)
+                        .to_numpy()
                     )
     return output.loc[:, ["market_id", "asset_id", "timestamp", *columns]]

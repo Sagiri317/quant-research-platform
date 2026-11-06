@@ -105,7 +105,7 @@ def test_unselected_year_is_not_discovered_and_eval_feeds_statistics(
     import quant_research_platform.research.factors.statistics as factor_stats
 
     monkeypatch.setattr(statistics_inputs, "open_dataset_session", forbidden)
-    monkeypatch.setattr(factor_stats, "read_dataset", forbidden)
+    monkeypatch.setattr(factor_stats, "iter_dataset_chunks", forbidden)
     statistic = read_statistics_artifact(
         factor_statistics(
             {

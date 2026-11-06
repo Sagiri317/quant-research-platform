@@ -1,6 +1,9 @@
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
+from quant_research_platform.agents.protocol import sandbox_context
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import read_session
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
@@ -111,13 +114,91 @@ def test_agent_budget_and_model_failure_are_recorded(tmp_path):
     assert read_session(tmp_path / "unavailable")["error"]["error"] == "RuntimeError"
 
 
-def test_sandbox_rejects_labels_that_mature_in_holdout(tmp_path):
+def test_sandbox_full_table_is_context_while_native_search_filters_maturity(tmp_path):
     config = agent_config(tmp_path)
     frame, spec = learning_panel(tmp_path / "earlier")
-    frame.loc[frame.timestamp.eq(frame.timestamp.max()), "label_available_at"] = (
-        pd.Timestamp("2020-01-20")
-    )
+    late = frame.timestamp.between("2020-01-06", "2020-01-07")
+    frame.loc[late, "label_available_at"] = pd.Timestamp("2020-01-20")
+    frame.loc[late, "label"] *= -1
     write_dataset(tmp_path / "late-labels", frame, spec=spec)
-    config["sandbox"] = {"inputs": {"training": str(tmp_path / "late-labels")}}
-    with pytest.raises(ValueError, match="labels_reach_holdout"):
-        run_agent(config, client=ScriptedClient([]))
+    config["sandbox"] = {"inputs": {"panel": str(tmp_path / "late-labels")}}
+    config["tools"].pop("apply")
+    config["tools"]["search"]["config"]["dataset"] = str(tmp_path / "late-labels")
+    config["protocol"]["test_window"] = {"start": "2020-01-10", "end": "2020-01-12"}
+    client = ScriptedClient(
+        [
+            {"kind": "tool", "tool": "search", "summary": "Use only mature labels."},
+            {
+                "kind": "finish",
+                "summary": "Only the positive validation day is mature.",
+            },
+        ]
+    )
+    root = run_agent(config, client=client)
+    state = read_session(root)
+    metadata = state["public"]["sandbox_inputs"]["panel"]
+    assert metadata["rows"] == 36
+    assert metadata["date_min"] == "2020-01-01"
+    assert metadata["date_max"] == "2020-01-12"
+    assert metadata["label_availability_columns"] == {"label": "label_available_at"}
+    assert state["events"][0]["result"]["status"] == "completed"
+    # The two reversed-label dates are immature; the retained date has equal ranks.
+    assert state["events"][0]["result"]["metrics"] == {"score": 1.0}
+    assert "label_available_at" in client.messages[0]
+    report = parse_qrp_json_object((root / "report.json").read_bytes())
+    assert report["final_evaluation_status"] == "not_started"
+    assert "holdout_viewed" not in report
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_sandbox_metadata_does_not_require_label_maturity_declaration(tmp_path, empty):
+    frame, spec = learning_panel(tmp_path / "earlier")
+    if empty:
+        frame = frame.iloc[:0]
+    root = tmp_path / "input"
+    write_dataset(root, frame, spec=replace(spec, label_availability_columns={}))
+    metadata = sandbox_context({"panel": root})["panel"]
+    assert metadata["rows"] == len(frame)
+    assert metadata["date_max"] == (None if empty else "2020-01-12")
+    assert metadata["label_availability_columns"] == {}
+
+
+def test_sandbox_dynamic_input_uses_successful_artifact_alongside_fixed_input(
+    tmp_path, monkeypatch
+):
+    config = agent_config(tmp_path)
+    config["sandbox"] = {"inputs": {"fixed": str(tmp_path / "input")}}
+    seen = []
+
+    def isolated(code, sandbox, output, *, timeout):
+        seen.append(read_dataset(sandbox["inputs"]["dynamic"]))
+        assert read_dataset(sandbox["inputs"]["fixed"]).shape[0] == 36
+        (output / "results").mkdir(parents=True)
+        return {"status": "completed", "exit_code": 0}
+
+    monkeypatch.setattr(
+        "quant_research_platform.agents.runner.run_isolated_python", isolated
+    )
+    root = run_agent(
+        config,
+        client=ScriptedClient(
+            [
+                {"kind": "tool", "tool": "search", "summary": "Select a formula."},
+                {
+                    "kind": "tool",
+                    "tool": "apply",
+                    "arguments_json": '{"inputs":{"search":"e0001"}}',
+                    "summary": "Create an input artifact.",
+                },
+                {
+                    "kind": "tool",
+                    "tool": "python",
+                    "arguments_json": '{"code":"pass","inputs":{"dynamic":"e0002"}}',
+                    "summary": "Read the bound result.",
+                },
+                {"kind": "finish", "summary": "Both inputs remain accessible."},
+            ]
+        ),
+    )
+    assert read_session(root)["events"][2]["result"]["status"] == "completed"
+    assert seen[0].discovered_factor.tolist() == [1.0, 2.0, 3.0] * 3

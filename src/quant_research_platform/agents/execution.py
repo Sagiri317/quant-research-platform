@@ -378,6 +378,8 @@ def _metrics(output, definitions):
         if not source.is_relative_to(output.resolve()):
             raise ValueError("agent_metric_path_escape")
         if source.suffix == ".parquet":
+            if not source.is_file():
+                raise ValueError("agent_metric_file_required")
             values = pd.read_parquet(
                 source,
                 columns=[definition["column"]],

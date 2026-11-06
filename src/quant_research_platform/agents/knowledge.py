@@ -4,7 +4,11 @@ import difflib
 import json
 from pathlib import Path
 
-from quant_research_platform.agents.session import evidence_record, replace_json
+from quant_research_platform.agents.session import (
+    evidence_record,
+    final_evaluation_status,
+    replace_json,
+)
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
@@ -19,10 +23,16 @@ from quant_research_platform.storage.atomic import atomic_write_json, atomic_wri
 
 
 def lookup(arguments, state):
-    arguments = _strict_config(arguments, {"scope", "query"}, {"key", "offset"})
+    arguments = _strict_config(
+        arguments, {"scope", "query"}, {"key", "offset", "page_size"}
+    )
     scope, query = arguments["scope"], arguments["query"]
     offset = arguments.get("offset", 0)
     if type(query) is not str or type(offset) is not int or offset < 0:
+        raise ValueError("agent_lookup_arguments_invalid")
+    maximum = 6000 if "key" in arguments else 6
+    page_size = arguments.get("page_size", maximum)
+    if type(page_size) is not int or not 1 <= page_size <= maximum:
         raise ValueError("agent_lookup_arguments_invalid")
     documents = {}
     if scope == "documents":
@@ -67,8 +77,10 @@ def lookup(arguments, state):
         text = documents[arguments["key"]]
         return {
             "key": arguments["key"],
-            "text": text[offset : offset + 6000],
-            "next_offset": offset + 6000 if offset + 6000 < len(text) else None,
+            "text": text[offset : offset + page_size],
+            "next_offset": offset + page_size
+            if offset + page_size < len(text)
+            else None,
         }
     terms = query.casefold().split()
     matches = []
@@ -90,9 +102,11 @@ def lookup(arguments, state):
         )
     matches.sort(key=lambda item: (-item["score"], item["key"]))
     return {
-        "matches": matches[offset : offset + 6],
+        "matches": matches[offset : offset + page_size],
         "total": len(matches),
-        "next_offset": offset + 6 if offset + 6 < len(matches) else None,
+        "next_offset": offset + page_size
+        if offset + page_size < len(matches)
+        else None,
     }
 
 
@@ -117,7 +131,7 @@ def remember(arguments, state, identifier):
         },
         "question": state["public"]["question"],
         "protocol": state["public"]["protocol"],
-        "holdout_viewed": state["holdout_viewed"],
+        "final_evaluation_status": final_evaluation_status(state),
         "finding": sanitize_shared_text(arguments["text"]),
         "evidence": [evidence_record(events[key]) for key in arguments["evidence"]],
     }

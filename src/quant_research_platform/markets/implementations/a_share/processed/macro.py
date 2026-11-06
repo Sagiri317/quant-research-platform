@@ -14,6 +14,7 @@ from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.models import _target_definition
 from quant_research_platform.contracts.time import (
     DECISION_CONTEXT_COLUMNS,
+    TimeWindow,
     time_window_timestamp_interval,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
@@ -21,6 +22,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors.macro_liquidity.calculations import (
+    BETA_INPUT_COLUMNS,
     calculate_macro_factors,
     macro_states,
     parameters,
@@ -67,7 +69,8 @@ def processed_specs():
             column_roles={**keys, **dict.fromkeys(RECIPES, "factor")},
             column_units={name: factor_unit(name) for name in RECIPES},
             processed_input_data_ids=("decision_panel",),
-            source_input_data_ids=("macro_observations",),
+            source_input_data_ids=("macro_observations", "trading_calendar"),
+            optional_source_input_data_ids=("trading_calendar",),
         ),
     )
 
@@ -249,7 +252,10 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             name for name, role in spec.column_roles.items() if role == "factor"
         )
         declared = set(session.logical_columns)
-        if not set(DECISION_CONTEXT_COLUMNS) <= declared:
+        if (
+            not set(DECISION_CONTEXT_COLUMNS).difference({"return_available_at"})
+            <= declared
+        ):
             raise ValueError("macro_factors_require_explicit_decision_panel")
         beta = any(RECIPES[name][0] == "beta" for name in columns)
         required = set(PLATFORM_ASSET_TIME_KEY) | {"eligible"}
@@ -261,19 +267,41 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         if any(RECIPES[name][0] == "industry_interaction" for name in columns):
             required.update(("industry_standard_id", "industry_level1_code"))
         if beta:
-            required.update(
-                (
-                    "listing_date",
-                    "return_available_at",
-                    "period_return",
-                    "market_return",
-                )
-            )
+            required.update((*BETA_INPUT_COLUMNS, "market_return"))
         session = session.projected_view(
             tuple(name for name in session.logical_columns if name in required)
         )
-        if not beta:
-            session = session.filtered_view(time_window)
+        start, end, closed = time_window_timestamp_interval(time_window)
+        session = session.filtered_view(
+            TimeWindow(pd.Timestamp.min, end if closed else end - pd.Timedelta(1, "ns"))
+            if beta
+            else time_window
+        )
+        calendar = (
+            materialize_dataset_session(
+                open_dataset_session(
+                    **_dataset_input_options(inputs["trading_calendar"])
+                )
+            )
+            if beta and "trading_calendar" in inputs
+            else None
+        )
+        if beta:
+            missing = set(BETA_INPUT_COLUMNS) - declared
+            if (
+                any(
+                    RECIPES[name][2] == "partial_beta"
+                    for name in columns
+                    if RECIPES[name][0] == "beta"
+                )
+                and "market_return" not in declared
+            ):
+                missing.add("market_return")
+            if calendar is None:
+                missing.add("trading_calendar")
+            metadata["producer_diagnostics"]["macro_beta_missing_inputs"] = sorted(
+                missing
+            )
         cutoffs = set()
         with closing_iterator(
             iter_dataset_chunks(session.projected_view(("timestamp",)))
@@ -283,7 +311,6 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         states = macro_states(
             observations, sorted(cutoffs), columns=columns, config=parameters(config)
         )
-        start, end, closed = time_window_timestamp_interval(time_window)
         metadata["producer_diagnostics"]["feature_preserve_amplitude"] = [
             name for name in columns if RECIPES[name][0] != "beta"
         ]
@@ -304,6 +331,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                         columns=columns,
                         config=config,
                         states=states,
+                        calendar=calendar,
                     )
                     yield result.loc[
                         result.timestamp.ge(start)

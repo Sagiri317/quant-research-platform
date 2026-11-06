@@ -580,8 +580,6 @@ def test_selected_prediction_checks_only_its_selection_path(tmp_path, retrospect
             "selection_cutoff"
         ] = str(dates[-1])
     tables = model_stats.build_a_share_statistics_tables(
-        dataset_path=tmp_path / "input",
-        dataset_spec=spec,
         dataset_session=session,
         prediction_id="chosen-path",
         config=config,

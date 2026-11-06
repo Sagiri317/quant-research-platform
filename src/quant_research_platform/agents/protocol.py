@@ -11,15 +11,10 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
-from quant_research_platform.storage.datasets import inspect_dataset
-from quant_research_platform.storage.datasets.reading import (
-    iter_dataset_chunks,
-    open_dataset_session,
-)
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 OPERATIONS = {
     "prepare",
@@ -129,42 +124,20 @@ def before_holdout(value, holdout_start):
             before_holdout(item, holdout_start)
 
 
-def sandbox_context(inputs, test_start):
-    """Inspect declared development datasets once before exposing them to code."""
+def sandbox_context(inputs):
+    """Expose native metadata without treating the whole table as a sample window."""
     result = {}
     for alias, root in inputs.items():
-        inspection = inspect_dataset(Path(root))
-        if (
-            inspection.date_max is None
-            or pd.Timestamp(inspection.date_max) >= test_start
-        ):
-            raise ValueError("agent_sandbox_input_reaches_holdout")
-        clocks = inspection.spec.get("label_availability_columns", {})
-        labels = [
-            name
-            for name, role in inspection.spec["column_roles"].items()
-            if role == "label"
-        ]
-        if set(labels) != set(clocks):
-            raise ValueError("agent_sandbox_label_maturity_required")
-        if labels:
-            session = open_dataset_session(
-                Path(root), columns=tuple(dict.fromkeys([*labels, *clocks.values()]))
-            )
-            with closing_iterator(iter_dataset_chunks(session)) as chunks:
-                for frame in chunks:
-                    for label, clock in clocks.items():
-                        available = pd.to_datetime(frame[clock], errors="raise")
-                        if (
-                            frame[label].notna()
-                            & (available.isna() | available.ge(test_start))
-                        ).any():
-                            raise ValueError("agent_sandbox_labels_reach_holdout")
+        session = open_dataset_session(Path(root))
+        spec, manifest = session.spec, session.manifest
         result[alias] = {
-            "columns": inspection.spec["column_roles"],
-            "units": inspection.spec.get("column_units", {}),
-            "frequency": inspection.spec["frequency"],
-            "rows": inspection.row_count,
+            "columns": spec["column_roles"],
+            "units": spec.get("column_units", {}),
+            "frequency": spec["frequency"],
+            "rows": manifest["row_count"],
+            "date_min": manifest["date_min"],
+            "date_max": manifest["date_max"],
+            "label_availability_columns": spec.get("label_availability_columns", {}),
         }
     return result
 
@@ -267,9 +240,7 @@ def validate_config(config):
         "protocol": protocol,
         "tools": public_tools,
         "budget": config["budget"],
-        "sandbox_inputs": sandbox_context(
-            config.get("sandbox", {}).get("inputs", {}), test_start
-        ),
+        "sandbox_inputs": sandbox_context(config.get("sandbox", {}).get("inputs", {})),
         "documents": list(config.get("documents", {})),
         "final_evaluation": [
             {

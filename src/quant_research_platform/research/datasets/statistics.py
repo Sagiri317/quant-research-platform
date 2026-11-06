@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
@@ -24,10 +25,6 @@ def _statistics_window_bounds(window):
 
 
 def _statistics_input_session(config, window):
-    from dataclasses import fields
-
-    from quant_research_platform.contracts.data import DataSpec
-
     value = config["dataset"]
     if "input_spec" in config:
         if isinstance(value, dict):
@@ -38,19 +35,9 @@ def _statistics_input_session(config, window):
             value = {"path": value, "spec": config["input_spec"]}
     options = _dataset_input_options(value, time_window=window)
     session = open_dataset_session(**options)
-    payload = session.spec
-    values = {
-        field.name: payload[field.name]
-        for field in fields(DataSpec)
-        if field.init and field.name in payload
-    }
-    for key in ("primary_key", "partition_columns"):
-        values[key] = tuple(values[key])
-    from quant_research_platform.contracts.columns import _validate_asset_time_key
-
-    spec = DataSpec(**values)
-    _validate_asset_time_key(spec.primary_key, spec.column_roles)
-    return session, spec
+    spec = session.spec
+    _validate_asset_time_key(spec["primary_key"], spec["column_roles"])
+    return session
 
 
 def _statistics_label_availability(evaluation, spec):
@@ -58,7 +45,7 @@ def _statistics_label_availability(evaluation, spec):
     availability = evaluation.get("label_availability_columns", {})
     if not isinstance(availability, dict) or set(availability) - {label}:
         raise ValueError("statistics_label_availability_invalid")
-    declared = getattr(spec, "label_availability_columns", {}).get(label)
+    declared = spec.get("label_availability_columns", {}).get(label)
     if (
         label in availability
         and declared is not None
@@ -68,12 +55,12 @@ def _statistics_label_availability(evaluation, spec):
     column = availability.get(label, declared)
     if column is None:
         column = training_availability_columns(label)[0]
-    if not isinstance(column, str) or not column or column not in spec.column_roles:
+    if not isinstance(column, str) or not column or column not in spec["column_roles"]:
         raise ValueError("statistics_label_availability_invalid")
-    if str(spec.column_roles.get(label)) != "label":
+    if str(spec["column_roles"].get(label)) != "label":
         raise ValueError("statistics_label_role_invalid")
     if any(
-        str(spec.column_roles.get(factor)) not in {"factor", "feature"}
+        str(spec["column_roles"].get(factor)) not in {"factor", "feature"}
         for factor in evaluation.get("factors", ())
     ):
         raise ValueError("statistics_factor_role_invalid")

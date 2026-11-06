@@ -50,11 +50,9 @@ from quant_research_platform.runtime.dataframes import (
     iter_complete_session_frames,
 )
 from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
     iter_dataset_chunks,
-    read_dataset,
 )
-from quant_research_platform.storage.datasets.schema import data_spec_payload
-from quant_research_platform.storage.datasets.types import DatasetReadMode
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
 
@@ -77,8 +75,7 @@ _MODEL_ANALYSES = (
 
 def build_a_share_statistics_tables(
     *,
-    dataset_path,
-    dataset_spec,
+    dataset_session: DatasetSession,
     prediction_id: str,
     model_entries: Mapping,
     selections: Mapping,
@@ -89,15 +86,10 @@ def build_a_share_statistics_tables(
     prediction_lookup: object,
     global_prediction_lookup: object | None = None,
     global_inference_blocker: Mapping[str, str] | str | None = None,
-    dataset_session=None,
 ) -> dict[str, pd.DataFrame]:
-    declared = (
-        dataset_session.spec
-        if dataset_session is not None
-        else data_spec_payload(dataset_spec)
-    )
-    manifest = dataset_session.manifest if dataset_session is not None else None
-    dataset_id = str(dataset_spec.data_id)
+    declared = dataset_session.spec
+    manifest = dataset_session.manifest
+    dataset_id = declared["data_id"]
     selection_group = config.get("selection_group", "explicit")
     retrospective_entries = {
         (period, family)
@@ -128,7 +120,7 @@ def build_a_share_statistics_tables(
     )
     joint_blocker = _inference_blocker(config)
     primary_label = config["evaluation"]["primary_label"]
-    availability = _statistics_label_availability(config["evaluation"], dataset_spec)
+    availability = _statistics_label_availability(config["evaluation"], declared)
     analyses = _selected_analyses(config, _MODEL_ANALYSES)
     statistics = config.get("statistics")
     root_seed = config.get("root_seed", DEFAULT_ROOT_SEED)
@@ -144,7 +136,7 @@ def build_a_share_statistics_tables(
     raw_label = config["evaluation"].get(
         "raw_return_label",
         "forward_return_20d"
-        if "forward_return_20d" in dataset_spec.column_roles
+        if "forward_return_20d" in declared["column_roles"]
         else None,
     )
     if raw_label is not None and (type(raw_label) is not str or not raw_label):
@@ -152,7 +144,7 @@ def build_a_share_statistics_tables(
     if "model_losses" not in analyses:
         raw_label = None
     raw_availability = (
-        _statistics_label_availability({"primary_label": raw_label}, dataset_spec)
+        _statistics_label_availability({"primary_label": raw_label}, declared)
         if raw_label is not None
         else None
     )
@@ -184,7 +176,7 @@ def build_a_share_statistics_tables(
     read_columns = tuple(
         dict.fromkeys(
             (
-                *dataset_spec.primary_key,
+                *declared["primary_key"],
                 "eligible",
                 primary_label,
                 availability,
@@ -196,9 +188,7 @@ def build_a_share_statistics_tables(
         primary_label,
         *((raw_label,) if raw_label is not None else ()),
     }
-    if dataset_session is not None and business_columns - set(
-        dataset_session.logical_columns
-    ):
+    if business_columns - set(dataset_session.logical_columns):
         raise ValueError("statistics_required_columns_excluded")
     needs_losses = "model_losses" in analyses
     needs_comparison = bool(
@@ -215,15 +205,7 @@ def build_a_share_statistics_tables(
         else dict.fromkeys(family_ids, global_inference_blocker)
     )
     chunks = iter_complete_session_frames(
-        read_dataset(
-            dataset_path,
-            spec=dataset_spec if Path(dataset_path).is_file() else None,
-            time_window=model_window,
-            columns=read_columns,
-            mode=DatasetReadMode.CHUNKED,
-        )
-        if dataset_session is None
-        else iter_dataset_chunks(dataset_session.projected_view(read_columns)),
+        iter_dataset_chunks(dataset_session.projected_view(read_columns)),
         timestamp_column="timestamp",
     )
     with closing_iterator(chunks):
@@ -688,7 +670,7 @@ def _model_target_metadata(config, spec, window):
             "raw_return_label": config["evaluation"].get(
                 "raw_return_label",
                 "forward_return_20d"
-                if "forward_return_20d" in spec.column_roles
+                if "forward_return_20d" in spec["column_roles"]
                 else None,
             ),
             "baseline": config["evaluation"].get("baseline", "zero_prediction"),
@@ -713,10 +695,10 @@ def _model_target_metadata(config, spec, window):
             and config.get("selection_group") == "quarterly"
             else {}
         ),
-        "column_roles": {label: str(spec.column_roles[label])},
+        "column_roles": {label: str(spec["column_roles"][label])},
         "column_units": {
             column: unit
-            for column, unit in spec.column_units.items()
+            for column, unit in spec["column_units"].items()
             if column == label
         },
         "label_cutoff": cutoff.isoformat(),
@@ -1204,7 +1186,6 @@ def _selection_trial_rows(selections, selection_group):
 
 def model_statistics(config):
     """Compare explicit saved predictions over caller-selected disjoint periods."""
-    from pathlib import Path
 
     import pyarrow as pa
 
@@ -1556,12 +1537,10 @@ def model_statistics(config):
                         )
                         if duplicates:
                             raise ValueError("statistics_prediction_keys_duplicate")
-        session, spec = _statistics_input_session(config, window)
+        session = _statistics_input_session(config, window)
         validate_input_market(session.spec, market)
         tables = build_a_share_statistics_tables(
-            dataset_path=session.root,
             dataset_session=session,
-            dataset_spec=spec,
             prediction_id=config.get("prediction_id"),
             model_entries=entries,
             selections=selections,
@@ -1590,7 +1569,7 @@ def model_statistics(config):
         output,
         metadata={
             **{key: value for key, value in config.items() if key != "output"},
-            **_model_target_metadata(config, spec, window),
+            **_model_target_metadata(config, session.spec, window),
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
             "prediction_coverage": prediction_coverage,

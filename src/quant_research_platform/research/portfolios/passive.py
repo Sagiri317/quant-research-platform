@@ -44,6 +44,7 @@ class _Order:
     depth: float
     segment: str
     cost: object
+    face_value_per_share: float | None = None
     filled_notional: float = 0.0
     paid: np.ndarray = field(default_factory=lambda: np.zeros(5))
     cancel_at: int | None = None
@@ -92,7 +93,17 @@ class PassiveOrders:
     Same-time trades precede cancellation acknowledgement and new submissions.
     """
 
-    def __init__(self, config, market_types, day, schedule, assumptions, participation):
+    def __init__(
+        self,
+        config,
+        market_types,
+        day,
+        schedule,
+        assumptions,
+        participation,
+        *,
+        face_value_per_share=None,
+    ):
         self.config = config
         self.minimum_commission = assumptions.minimum_commission
         self.participation = participation
@@ -111,11 +122,21 @@ class PassiveOrders:
             for asset, market in zip(market_types.index, markets, strict=True)
             for side in (1, -1)
         }
+        self.face_value_per_share = face_value_per_share
         self.orders = {}
         self.intents = {}
         self.counter = 0
 
-    def _required_cash(self, cost, side, price, remaining, filled=0.0, paid=0.0):
+    def _required_cash(
+        self,
+        cost,
+        side,
+        price,
+        remaining,
+        filled=0.0,
+        paid=0.0,
+        face_value_per_share=None,
+    ):
         # Reserve the worst partial-fill prefix, including fee-heavy odd-lot sales.
         return max(
             0.0,
@@ -123,7 +144,10 @@ class PassiveOrders:
                 side * count * price
                 + fsum(
                     cost.order_components(
-                        filled + count * price, self.minimum_commission
+                        filled + count * price,
+                        self.minimum_commission,
+                        price=price,
+                        face_value_per_share=face_value_per_share,
                     )
                 )
                 - paid
@@ -141,6 +165,7 @@ class PassiveOrders:
             order.remaining,
             order.filled_notional,
             fsum(order.paid),
+            order.face_value_per_share,
         )
 
     def frozen_cash(self):
@@ -196,7 +221,10 @@ class PassiveOrders:
             return None
         notional = quantity * order.price
         total = order.cost.order_components(
-            order.filled_notional + notional, self.minimum_commission
+            order.filled_notional + notional,
+            self.minimum_commission,
+            price=order.price,
+            face_value_per_share=order.face_value_per_share,
         )
         costs = total - order.paid
         order.filled_notional += notional
@@ -309,8 +337,16 @@ class PassiveOrders:
             )
             cost = self.costs[asset, side]
 
-            def required(count, cost=cost, side=side, price=price):
-                return self._required_cash(cost, side, price, count)
+            face = (
+                self.face_value_per_share.get(asset)
+                if self.face_value_per_share is not None
+                else None
+            )
+
+            def required(count, cost=cost, side=side, price=price, face=face):
+                return self._required_cash(
+                    cost, side, price, count, face_value_per_share=face
+                )
 
             if side == 1 and quantity and required(quantity) > free:
                 low, high = 0, quantity // increment
@@ -345,6 +381,7 @@ class PassiveOrders:
                 depth,
                 row.segment_id,
                 cost,
+                face_value_per_share=face,
             )
             free -= required(quantity)
             diagnostics.extend(

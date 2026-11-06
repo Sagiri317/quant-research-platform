@@ -67,3 +67,65 @@ def inspect(path: Path) -> dict[str, object]:
         if candidate.is_file():
             return read_qrp_json_file(candidate)[1]
     raise ValueError("published_metadata_missing")
+
+
+def inspect_native(path: Path) -> dict[str, object]:
+    """Recognize native metadata shapes, without authenticating their provenance.
+
+    HTTP must not expose arbitrary JSON merely because it has a familiar filename.
+    This does not load data members or establish that a trusted writer produced it.
+    """
+    metadata = inspect(path)
+    schema_shapes = {
+        "qrp-dataset-spec": {
+            "data_id": str,
+            "required_columns": list,
+            "column_roles": dict,
+            "primary_key": list,
+        },
+        "qrp-dataset-manifest": {
+            "row_count": int,
+            "columns": list,
+            "partitions": list,
+        },
+        "qrp-output-manifest": {
+            "output_definition_id": str,
+            "metadata": dict,
+            "files": list,
+        },
+        "qrp-portfolio-ledger": {
+            "metadata": dict,
+            "capital": dict,
+            "members": list,
+        },
+        "qrp-statistics": {
+            "table_group": str,
+            "metadata": dict,
+            "members": list,
+        },
+    }
+    kind_shapes = {
+        "bivariate_exponential_hawkes": {
+            "config": dict,
+            "parameters": dict,
+            "fit_cutoff": str,
+        },
+        "cost_aware_allocator": {"config": dict, "periods": int, "device": str},
+        "MODEL_EXPLANATION": {
+            "model": str,
+            "model_id": str,
+            "methods": list,
+            "input_columns": list,
+            "members": list,
+        },
+    }
+    shape = schema_shapes.get(metadata.get("schema_id")) or kind_shapes.get(
+        metadata.get("kind")
+    )
+    if shape is None and set(metadata) == {"model_metadata", "facts", "trial_id"}:
+        shape = {"model_metadata": dict, "facts": dict, "trial_id": str}
+    if shape is None or any(
+        type(metadata.get(key)) is not kind for key, kind in shape.items()
+    ):
+        raise ValueError("inspection_requires_native_artifact_metadata")
+    return metadata

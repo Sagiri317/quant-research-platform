@@ -121,7 +121,7 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/inspect", operation_id="inspect_published_artifact")
     def inspect(path: str) -> dict[str, object]:
-        return evidence(queries.inspect, path)
+        return evidence(queries.inspect_native, path)
 
     @app.get("/api/portfolio-curve", operation_id="read_portfolio_curve")
     def portfolio_curve(path: str, stride: int = Query(1, ge=1)) -> dict[str, object]:

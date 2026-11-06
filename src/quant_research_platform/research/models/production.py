@@ -135,7 +135,19 @@ def fit(config: Mapping) -> Path:
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
     windows = _fit_windows(config["fit_windows"], cutoff)
-    options = _dataset_input_options(source, discovery_windows=windows)
+    assets = config.get("asset_ids")
+    if assets is not None and (
+        type(assets) is not list
+        or not assets
+        or len(assets) != len(set(assets))
+        or any(type(item) is not str or not item for item in assets)
+    ):
+        raise ValueError("training_asset_ids_invalid")
+    options = _dataset_input_options(
+        source,
+        discovery_windows=windows,
+        row_filters=(("asset_id", "in", tuple(assets)),) if assets is not None else (),
+    )
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -240,14 +252,6 @@ def fit(config: Mapping) -> Path:
         )
         if spec.training_weighting.half_life_periods is not None:
             columns = (*columns, "market_type")
-        assets = config.get("asset_ids")
-        if assets is not None and (
-            type(assets) is not list
-            or not assets
-            or len(assets) != len(set(assets))
-            or any(type(item) is not str or not item for item in assets)
-        ):
-            raise ValueError("training_asset_ids_invalid")
 
         def checked_frames():
             import pyarrow as pa
@@ -267,8 +271,6 @@ def fit(config: Mapping) -> Path:
                 )
                 with closing_iterator(iter(frames)) as source:
                     for frame in source:
-                        if assets is not None:
-                            frame = frame.loc[frame.asset_id.isin(assets)]
                         if keys is not None and (
                             frame.loc[:, ["timestamp", "asset_id"]]
                             .isna()

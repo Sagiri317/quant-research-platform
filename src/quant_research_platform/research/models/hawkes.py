@@ -197,7 +197,11 @@ def fit_hawkes(config):
     }
     sources = {
         name: open_dataset_session(
-            **_dataset_input_options(path, time_window=window)
+            **_dataset_input_options(
+                path,
+                time_window=window,
+                row_filters=(("asset_id", "in", tuple(assets)),),
+            )
         ).projected_view(columns[name])
         for name, path in inputs.items()
     }
@@ -216,7 +220,6 @@ def fit_hawkes(config):
             for name, source in sources.items()
         }
         panel = data["hft_panel"]
-        panel = panel.loc[panel.asset_id.isin(assets)]
         for quotes, selected in observed_segments(panel, trades=data["hft_trades"]):
             if not quotes.eligible.all() or len(quotes) < 2:
                 continue

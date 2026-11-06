@@ -28,6 +28,7 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
 def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
@@ -241,7 +242,9 @@ def test_decision_clock_rejects_information_after_opening_price_formation():
     assert close.timestamp.iloc[0] == pd.Timestamp("2024-01-05T08:00")
 
 
-@pytest.mark.parametrize("missing_column", [None, "listing_date", "period_return"])
+@pytest.mark.parametrize(
+    "missing_column", [None, "listing_date", "period_return", "trading_calendar"]
+)
 def test_native_macro_beta_resets_listing_history_without_blocking_levels(
     tmp_path, missing_column
 ):
@@ -251,6 +254,7 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
         {
             "market_id": "a_share",
             "asset_id": "A",
+            "market_type": 1,
             "timestamp": sessions[:-1],
             "listing_date": [sessions[0]] * 5
             + [sessions[5]] * 4
@@ -260,7 +264,7 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
             "period_return": np.r_[np.nan, 2 * np.diff(levels)],
         }
     )
-    if missing_column is not None:
+    if missing_column not in (None, "trading_calendar"):
         frame = frame.drop(columns=missing_column)
     frame = decision_panel(
         frame,
@@ -309,6 +313,30 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
         read_release_csv(release_file),
         spec=interim_catalog().get("macro_observations"),
     )
+    calendar_path = tmp_path / "calendar.parquet"
+    dates = pd.date_range(sessions[0], sessions[-1])
+    pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.isin(sessions),
+        }
+    ).to_parquet(calendar_path, index=False)
+    calendar_input = {
+        "path": str(calendar_path),
+        "spec": {
+            "data_id": "calendar",
+            "frequency": "1d",
+            "grain": "source_market_calendar_date",
+            "primary_key": ["calendar_date", "source_market_type"],
+            "partition_columns": [],
+            "column_roles": {
+                "calendar_date": "timestamp",
+                "source_market_type": "key",
+                "is_trading_day": "mask",
+            },
+        },
+    }
     factors = prepare(
         {
             "market_id": "a_share",
@@ -316,6 +344,11 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
             "inputs": {
                 "macro_observations": str(macro),
                 "decision_panel": str(decision_root),
+                **(
+                    {"trading_calendar": calendar_input}
+                    if missing_column != "trading_calendar"
+                    else {}
+                ),
             },
             "time_window": {
                 "start": str(sessions[1].date()),
@@ -331,6 +364,10 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
         }
     )
     actual = read_dataset(factors).sort_values("timestamp")
+    missing = open_dataset_session(factors).manifest["producer_diagnostics"][
+        "macro_beta_missing_inputs"
+    ]
+    assert missing == ([] if missing_column is None else [missing_column])
     # Preopen levels include the new midnight release; return betas stop at close.
     np.testing.assert_allclose(actual.ml_us_nfci_level, np.r_[levels[1:], levels[-1]])
     expected = np.full(16, np.nan)

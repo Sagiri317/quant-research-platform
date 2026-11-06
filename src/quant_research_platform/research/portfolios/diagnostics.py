@@ -569,9 +569,8 @@ def _portfolio_statistics_tables(
 
     analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
     benchmark_requested = bool({"attribution"} & set(analyses))
-    ids = tuple(candidate.candidate_id for candidate in candidates)
-    if len(ids) != len(set(ids)) or set(ledgers) != set(ids):
-        raise ValueError("portfolio_statistics_candidate_set_invalid")
+    ids = tuple(ledgers)
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
     sessions = (
         pd.DatetimeIndex(unified_trading_sessions(calendar))
         if calendar is not None
@@ -681,11 +680,12 @@ def _portfolio_statistics_tables(
                         )
                         for name, value in holding_input.fitted.factor_returns.items()
                     )
-            for candidate, batch, row in zip(
-                candidates, batch_group, interval_economics, strict=True
+            for candidate_id, batch, row in zip(
+                ids, batch_group, interval_economics, strict=True
             ):
-                holding_input = interval_inputs.get(candidate.risk_style_columns)
-                candidate_id = candidate.candidate_id
+                if "attribution" in analyses:
+                    candidate = by_id[candidate_id]
+                    holding_input = interval_inputs[candidate.risk_style_columns]
                 previous_end, previous_nav = previous[candidate_id]
                 economic_totals[candidate_id].consume(batch)
                 if (row["entry_at"], row["end_at"]) != (
@@ -940,8 +940,7 @@ def _portfolio_statistics_tables(
                             )
             interval_index += 1
 
-    for candidate in candidates:
-        candidate_id = candidate.candidate_id
+    for candidate_id in ids:
         artifact = ledgers[candidate_id]
         previous_end, previous_nav = previous[candidate_id]
         candidate_rows = daily_by_candidate[candidate_id]
@@ -1614,8 +1613,13 @@ def portfolio_statistics(config):
         if candidate_id in ledgers:
             raise ValueError("portfolio_statistics_candidate_set_invalid")
         ledgers[candidate_id] = ledger
-        if ledger.metadata.get("kind") == "a_share_hft":
+        if ledger.metadata.get("kind") == "a_share_hft" or not {
+            "attribution",
+            "group_comparison",
+        }.intersection(analyses):
             continue
+        if "candidate" not in ledger.metadata:
+            raise ValueError("portfolio_statistics_candidate_metadata_required")
         values = dict(ledger.metadata["candidate"])
         values["risk_style_columns"] = tuple(values.get("risk_style_columns", ()))
         candidate = PortfolioCandidateSpec(**values)
@@ -1623,9 +1627,12 @@ def portfolio_statistics(config):
             raise ValueError("portfolio_statistics_candidate_set_invalid")
         candidates.append(candidate)
     comparison_metadata = {}
-    if len(candidates) != len(ledgers):
-        if candidates:
-            raise ValueError("portfolio_statistics_account_clocks_mixed")
+    hft_clocks = {
+        ledger.metadata.get("kind") == "a_share_hft" for ledger in ledgers.values()
+    }
+    if len(hft_clocks) != 1:
+        raise ValueError("portfolio_statistics_account_clocks_mixed")
+    if True in hft_clocks:
         from quant_research_platform.research.portfolios.high_frequency import (
             statistics_tables,
         )

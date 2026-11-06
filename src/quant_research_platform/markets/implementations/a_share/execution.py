@@ -260,6 +260,29 @@ class PreparedTradeCost:
     impact_bps: float
     source_identity: str
 
+    def face_value_ratio(self, prices, face_value_per_share):
+        """Convert actual PIT share face value to a notional fee multiplier."""
+        if not any(self.face_value):
+            return 1.0
+        if prices is None or face_value_per_share is None:
+            raise ValueError("a_share_face_value_per_share_required")
+        try:
+            price = np.asarray(prices, dtype="float64")
+            face = np.asarray(face_value_per_share, dtype="float64")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("a_share_face_value_per_share_invalid") from exc
+        if (
+            np.asarray(prices).dtype.kind == "b"
+            or np.asarray(face_value_per_share).dtype.kind == "b"
+            or price.shape != face.shape
+            or not np.isfinite(price).all()
+            or not np.isfinite(face).all()
+            or (price <= 0).any()
+            or (face <= 0).any()
+        ):
+            raise ValueError("a_share_face_value_per_share_invalid")
+        return face / price
+
     def components(self, notional, adv20, *, face_value_notional=None):
         if (
             np.asarray(notional).dtype.kind == "b"
@@ -287,7 +310,8 @@ class PreparedTradeCost:
                 np.asarray(face_value_notional).dtype.kind == "b"
                 or face.shape != amount_values.shape
                 or not np.isfinite(face).all()
-                or (face <= 0).any()
+                or (face < 0).any()
+                or ((amount_values > 0) & (face == 0)).any()
             ):
                 raise ValueError("a_share_face_value_notional_invalid")
         elif any(self.face_value):
@@ -315,11 +339,24 @@ class PreparedTradeCost:
         return result
 
     def stock_components(
-        self, quantities, prices, adv20, minimum, maximum, minimum_commission
+        self,
+        quantities,
+        prices,
+        adv20,
+        minimum,
+        maximum,
+        minimum_commission,
+        *,
+        face_value_per_share=None,
     ):
         """Charge minimum commission per actual limit order after quantity sizing."""
         notionals = quantities * prices
-        values = list(self.components(notionals, adv20))
+        face = (
+            notionals * self.face_value_ratio(prices, face_value_per_share)
+            if any(self.face_value)
+            else None
+        )
+        values = list(self.components(notionals, adv20, face_value_notional=face))
         full = np.maximum(0.0, np.ceil(quantities / maximum) - 1)
         last = quantities - full * maximum
         split = (full > 0) & (last < minimum)
@@ -330,26 +367,49 @@ class PreparedTradeCost:
         def commission(units):
             return np.where(
                 units > 0,
-                np.maximum(units * prices * self.rates[0], minimum_commission),
+                np.maximum(
+                    units
+                    * (face_value_per_share if self.face_value[0] else prices)
+                    * self.rates[0],
+                    minimum_commission,
+                ),
                 0.0,
             )
 
         values[0] = full * commission(maximum) + commission(middle) + commission(last)
         return tuple(values)
 
-    def order_components(self, cumulative_notional, minimum_commission):
+    def order_components(
+        self,
+        cumulative_notional,
+        minimum_commission,
+        *,
+        price=None,
+        face_value_per_share=None,
+    ):
         """Cumulative fees for one limit order, including all of its partial fills."""
-        values = list(self.components(cumulative_notional, np.nan))
+        face = (
+            cumulative_notional * self.face_value_ratio(price, face_value_per_share)
+            if any(self.face_value)
+            else None
+        )
+        values = list(
+            self.components(cumulative_notional, np.nan, face_value_notional=face)
+        )
         values[0] = (
             max(float(values[0]), minimum_commission) if cumulative_notional else 0.0
         )
         return np.asarray(values, dtype="float64")
 
-    def totals(self, notional, adv20):
-        commission, stamp, transfer, slippage, impact = self.components(notional, adv20)
+    def totals(self, notional, adv20, *, face_value_notional=None):
+        commission, stamp, transfer, slippage, impact = self.components(
+            notional, adv20, face_value_notional=face_value_notional
+        )
         return commission + stamp + transfer + slippage + impact
 
-    def totals_and_gradients(self, notional, adv20):
+    def totals_and_gradients(
+        self, notional, adv20, *, prices=None, face_value_per_share=None
+    ):
         """Return side cost and marginal rate, smoothly extended below zero.
 
         SLSQP may evaluate infeasible buy/sell amounts. The linear fees retain
@@ -365,13 +425,24 @@ class PreparedTradeCost:
         if not np.isfinite(amounts).all():
             raise ValueError("a_share_trade_cost_inputs_invalid")
         positive = np.maximum(amounts, 0.0)
-        totals = self.totals(positive, adv20)
+        ratio = self.face_value_ratio(prices, face_value_per_share)
+        totals = self.totals(
+            positive,
+            adv20,
+            face_value_notional=positive * ratio if any(self.face_value) else None,
+        )
         marginal_impact = (
             1.5 * self.impact_bps / 10_000.0 * np.sqrt(positive / adv20)
             if self.impact_bps
             else np.zeros_like(amounts)
         )
-        linear = sum(self.rates) + self.slippage_bps / 10_000.0
+        linear = (
+            sum(
+                rate * (ratio if face else 1.0)
+                for rate, face in zip(self.rates, self.face_value, strict=True)
+            )
+            + self.slippage_bps / 10_000.0
+        )
         gradient = linear + marginal_impact
         extended = totals + np.minimum(amounts, 0.0) * linear
         if not np.isfinite(gradient).all() or not np.isfinite(extended).all():

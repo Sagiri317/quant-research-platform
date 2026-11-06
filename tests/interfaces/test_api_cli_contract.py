@@ -4,6 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from quant_research_platform.interfaces.api.app import create_app
+from tests.artifacts.test_outputs_core import native_bundle
 
 
 @pytest.mark.anyio
@@ -39,8 +40,7 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
 async def test_api_cannot_escape_root_or_read_raw(anyio_backend, tmp_path):
     root = tmp_path / "project"
     root.mkdir()
-    (root / "output").mkdir()
-    (root / "output" / "manifest.json").write_text('{"kind":"synthetic"}')
+    output, _, metadata = native_bundle(root)
     async with AsyncClient(
         transport=ASGITransport(app=create_app(project_root=root)),
         base_url="http://testserver",
@@ -54,9 +54,9 @@ async def test_api_cannot_escape_root_or_read_raw(anyio_backend, tmp_path):
         ):
             response = await client.get("/api/inspect", params={"path": path})
             assert response.status_code == 422
-        response = await client.get("/api/inspect", params={"path": "output"})
+        response = await client.get("/api/inspect", params={"path": output.name})
         assert response.status_code == 200
-        assert response.json() == {"kind": "synthetic"}
+        assert response.json()["metadata"] == metadata
         assert (
             await client.get("/api/inspect", params={"path": "missing"})
         ).status_code == 404
@@ -99,28 +99,72 @@ async def test_http_inspection_redacts_private_paths_without_changing_artifact(
 ):
     import json
 
-    output = tmp_path / "output"
-    output.mkdir()
+    output, _, _ = native_bundle(tmp_path)
     manifest = output / "manifest.json"
-    facts = {
-        "kind": "synthetic",
-        "inputs": [{"path": "/private/project/data.parquet"}],
-        "rows": 3,
-    }
+    facts = json.loads(manifest.read_text())
+    facts["metadata"]["inputs"] = "/private/project/data.parquet"
     manifest.write_text(json.dumps(facts))
     async with AsyncClient(
         transport=ASGITransport(app=create_app(project_root=tmp_path)),
         base_url="http://testserver",
     ) as client:
-        response = await client.get("/api/inspect", params={"path": "output"})
+        response = await client.get("/api/inspect", params={"path": output.name})
         assert response.status_code == 200
-        assert response.json()["inputs"] == [{"path": "[local-path]"}]
-        assert response.json()["rows"] == 3
+        assert response.json()["metadata"]["inputs"] == "[local-path]"
+        assert response.json()["metadata"]["prediction_rows"] == 1
         assert json.loads(manifest.read_text()) == facts
-        manifest.write_text(json.dumps({"api_key": "sensitive-value"}))
-        response = await client.get("/api/inspect", params={"path": "output"})
+        facts["metadata"]["api_key"] = "sensitive-value"
+        manifest.write_text(json.dumps(facts))
+        response = await client.get("/api/inspect", params={"path": output.name})
         assert response.status_code == 422
         assert "sensitive-value" not in response.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_http_inspection_requires_native_metadata_shape(anyio_backend, tmp_path):
+    import json
+
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.storage.low_level_fixtures import (
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    dataset = tmp_path / "dataset"
+    write_dataset(
+        dataset,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("selected"),
+    )
+    arbitrary = tmp_path / "arbitrary"
+    arbitrary.mkdir()
+    manifest = arbitrary / "manifest.json"
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(project_root=tmp_path)),
+        base_url="http://testserver",
+    ) as client:
+        for path in ("dataset", "dataset/spec.json", "dataset/_manifest/manifest.json"):
+            response = await client.get("/api/inspect", params={"path": path})
+            assert response.status_code == 200
+            assert response.json()["schema_id"].startswith("qrp-dataset-")
+        for payload in (
+            {"private_value": "not-to-be-returned"},
+            {"schema_id": "qrp-output-manifest"},
+            {"schema_id": "qrp-unknown", "metadata": {}, "files": []},
+            {"schema_id": "qrp-raw-snapshot", "metadata": {}, "columns": []},
+            {
+                "schema_id": "qrp-output-manifest",
+                "output_definition_id": "prediction_outputs",
+                "metadata": "not-to-be-returned",
+                "files": [],
+            },
+        ):
+            manifest.write_text(json.dumps(payload))
+            for path in ("arbitrary", "arbitrary/manifest.json"):
+                response = await client.get("/api/inspect", params={"path": path})
+                assert response.status_code == 422
+                assert "not-to-be-returned" not in response.text
 
 
 @pytest.mark.anyio

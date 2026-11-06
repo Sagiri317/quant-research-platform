@@ -1390,3 +1390,107 @@ def test_sparse_predecessor_falls_back_only_for_unfetched_fields(tmp_path, prede
     else:
         assert frame.total_assets.tolist() == [100.0, 110.0]
     assert frame.parent_equity.tolist() == [100.0, 110.0]
+
+
+@pytest.mark.parametrize(
+    "namespace,first,second",
+    (
+        ("snapshot", {"values": None}, {"values": 100.0}),
+        ("disclosure_field", {"values": []}, {"values": ["2020-01-30"]}),
+        (
+            "disclosure",
+            [CODE, "2019-12-31", "2020-01-30"],
+            [CODE, "2019-12-31", "2020-02-01"],
+        ),
+    ),
+)
+def test_source_coordinate_conflicts_cannot_be_repaired_by_matching_duplicates(
+    namespace, first, second
+):
+    index = {}
+    key = (CODE, "2019-12-31")
+    assert interim._get(index, namespace, key) is None
+    for value in (first, first):
+        interim._put(index, namespace, key, value)
+        assert interim._get(index, namespace, key) == first
+    for value in (second, first, second):
+        interim._put(index, namespace, key, value)
+        expected = (
+            {"values": None, "conflicted": True} if namespace == "snapshot" else None
+        )
+        assert interim._get(index, namespace, key) == expected
+    # A different coordinate remains independent of the permanently disputed one.
+    other = ("000002.SZ", "2019-12-31")
+    interim._put(index, namespace, other, first)
+    assert interim._get(index, namespace, other) == first
+
+
+def test_raw_request_order_preserves_sorted_versions_and_source_evidence(
+    tmp_path, monkeypatch
+):
+    layout = StorageLayout(tmp_path)
+    data_id = "financial_balance"
+    fields = tuple(FINANCIAL_FIELDS[data_id])
+    periods = ("2019-12-31", "2019-09-30")
+    codes = ("000002.SZ", CODE)
+    with choice_session(SDK(response())) as session:
+        for period in periods:
+            write_css(
+                session,
+                layout,
+                period=period,
+                end_date="2025-12-31",
+                indicators=DATE_FIELDS,
+                data={
+                    code: ["2020-01-30", None, "2020-02-03,2020-02-01"]
+                    for code in codes
+                },
+            )
+            for day, value in (
+                ("2020-02-03", 300.0),
+                ("2020-01-30", 100.0),
+                ("2020-02-01", 200.0),
+            ):
+                for branch in ("1", "3"):
+                    write_css(
+                        session,
+                        layout,
+                        period=period,
+                        end_date=day,
+                        indicators=fields,
+                        data={code: [value] * len(fields) for code in codes},
+                        branch=branch,
+                    )
+    raw_root = layout.raw_source_root("choice")
+    before = _file_hashes(raw_root)
+    index, identities = interim._raw_index(raw_root, (data_id,), None, None)
+    evidence = hashlib.sha256()
+    for path, digest in sorted(before.items()):
+        for value in (path.as_posix(), digest):
+            encoded = value.encode("utf-8")
+            evidence.update(len(encoded).to_bytes(8, "big"))
+            evidence.update(encoded)
+    assert identities == {data_id: evidence.hexdigest()}
+    rows = list(interim._rows(index, data_id, None))
+    assert [(row[0], row[1], row[6], row[7]) for row in rows] == [
+        (code[:6], period, version, value)
+        for code in sorted(codes)
+        for period in sorted(periods)
+        for version, value in (
+            ("original", 100.0),
+            ("correction@2020-02-01", 200.0),
+            ("correction@2020-02-03", 300.0),
+        )
+    ]
+    requests = interim._raw_requests
+
+    def reversed_requests(*args, **kwargs):
+        yield from reversed(tuple(requests(*args, **kwargs)))
+
+    monkeypatch.setattr(interim, "_raw_requests", reversed_requests)
+    reverse_index, reverse_identities = interim._raw_index(
+        raw_root, (data_id,), None, None
+    )
+    assert list(interim._rows(reverse_index, data_id, None)) == rows
+    assert reverse_identities == identities
+    assert _file_hashes(raw_root) == before

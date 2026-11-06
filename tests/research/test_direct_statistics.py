@@ -13,6 +13,7 @@ from quant_research_platform.research.factors.statistics import (
     build_a_share_factor_statistics_tables,
 )
 from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 
@@ -72,8 +73,7 @@ def _factor_input(tmp_path):
 def _factor_tables(tmp_path):
     spec, config, window, metadata, dates = _factor_input(tmp_path)
     tables = build_a_share_factor_statistics_tables(
-        dataset_path=tmp_path / "input",
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(tmp_path / "input", time_window=window),
         config=config,
         time_window=window,
     )
@@ -384,8 +384,7 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
             return (0, 0)
 
     tables = build_a_share_statistics_tables(
-        dataset_path=tmp_path / "input",
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(tmp_path / "input", time_window=window),
         config=config,
         time_window=window,
         prediction_id="predictions",
@@ -629,9 +628,7 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp
             return (0, 0)
 
     tables = build_a_share_statistics_tables(
-        dataset_path=tmp_path / "input",
         dataset_session=session,
-        dataset_spec=spec,
         config=config,
         time_window=window,
         prediction_id="saved",

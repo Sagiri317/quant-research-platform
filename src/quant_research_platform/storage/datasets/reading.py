@@ -266,7 +266,9 @@ def _selection_filters(schema, *, timestamp, time_window, years, row_filters):
     return filters
 
 
-def _dataset_input_options(value, *, time_window=None, discovery_windows=None):
+def _dataset_input_options(
+    value, *, time_window=None, discovery_windows=None, row_filters=()
+):
     """Intersect explicit inputs with the consumer domain before discovering files.
 
     Disjoint consumers still read each window separately; discovery_windows only
@@ -328,6 +330,8 @@ def _dataset_input_options(value, *, time_window=None, discovery_windows=None):
             )
             for column, operator, items in filters
         )
+    if row_filters:
+        options["row_filters"] = (*options.get("row_filters", ()), *row_filters)
     if time_window is not None or discovery_windows is not None:
         years = _validated_years(options.get("years"))
 

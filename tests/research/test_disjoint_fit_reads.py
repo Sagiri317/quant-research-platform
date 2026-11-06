@@ -22,19 +22,33 @@ def request(tmp_path):
     return source, config
 
 
-def test_fit_indexes_only_selected_rows_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("assets", [None, ["a", "c"]])
+def test_fit_indexes_only_selected_rows_once(tmp_path, monkeypatch, assets):
     _, config = request(tmp_path)
+    if assets is not None:
+        config["asset_ids"] = assets
     indexed = []
     original = ExactPrimaryKeyIndex.add_table
 
     def observe(self, table):
-        indexed.extend(table.column("timestamp").to_pylist())
+        indexed.extend(
+            zip(
+                table.column("timestamp").to_pylist(),
+                table.column("asset_id").to_pylist(),
+                strict=True,
+            )
+        )
         return original(self, table)
 
     monkeypatch.setattr(ExactPrimaryKeyIndex, "add_table", observe)
     result, _ = load_model(fit(config))
-    assert result.metadata["rows_after_input_label_dropna"] == 6
-    assert indexed == list(pd.to_datetime(["2020-01-01"] * 3 + ["2020-01-05"] * 3))
+    expected_assets = assets or ["a", "b", "c"]
+    assert result.metadata["rows_after_input_label_dropna"] == 2 * len(expected_assets)
+    assert indexed == [
+        (pd.Timestamp(day), asset)
+        for day in ("2020-01-01", "2020-01-05")
+        for asset in expected_assets
+    ]
 
 
 @pytest.mark.parametrize("day", [1, 3, 5])
@@ -137,3 +151,55 @@ def test_fit_accepts_empty_first_window_and_asset_selection(tmp_path):
     result, _ = load_model(fit(config))
     assert result.metadata["rows_after_input_label_dropna"] == 2
     assert result.metadata["training_asset_ids"] == ["a", "c"]
+
+
+def test_fit_asset_pushdown_intersects_parent_rows_and_ignores_excluded_bad_values(
+    tmp_path, monkeypatch
+):
+    source, config = request(tmp_path)
+    frame = pd.read_parquet(source)
+    frame.loc[frame.asset_id.eq("b"), "x"] = float("inf")
+    frame.to_parquet(source, index=False)
+    declared = config.pop("input_spec")
+    config["inputs"] = {
+        "path": str(source),
+        "spec": declared,
+        "columns": ["x", "label"],
+        "years": [2020],
+        "time_window": {"start": "2020-01-02", "end": "2020-01-06"},
+        "row_filters": [["asset_id", "in", ["a", "b"]]],
+    }
+    config["asset_ids"] = ["a", "c"]
+    indexed = []
+    original = ExactPrimaryKeyIndex.add_table
+
+    def observe(self, table):
+        indexed.extend(table.column("asset_id").to_pylist())
+        return original(self, table)
+
+    monkeypatch.setattr(ExactPrimaryKeyIndex, "add_table", observe)
+    result, _ = load_model(fit(config))
+    assert result.metadata["rows_after_input_label_dropna"] == 1
+    assert indexed == ["a"]
+
+
+def test_prediction_asset_output_selection_keeps_full_candidate_ranks(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.predictions.runner import predict
+
+    source = data(tmp_path)
+    model = fit(fit_config(tmp_path, source))
+    config = {
+        "model": str(model),
+        "inputs": str(source),
+        "input_spec": fit_config(tmp_path, source)["input_spec"],
+        "prediction_window": {"start": "2020-01-04", "end": "2020-01-04"},
+        "output": str(tmp_path / "all_predictions"),
+    }
+    full, _ = read_predictions(predict(config))
+    config.update(asset_ids=["a"], output=str(tmp_path / "selected_prediction"))
+    selected, _ = read_predictions(predict(config))
+    pd.testing.assert_frame_equal(
+        selected, full.loc[full.asset_id.eq("a")].reset_index(drop=True)
+    )
+    assert selected.prediction_rank_score.tolist() == pytest.approx([-1 / 3])

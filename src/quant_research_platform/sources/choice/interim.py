@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 from collections.abc import Iterator, Mapping
@@ -40,7 +39,6 @@ from quant_research_platform.sources.choice.raw_exports import (
     read_choice_response,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
     require_unaliased_path,
@@ -48,6 +46,7 @@ from quant_research_platform.storage.identity import (
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _DISCLOSURE_INDICATORS = {"STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"}
+_CONFLICT = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,44 +192,18 @@ def _raw_requests(raw_root: Path, *, data_ids):
             yield _yield_value
 
 
-def _encode(value: object) -> bytes:
-    return json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
-
-
-def _identity_payload_row(index, namespace, key, value):
-    key, payload = _encode(key), _encode(value)
-    old = index.identity_payload_value(namespace=namespace, payload=key)
-    if old is not None:
-        previous = json.loads(old)
-        equal = (
-            previous["values"] == value["values"]
-            if namespace in {"snapshot", "disclosure_field"}
-            else previous == value
-        )
-        if not equal:
-            # Preserve the coordinate but never choose one competing fact.
-            index.add_identity_payload_rows(
-                rows=(("conflict:" + namespace, key, b"true"),)
-            )
-    return namespace, key, payload
+def _put(index, namespace, key, value):
+    facts = index.setdefault(namespace, {})
+    previous = facts.setdefault(key, value)
+    if previous != value:
+        # A later matching observation must never resolve a competing fact.
+        facts[key] = _CONFLICT
 
 
 def _get(index, namespace, key):
-    payload = index.identity_payload_value(namespace=namespace, payload=_encode(key))
-    if payload is None:
-        return None
-    value = json.loads(payload)
-    if (
-        index.identity_payload_value(
-            namespace="conflict:" + namespace, payload=_encode(key)
-        )
-        is not None
-    ):
-        return (
-            {**value, "values": None, "conflicted": True}
-            if namespace == "snapshot"
-            else None
-        )
+    value = index.get(namespace, {}).get(key)
+    if value is _CONFLICT:
+        return {"values": None, "conflicted": True} if namespace == "snapshot" else None
     return value
 
 
@@ -271,154 +244,146 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
     indicators = {
         field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
     }
-    index = ExactPrimaryKeyIndex(primary_key=("source_coordinate",))
+    index = {}
     hashes = {data_id: [] for data_id in data_ids}
 
-    def rows():
-        with closing_iterator(_raw_requests(raw_root, data_ids=data_ids)) as requests:
-            for (
-                root,
-                request,
-                options,
-                disclosure,
-                snapshot,
-                raw_metadata,
-                manifest,
-            ) in requests:
-                period = date.fromisoformat(options["reportdate"])
-                if (start is not None and period < start) or (
-                    end is not None and period > end
-                ):
-                    continue
-                period = period.isoformat()
-                snapshot_date = date.fromisoformat(options["enddate"])
-                snapshot = snapshot and (end is None or snapshot_date <= end)
-                if not disclosure and not snapshot:
-                    continue
-                if snapshot and "reporttype" in options:
-                    raise ValueError("choice_financial_css_reporttype_unsupported")
-                content_hashes = []
-                response = read_choice_response(
-                    root, request, manifest=manifest, content_hashes=content_hashes
-                )
-                fields = set(response["Indicators"])
-                targets = {
-                    data_id
-                    for data_id in data_ids
-                    if disclosure
-                    or snapshot
-                    and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
-                }
-                source_hash = content_hashes[0]
-                for data_id in targets:
-                    hashes[data_id].extend(
+    with closing_iterator(_raw_requests(raw_root, data_ids=data_ids)) as requests:
+        for (
+            root,
+            request,
+            options,
+            disclosure,
+            snapshot,
+            raw_metadata,
+            manifest,
+        ) in requests:
+            period = date.fromisoformat(options["reportdate"])
+            if (start is not None and period < start) or (
+                end is not None and period > end
+            ):
+                continue
+            period = period.isoformat()
+            snapshot_date = date.fromisoformat(options["enddate"])
+            snapshot = snapshot and (end is None or snapshot_date <= end)
+            if not disclosure and not snapshot:
+                continue
+            if snapshot and "reporttype" in options:
+                raise ValueError("choice_financial_css_reporttype_unsupported")
+            content_hashes = []
+            response = read_choice_response(
+                root, request, manifest=manifest, content_hashes=content_hashes
+            )
+            fields = set(response["Indicators"])
+            targets = {
+                data_id
+                for data_id in data_ids
+                if disclosure
+                or snapshot
+                and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
+            }
+            source_hash = content_hashes[0]
+            for data_id in targets:
+                hashes[data_id].extend(
+                    (
                         (
-                            (
-                                f"css/{root.name}/response.metadata.json",
-                                hashlib.sha256(raw_metadata).hexdigest(),
-                            ),
-                            (f"css/{root.name}/response.csv", source_hash),
-                        )
+                            f"css/{root.name}/response.metadata.json",
+                            hashlib.sha256(raw_metadata).hexdigest(),
+                        ),
+                        (f"css/{root.name}/response.csv", source_hash),
                     )
-                if not response["Data"]:
+                )
+            if not response["Data"]:
+                continue
+            if len(response["Dates"]) != 1:
+                raise ValueError("choice_financial_snapshot_dates_invalid")
+            for code, cells in response["Data"].items():
+                if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
+                    diagnostics["excluded_invalid_asset_rows"] = (
+                        diagnostics.get("excluded_invalid_asset_rows", 0) + 1
+                    )
                     continue
-                if len(response["Dates"]) != 1:
-                    raise ValueError("choice_financial_snapshot_dates_invalid")
-                for code, cells in response["Data"].items():
-                    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
-                        diagnostics["excluded_invalid_asset_rows"] = (
-                            diagnostics.get("excluded_invalid_asset_rows", 0) + 1
+                values = dict(zip(response["Indicators"], cells, strict=True))
+                pair = (code, period)
+                coordinate = (
+                    *pair,
+                    snapshot_date.isoformat(),
+                    options.get("type", "1"),
+                )
+                if disclosure:
+                    try:
+                        parsed_dates = {
+                            field: _dates(values[field])
+                            for field in _DISCLOSURE_INDICATORS.intersection(values)
+                        }
+                    except ValueError:
+                        index.setdefault("unresolved_report", {})[pair] = True
+                        diagnostics["excluded_invalid_disclosure_rows"] = (
+                            diagnostics.get("excluded_invalid_disclosure_rows", 0) + 1
                         )
                         continue
-                    values = dict(zip(response["Indicators"], cells, strict=True))
-                    pair = [code, period]
-                    coordinate = [
-                        *pair,
-                        snapshot_date.isoformat(),
-                        options.get("type", "1"),
-                    ]
-                    if disclosure:
-                        try:
-                            parsed_dates = {
-                                field: _dates(values[field])
-                                for field in _DISCLOSURE_INDICATORS.intersection(values)
-                            }
-                        except ValueError:
-                            index.add_identity_payload_rows(
-                                rows=(("unresolved_report", _encode(pair), b"true"),)
-                            )
-                            diagnostics["excluded_invalid_disclosure_rows"] = (
-                                diagnostics.get("excluded_invalid_disclosure_rows", 0)
-                                + 1
-                            )
-                            continue
-                        for field in _DISCLOSURE_INDICATORS.intersection(values):
-                            yield _identity_payload_row(
-                                index,
-                                "disclosure_field",
-                                [*coordinate, field],
-                                {
-                                    "values": [
-                                        day.isoformat() for day in parsed_dates[field]
-                                    ],
-                                },
-                            )
-                        yield _identity_payload_row(
+                    for field in _DISCLOSURE_INDICATORS.intersection(values):
+                        _put(
                             index,
-                            f"disclosure_coordinates:{code}:{period}",
-                            coordinate,
-                            coordinate,
+                            "disclosure_field",
+                            (*coordinate, field),
+                            {
+                                "values": [
+                                    day.isoformat() for day in parsed_dates[field]
+                                ],
+                            },
                         )
-                        if "STMTACTDATE" in values:
-                            first = [
-                                day
-                                for day in parsed_dates["STMTACTDATE"]
-                                if day <= request.cutoff
-                            ]
-                            if first:
-                                yield _identity_payload_row(
-                                    index,
-                                    "disclosure",
-                                    pair,
-                                    [*pair, first[0].isoformat()],
-                                )
-                        if "ITEMVALUECHANGEDATE" in values:
-                            for event in parsed_dates["ITEMVALUECHANGEDATE"]:
-                                if event <= request.cutoff:
-                                    yield _identity_payload_row(
-                                        index,
-                                        f"events:{code}:{period}",
-                                        event.isoformat(),
-                                        event.isoformat(),
-                                    )
-                    if snapshot:
-                        for field in indicators.intersection(values):
-                            value = values[field]
-                            if value is not None and (
-                                type(value) not in (int, float)
-                                or not math.isfinite(value)
-                            ):
-                                diagnostics[f"invalid_{field}_cells"] = (
-                                    diagnostics.get(f"invalid_{field}_cells", 0) + 1
-                                )
-                            yield _identity_payload_row(
+                    _put(
+                        index,
+                        f"disclosure_coordinates:{code}:{period}",
+                        coordinate,
+                        coordinate,
+                    )
+                    if "STMTACTDATE" in values:
+                        first = [
+                            day
+                            for day in parsed_dates["STMTACTDATE"]
+                            if day <= request.cutoff
+                        ]
+                        if first:
+                            _put(
                                 index,
-                                "snapshot",
-                                [*coordinate, field],
-                                {
-                                    "values": _values((values[field],))[0],
-                                },
+                                "disclosure",
+                                pair,
+                                [*pair, first[0].isoformat()],
                             )
-                    for data_id in targets:
-                        yield _identity_payload_row(
-                            index, f"report:{data_id}", pair, pair
+                    if "ITEMVALUECHANGEDATE" in values:
+                        for event in parsed_dates["ITEMVALUECHANGEDATE"]:
+                            if event <= request.cutoff:
+                                _put(
+                                    index,
+                                    f"events:{code}:{period}",
+                                    (event.isoformat(),),
+                                    event.isoformat(),
+                                )
+                if snapshot:
+                    for field in indicators.intersection(values):
+                        value = values[field]
+                        if value is not None and (
+                            type(value) not in (int, float) or not math.isfinite(value)
+                        ):
+                            diagnostics[f"invalid_{field}_cells"] = (
+                                diagnostics.get(f"invalid_{field}_cells", 0) + 1
+                            )
+                        _put(
+                            index,
+                            "snapshot",
+                            (*coordinate, field),
+                            {
+                                "values": _values((values[field],))[0],
+                            },
                         )
+                for data_id in targets:
+                    _put(index, f"report:{data_id}", pair, pair)
 
-    with closing_iterator(rows()) as input_rows:
-        for row in input_rows:
-            index.add_identity_payload_rows(rows=(row,))
     for namespace in ("snapshot", "disclosure", "disclosure_field"):
-        conflicts = index.identity_payload_count(namespace="conflict:" + namespace)
+        conflicts = sum(
+            value is _CONFLICT for value in index.get(namespace, {}).values()
+        )
         if conflicts:
             diagnostics[f"conflicting_{namespace}_coordinates"] = conflicts
     identities = {}
@@ -434,8 +399,8 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
 
 
 def _snapshot(index, pair, day, branch, indicators):
-    coordinate = [*pair, day.isoformat(), branch]
-    return [_get(index, "snapshot", [*coordinate, field]) for field in indicators]
+    coordinate = (*pair, day.isoformat(), branch)
+    return [_get(index, "snapshot", (*coordinate, field)) for field in indicators]
 
 
 def _report_versions(index, pair, first, end, indicators):
@@ -454,119 +419,95 @@ def _report_versions(index, pair, first, end, indicators):
             current[position] = value if current[position] in (None, value) else None
     yield first, False, current.copy()
     branches = {"1": initial, "3": adjusted}
-    events = index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
-    with closing_iterator(events):
-        for payload in events:
-            event = date.fromisoformat(json.loads(payload))
-            if event <= first or (end is not None and event > end):
-                continue
-            changed = {}
-            for branch in ("1", "3"):
-                after = _snapshot(index, pair, event, branch, indicators)
-                before = _snapshot(
-                    index, pair, event - timedelta(days=1), branch, indicators
-                )
-                previous = branches[branch]
-                for position, (prior_field, after_field, previous_field) in enumerate(
-                    zip(before, after, previous, strict=True)
+    events = index.get(f"events:{pair[0]}:{pair[1]}", {})
+    for (event,) in sorted(events):
+        event = date.fromisoformat(event)
+        if event <= first or (end is not None and event > end):
+            continue
+        changed = {}
+        for branch in ("1", "3"):
+            after = _snapshot(index, pair, event, branch, indicators)
+            before = _snapshot(
+                index, pair, event - timedelta(days=1), branch, indicators
+            )
+            previous = branches[branch]
+            for position, (prior_field, after_field, previous_field) in enumerate(
+                zip(before, after, previous, strict=True)
+            ):
+                if prior_field is None:
+                    prior_field = previous_field
+                if after_field is None or prior_field is None:
+                    changed.setdefault(position, set()).add(None)
+                    continue
+                prior, value = prior_field["values"], after_field["values"]
+                if after_field.get("conflicted", False) or prior_field.get(
+                    "conflicted", False
                 ):
-                    if prior_field is None:
-                        prior_field = previous_field
-                    if after_field is None or prior_field is None:
-                        changed.setdefault(position, set()).add(None)
-                        continue
-                    prior, value = prior_field["values"], after_field["values"]
-                    if after_field.get("conflicted", False) or prior_field.get(
-                        "conflicted", False
-                    ):
-                        changed.setdefault(position, set()).add(None)
-                    elif previous_field is not None and (
-                        previous_field.get("conflicted", False)
-                        or prior != previous_field["values"]
-                    ):
-                        changed.setdefault(position, set()).add(None)
-                    elif value != prior:
-                        changed.setdefault(position, set()).add(value)
-                branches[branch] = after
-            revised = False
-            for position, values in changed.items():
-                value = next(iter(values)) if len(values) == 1 else None
-                revised |= value != current[position]
-                current[position] = value
-            if revised:
-                yield event, True, current.copy()
+                    changed.setdefault(position, set()).add(None)
+                elif previous_field is not None and (
+                    previous_field.get("conflicted", False)
+                    or prior != previous_field["values"]
+                ):
+                    changed.setdefault(position, set()).add(None)
+                elif value != prior:
+                    changed.setdefault(position, set()).add(value)
+            branches[branch] = after
+        revised = False
+        for position, values in changed.items():
+            value = next(iter(values)) if len(values) == 1 else None
+            revised |= value != current[position]
+            current[position] = value
+        if revised:
+            yield event, True, current.copy()
 
 
 def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]:
     diagnostics = {} if diagnostics is None else diagnostics
-    reports = index.identity_payload_values(namespace=f"report:{data_id}")
-    with closing_iterator(reports):
-        for payload in reports:
-            row = json.loads(payload)
-            pair = row[:2]
-            if (
-                index.identity_payload_value(
-                    namespace="unresolved_report", payload=_encode(pair)
-                )
-                is not None
-            ):
-                diagnostics["excluded_unresolved_report_rows"] = (
-                    diagnostics.get("excluded_unresolved_report_rows", 0) + 1
-                )
-                continue
-            disclosure = _get(index, "disclosure", pair)
-            first = (
-                date.fromisoformat(disclosure[2]) if disclosure is not None else None
+    for pair in sorted(index.get(f"report:{data_id}", {})):
+        if pair in index.get("unresolved_report", {}):
+            diagnostics["excluded_unresolved_report_rows"] = (
+                diagnostics.get("excluded_unresolved_report_rows", 0) + 1
             )
-            if first is not None and end is not None and first > end:
-                continue
-            coordinates = index.identity_payload_values(
-                namespace=f"disclosure_coordinates:{pair[0]}:{pair[1]}"
+            continue
+        disclosure = _get(index, "disclosure", pair)
+        first = date.fromisoformat(disclosure[2]) if disclosure is not None else None
+        if first is not None and end is not None and first > end:
+            continue
+        coordinates = index.get(f"disclosure_coordinates:{pair[0]}:{pair[1]}", {})
+        complete = all(
+            _get(index, "disclosure_field", (*coordinate, field)) is not None
+            for coordinate in coordinates
+            for field in _DISCLOSURE_INDICATORS
+        )
+        if first is None or not complete:
+            diagnostics["excluded_unresolved_disclosure_rows"] = (
+                diagnostics.get("excluded_unresolved_disclosure_rows", 0) + 1
             )
-            complete = True
-            with closing_iterator(coordinates):
-                for payload in coordinates:
-                    coordinate = json.loads(payload)
-                    complete &= all(
-                        _get(index, "disclosure_field", [*coordinate, field])
-                        is not None
-                        for field in _DISCLOSURE_INDICATORS
-                    )
-            if first is None or not complete:
-                diagnostics["excluded_unresolved_disclosure_rows"] = (
-                    diagnostics.get("excluded_unresolved_disclosure_rows", 0) + 1
-                )
-                continue
-            with closing_iterator(
-                index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
-            ) as events:
-                earliest = next(events, None)
-            if (
-                earliest is not None
-                and date.fromisoformat(json.loads(earliest)) < first
-            ):
-                diagnostics["excluded_invalid_chronology_rows"] = (
-                    diagnostics.get("excluded_invalid_chronology_rows", 0) + 1
-                )
-                continue
-            if data_id == FIRST_DISCLOSURE_DATA_ID:
-                _yield_value = (pair[0][:6], pair[1], first.isoformat())
-                yield _yield_value
-                continue
-            for public_date, revised, values in _report_versions(
-                index, pair, first, end, tuple(FINANCIAL_FIELDS[data_id])
-            ):
-                _yield_value = (
-                    pair[0][:6],
-                    pair[1],
-                    pair[1],
-                    "A",
-                    revised,
-                    public_date.isoformat() if revised else None,
-                    f"correction@{public_date}" if revised else "original",
-                    *values,
-                )
-                yield _yield_value
+            continue
+        earliest = min(index.get(f"events:{pair[0]}:{pair[1]}", {}), default=None)
+        if earliest is not None and date.fromisoformat(earliest[0]) < first:
+            diagnostics["excluded_invalid_chronology_rows"] = (
+                diagnostics.get("excluded_invalid_chronology_rows", 0) + 1
+            )
+            continue
+        if data_id == FIRST_DISCLOSURE_DATA_ID:
+            _yield_value = (pair[0][:6], pair[1], first.isoformat())
+            yield _yield_value
+            continue
+        for public_date, revised, values in _report_versions(
+            index, pair, first, end, tuple(FINANCIAL_FIELDS[data_id])
+        ):
+            _yield_value = (
+                pair[0][:6],
+                pair[1],
+                pair[1],
+                "A",
+                revised,
+                public_date.isoformat() if revised else None,
+                f"correction@{public_date}" if revised else "original",
+                *values,
+            )
+            yield _yield_value
 
 
 def _frames(rows, spec):

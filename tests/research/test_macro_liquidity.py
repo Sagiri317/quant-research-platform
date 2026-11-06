@@ -2,6 +2,7 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.research.factors.macro_liquidity.calculations import (
     calculate_macro_factors,
@@ -227,3 +228,151 @@ def test_industry_exposure_keeps_macro_amplitude_and_unknown_industry_null():
         .isna()
         .all()
     )
+
+
+def test_macro_beta_counts_actual_market_sessions_and_keeps_unknown_clocks():
+    # One weekday is an explicit market closure, so it must not use a window slot.
+    dates = pd.bdate_range("2024-01-02", periods=12)
+    sessions = dates.delete(3)
+    levels = np.arange(len(sessions), dtype=float) ** 2
+    observations = _observations(
+        [
+            ("us_nfci", day, day, value)
+            for day, value in zip(sessions, levels, strict=True)
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "market_type": 1,
+            "timestamp": sessions + pd.Timedelta(hours=8),
+            "signal_session": sessions,
+            "listing_date": sessions[0],
+            "return_available_at": sessions + pd.Timedelta(hours=7),
+            "period_return": np.r_[np.nan, 2 * np.diff(levels)],
+        }
+    )
+    calendar_dates = pd.date_range(dates[0], dates[-1])
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": calendar_dates,
+            "source_market_type": 1,
+            "is_trading_day": calendar_dates.isin(sessions),
+        }
+    )
+    config = {"beta_window": 4, "beta_min_observations": 3, "beta_min_changes": 3}
+    columns = ["ml_us_nfci_level", "ml_us_nfci_beta"]
+    complete = calculate_macro_factors(
+        observations,
+        panel,
+        columns=columns,
+        config=config,
+        calendar=calendar,
+    )
+    np.testing.assert_allclose(complete.ml_us_nfci_beta.iloc[3:], 2.0)
+    sparse = panel.drop(index=3).copy()
+    sparse.loc[8, "return_available_at"] = pd.NaT
+    result = calculate_macro_factors(
+        observations,
+        sparse,
+        columns=columns,
+        config=config,
+        calendar=calendar,
+    ).set_index("timestamp")
+    # Missing session 3 and its following shock both consume their calendar slots.
+    assert result.loc[panel.timestamp.iloc[4:7], "ml_us_nfci_beta"].isna().all()
+    assert result.loc[panel.timestamp.iloc[7], "ml_us_nfci_beta"] == pytest.approx(2.0)
+    # A missing clock at 8 cannot become a fabricated 15:00 observation.
+    assert result.loc[panel.timestamp.iloc[9:11], "ml_us_nfci_beta"].isna().all()
+    np.testing.assert_allclose(
+        result.ml_us_nfci_level, levels[np.arange(len(levels)) != 3]
+    )
+    future = sparse.copy()
+    future.loc[8, "return_available_at"] = future.loc[8, "timestamp"] + pd.Timedelta(
+        hours=1
+    )
+    pd.testing.assert_frame_equal(
+        calculate_macro_factors(
+            observations, future, columns=columns, config=config, calendar=calendar
+        ),
+        result.reset_index()[["market_id", "asset_id", "timestamp", *columns]],
+    )
+
+
+@pytest.mark.parametrize("window,minimum", [(4, 3), (6, 2)])
+def test_macro_beta_unknown_calendar_does_not_compress_windows_or_block_levels(
+    window, minimum
+):
+    sessions = pd.bdate_range("2024-01-02", periods=14)
+    dates = pd.date_range(sessions[0], sessions[-1])
+    levels = np.arange(len(sessions), dtype=float) ** 2
+    observations = _observations(
+        [
+            ("us_nfci", day, day, value)
+            for day, value in zip(sessions, levels, strict=True)
+        ]
+    )
+    one = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "market_type": 1,
+            "timestamp": sessions + pd.Timedelta(hours=8),
+            "signal_session": sessions,
+            "listing_date": sessions[0],
+            "return_available_at": sessions + pd.Timedelta(hours=7),
+            "period_return": np.r_[np.nan, 2 * np.diff(levels)],
+        }
+    )
+    other = one.assign(asset_id="B", market_type=4)
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.isin(sessions),
+        }
+    )
+    calendar = pd.concat(
+        [calendar, calendar.assign(source_market_type=4)], ignore_index=True
+    )
+    unknown = calendar.loc[
+        ~(calendar.calendar_date.eq(sessions[3]) & calendar.source_market_type.eq(1))
+    ]
+    config = {
+        "beta_window": window,
+        "beta_min_observations": minimum,
+        "beta_min_changes": minimum,
+    }
+    columns = ["ml_us_nfci_level", "ml_us_nfci_beta"]
+    for panel in (one, one.drop(index=3)):
+        result = calculate_macro_factors(
+            observations,
+            pd.concat([panel, other], ignore_index=True),
+            columns=columns,
+            config=config,
+            calendar=unknown,
+        )
+        a = result.loc[result.asset_id.eq("A")].set_index("timestamp")
+        expected = np.full(len(sessions), np.nan)
+        expected[minimum:3] = 2.0
+        # The first known session after the unknown date is 4. Its preceding
+        # boundary leaves the W-session window at 4 + W - 1, not after min samples.
+        expected[4 + window - 1 :] = 2.0
+        positions = sessions.get_indexer(panel.signal_session)
+        np.testing.assert_allclose(
+            a.ml_us_nfci_beta, expected[positions], equal_nan=True
+        )
+        np.testing.assert_allclose(a.ml_us_nfci_level, levels[positions])
+        b = result.loc[result.asset_id.eq("B")]
+        np.testing.assert_allclose(b.ml_us_nfci_beta.iloc[minimum:], 2.0)
+    # A known closure contradicting a supplied signal is different from unknown.
+    closed = calendar.copy()
+    closed.loc[
+        closed.calendar_date.eq(sessions[3]) & closed.source_market_type.eq(1),
+        "is_trading_day",
+    ] = False
+    with pytest.raises(ValueError, match="liquidity_beta_signal_session_invalid"):
+        calculate_macro_factors(
+            observations, one, columns=columns, config=config, calendar=closed
+        )

@@ -244,7 +244,7 @@ def test_native_own_common_strata_and_persisted_reduction(
     def forbidden(*args, **kwargs):
         raise AssertionError("persisted reduction must not rescan or recompute")
 
-    monkeypatch.setattr(factor_stats, "read_dataset", forbidden)
+    monkeypatch.setattr(factor_stats, "iter_dataset_chunks", forbidden)
     monkeypatch.setattr(dataset_stats, "open_dataset_session", forbidden)
     monkeypatch.setattr(factor_stats, "cross_sectional_rank_ic", forbidden)
     monkeypatch.setattr(factor_stats, "fama_macbeth_period", forbidden)

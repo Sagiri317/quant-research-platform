@@ -10,6 +10,7 @@ from math import ceil
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import _centered_values
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
@@ -325,19 +326,8 @@ class MarketModelRiskState:
             paired = np.isfinite(markets) & np.isfinite(returns)
             counts = paired.sum(axis=1)
             enough = counts >= max(2, ceil(self.min_fresh_fraction * self.window))
-            # Center observed differences, avoiding raw second-moment subtraction.
-            centered = []
-            for values in (markets, returns):
-                anchors = values[np.arange(len(values)), paired.argmax(axis=1)]
-                differences = np.where(paired, values - anchors[:, None], 0.0)
-                means = np.divide(
-                    differences.sum(axis=1),
-                    counts,
-                    out=np.zeros(len(values)),
-                    where=counts > 0,
-                )
-                centered.append(np.where(paired, differences - means[:, None], 0.0))
-            x, y = centered
+            x = _centered_values(markets, paired)
+            y = _centered_values(returns, paired)
             variance = np.sum(x * x, axis=1)
             slopes = np.divide(
                 np.sum(x * y, axis=1),
@@ -367,8 +357,7 @@ class MarketModelRiskState:
             counts = finite.sum(axis=1)
             valid = counts >= ceil(self.min_fresh_fraction * self.residual_window)
             values, finite, counts = values[valid], finite[valid], counts[valid]
-            means = np.sum(np.where(finite, values, 0.0), axis=1) / counts
-            centered = np.where(finite, values - means[:, None], 0.0)
+            centered = _centered_values(values, finite)
             volatilities[np.asarray(mature)[valid]] = np.sqrt(
                 np.sum(centered * centered, axis=1) / counts
             )

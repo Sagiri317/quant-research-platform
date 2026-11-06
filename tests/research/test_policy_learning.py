@@ -12,6 +12,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
 )
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.data import DataSpec, ProcessedDataSpec
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.contracts.policies import PolicyDecision
@@ -30,12 +31,15 @@ from quant_research_platform.research.policies.reinforcement import (
     backtest_policy,
     train_policy,
 )
+from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.high_frequency import inventory_batches
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.benchmark_references import reference_input
 from tests.helpers.high_frequency import daily_view, write_daily_inputs
 from tests.helpers.portfolio_inputs import _interim_specs, closed_market_inputs
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_hft_portfolio import parameters, quotes, schedule
+from tests.research.test_optional_statistics import _cash_ledger
 
 
 def hft_episode(root, *, day="2024-01-02", task="execution", missing_features=False):
@@ -154,6 +158,44 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
     summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
     assert summary["net_pnl"] == pytest.approx(-1)
     assert summary["nav"] == pytest.approx(4999)
+    artifact = read_statistics_artifact(
+        portfolio_statistics(
+            {
+                "ledgers": [str(output / "ledger")],
+                "window": episode["window"],
+                "output": str(tmp_path / "statistics"),
+            }
+        )
+    )
+    assert artifact.metadata["observation_clock"] == "trading_day_close"
+    assert artifact.metadata["candidate_ids"] == ["learned_policy"]
+    with artifact.table("portfolio_performance.parquet") as performance:
+        values = performance.set_index("metric_id").value
+        assert values["net_pnl"] == pytest.approx(-1)
+        assert values["terminal_nav"] == pytest.approx(4999)
+
+
+def test_policy_statistics_reject_mixed_account_clocks(tmp_path):
+    episode = hft_episode(tmp_path / "hft-inputs")
+    daily = tmp_path / "daily"
+    window = _cash_ledger(daily)
+    episode["window"] = window
+    output = backtest_policy(
+        {
+            "episode": episode,
+            "strategy": "immediate",
+            "output": str(tmp_path / "hft"),
+        }
+    )
+    with pytest.raises(ValueError, match="portfolio_statistics_account_clocks_mixed"):
+        portfolio_statistics(
+            {
+                "ledgers": [str(daily), str(output / "ledger")],
+                "window": window,
+                "output": str(tmp_path / "mixed"),
+            }
+        )
+    assert not (tmp_path / "mixed").exists()
 
 
 @pytest.mark.parametrize("n_envs", [1, 2])
@@ -301,6 +343,7 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     )
     ledger = read_portfolio_ledger_artifact(output / "ledger")
     assert any(batch.trades for batch in ledger.iter_chunks())
+    policy_ledger = output / "ledger"
     daily_model = train_policy(
         {
             "episodes": [episode],
@@ -386,6 +429,136 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())["nav"]
     )
     assert (model / "feature_scaler.pkl").read_bytes() == frozen
+    roots = [policy_ledger, output]
+    expected = {}
+    for root in roots:
+        native = read_portfolio_ledger_artifact(root)
+        assert "candidate" not in native.metadata
+        batches = list(native.iter_chunks())
+        terminal = sum(
+            row.value for row in batches[-1].valuations if row.phase == "end"
+        )
+        expected[native.capital.candidate_id] = {
+            "terminal_nav": terminal,
+            "net_pnl": terminal - native.capital.initial_capital,
+            "cost": -sum(
+                flow.amount
+                for batch in batches
+                for flow in batch.cashflows
+                if flow.kind.endswith("_cost")
+            ),
+        }
+    dates = pd.DatetimeIndex(
+        [
+            pd.Timestamp(
+                next(
+                    row.timestamp_ns
+                    for row in batches[0].valuations
+                    if row.phase == "before"
+                )
+            )
+        ]
+        + [
+            pd.Timestamp(
+                next(row.timestamp_ns for row in batch.valuations if row.phase == "end")
+            )
+            for batch in batches
+        ]
+    )
+    levels = pd.Series(100 + np.arange(len(dates)) ** 2, index=dates)
+    reference = reference_input(
+        tmp_path / "benchmark.parquet", levels.to_numpy(), dates=dates
+    )
+    config = {
+        "ledgers": [str(root) for root in roots],
+        "window": episode["window"],
+        "inputs": {"calendar": str(inputs["calendar"])},
+        "output": str(tmp_path / "statistics"),
+        "analyses": [
+            "performance",
+            "capacity",
+            "sharpe_inference",
+            "cscv",
+            "benchmark_comparison",
+            "control_comparison",
+            "market_exposure",
+            "regime_comparison",
+        ],
+        "adv_sensitivities": [0.1],
+        "statistics": {"cscv_blocks": 4},
+        "comparison_benchmarks": [reference],
+        "comparison_controls": [
+            {
+                **reference,
+                "reference_id": "control",
+                "return_basis": "strategy_net",
+                "cost_basis": "execution_costs",
+            }
+        ],
+        "market_exposure": {
+            "hac_lag": 0,
+            "confidence": 0.95,
+            "minimum_observations": 3,
+        },
+        "regime_comparison": {"threshold": 0.0},
+    }
+    artifact = read_statistics_artifact(portfolio_statistics(config))
+    ids = {"learned_policy", "cost_aware_allocator"}
+    assert set(artifact.metadata["candidate_ids"]) == ids
+    with artifact.table("portfolio_performance.parquet") as performance:
+        assert set(performance.candidate_id) == ids
+        for candidate_id, values in expected.items():
+            actual = performance.loc[
+                performance.candidate_id.eq(candidate_id)
+            ].set_index("metric_id")
+            for metric, value in values.items():
+                assert actual.loc[metric, "value"] == pytest.approx(value, abs=1e-9)
+    for name in (
+        "portfolio_daily",
+        "portfolio_capacity_summary",
+        "portfolio_benchmark_intervals",
+        "portfolio_market_exposure",
+        "portfolio_regime_comparison",
+    ):
+        with artifact.table(f"{name}.parquet") as rows:
+            assert set(rows.candidate_id) == ids
+            if name == "portfolio_benchmark_intervals":
+                expected_returns = (
+                    rows.end_at.map(levels) / rows.start_at.map(levels) - 1
+                )
+                assert rows.status.eq("DEFINED").all()
+                assert rows.benchmark_return.tolist() == pytest.approx(expected_returns)
+    with artifact.table("portfolio_robustness.parquet") as rows:
+        assert set(rows.candidate_id) == ids | {"joint"}
+    for analysis, settings in (
+        ("attribution", {"risk": {}, "benchmark_total_return_indices": {}}),
+        (
+            "group_comparison",
+            {
+                "statistics": {
+                    "hac_lag": 0,
+                    "bootstrap_block": 1,
+                    "bootstrap_repetitions": 10,
+                    "group_comparison": {
+                        "portfolio_ids": ["policy"],
+                        "primary_portfolio_id": "policy",
+                        "fdr_method": "BY",
+                        "alpha": 0.05,
+                        "seed": 1,
+                        "confidence": 0.95,
+                    },
+                }
+            },
+        ),
+    ):
+        rejected = tmp_path / analysis
+        with pytest.raises(
+            ValueError, match="portfolio_statistics_candidate_metadata_required"
+        ):
+            portfolio_statistics(
+                {**config, **settings, "analyses": [analysis], "output": str(rejected)}
+            )
+        assert not rejected.exists()
     data = read_dataset(inputs["dataset"]).rename(columns={"signal": "feature_signal"})
     data.loc[data.asset_id.eq("a0"), "feature_signal"] = np.nan
     observed_spec = make_demo_research_dataset_spec(

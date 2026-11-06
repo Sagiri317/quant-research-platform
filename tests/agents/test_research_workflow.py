@@ -5,7 +5,7 @@ import json
 import pytest
 
 from quant_research_platform.agents.runner import run_agent
-from quant_research_platform.agents.session import read_session
+from quant_research_platform.agents.session import final_evaluation_status, read_session
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
@@ -91,7 +91,7 @@ def test_factor_to_final_account_reuses_native_science_and_reports_negative_resu
     assert state["events"][14]["result"]["metrics"]["net_pnl"] == pytest.approx(
         economics["net_pnl"]
     )
-    assert state["holdout_viewed"] is True
+    assert final_evaluation_status(state) == "completed"
     assert "![e0016 图表](e0016/result.png)" in (root / "report.md").read_text(
         encoding="utf-8"
     )

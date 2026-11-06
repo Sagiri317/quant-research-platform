@@ -27,6 +27,7 @@ from quant_research_platform.contracts.models import (
     TrainingWeighting,
     _thaw_model_hyperparameters,
     sequence_context_columns,
+    sequence_parameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -121,7 +122,6 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
             SequencePredictor,
             _network,
             _ordered_context,
-            sequence_parameters,
         )
 
         if type(predictor) is not SequencePredictor or (

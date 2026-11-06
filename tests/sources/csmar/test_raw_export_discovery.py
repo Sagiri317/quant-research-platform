@@ -304,3 +304,29 @@ def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns, e
     mapped.loc[0, "effective_date"] = "bad-date"
     with pytest.raises(ValueError, match=error):
         interim._normalize_state_change_frame(mapped, data_id)
+
+
+@pytest.mark.parametrize(
+    "filename,dataset",
+    (
+        ("csmar__stock_master__a_share__full__export-20260605.csv", "stock_master"),
+        (
+            "csmar__market_cap__all__19900101_20261231__part-02__export-20260605.csv",
+            "market_cap",
+        ),
+        ("csmar__unknown__all__full__export-20260605.csv", None),
+        ("csmar__stock_master__all__full__part-2__export-20260605.csv", None),
+    ),
+)
+def test_raw_filename_retains_registered_dataset_and_filename_grammar(
+    filename, dataset
+):
+    from quant_research_platform.sources.csmar.raw_schemas import (
+        infer_dataset_from_raw_filename,
+    )
+
+    if dataset is None:
+        with pytest.raises(ValueError, match="CSMAR.*filename"):
+            infer_dataset_from_raw_filename(filename)
+    else:
+        assert infer_dataset_from_raw_filename(Path("raw") / filename) == dataset

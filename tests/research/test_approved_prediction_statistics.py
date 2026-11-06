@@ -14,6 +14,7 @@ from quant_research_platform.research.models.statistics import (
     _prediction_summary,
 )
 from quant_research_platform.research.statistics import time_series_inference_summary
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
 def test_no_selected_family_retains_undefined_statistics(tmp_path):
@@ -28,8 +29,7 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
     spec, _, _, _, dates = _factor_input(tmp_path)
     window = TimeWindow(dates[0], dates[-1])
     tables = build_a_share_statistics_tables(
-        dataset_path=tmp_path / "input",
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(tmp_path / "input", time_window=window),
         prediction_id="no_winner",
         model_entries={
             ("period", "family"): {"model_metadata": None, "model_id": None}

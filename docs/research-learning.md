@@ -87,6 +87,14 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 [日频组合示例](../configs/research-learning/train-policy-portfolio.json)共用同一训练入口。
 固定资产顺序决定网络的观测和动作位置，股票池变化需重新设计训练输入和模型。
 
+`portfolio-statistics` 可直接读取 `backtest-policy` 的 `ledger/` 和
+`backtest-cost-model` 的输出目录。日频绩效、容量、Sharpe/CSCV 推断及显式基准、
+对照、市场暴露和行情分段比较使用原生账本，不要求普通选股组合的 `candidate` 配置。
+统计保留账本资本中的 `learned_policy`、`cost_aware_allocator` 身份，不从账户配置
+复制选股方法或 G/Q 选择事实。持仓归因和 G/Q 组合比较仍须有实际匹配的候选元数据，
+缺失时明确失败。高频账本按自身 `kind` 使用日终绩效口径，不与日频账本混合统计；
+学习账本也不因缺少 `candidate` 而被误判为高频。
+
 ## 自动因子搜索
 
 `search-factors` 读取固定 `columns`、可选 `baseline_columns`、`label`、

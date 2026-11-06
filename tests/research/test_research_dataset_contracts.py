@@ -247,15 +247,50 @@ def test_missing_join_key_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_duplicate_output_column_fails_closed() -> None:
+def test_duplicate_output_column_fails_closed(tmp_path: Path) -> None:
     processed_catalog = make_dummy_processed_catalog(
         include_extensions=True, duplicate_factor_context=True
     )
     spec = make_dummy_research_dataset_spec(
         factor_columns=("factor_2",), context_columns=("factor_1",)
     )
+    from quant_research_platform.storage.datasets import write_dataset
+
+    layout = StorageLayout(project_root=tmp_path)
+    frame = pd.DataFrame(
+        {
+            "market_id": ["dummy_market"],
+            "asset_id": ["asset_a"],
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "factor_1": [1.0],
+            "factor_2": [2.0],
+            "label_1": [0.1],
+            "label_2": [0.2],
+            "eligible": [True],
+            "context_1": ["x"],
+            "context_2": ["y"],
+        }
+    )
+    for item in processed_catalog.list():
+        write_dataset(
+            layout.processed_data_root(item.market_id, item.kind, item.data_id),
+            frame.loc[:, list(item.required_columns)],
+            spec=item,
+        )
     with pytest.raises(ValueError, match="duplicate_research_output_columns: factor_1"):
-        _validate_inputs(spec, processed_catalog)
+        assemble_research_dataset(
+            inputs={
+                item.data_id: layout.processed_data_root(
+                    item.market_id, item.kind, item.data_id
+                )
+                for item in processed_catalog.list()
+                if item.data_id in spec.input_data_ids
+            },
+            output_root=layout.research_dataset_root(spec.market_id, spec.data_id),
+            dataset_catalog=make_research_dataset_catalog(spec),
+            dataset_id=spec.data_id,
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
+        )
 
 
 @pytest.mark.parametrize(

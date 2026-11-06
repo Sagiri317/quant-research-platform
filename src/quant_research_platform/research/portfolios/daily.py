@@ -1836,6 +1836,13 @@ def _build_session(
             for market in set(decision_markets.values())
         }
 
+        cost_prices = assets_frame.asset_id.map(decision_panel.close).to_numpy()
+        cost_face_values = (
+            assets_frame.asset_id.map(decision_panel.face_value_per_share).to_numpy()
+            if "face_value_per_share" in decision_panel
+            else None
+        )
+
         def expected_cost(buys, sells):
             total = 0.0
             gradients = []
@@ -1846,7 +1853,16 @@ def _build_session(
                     if active.any():
                         costs, gradient[active] = prepared[
                             market, side
-                        ].totals_and_gradients(notionals[active], adv_values[active])
+                        ].totals_and_gradients(
+                            notionals[active],
+                            adv_values[active],
+                            prices=cost_prices[active],
+                            face_value_per_share=(
+                                cost_face_values[active]
+                                if cost_face_values is not None
+                                else None
+                            ),
+                        )
                         total += float(costs.sum())
                 gradients.append(gradient)
             return total, *gradients
@@ -1942,6 +1958,10 @@ def _build_session(
                 "can_exit": masks["can_exit"],
             }
         )
+        if "face_value_per_share" in execution_panel:
+            orders["face_value_per_share"] = (
+                execution_panel.face_value_per_share.reindex(assets)
+            )
         return execute_stock_target(
             orders,
             cash=execution_cash,

@@ -40,10 +40,9 @@ from quant_research_platform.runtime.dataframes import (
     iter_complete_time_frames,
 )
 from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
     iter_dataset_chunks,
-    read_dataset,
 )
-from quant_research_platform.storage.datasets.types import DatasetReadMode
 
 _FAMA_MACBETH_PERIOD_COLUMNS = (
     "regression_id",
@@ -60,17 +59,15 @@ _FAMA_MACBETH_PERIOD_COLUMNS = (
 
 def build_a_share_factor_statistics_tables(
     *,
-    dataset_path,
-    dataset_spec,
+    dataset_session: DatasetSession,
     config: Mapping[str, object],
     time_window: TimeWindow,
-    dataset_session=None,
 ) -> dict[str, pd.DataFrame]:
     """Publish factor inference once, independently of fitted model artifacts."""
-    spec = dataset_spec
+    spec = dataset_session.spec
     evaluation = config["evaluation"]
     primary_label = evaluation["primary_label"]
-    availability = _statistics_label_availability(config["evaluation"], dataset_spec)
+    availability = _statistics_label_availability(config["evaluation"], spec)
     factors = tuple(evaluation["factors"])
     analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
     statistics = config["statistics"]
@@ -99,7 +96,7 @@ def build_a_share_factor_statistics_tables(
     columns = tuple(
         dict.fromkeys(
             (
-                *spec.primary_key,
+                *spec["primary_key"],
                 "eligible",
                 primary_label,
                 availability,
@@ -120,21 +117,11 @@ def build_a_share_factor_statistics_tables(
         *factors,
         *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
     }
-    if dataset_session is not None and business_columns - set(
-        dataset_session.logical_columns
-    ):
+    if business_columns - set(dataset_session.logical_columns):
         raise ValueError("statistics_required_columns_excluded")
     ranks, periods, input_dates = [], [], []
     chunks = iter_complete_time_frames(
-        read_dataset(
-            dataset_path,
-            spec=dataset_spec if Path(dataset_path).is_file() else None,
-            time_window=window,
-            columns=columns,
-            mode=DatasetReadMode.CHUNKED,
-        )
-        if dataset_session is None
-        else iter_dataset_chunks(dataset_session.projected_view(columns)),
+        iter_dataset_chunks(dataset_session.projected_view(columns)),
         timestamp_column="timestamp",
     )
     with closing_iterator(chunks):
@@ -491,11 +478,9 @@ def factor_statistics(config):
     output = Path(config["output"])
     reject_if_exists(output)
     window = TimeWindow(**config["window"])
-    session, spec = _statistics_input_session(config, window)
+    session = _statistics_input_session(config, window)
     tables = build_a_share_factor_statistics_tables(
-        dataset_path=session.root,
         dataset_session=session,
-        dataset_spec=spec,
         config=config,
         time_window=window,
     )
@@ -507,7 +492,7 @@ def factor_statistics(config):
             "formal_selection_qualification": "not_established",
             "column_units": {
                 column: unit
-                for column, unit in spec.column_units.items()
+                for column, unit in session.spec["column_units"].items()
                 if column in {evaluation["primary_label"], *evaluation["factors"]}
             },
         },

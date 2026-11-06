@@ -12,6 +12,7 @@ from quant_research_platform.research.statistics import (
     fama_macbeth_period,
     hac_mean,
 )
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
 def test_native_validation_rank_tie_uses_unscaled_average_ranks():
@@ -328,8 +329,7 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
     config["statistics"]["fama_macbeth_core_factors"] = []
     window = TimeWindow(dates[0].date(), dates[-1].date())
     tables = build_a_share_factor_statistics_tables(
-        dataset_path=dataset_path,
-        dataset_spec=spec,
+        dataset_session=open_dataset_session(dataset_path, time_window=window),
         config=config,
         time_window=window,
     )

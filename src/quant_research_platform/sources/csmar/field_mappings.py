@@ -23,268 +23,6 @@ class _RawTableContract:
     required_columns: tuple[str, ...]
 
 
-RAW_TABLE_CONTRACTS = MappingProxyType(
-    {
-        "stock_master": _RawTableContract(
-            table_code="TRDNEW_Co",
-            required_columns=(
-                "Stkcd",
-                "Stknme",
-                "Listdt",
-                "DelistedDate",
-                "Markettype",
-                "Nnindcd",
-                "Nnindnme",
-                "Statco",
-                "Statdt",
-            ),
-        ),
-        MARKET_BARS_DATA_ID: _RawTableContract(
-            table_code="TRDNEW_Dalyr",
-            required_columns=(
-                "Stkcd",
-                "Trddt",
-                "Markettype",
-                "Trdsta",
-                "Filling",
-                "Opnprc",
-                "Hiprc",
-                "Loprc",
-                "Clsprc",
-                "Dnshrtrd",
-                "Dnvaltrd",
-                "Ahshrtrd_D",
-                "Ahvaltrd_D",
-                "Dsmvosd",
-                "Dsmvtl3",
-                "Dretwd",
-                "Adjprcwd",
-                "PreClosePrice",
-                "LimitStatus",
-            ),
-        ),
-        "market_cap": _RawTableContract(
-            table_code="TRDNEW_Capchg",
-            required_columns=("Stkcd", "Shrchgdt", "Nshrttl", "Nshra"),
-        ),
-        "adjustment": _RawTableContract(
-            table_code="TRD_AdjustFactor",
-            required_columns=(
-                "Symbol",
-                "TradingDate",
-                "FwardFactor",
-                "BwardFactor",
-                "CumulateFwardFactor",
-                "CumulateBwardFactor",
-            ),
-        ),
-        "index_market": _RawTableContract(
-            table_code="IDX_Idxtrd",
-            required_columns=(
-                "Indexcd",
-                "Idxtrd01",
-                "Idxtrd02",
-                "Idxtrd03",
-                "Idxtrd04",
-                "Idxtrd05",
-                "Idxtrd06",
-                "Idxtrd07",
-                "Idxtrd08",
-                "Idxtrd09",
-            ),
-        ),
-        "index_info": _RawTableContract(
-            table_code="IDX_Idxinfo",
-            required_columns=("Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"),
-        ),
-        "index_membership": _RawTableContract(
-            table_code="IDX_Chgsmp",
-            required_columns=(
-                "Indexcd",
-                "Chgsmp01",
-                "Chgsmp02",
-                "Chgsmp03",
-                "Chgsmp04",
-                "Chgsmp05",
-                "Chgsmp06",
-                "Chgsmp07",
-            ),
-        ),
-        "index_weights": _RawTableContract(
-            table_code="IDX_Smprat",
-            required_columns=("Indexcd", "Enddt", "Stkcd", "Constdnme", "Weight"),
-        ),
-        "financial_balance": _RawTableContract(
-            table_code="FS_Combas",
-            required_columns=(
-                "Stkcd",
-                "ShortName",
-                "IfCorrect",
-                "DeclareDate",
-                "Accper",
-                "Typrep",
-                "A001000000",
-                "A002000000",
-                "A003100000",
-                "A001101000",
-                "A002101000",
-                "A002125000",
-                "A002201000",
-                "A002203000",
-            ),
-        ),
-        "financial_income": _RawTableContract(
-            table_code="FS_Comins",
-            required_columns=(
-                "Stkcd",
-                "ShortName",
-                "IfCorrect",
-                "DeclareDate",
-                "Accper",
-                "Typrep",
-                "B001101000",
-                "B001201000",
-                "B002000000",
-                "B002000101",
-            ),
-        ),
-        "financial_cashflow": _RawTableContract(
-            table_code="FS_Comscfd",
-            required_columns=(
-                "Stkcd",
-                "ShortName",
-                "IfCorrect",
-                "DeclareDate",
-                "Accper",
-                "Typrep",
-                "C001000000",
-                "C002006000",
-            ),
-        ),
-        "industry_classification": _RawTableContract(
-            table_code="STK_INDUSTRYCLASS",
-            required_columns=(
-                "Symbol",
-                "IndustryClassificationID",
-                "ImplementDate",
-                "IndustryCode",
-                "IndustryName",
-            ),
-        ),
-        "industry_classification_annual": _RawTableContract(
-            table_code="STK_IndustryClassAnl",
-            required_columns=(
-                "Symbol",
-                "EndDate",
-                "IndustryCode1",
-                "IndustryName1",
-            ),
-        ),
-        "industry_classification_sets": _RawTableContract(
-            table_code="STK_INDCLASSIFYSETS",
-            required_columns=(
-                "INDUSTRYCODE",
-                "INDCLASSIFYSYSTEMCODE",
-                "INDUSTRYNAME",
-                "P_INDUSTRYCODE",
-                "INDUSTRYID",
-                "RANK",
-            ),
-        ),
-        "industry_classification_versions": _RawTableContract(
-            table_code="STK_INDCLASSIFYVERSION",
-            required_columns=(
-                "IndClassifySystemCode",
-                "IndClassifySystem",
-                "ImplementDate",
-                "AbandonDate",
-                "InstitutionName",
-            ),
-        ),
-        "listing_status_changes": _RawTableContract(
-            table_code="STK_ITEMCHANGE",
-            required_columns=(
-                "Symbol",
-                "DeclareDate",
-                "ChangeDate",
-                "ChangedItem",
-                "ValueBefore",
-                "ValueAfter",
-            ),
-        ),
-        "stock_info_changes": _RawTableContract(
-            table_code="STK_LISTEDCOINFOCHG",
-            required_columns=(
-                "Symbol",
-                "AnnouncementDate",
-                "ImplementDate",
-                "ChangedItem",
-                "Value_Before",
-                "Value_After",
-            ),
-        ),
-        "stock_info_annual": _RawTableContract(
-            table_code="STK_LISTEDCOINFOANL",
-            required_columns=(
-                "Symbol",
-                "EndDate",
-                "IndustryCode",
-                "IndustryName",
-                "LISTINGDATE",
-                "LISTINGSTATE",
-            ),
-        ),
-        "trading_no_limit": _RawTableContract(
-            table_code="TRD_NoLimit",
-            required_columns=("TradingDate", "Symbol", "Reason"),
-        ),
-        "special_treatment_changes": _RawTableContract(
-            table_code="BDT_Trdchg",
-            required_columns=("Symbol", "Chgtype", "Annoudt", "Execudt"),
-        ),
-        "corporate_actions": _RawTableContract(
-            table_code="TRDNEW_Cptl",
-            required_columns=(
-                "Stkcd",
-                "Disttyp",
-                "Exdistdt",
-                "Markettype",
-                "Annodt",
-                "Paydt",
-                "Amount",
-                "Roprc",
-            ),
-        ),
-        "equity_changes": _RawTableContract(
-            table_code="FN_FN046",
-            required_columns=(
-                "Stkcd",
-                "Accper",
-                "Typrep",
-                "DataSources",
-                "SubjectCode",
-            ),
-        ),
-        "analyst_forecast": _RawTableContract(
-            table_code="AF_Forecast",
-            required_columns=(
-                "Stkcd",
-                "ReportID",
-                "AnanmID",
-                "DeclareDate",
-                "Fenddt",
-                "InstitutionID",
-                "Feps",
-                "Fpe",
-            ),
-        ),
-        "trading_calendar": _RawTableContract(
-            table_code="TRDNEW_Cale",
-            required_columns=("Markettype", "Clddt", "Daywk", "State"),
-        ),
-    }
-)
-
 COLUMN_MAPPINGS = {
     "stock_master": {
         "Stkcd": "stock_code",
@@ -505,6 +243,71 @@ COLUMN_MAPPINGS = {
         "State": "source_state",
     },
 }
+
+# These provider requirements differ from the mapped research columns.
+_REQUIRED_COLUMN_OVERRIDES = {
+    "stock_master": (
+        "Stkcd",
+        "Stknme",
+        "Listdt",
+        "DelistedDate",
+        "Markettype",
+        "Nnindcd",
+        "Nnindnme",
+        "Statco",
+        "Statdt",
+    ),
+    "index_market": (
+        "Indexcd",
+        "Idxtrd01",
+        "Idxtrd02",
+        "Idxtrd03",
+        "Idxtrd04",
+        "Idxtrd05",
+        "Idxtrd06",
+        "Idxtrd07",
+        "Idxtrd08",
+        "Idxtrd09",
+    ),
+    "index_info": ("Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"),
+}
+
+RAW_TABLE_CONTRACTS = MappingProxyType(
+    {
+        dataset: _RawTableContract(
+            table_code=table_code,
+            required_columns=_REQUIRED_COLUMN_OVERRIDES.get(
+                dataset, tuple(COLUMN_MAPPINGS[dataset])
+            ),
+        )
+        for dataset, table_code in {
+            "stock_master": "TRDNEW_Co",
+            MARKET_BARS_DATA_ID: "TRDNEW_Dalyr",
+            "market_cap": "TRDNEW_Capchg",
+            "adjustment": "TRD_AdjustFactor",
+            "index_market": "IDX_Idxtrd",
+            "index_info": "IDX_Idxinfo",
+            "index_membership": "IDX_Chgsmp",
+            "index_weights": "IDX_Smprat",
+            "financial_balance": "FS_Combas",
+            "financial_income": "FS_Comins",
+            "financial_cashflow": "FS_Comscfd",
+            "industry_classification": "STK_INDUSTRYCLASS",
+            "industry_classification_annual": "STK_IndustryClassAnl",
+            "industry_classification_sets": "STK_INDCLASSIFYSETS",
+            "industry_classification_versions": "STK_INDCLASSIFYVERSION",
+            "listing_status_changes": "STK_ITEMCHANGE",
+            "stock_info_changes": "STK_LISTEDCOINFOCHG",
+            "stock_info_annual": "STK_LISTEDCOINFOANL",
+            "trading_no_limit": "TRD_NoLimit",
+            "special_treatment_changes": "BDT_Trdchg",
+            "corporate_actions": "TRDNEW_Cptl",
+            "equity_changes": "FN_FN046",
+            "analyst_forecast": "AF_Forecast",
+            "trading_calendar": "TRDNEW_Cale",
+        }.items()
+    }
+)
 
 COLUMN_ALIASES = {
     "adjustment": {

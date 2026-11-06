@@ -842,6 +842,11 @@ def execute_stock_target(
                     minimum[mask],
                     maximum[mask],
                     assumptions.minimum_commission,
+                    face_value_per_share=(
+                        frame.loc[mask, "face_value_per_share"].to_numpy()
+                        if "face_value_per_share" in frame
+                        else None
+                    ),
                 )
         return result
 

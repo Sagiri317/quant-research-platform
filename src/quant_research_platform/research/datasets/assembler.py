@@ -368,7 +368,6 @@ def _validate_research_input_specs(
         _validate_asset_time_key(
             processed_spec.primary_key, processed_spec.column_roles
         )
-    _require_no_duplicate_output_columns(dataset_spec, processed_specs)
     _require_research_required_columns_available(dataset_spec, processed_specs)
     role_by_column: dict[str, set[ColumnRole]] = {}
     kind_by_column: dict[str, set[ProcessedDataKind]] = {}
@@ -465,28 +464,6 @@ def _require_columns_from_roles_or_kinds(
     ]
     if invalid:
         raise ValueError(f"{error_name}: {', '.join(invalid)}")
-
-
-def _require_no_duplicate_output_columns(
-    dataset_spec: ResearchDatasetSpec, processed_specs: dict[str, ProcessedDataSpec]
-) -> None:
-    requested = (
-        set(_required_input_columns(dataset_spec))
-        .difference(dataset_spec.primary_key)
-        .difference(_generated_feature_columns(dataset_spec))
-        .difference(_generated_semantic_columns(dataset_spec))
-    )
-    producers: dict[str, list[str]] = {}
-    for data_id, processed_spec in processed_specs.items():
-        for column in processed_spec.required_columns:
-            if column in dataset_spec.primary_key or column not in requested:
-                continue
-            producers.setdefault(column, []).append(data_id)
-    duplicates = sorted(
-        (column for column, data_ids in producers.items() if len(data_ids) > 1)
-    )
-    if duplicates:
-        raise ValueError("duplicate_research_output_columns: " + ", ".join(duplicates))
 
 
 def _require_research_required_columns_available(

@@ -13,6 +13,7 @@ from quant_research_platform.contracts.models import (
     ModelSpec,
     _model_algorithm_facts,
     _thaw_model_hyperparameters,
+    sequence_parameters,
 )
 
 _MODEL_ESTIMATOR_CLASSES = {
@@ -62,7 +63,5 @@ def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
         params.setdefault("device", "cuda")
         params.setdefault("tree_method", "hist")
     if spec.model_algorithm in SEQUENCE_ALGORITHMS:
-        from quant_research_platform.research.models.neural import sequence_parameters
-
         return sequence_parameters(spec.model_algorithm, params)
     return params
