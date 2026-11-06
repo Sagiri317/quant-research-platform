@@ -110,3 +110,18 @@ def test_daily_equal_weight_metrics_pairing_and_missing_clock(tmp_path):
         inference.candidate_id.eq("sparse") & inference.metric.eq("ic")
     ]
     assert incomplete.reason.eq("incomplete_session_clock").all()
+    dense_output = evaluate_time_series(
+        {
+            **config,
+            "predictions": {},
+            "window": {"start": "2020-01-04", "end": "2020-01-04"},
+            "sessions": ["2020-01-04"],
+            "comparison_groups": {},
+            "comparisons": [],
+            "inference_groups": {"factors": ["sparse"]},
+            "output": str(tmp_path / "defined-factor-day"),
+        }
+    )
+    dense = read_dataset(dense_output / "daily")
+    assert dense.reason.isna().all()
+    assert dense.value.eq(1).all()

@@ -98,7 +98,9 @@ def daily_inference(daily, *, groups, statistics, sessions):
                     asset_id=asset, sample_scope=scope, metric=metric, family=family
                 )
             )
-    return pd.concat(results, ignore_index=True)
+    return pd.concat(results, ignore_index=True).astype(
+        {"reason": "string", "fdr_method": "string"}
+    )
 
 
 def _write_table(root, name, frame, key, config):
@@ -287,7 +289,7 @@ def evaluate_time_series(config):
                                 input_count=len(block),
                             )
                         )
-    daily = pd.DataFrame(rows)
+    daily = pd.DataFrame(rows).astype({"value": "float64", "reason": "string"})
     comparisons = []
     for comparison in config.get("comparisons", []):
         comparison = _strict_config(
