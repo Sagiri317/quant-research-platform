@@ -48,7 +48,7 @@ def stock_order_limits(
     market_types = strict_integer_series(
         market_types, error="a_share_market_type_invalid"
     )
-    markets = market_types.map(market_name_for_type)
+    markets = market_types.map(market_name_for_type).astype("str")
     if instrument_types is not None:
         kinds = instrument_types.reindex(market_types.index)
         if not kinds.isin(A_SHARE_INSTRUMENT_TYPES).all():

@@ -157,6 +157,24 @@ def test_missing_facts_only_block_requested_orders_and_never_fund_buys():
     assert result.nav_after == 1050
 
 
+def test_blocked_etf_order_preserves_inventory_and_cash_without_fees():
+    orders = stock_orders({"a": 100}, {"a": 200}, prices=10.0)
+    orders["instrument_type"] = "equity_etf"
+    orders["can_enter"] = False
+    result = execute_stock_target(
+        orders,
+        cash=1000.0,
+        execution_date=DAY,
+        fee_schedule=_schedule(),
+        assumptions=SETTINGS,
+    )
+    row = result.asset_ledger.iloc[0]
+    assert row.executed_quantity == 0
+    assert row.reason == "market_blocked"
+    assert result.post_trade_cash == 1000.0
+    assert result.nav_before == result.nav_after == 2000.0
+
+
 @pytest.mark.parametrize(
     "market,quantity,commission", [(1, 1000100, 305.0), (32, 100001, 34.9403)]
 )
