@@ -337,15 +337,21 @@ def agent(
     interactive: Annotated[bool, typer.Option("--interactive")] = False,
     status: Annotated[bool, typer.Option("--status")] = False,
 ) -> None:
-    """Start, inspect or resume a research session; optionally chat while it runs."""
+    """Chat directly, or start, inspect and resume a configured research session."""
     from quant_research_platform.agents.runner import resume_agent, run_agent
     from quant_research_platform.agents.session import read_session, usage_summary
 
-    if (config is None) == (resume is None):
+    if config is not None and resume is not None:
         raise ValueError("agent_choose_config_or_resume")
-    if config is not None and (message is not None or budget is not None or status):
+    if resume is None and (message is not None or budget is not None or status):
         raise ValueError("agent_resume_options_require_session")
+    conversation = resume is not None and (resume / "conversation.json").is_file()
     if status:
+        if conversation:
+            from quant_research_platform.agents.chat import chat_status
+
+            _echo_result(chat_status(resume))
+            return
         state = read_session(resume)
         _echo_result(
             {
@@ -358,7 +364,7 @@ def agent(
         return
     settings = read_qrp_json_file(config)[1] if config is not None else None
     limits = read_qrp_json_file(budget)[1] if budget is not None else None
-    if interactive:
+    if interactive or conversation or config is None and resume is None:
         from quant_research_platform.agents.chat import chat_agent
 
         result = chat_agent(
@@ -368,7 +374,8 @@ def agent(
         result = resume_agent(resume, message=message, budget=limits)
     else:
         result = run_agent(settings)
-    _echo_result(result)
+    if result is not None:
+        _echo_result(result)
 
 
 def _echo_result(result) -> None:

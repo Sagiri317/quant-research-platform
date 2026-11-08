@@ -269,10 +269,89 @@ def test_context_compaction_keeps_constraints_and_retrievable_history(tmp_path):
     assert "train_window" in messages[1]["content"]
     assert (root / "e0001/action.json").is_file()
     state["events"] = state["events"][:-1]
-    state["config"]["budget"]["max_context_chars"] = 6000
+    state["config"]["budget"]["max_context_chars"] = 10000
     messages, _ = context_messages(state)
     assert json.loads(messages[-1]["content"])["id"] == "e0004"
-    assert sum(len(item["content"]) for item in messages) <= 6000
+    assert sum(len(item["content"]) for item in messages) <= 10000
+
+
+def test_context_keeps_cited_baseline_and_skips_oversized_recent_records(tmp_path):
+    config = agent_config(tmp_path)
+    config["budget"]["max_requests"] = 8
+    baseline, large = tmp_path / "baseline.md", tmp_path / "large.md"
+    baseline.write_text("The baseline net return is negative.", encoding="utf-8")
+    large.write_text("A long intermediate observation.\n" * 300, encoding="utf-8")
+    config["documents"] = {"baseline": str(baseline), "large": str(large)}
+    root = run_agent(
+        config,
+        client=ScriptedClient(
+            [
+                call("lookup", scope="documents", query="", key="baseline"),
+                *[
+                    call("lookup", scope="documents", query="", key="large")
+                    for _ in range(4)
+                ],
+                finish(),
+            ]
+        ),
+    )
+    state = read_session(root)
+    state["config"]["budget"]["max_context_chars"] = 10000
+    messages, omitted = context_messages(state)
+    records = [json.loads(item["content"]) for item in messages[2:]]
+    assert records[0]["id"] == "e0001"
+    assert records[0]["result"]["text"] == baseline.read_text(encoding="utf-8")
+    assert records[-1]["id"] == "e0006"
+    assert omitted > 0
+    assert sum(len(item["content"]) for item in messages) <= 10000
+    state["events"].pop()
+    messages, _ = context_messages(state)
+    records = [json.loads(item["content"]) for item in messages[2:]]
+    assert records[0]["id"] == "e0001"
+    assert records[-1]["id"] == "e0005"
+    assert records[-1]["details_omitted"] is True
+    assert len(read_session(root)["events"]) == 6
+
+
+def test_finish_checks_raw_metric_claims_and_can_correct_a_rejected_claim(tmp_path):
+    config = agent_config(tmp_path)
+    config["budget"]["max_requests"] = 8
+    invalid = [
+        (
+            {"evidence": "e0001", "metric": "score", "value": 0.5},
+            "agent_claim_value_mismatch",
+        ),
+        (
+            {"evidence": "e0001", "metric": "return", "value": 1},
+            "agent_claim_metric_not_found",
+        ),
+        (
+            {"evidence": "e0002", "metric": "score", "value": 1},
+            "agent_claim_evidence_not_cited",
+        ),
+        (
+            {"evidence": "e0001", "metric": "score", "value": True},
+            "agent_claim_value_must_be_numeric_or_null",
+        ),
+    ]
+    client = ScriptedClient(
+        [
+            call("search"),
+            finish(claims={}),
+            *[finish(claims=[claim]) for claim, _ in invalid],
+            finish(claims=[{"evidence": "e0001", "metric": "score", "value": 1.0}]),
+        ]
+    )
+    root = run_agent(config, client=client)
+    state = read_session(root)
+    assert state["status"] == "completed"
+    assert state["events"][0]["result"]["metrics"] == {"score": 1.0}
+    assert [item["result"]["reason"] for item in state["events"][1:-1]] == [
+        "agent_claims_must_be_list",
+        *[reason for _, reason in invalid],
+    ]
+    assert state["events"][-1]["result"]["status"] == "completed"
+    assert "agent_claim_value_mismatch" in client.messages[3]
 
 
 def test_completed_research_memory_links_evidence_and_can_be_retrieved(tmp_path):

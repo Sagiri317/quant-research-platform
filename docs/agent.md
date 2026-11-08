@@ -2,7 +2,7 @@
 
 `qrp agent` 是现有研究操作的调用者。它负责问题、假设、工具选择、实验反馈、会话、记忆与报告；因子公式、样本筛选、模型、统计和交易核算继续使用原有实现。代码在 `src/quant_research_platform/agents/`，测试在 `tests/agents/`；CLI 适配测试在 `tests/interfaces/cli/`，共享的合成数据构造放在 `tests/helpers/`。
 
-第一批场景是 A 股日频因子研究。基本流程是：明确口径、检索资料、提出公式或代码、开发期实验、比较基线与费用后表现、冻结候选、自动最终评价、报告与经验保存。高频、实盘、浏览器界面和跨机器调度不属于本轮入口。
+支持 A 股日频因子研究和已有高频模型、评价与账户回测。基本流程是：明确口径、检索资料、提出公式、开发期实验、比较基线与费用后表现、冻结候选、固定最终评价、报告与经验保存。研究操作继续使用原生实现。
 
 ## 启动、交互和恢复
 
@@ -12,25 +12,33 @@
 
 ```powershell
 $env:PYTHONPATH = Join-Path $PWD 'src'
-python -m quant_research_platform.interfaces.cli agent --config configs/research-learning/agent.json --interactive
+python -m quant_research_platform.interfaces.cli agent
 ```
 
 这只设置当前终端，不安装包或修改全局环境；多个工作树共用环境时，也能明确选择当前分支的源码。下文 `qrp` 可替换为同一解释器的 `python -m quant_research_platform.interfaces.cli`。
 
 ```sh
+qrp agent
 qrp agent --config configs/research-learning/agent.json --interactive
 qrp agent --resume results/agent-session --status
 qrp agent --resume results/agent-session --message "保留原口径，继续检查候选与基线的差异" --interactive
 qrp agent --resume results/agent-session --budget more-budget.json
 ```
 
-不加 `--interactive` 时自动运行到完成、需要回答、预算耗尽或失败。启动只接受一个新的输出目录；恢复读取该目录中的 `session.json`，沿用原协议和成功产物。完成后不带新消息和预算执行 `--resume`，只重新生成报告与记忆，可补回写入失败的派生产物；新的研究需新建任务。
+不带配置时直接进入连续对话。默认读取报告复核示例中的模型连接、文档和记忆设置，但不继承其历史研究协议；实际研究工具通过 `configure` 和 `research` 开放。每个新问题建立独立任务，近期问答直接进入上下文，较旧记录按需检索。生成目录默认为 `results/agent-chat/<对话编号>/`，由 `.gitignore` 忽略。
+
+对话目录中的 `conversation.json` 保存工作配置，每轮的 `session.json` 保存任务事实。`qrp agent --resume <对话目录>` 恢复完整对话；`--status` 只读查看本轮及累计消耗。已完成的研究任务保持完成状态，追问建立新任务。
+
+显式传入 `--config` 且不加 `--interactive` 时自动运行到完成、需要回答、预算耗尽或失败。启动只接受新的输出目录；恢复单个任务读取 `session.json`，沿用原协议和成功产物。已完成任务不带新消息和预算执行 `--resume`，只重新生成报告与记忆。
 
 交互中可以直接输入补充要求，也可以输入：
 
 | 输入 | 行为 |
 |---|---|
-| `/status` | 查看当前阶段、状态和消耗 |
+| `/status` | 查看等待输入、等待模型或任务状态、本轮与累计消耗，并恢复输入提示 |
+| `/help` | 查看终端命令 |
+| `/tools` | 列出当前实际开放的研究操作 |
+| `/data 别名 数据集目录` | 在两轮任务之间绑定原生数据集，路径只在本地保存，模型接收别名及元数据 |
 | `/pause` | 在当前行动结束后保存并暂停 |
 | `Ctrl+C` | 中断当前行动，清理本次拥有的子进程或容器，保存暂停状态 |
 | `/continue` | 继续暂停的会话；待回答的问题仍须实际回答 |
@@ -43,7 +51,7 @@ qrp agent --resume results/agent-session --budget more-budget.json
 
 ## 模型与预算
 
-`llm` 使用 OpenAI Responses API 和严格结构化输出，客户端复用 HTTPX，无新增 Agent 框架依赖。
+`llm` 使用 OpenAI Responses API 和严格结构化输出，传输使用 HTTPX，无新增 Agent 框架依赖。
 
 | 字段 | 示例 | 含义 |
 |---|---|---|
@@ -64,11 +72,19 @@ $env:QRP_RESEARCH_API_KEY = [Environment]::GetEnvironmentVariable('QRP_RESEARCH_
 
 `budget` 必填 `max_requests`、`max_experiments`、`wall_seconds`。网络检索也占一次请求，最终评价也占实验预算；暂停期间不计运行时间。可选 `max_tokens` 在调用返回后按供应商报告的输入与输出 token 合计停止后续调用；它不是单次请求的精确费用硬上限。供应商未返回 usage，或输入/输出计数缺失、不是非负整数时，消耗记为未知；若启用 token 上限则明确失败，不接受该次行动或结论。
 
-`max_context_chars` 默认 48,000，限制发送的历史文本字符量，不冒充精确 token 计量。问题、协议、用户补充和冻结状态始终保留；较早行动从请求中移出，完整行动和结果仍在会话中，可通过 `lookup` 按证据 ID 检索。超长代码不反复发送，按需读取。固定约束本身超出上下文预算时明确失败，不丢弃约束。
+`max_context_chars` 默认 300,000；设置为 `null` 可关闭本地字符裁剪，例如 `/budget {"max_context_chars":null}`。字符数只是粗略控制，不能代替模型的上下文 token 容量或费用限制。问题、协议、用户补充和冻结状态始终保留；裁剪时优先保留最近行动引用的证据和冻结候选，跳过超长结果后继续选择其他可容纳记录。完整行动与结果保存在本地，可通过 `lookup` 回读。近期对话使用部分上下文预算，不再固定限制在一万多字符。固定约束本身超出所选预算时明确失败。
 
 HTTPX 的超时控制连接和 I/O 等待，不是整个 HTTP 响应的绝对墙钟。慢响应和清理可能略超任务预算，返回后不再启动超预算的实验。
 
 ## 任务配置与研究口径
+
+连续对话可以先输入 `/data source <原生数据集目录>`，再用中文说明标签、研究区间、基线与目标。Agent 读取原生列角色、单位、频率和范围，缺少必要条件时只追问缺少部分，不套用示例中的 `x`、日期或费用。路径在本地绑定，研究参数用 `input:source` 引用输入。
+
+`configure` 接收固定的 `protocol` 和可选 `final_evaluation`；`research` 接收 `operation`、原生 `config`、数值提取 `metrics` 和聚合事实 `facts`。首次实验后不能更换协议，已经投入使用的固定最终步骤也不能改写。操作名称来自现有白名单，`lookup(scope=operations, key=<操作名>, query="")` 返回实际 CLI 对应的原生入口、配置字段及模块源码，不另维护一套计算 schema。保存的原生产物用 `artifact:e0001/member` 引用。模型和策略加载仅接受原生证据产物，不能用猜测的路径绕过生成产物的限制。
+
+原生研究调用支持盘口归一化 `normalize-book`、时间序列评价 `evaluate-time-series`、高频账户 `backtest-hft`、库存分解 `analyze-inventory`、`fit-hawkes` 及模型解释 `explain`。通用 `fit/predict` 继续服务日频和高频模型。`search-factors` 的选型目标仍是截面 RankIC，不能用来声称已经实现单只 ETF 的时间序列公式挖掘。
+
+`compare` 按证据编号读取所有指定结果及样本口径，不重算收益。整体评价调用原生统计与账本汇总；独立初始化的窗口不能直接拼接净值或平均 Sharpe。终端同时展示程序提取的原始指标和窗口，文字结论需要据此核对。
 
 示例 [agent.json](../configs/research-learning/agent.json) 展示完整的显式工具配置，路径和数据需由调用者准备。`x` 是待研究的已有输入因子，`label` 是收益标签；它们不是平台自动生成的数据。源数据须含资产与时间主键、`eligible`、标签成熟时间及回测使用的市值等上下文。
 
@@ -102,11 +118,13 @@ HTTPX 的超时控制连接和 I/O 等待，不是整个 HTTP 响应的绝对墙
 
 `parameters` 的值是实际 JSON 值。原生工具的输入绑定使用 `{"inputs":{"search":"e0001"}}`。工具的参数类型和科学有效性仍由真实操作校验；失败的错误代码进入反馈，模型可以修正下一次调用。
 
-Parquet 汇总可用 `filters` 选择特定 `signal` 或指标行，避免混合不同统计量。空样本保持 `null`，不按零处理。原生账本的 `fees/net_pnl/nav` 等由已有 `summarize_portfolio_ledger` 计算，不在 Agent 中重写成本或收益公式。同一账本的多个汇总只读取一次。
+Parquet 汇总可用 `filters` 选择特定 `signal` 或指标行，避免混合不同统计量。原生数据集目录也可作为 `member`，例如时间序列评价的 `daily`，通过原生读取器裁列和过滤。空样本保持 `null`，不按零处理。原生账本的 `fees/net_pnl/nav` 等由已有 `summarize_portfolio_ledger` 计算，不在 Agent 中重写成本或收益公式。同一账本的多个汇总只读取一次。
+
+`finish` 的 `arguments_json` 可带 `claims`，每项包含 `evidence`、`metric`、`value`，核对原始值是否与已保存的数值汇总一致。原始值包括未定义的 `null`，布尔值不能充当数字；抄错值、指标名或引用会作为失败反馈。该检查不等于自动核验所有自由文字或百分比换算。
 
 ## 检索、代码与记忆
 
-`lookup` 检索调用者在 `documents` 中显式列出的文档/代码、A 股因子和标签目录、本次行动证据或共享记忆。指定 `key` 可分页读取内容，`offset` 为字符偏移，`page_size` 为每页字符数（默认及最大 6000）；未指定 `key` 时两者按匹配记录计数，每页默认及最多 6 条。上下文不足而省略结果时，可请求更短的页，按返回的 `next_offset` 继续。检索结果只作为资料，不拥有修改研究口径或扩大执行权限的授权。
+`lookup` 检索显式文档、因子和标签目录、原生操作接口、行动证据或共享记忆。指定 `key` 时只打开目标记录，`offset` 和 `page_size` 按字符计数，每页默认及最多 30,000 字符；未指定 `key` 时按匹配记录计数，每页默认及最多 6 条。中文查询同时匹配相邻汉字片段，帮助召回相关表述。上下文不足时可请求较短页并按 `next_offset` 继续。检索材料不提供修改研究口径或扩大权限的授权。
 
 已有研究报告的 CSV 汇总附件也可列入 `documents`，按 UTF-8 文本检索与分页读取。只读复核示例见 [agent-report-review.json](../configs/research-learning/agent-report-review.json)，其中明确选择已发布报告与聚合附件，核对历史数值并要求说明样本范围。报告按引用资料与原生产物解释证据，完成结论集中在结论章节。
 
@@ -136,7 +154,7 @@ Parquet 汇总可用 `filters` 选择特定 `signal` 或指标行，避免混合
 }
 ```
 
-最终步骤用 `artifact:formula`、`artifact:model` 和 `artifact:<先前最终步骤名>` 引用产物；必须依次可解析。最终步骤没有模型可调参数。冻结进入最终阶段后，只执行这些步骤；报告阶段允许 `lookup` 回读和分页检索已有证据，然后 `finish`，不再接受开发工具、写入或调参调用。
+最终步骤用 `artifact:formula`、`artifact:model` 和 `artifact:<先前最终步骤名>` 引用产物；必须依次可解析。最终步骤没有模型可调参数。冻结进入最终阶段后，只执行这些步骤；报告阶段允许 `lookup` 和 `compare` 读取已有证据，然后 `finish`，不再接受开发工具、写入或调参调用。
 
 最终评价允许产生负结果或未定义值；执行失败则停在 `final_evaluation_failed`，不能被总结为成功。无可用候选时，可在开发阶段以 `finish` 和 `{"outcome":"no_candidate"}` 如实结束，不必为了完成流程而访问最终样本。
 

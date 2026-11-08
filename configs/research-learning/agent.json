@@ -856,7 +856,7 @@
     "max_requests": 40,
     "max_experiments": 30,
     "wall_seconds": 3600,
-    "max_context_chars": 48000
+    "max_context_chars": 300000
   },
   "output": "results/agent-session",
   "llm": {

@@ -19,7 +19,7 @@
     "max_requests": 12,
     "max_experiments": 1,
     "wall_seconds": 600,
-    "max_context_chars": 60000
+    "max_context_chars": 300000
   },
   "llm": {
     "base_url": "https://api.openai.com/v1",

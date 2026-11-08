@@ -1,9 +1,12 @@
 """Agent decisions compose actual native calculations, including a negative holdout."""
 
 import json
+from copy import deepcopy
+from pathlib import Path
 
 import pytest
 
+from quant_research_platform.agents.protocol import set_argument
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import final_evaluation_status, read_session
 from quant_research_platform.artifacts.portfolio_ledger import (
@@ -15,8 +18,10 @@ from tests.agents.research_support import daily_research_config
 from tests.agents.support import ScriptedClient
 
 
+@pytest.mark.parametrize("dynamic", [False, True])
 def test_factor_to_final_account_reuses_native_science_and_reports_negative_result(
     tmp_path,
+    dynamic,
 ):
     config = daily_research_config(tmp_path)
 
@@ -54,10 +59,73 @@ def test_factor_to_final_account_reuses_native_science_and_reports_negative_resu
                     "the constant-price final account loses its fees; this is a "
                     "negative synthetic result."
                 ),
-                "evidence": ["e0004", "e0012", "e0015"],
+                "arguments_json": json.dumps(
+                    {
+                        "claims": [
+                            {
+                                "evidence": "e0005",
+                                "metric": "candidate_hac_p_value",
+                                "value": None,
+                            },
+                            {
+                                "evidence": "e0012",
+                                "metric": "candidate_ic",
+                                "value": -1.0,
+                            },
+                        ]
+                    }
+                ),
+                "evidence": ["e0004", "e0005", "e0012", "e0015"],
             },
         ]
     )
+    if dynamic:
+        config["final_evaluation"][-1]["name"] = "research"
+        tools = config["tools"]
+        config["tools"], config["inputs"] = {}, {}
+
+        def attach(value):
+            if isinstance(value, dict):
+                return {key: attach(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [attach(item) for item in value]
+            if (
+                isinstance(value, str)
+                and Path(value).is_absolute()
+                and Path(value).exists()
+            ):
+                alias = f"source_{len(config['inputs'])}"
+                config["inputs"][alias] = value
+                return "input:" + alias
+            return value
+
+        actions = []
+        for action in client.actions:
+            if action.get("tool") in tools:
+                template = deepcopy(tools[action["tool"]])
+                arguments = json.loads(action["arguments_json"])
+                for path, value in arguments.get("parameters", {}).items():
+                    set_argument(template["config"], path, value)
+                for path, identifier in arguments.get("inputs", {}).items():
+                    set_argument(
+                        template["config"],
+                        path,
+                        f"artifact:{identifier}/{template['bindings'][path]}",
+                    )
+                action = {
+                    **action,
+                    "tool": "research",
+                    "arguments_json": json.dumps(
+                        {
+                            "operation": template["operation"],
+                            "config": attach(template["config"]),
+                            "metrics": template["metrics"],
+                            "facts": template.get("facts", {}),
+                        }
+                    ),
+                }
+            actions.append(action)
+        client = ScriptedClient(actions)
     root = run_agent(config, client=client)
     state = read_session(root)
     assert read_dataset(root / "e0002/result").market_id.eq("a_share").all()

@@ -1,9 +1,12 @@
 """Retrieve declared text, catalogs and evidence-linked local research memories."""
 
+import ast
 import difflib
 import json
+import re
 from pathlib import Path
 
+from quant_research_platform.agents.protocol import OPERATIONS
 from quant_research_platform.agents.session import (
     evidence_record,
     final_evaluation_status,
@@ -30,13 +33,16 @@ def lookup(arguments, state):
     offset = arguments.get("offset", 0)
     if type(query) is not str or type(offset) is not int or offset < 0:
         raise ValueError("agent_lookup_arguments_invalid")
-    maximum = 6000 if "key" in arguments else 6
+    maximum = 30000 if "key" in arguments else 6
     page_size = arguments.get("page_size", maximum)
     if type(page_size) is not int or not 1 <= page_size <= maximum:
         raise ValueError("agent_lookup_arguments_invalid")
     documents = {}
     if scope == "documents":
-        for name, source in state["config"].get("documents", {}).items():
+        sources = state["config"].get("documents", {})
+        if "key" in arguments:
+            sources = {arguments["key"]: sources[arguments["key"]]}
+        for name, source in sources.items():
             path = Path(source)
             if path.suffix not in {
                 ".py",
@@ -50,6 +56,68 @@ def lookup(arguments, state):
             }:
                 raise ValueError("agent_document_must_be_text_or_code")
             documents[name] = sanitize_shared_text(path.read_text(encoding="utf-8"))
+    elif scope == "operations":
+        package = Path(__file__).resolve().parents[1]
+        cli = ast.parse(
+            (package / "interfaces/cli/commands.py").read_text(encoding="utf-8")
+        )
+        for command in cli.body:
+            if not isinstance(command, ast.FunctionDef):
+                continue
+            names = [
+                decorator.args[0].value
+                for decorator in command.decorator_list
+                if isinstance(decorator, ast.Call)
+                and decorator.args
+                and isinstance(decorator.args[0], ast.Constant)
+            ]
+            for name in names:
+                if name not in OPERATIONS:
+                    continue
+                text = ast.get_docstring(command) or name
+                if arguments.get("key") == name:
+                    examples = parse_qrp_json_object(
+                        (
+                            package.parents[1] / "configs/research-learning/agent.json"
+                        ).read_bytes()
+                    )
+                    templates = [
+                        *examples["tools"].values(),
+                        *examples.get("final_evaluation", []),
+                    ]
+                    example = next(
+                        (item for item in templates if item["operation"] == name), None
+                    )
+                    if example is not None:
+                        text += (
+                            "\nExample template for research.config. "
+                            "Replace bindings with artifact: references. "
+                            "Example paths, labels and dates are not task inputs.\n"
+                            + json.dumps(example, ensure_ascii=False, indent=2)
+                        )
+                    binding = next(
+                        node
+                        for node in ast.walk(command)
+                        if isinstance(node, ast.ImportFrom)
+                        and node.module.startswith("quant_research_platform.")
+                    )
+                    source = (
+                        package.joinpath(*binding.module.split(".")[1:])
+                        .with_suffix(".py")
+                        .read_text(encoding="utf-8")
+                    )
+                    function = next(
+                        node
+                        for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef)
+                        and node.name == binding.names[0].name
+                    )
+                    text += (
+                        "\nNative entry point (includes exact config fields):\n"
+                        + ast.get_source_segment(source, function)
+                    )
+                    text += "\nModule helpers and contracts:\n" + source
+                documents[name] = sanitize_shared_text(text)
     elif scope == "catalog":
         profile = research_profile(A_SHARE_PROFILE_ID)
         documents = {
@@ -67,6 +135,8 @@ def lookup(arguments, state):
         }
     elif scope == "memory":
         for path in sorted(Path(state["config"]["memory"]).glob("*.json")):
+            if "key" in arguments and path.stem != arguments["key"]:
+                continue
             value = parse_qrp_json_object(path.read_bytes())
             value.pop("local_source", None)
             documents[path.stem] = sanitize_shared_text(
@@ -84,9 +154,17 @@ def lookup(arguments, state):
             else None,
         }
     terms = query.casefold().split()
+    terms += sorted(
+        {
+            word[index : index + 2]
+            for word in re.findall(r"[\u4e00-\u9fff]{3,}", query)
+            for index in range(len(word) - 1)
+        }
+    )
     matches = []
     for name, content in documents.items():
-        score = sum(term in (name + " " + content).casefold() for term in terms)
+        searchable = (name + " " + content).casefold()
+        score = sum(term in searchable for term in terms)
         if terms and not score:
             continue
         snippets = [

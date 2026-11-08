@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from quant_research_platform.agents.execution import error_feedback
 from quant_research_platform.agents.knowledge import lookup
 from quant_research_platform.agents.runner import run_agent
@@ -31,6 +33,52 @@ def test_report_csv_lookup_preserves_values_and_pagination(tmp_path):
     )
     assert first["text"] + rest["text"] == content
     assert rest["next_offset"] is None
+
+
+@pytest.mark.parametrize("scope", ["documents", "memory"])
+def test_keyed_lookup_reads_only_the_requested_record(tmp_path, scope):
+    if scope == "documents":
+        source = tmp_path / "target.md"
+        source.write_text("费用后的收益为负。", encoding="utf-8")
+        state = {
+            "config": {
+                "documents": {
+                    "target": str(source),
+                    "unrelated": str(tmp_path / "missing.md"),
+                }
+            }
+        }
+    else:
+        (tmp_path / "target.json").write_text(
+            json.dumps(
+                {"finding": "费用后的收益为负。", "local_source": {"root": "hidden"}}
+            ),
+            encoding="utf-8",
+        )
+        (tmp_path / "unrelated.json").write_text("invalid JSON", encoding="utf-8")
+        state = {"config": {"memory": str(tmp_path)}}
+    result = lookup({"scope": scope, "query": "", "key": "target"}, state)
+    assert "费用后的收益为负。" in result["text"]
+    assert "local_source" not in result["text"]
+    with pytest.raises(KeyError):
+        lookup({"scope": scope, "query": "", "key": "../unrelated"}, state)
+
+
+def test_chinese_lookup_recalls_related_terms_and_prefers_exact_match(tmp_path):
+    documents = {
+        "related": "各窗口收益为负，不能用最优窗口代表全体。",
+        "exact": "整体收益应结合各窗口结果解释。",
+        "irrelevant": "模型使用线性回归。",
+    }
+    paths = {}
+    for name, text in documents.items():
+        path = tmp_path / f"{name}.md"
+        path.write_text(text, encoding="utf-8")
+        paths[name] = str(path)
+    state = {"config": {"documents": paths}}
+    result = lookup({"scope": "documents", "query": "整体收益"}, state)
+    assert [item["key"] for item in result["matches"]] == ["exact", "related"]
+    assert "窗口收益为负" in result["matches"][1]["excerpt"]
 
 
 def test_patch_is_reviewable_and_original_source_is_unchanged(tmp_path, monkeypatch):

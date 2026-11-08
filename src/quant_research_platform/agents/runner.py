@@ -17,6 +17,7 @@ from quant_research_platform.agents.execution import (
 )
 from quant_research_platform.agents.knowledge import lookup, propose_patch, remember
 from quant_research_platform.agents.protocol import (
+    OPERATIONS,
     artifact_references,
     validate_budget,
     validate_config,
@@ -62,6 +63,10 @@ def run_agent(config, *, client=None, control=None, on_event=None):
             key: str(Path(value).resolve())
             for key, value in config["sandbox"]["inputs"].items()
         }
+    if "inputs" in config:
+        config["inputs"] = {
+            key: str(Path(value).resolve()) for key, value in config["inputs"].items()
+        }
     state = {
         "version": 1,
         "id": uuid4().hex,
@@ -69,7 +74,7 @@ def run_agent(config, *, client=None, control=None, on_event=None):
         "config": config,
         "public": public,
         "status": "ready",
-        "phase": "development",
+        "phase": "discussion" if config["protocol"] is None else "development",
         "events": [],
         "requests": [],
         "steering": [],
@@ -143,10 +148,14 @@ class _Runner:
         self.control, self.on_event = control, on_event
         self.started = time.monotonic()
         self.elapsed_before = state["elapsed_seconds"]
-        self.test_start = pd.Timestamp(
-            time_window_timestamp_interval(
-                TimeWindow(**self.config["protocol"]["test_window"])
-            )[0]
+        self.test_start = (
+            None
+            if self.config["protocol"] is None
+            else pd.Timestamp(
+                time_window_timestamp_interval(
+                    TimeWindow(**self.config["protocol"]["test_window"])
+                )[0]
+            )
         )
 
     def checkpoint(self):
@@ -289,7 +298,14 @@ class _Runner:
             )
 
     def execute(self, action, *, final_template=None):
-        native = action.tool in self.config["tools"] or final_template is not None
+        dynamic = (
+            final_template is None
+            and action.tool == "research"
+            and "inputs" in self.config
+        )
+        native = (
+            dynamic or action.tool in self.config["tools"] or final_template is not None
+        )
         experiment = native or action.tool == "python"
         if not self.budget_available(
             experiment=experiment, request=action.tool == "web_search"
@@ -300,12 +316,45 @@ class _Runner:
         try:
             arguments = action.arguments()
             if native:
-                arguments = _strict_config(arguments, set(), {"parameters", "inputs"})
-                template = (
-                    final_template
-                    if final_template is not None
-                    else self.config["tools"][action.tool]
-                )
+                if self.config["protocol"] is None:
+                    raise ValueError("agent_research_protocol_required")
+                if dynamic:
+                    arguments = _strict_config(
+                        arguments, {"operation", "config"}, {"metrics", "facts"}
+                    )
+                    if arguments["operation"] not in OPERATIONS:
+                        raise ValueError("agent_operation_not_allowed")
+                    model_key = (
+                        "model"
+                        if arguments["operation"]
+                        in {"predict", "explain", "backtest-cost-model"}
+                        else "policy"
+                        if arguments["operation"] == "backtest-policy"
+                        and arguments["config"].get("strategy") == "ppo"
+                        else None
+                    )
+                    if model_key is not None and not str(
+                        arguments["config"][model_key]
+                    ).startswith("artifact:"):
+                        raise ValueError("agent_model_requires_native_evidence")
+                    template = {
+                        "operation": arguments["operation"],
+                        "config": arguments["config"],
+                        "description": action.summary,
+                        "parameters": {},
+                        "metrics": arguments.get("metrics", {}),
+                        "facts": arguments.get("facts", {}),
+                    }
+                    arguments = {}
+                else:
+                    arguments = _strict_config(
+                        arguments, set(), {"parameters", "inputs"}
+                    )
+                    template = (
+                        final_template
+                        if final_template is not None
+                        else self.config["tools"][action.tool]
+                    )
                 result, artifact = run_native(
                     template,
                     arguments.get("parameters", {}),
@@ -314,10 +363,74 @@ class _Runner:
                     self.config["protocol"],
                     root,
                     timeout=max(0.001, self.remaining()),
+                    attached_inputs=self.config.get("inputs", {}),
                     cwd=Path(self.state["cwd"]),
                     test_start=self.test_start if final_template is None else None,
                 )
                 trusted = True
+            elif action.tool == "configure" and "inputs" in self.config:
+                arguments = _strict_config(
+                    arguments, {"protocol"}, {"final_evaluation"}
+                )
+                if arguments["protocol"] is None:
+                    raise ValueError("agent_research_protocol_required")
+                experiment_started = any(
+                    item["experiment"] and item["phase"] == "development"
+                    for item in self.state["events"]
+                )
+                if (
+                    experiment_started
+                    and arguments["protocol"] != self.config["protocol"]
+                ):
+                    raise ValueError("agent_protocol_already_in_use")
+                if (
+                    self.config.get("final_evaluation")
+                    and "final_evaluation" in arguments
+                    and arguments["final_evaluation"] != self.config["final_evaluation"]
+                    and experiment_started
+                ):
+                    raise ValueError("agent_final_steps_already_in_use")
+                settings = deepcopy(self.config)
+                settings.update(arguments)
+                settings, public = validate_config(settings)
+                self.config.update(settings)
+                self.state["public"] = public
+                self.state["phase"] = "development"
+                self.test_start = pd.Timestamp(
+                    time_window_timestamp_interval(
+                        TimeWindow(**settings["protocol"]["test_window"])
+                    )[0]
+                )
+                result = {
+                    "status": "completed",
+                    "protocol": public["protocol"],
+                    "final_evaluation": public["final_evaluation"],
+                }
+            elif action.tool == "compare":
+                arguments = _strict_config(arguments, {"evidence"}, set())
+                sources = {item["id"]: item for item in self.state["events"][:-1]}
+                result = {
+                    "status": "completed",
+                    "rows": [
+                        {
+                            "evidence": identifier,
+                            **{
+                                key: value
+                                for key, value in sources[identifier]["result"].items()
+                                if key
+                                in {
+                                    "status",
+                                    "metrics",
+                                    "scope",
+                                    "metric_definitions",
+                                    "error",
+                                    "reason",
+                                }
+                            },
+                        }
+                        for identifier in arguments["evidence"]
+                    ],
+                }
             elif action.tool == "python":
                 arguments = _strict_config(arguments, {"code"}, {"inputs"})
                 sandbox = deepcopy(self.config["sandbox"])
@@ -346,7 +459,7 @@ class _Runner:
                 atomic_write_json(root / "sources.json", response)
                 result = {
                     "status": "completed",
-                    "text": response["text"][:6000],
+                    "text": response["text"][:30000],
                     "sources": response["sources"][:12],
                 }
             elif action.tool == "remember":
@@ -420,8 +533,8 @@ class _Runner:
     def handle_decision(self, action):
         event, _ = self.new_event(action, experiment=False)
         try:
-            prior = {item["id"] for item in self.state["events"][:-1]}
-            if set(action.evidence) - prior:
+            prior = {item["id"]: item for item in self.state["events"][:-1]}
+            if set(action.evidence) - prior.keys():
                 raise ValueError("agent_conclusion_evidence_invalid")
             if action.kind == "ask_user":
                 if action.arguments():
@@ -432,7 +545,28 @@ class _Runner:
             elif action.kind == "freeze":
                 self.freeze(action)
             elif action.kind == "finish":
-                arguments = _strict_config(action.arguments(), set(), {"outcome"})
+                arguments = _strict_config(
+                    action.arguments(), set(), {"outcome", "claims"}
+                )
+                claims = arguments.get("claims", [])
+                if type(claims) is not list:
+                    raise ValueError("agent_claims_must_be_list")
+                for claim in claims:
+                    claim = _strict_config(
+                        claim, {"evidence", "metric", "value"}, set()
+                    )
+                    if claim["evidence"] not in action.evidence:
+                        raise ValueError("agent_claim_evidence_not_cited")
+                    metrics = prior[claim["evidence"]]["result"].get("metrics", {})
+                    if claim["metric"] not in metrics:
+                        raise ValueError("agent_claim_metric_not_found")
+                    if claim["value"] is not None and type(claim["value"]) not in {
+                        int,
+                        float,
+                    }:
+                        raise ValueError("agent_claim_value_must_be_numeric_or_null")
+                    if claim["value"] != metrics[claim["metric"]]:
+                        raise ValueError("agent_claim_value_mismatch")
                 if (
                     self.state["phase"] == "development"
                     and self.config.get("final_evaluation")
@@ -475,7 +609,7 @@ class _Runner:
                 if self.state["phase"] == "reporting" and not (
                     action.kind == "finish"
                     or action.kind == "tool"
-                    and action.tool == "lookup"
+                    and action.tool in {"lookup", "compare"}
                 ):
                     event, _ = self.new_event(action, experiment=False)
                     self.finish_event(

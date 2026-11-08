@@ -23,6 +23,7 @@ build/
 dist/
 .run/
 /outputs/
+/results/
 *.egg-info/
 .coverage
 

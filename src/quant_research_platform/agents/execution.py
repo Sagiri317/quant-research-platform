@@ -21,6 +21,7 @@ import pandas as pd
 from quant_research_platform.agents.protocol import (
     before_holdout,
     bind_protocol,
+    resolve_inputs,
     set_argument,
 )
 from quant_research_platform.contracts.json_codec import (
@@ -70,6 +71,7 @@ def run_native(
     root,
     *,
     timeout,
+    attached_inputs,
     test_start=None,
     cwd=None,
 ):
@@ -79,7 +81,7 @@ def run_native(
     arguments = deepcopy(template["config"])
     for path, value in parameters.items():
         set_argument(arguments, path, value)
-    arguments = bind_protocol(arguments, protocol)
+    arguments = resolve_inputs(bind_protocol(arguments, protocol), attached_inputs)
     bindings = template.get("bindings", {})
     if set(inputs) != set(bindings):
         raise ValueError("agent_input_bindings_mismatch")
@@ -156,9 +158,23 @@ def run_native(
     result = {
         "exit_code": exit_code,
         "status": "completed" if exit_code == 0 else "failed",
+        "scope": {
+            "operation": operation,
+            **{
+                key: arguments[key]
+                for key in (
+                    "window",
+                    "output_window",
+                    "prediction_window",
+                    "sample_role",
+                )
+                if key in arguments
+            },
+        },
     }
     if exit_code == 0:
         result["metrics"] = _metrics(artifact, template["metrics"])
+        result["metric_definitions"] = template["metrics"]
         if template.get("facts"):
             result["facts"] = _facts(artifact, template["facts"])
     else:
@@ -393,19 +409,16 @@ def _metrics(output, definitions):
                 raise ValueError("agent_metric_numeric_required")
             values = pd.Series([value], dtype=float)
         elif source.is_dir():
-            from quant_research_platform.artifacts.portfolio_ledger import (
-                read_portfolio_ledger_artifact,
-                summarize_portfolio_ledger,
-            )
+            if (source / "spec.json").is_file():
+                from quant_research_platform.storage.datasets import read_dataset
 
-            if source not in ledger_summaries:
-                ledger = read_portfolio_ledger_artifact(source)
-                ledger_summaries[source] = summarize_portfolio_ledger(
-                    ledger.capital, ledger.iter_chunks()
-                )
-            values = pd.Series(
-                [ledger_summaries[source][definition["column"]]], dtype=float
-            )
+                values = read_dataset(
+                    source,
+                    columns=[definition["column"]],
+                    row_filters=definition.get("filters", ()),
+                )[definition["column"]]
+            else:
+                values = _ledger_metric(source, definition["column"], ledger_summaries)
         else:
             raise ValueError("agent_metric_format_invalid")
         if not pd.api.types.is_numeric_dtype(values):
@@ -421,3 +434,18 @@ def _metrics(output, definitions):
             raise ValueError("agent_metric_nonfinite")
         result[name] = value
     return result
+
+
+def _ledger_metric(source, column, ledger_summaries):
+    """Summarize a native ledger once for all requested metrics."""
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        summarize_portfolio_ledger,
+    )
+
+    if source not in ledger_summaries:
+        ledger = read_portfolio_ledger_artifact(source)
+        ledger_summaries[source] = summarize_portfolio_ledger(
+            ledger.capital, ledger.iter_chunks()
+        )
+    return pd.Series([ledger_summaries[source][column]], dtype=float)

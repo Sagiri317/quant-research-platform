@@ -39,14 +39,32 @@ OPERATIONS = {
     "evaluate-uncertainty",
     "fit-cost-model",
     "backtest-cost-model",
+    "normalize-book",
+    "evaluate-time-series",
+    "analyze-inventory",
+    "fit-hawkes",
+    "backtest-hft",
+    "explain",
 }
 TUNABLE = re.compile(
     r"^(?:model\.(?:model_algorithm|input_factor_columns|input_feature_columns|"
     r"hyperparameters\.[A-Za-z_][A-Za-z_0-9]*)|"
     r"candidate_parameters\.[A-Za-z_][A-Za-z_0-9]*|"
     r"columns|expressions|feature_columns|baseline_columns|hidden_sizes|epochs|"
-    r"learning_rate|ppo\.[A-Za-z_][A-Za-z_0-9]*)$"
+    r"learning_rate|ppo\.[A-Za-z_][A-Za-z_0-9]*|"
+    r"parameters\.(?:buy_threshold|sell_threshold))$"
 )
+
+
+def resolve_inputs(value, inputs):
+    """Resolve explicitly attached local inputs without exposing their paths."""
+    if isinstance(value, str) and value.startswith("input:"):
+        return inputs[value.removeprefix("input:")]
+    if isinstance(value, dict):
+        return {key: resolve_inputs(item, inputs) for key, item in value.items()}
+    if isinstance(value, list):
+        return [resolve_inputs(item, inputs) for item in value]
+    return value
 
 
 def bind_protocol(value, protocol):
@@ -148,7 +166,11 @@ def validate_budget(budget):
         {"max_requests", "max_experiments", "wall_seconds"},
         {"max_context_chars", "max_tokens"},
     )
-    if any(type(value) is not int or value < 1 for value in budget.values()):
+    if any(
+        type(value) is not int or value < 1
+        for key, value in budget.items()
+        if key != "max_context_chars" or value is not None
+    ):
         raise ValueError("agent_budget_invalid")
     return budget
 
@@ -157,40 +179,27 @@ def validate_config(config):
     config = _strict_config(
         config,
         {"question", "protocol", "tools", "budget", "output", "llm"},
-        {"sandbox", "documents", "memory", "final_evaluation", "web_search"},
-    )
-    protocol = _strict_config(
-        config["protocol"],
         {
-            "label",
-            "train_window",
-            "validation_window",
-            "test_window",
-            "costs",
-            "metric",
+            "sandbox",
+            "documents",
+            "memory",
+            "final_evaluation",
+            "web_search",
+            "inputs",
+            "history",
         },
-        set(),
     )
-    test_start = pd.Timestamp(
-        time_window_timestamp_interval(TimeWindow(**protocol["test_window"]))[0]
-    )
-    _, train_end, train_closed = time_window_timestamp_interval(
-        TimeWindow(**protocol["train_window"])
-    )
-    val_start, val_end, val_closed = time_window_timestamp_interval(
-        TimeWindow(**protocol["validation_window"])
-    )
-    if (
-        not pd.Timestamp(train_end)
-        <= pd.Timestamp(val_start)
-        <= pd.Timestamp(val_end)
-        <= test_start
-        or train_closed
-        and pd.Timestamp(train_end) == pd.Timestamp(val_start)
-        or val_closed
-        and pd.Timestamp(val_end) == test_start
-    ):
-        raise ValueError("agent_protocol_windows_overlap")
+    protocol = config["protocol"]
+    if protocol is None:
+        if config["tools"] or config.get("final_evaluation") or "sandbox" in config:
+            raise ValueError("agent_research_protocol_required")
+        test_start = None
+    else:
+        protocol = validate_protocol(protocol)
+        config["protocol"] = protocol
+        test_start = pd.Timestamp(
+            time_window_timestamp_interval(TimeWindow(**protocol["test_window"]))[0]
+        )
     config["budget"] = validate_budget(config["budget"])
     public_tools = {}
     final = config.get("final_evaluation", [])
@@ -251,6 +260,47 @@ def validate_config(config):
             for item in resolved_final
         ],
     }
-    if evidence_json_value_unsafe_reason(public):
+    if "inputs" in config:
+        public["inputs"] = sandbox_context(config["inputs"])
+        public["operations"] = sorted(OPERATIONS)
+    if evidence_json_value_unsafe_reason(public) or evidence_json_value_unsafe_reason(
+        config.get("history", [])
+    ):
         raise ValueError("agent_public_context_not_shareable")
     return config, public
+
+
+def validate_protocol(protocol):
+    protocol = _strict_config(
+        protocol,
+        {
+            "label",
+            "train_window",
+            "validation_window",
+            "test_window",
+            "costs",
+            "metric",
+        },
+        set(),
+    )
+    test_start = pd.Timestamp(
+        time_window_timestamp_interval(TimeWindow(**protocol["test_window"]))[0]
+    )
+    _, train_end, train_closed = time_window_timestamp_interval(
+        TimeWindow(**protocol["train_window"])
+    )
+    val_start, val_end, val_closed = time_window_timestamp_interval(
+        TimeWindow(**protocol["validation_window"])
+    )
+    if (
+        not pd.Timestamp(train_end)
+        <= pd.Timestamp(val_start)
+        <= pd.Timestamp(val_end)
+        <= test_start
+        or train_closed
+        and pd.Timestamp(train_end) == pd.Timestamp(val_start)
+        or val_closed
+        and pd.Timestamp(val_end) == test_start
+    ):
+        raise ValueError("agent_protocol_windows_overlap")
+    return protocol
