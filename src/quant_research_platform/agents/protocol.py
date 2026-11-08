@@ -1,5 +1,6 @@
 """Bind native research tools to one caller-owned scientific protocol."""
 
+import os
 import re
 from copy import deepcopy
 from pathlib import Path
@@ -187,6 +188,7 @@ def validate_config(config):
             "web_search",
             "inputs",
             "history",
+            "workspace",
         },
     )
     protocol = config["protocol"]
@@ -262,7 +264,20 @@ def validate_config(config):
     }
     if "inputs" in config:
         public["inputs"] = sandbox_context(config["inputs"])
-        public["operations"] = sorted(OPERATIONS)
+        if "workspace" not in config:
+            public["operations"] = sorted(OPERATIONS)
+    if "workspace" in config:
+        config["workspace"] = str(Path(config["workspace"]).resolve(strict=True))
+        public["runtime"] = {
+            "model": config["llm"].get("model"),
+            "shell": "PowerShell" if os.name == "nt" else "Bash",
+            "web_search": config.get("web_search", False),
+            "workspace": ".",
+            "source": "src/quant_research_platform/",
+            "data": "data/",
+            "python": "QRP_PYTHON",
+            "outputs": "QRP_OUTPUT",
+        }
     if evidence_json_value_unsafe_reason(public) or evidence_json_value_unsafe_reason(
         config.get("history", [])
     ):

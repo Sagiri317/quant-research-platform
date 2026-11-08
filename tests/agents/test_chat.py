@@ -172,7 +172,8 @@ def test_status_and_tools_redraw_prompt_without_consuming_question(
     root = workspace / "turn-001"
     text = capsys.readouterr().out
     assert "当前：等待输入" in text
-    assert "search-factors" in text and "backtest-hft" in text
+    assert "read" in text and "search" in text and "terminal" in text
+    assert "search-factors" not in text and "backtest-hft" not in text
     assert text.count("你> ") >= 3
     assert len(client.messages) == 1
     assert "/status" not in read_session(root)["public"]["question"]

@@ -25,7 +25,9 @@ qrp agent --resume results/agent-session --message "保留原口径，继续检�
 qrp agent --resume results/agent-session --budget more-budget.json
 ```
 
-不带配置时直接进入连续对话。默认读取报告复核示例中的模型连接、文档和记忆设置，但不继承其历史研究协议；实际研究工具通过 `configure` 和 `research` 开放。每个新问题建立独立任务，近期问答直接进入上下文，较旧记录按需检索。生成目录默认为 `results/agent-chat/<对话编号>/`，由 `.gitignore` 忽略。
+不带配置时直接进入连续对话，开放 `read`、`search`、`terminal` 三个工具：直接读当前仓库和 `data/`、搜索本地或网络资料、用当前项目 Python 调用仓库源码。无需先手动绑定本地数据或建立研究协议，就能盘点数据、查看因子和提出假设。默认继承报告复核示例的模型连接与预算设置，不继承其历史研究协议。每个新问题建立独立任务，近期问答直接进入上下文。生成目录默认为 `results/agent-chat/<对话编号>/`，由 `.gitignore` 忽略。
+
+自动挖因子是主要研究用途，具体步骤、原生搜索的能力与限制见 [自动化挖因子](factor-mining.md)。Agent 不另外实现因子算法；它读取真实入口和配置，调用原有数据准备、公式搜索、统计、模型和回测代码，依据训练反馈继续研究。
 
 对话目录中的 `conversation.json` 保存工作配置，每轮的 `session.json` 保存任务事实。`qrp agent --resume <对话目录>` 恢复完整对话；`--status` 只读查看本轮及累计消耗。已完成的研究任务保持完成状态，追问建立新任务。
 
@@ -37,7 +39,7 @@ qrp agent --resume results/agent-session --budget more-budget.json
 |---|---|
 | `/status` | 查看等待输入、等待模型或任务状态、本轮与累计消耗，并恢复输入提示 |
 | `/help` | 查看终端命令 |
-| `/tools` | 列出当前实际开放的研究操作 |
+| `/tools` | 默认列出读文件、搜索和本地终端三个通用工具；显式配置任务列出其原生操作 |
 | `/data 别名 数据集目录` | 在两轮任务之间绑定原生数据集，路径只在本地保存，模型接收别名及元数据 |
 | `/pause` | 在当前行动结束后保存并暂停 |
 | `Ctrl+C` | 中断当前行动，清理本次拥有的子进程或容器，保存暂停状态 |
@@ -52,6 +54,8 @@ qrp agent --resume results/agent-session --budget more-budget.json
 ## 模型与预算
 
 `llm` 使用 OpenAI Responses API 和严格结构化输出，传输使用 HTTPX，无新增 Agent 框架依赖。
+
+模型响应在 `action` 字段中返回行动。schema 区分必须带非空工具名的工具行动和工具名为空的提问、冻结、结束行动，避免等到执行时才发现两字段矛盾；本地会话仍保存原有的扁平行动记录，不新增第二套状态格式。
 
 | 字段 | 示例 | 含义 |
 |---|---|---|
@@ -72,15 +76,25 @@ $env:QRP_RESEARCH_API_KEY = [Environment]::GetEnvironmentVariable('QRP_RESEARCH_
 
 `budget` 必填 `max_requests`、`max_experiments`、`wall_seconds`。网络检索也占一次请求，最终评价也占实验预算；暂停期间不计运行时间。可选 `max_tokens` 在调用返回后按供应商报告的输入与输出 token 合计停止后续调用；它不是单次请求的精确费用硬上限。供应商未返回 usage，或输入/输出计数缺失、不是非负整数时，消耗记为未知；若启用 token 上限则明确失败，不接受该次行动或结论。
 
-`max_context_chars` 默认 300,000；设置为 `null` 可关闭本地字符裁剪，例如 `/budget {"max_context_chars":null}`。字符数只是粗略控制，不能代替模型的上下文 token 容量或费用限制。问题、协议、用户补充和冻结状态始终保留；裁剪时优先保留最近行动引用的证据和冻结候选，跳过超长结果后继续选择其他可容纳记录。完整行动与结果保存在本地，可通过 `lookup` 回读。近期对话使用部分上下文预算，不再固定限制在一万多字符。固定约束本身超出所选预算时明确失败。
+`max_context_chars` 默认 300,000；设置为 `null` 可关闭本地字符裁剪，例如 `/budget {"max_context_chars":null}`。字符数只是粗略控制，不能代替模型的上下文 token 容量或费用限制。问题、协议、用户补充和冻结状态始终保留；裁剪时优先保留最近行动引用的证据和冻结候选，跳过超长结果后继续选择其他可容纳记录。完整行动与结果保存在本地，默认可用 `read` 读取 `session:session.json`；显式配置的研究任务使用 `lookup`。近期对话使用部分上下文预算，不再固定限制在一万多字符。固定约束本身超出所选预算时明确失败。图片单独计入供应商的图片/token 用量，不算作本地文本字符。
 
 HTTPX 的超时控制连接和 I/O 等待，不是整个 HTTP 响应的绝对墙钟。慢响应和清理可能略超任务预算，返回后不再启动超预算的实验。
 
-## 任务配置与研究口径
+## 本地命令、网络与复杂文件
 
-连续对话可以先输入 `/data source <原生数据集目录>`，再用中文说明标签、研究区间、基线与目标。Agent 读取原生列角色、单位、频率和范围，缺少必要条件时只追问缺少部分，不套用示例中的 `x`、日期或费用。路径在本地绑定，研究参数用 `input:source` 引用输入。
+`terminal` 在本机运行命令，Windows 使用 PowerShell，Linux 使用 Bash。环境中的 `QRP_PYTHON` 指向启动 Agent 的项目解释器，`QRP_WORKSPACE` 指向仓库，`QRP_OUTPUT` 是每次行动的新输出目录。继承项目依赖和 `PYTHONPATH`，移除模型连接所用的密钥变量。它具有当前用户的文件和网络权限，**不是容器隔离**；不要给不可信来源的指令执行授权。普通工具输出会清理绝对路径、凭据模式和 traceback，原始日志只留本地。这不保证识别所有私人业务字段，研究脚本必须只打印结构和聚合统计。
 
-`configure` 接收固定的 `protocol` 和可选 `final_evaluation`；`research` 接收 `operation`、原生 `config`、数值提取 `metrics` 和聚合事实 `facts`。首次实验后不能更换协议，已经投入使用的固定最终步骤也不能改写。操作名称来自现有白名单，`lookup(scope=operations, key=<操作名>, query="")` 返回实际 CLI 对应的原生入口、配置字段及模块源码，不另维护一套计算 schema。保存的原生产物用 `artifact:e0001/member` 引用。模型和策略加载仅接受原生证据产物，不能用猜测的路径绕过生成产物的限制。
+`read` 支持文本、源码、目录、DOCX 正文与表格文字、Excel 表结构、CSV 列名及 Parquet schema/行数。图片会作为真实图片送入模型；PDF 按指定页返回文字和页面预览（默认第一页）。使用 `offset`、`limit` 分页，PDF 用从 1 开始的 `pages`。数据文件不自动上传明细。文件路径用仓库相对路径、`input:别名/成员` 或 `output:e0001/results/成员`，已有终端输出可通过返回的 `transcript` 继续分页读取，不必重跑命令。
+
+复杂文件写入通过终端调用已安装的 PyMuPDF、openpyxl、Pillow、pandas、pyarrow 或标准库 ZIP/XML；未安装的依赖明确报错，不自动安装。Word XML 读取不等于完整排版理解；复杂表格、图形或版式应先渲染，再用图片检查。默认没有音视频理解，也不承诺所有 Office 格式都能直接解析。
+
+默认 `search(scope=web)` 使用现有 Responses 网络搜索，只向服务发送检索词，并额外计一次请求。模型及 API 服务必须实际支持 `web_search` 和图片输入；不支持时返回错误，不静默假装执行。`search` 默认搜索本地源码；查找原始数据时使用 `files=true` 查文件名，在本机计算数据摘要。
+
+## 显式配置的研究任务
+
+原生数据集位于仓库外时，连续对话可以用 `/data source <原生数据集目录>` 绑定输入；仓库内的数据可以直接发现。真正进行实验时需明确标签、研究区间、基线与目标，缺少条件只追问缺少部分，不套用示例中的 `x`、日期或费用。
+
+对于通过 `--config` 显式提供原生模板的任务，保留固定协议、候选冻结和自动最终评价。配置中声明 `inputs` 时可使用 `configure` 和 `research`，后者接收 `operation`、原生 `config`、数值提取 `metrics` 和聚合事实 `facts`。首次实验后不能更换协议，已经投入使用的固定最终步骤也不能改写。`lookup(scope=operations, key=<操作名>, query="")` 返回实际原生入口及模块源码。保存的原生产物用 `artifact:e0001/member` 引用。该模板模式与默认的本地终端模式权限不同，下面有关原生证据和容器的约束适用于模板模式。
 
 原生研究调用支持盘口归一化 `normalize-book`、时间序列评价 `evaluate-time-series`、高频账户 `backtest-hft`、库存分解 `analyze-inventory`、`fit-hawkes` 及模型解释 `explain`。通用 `fit/predict` 继续服务日频和高频模型。`search-factors` 的选型目标仍是截面 RankIC，不能用来声称已经实现单只 ETF 的时间序列公式挖掘。
 

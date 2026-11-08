@@ -39,7 +39,7 @@ def test_http_transport_and_response_schema(
                         "content": [
                             {
                                 "type": "output_text",
-                                "text": '{"kind":"finish","summary":"Done"}',
+                                "text": '{"action":{"kind":"finish","summary":"Done"}}',
                             }
                         ],
                     },
@@ -74,6 +74,20 @@ def test_http_transport_and_response_schema(
     assert response_format["type"] == "json_schema"
     assert response_format["strict"] is True
     schema = response_format["schema"]
+    assert "anyOf" not in schema
+    branches = schema["properties"]["action"]["anyOf"]
+    definitions = [
+        schema["$defs"][branch["$ref"].rsplit("/", 1)[1]] for branch in branches
+    ]
+    tool = next(
+        item
+        for item in definitions
+        if item["properties"]["kind"].get("const") == "tool"
+    )
+    control = next(item for item in definitions if item is not tool)
+    assert tool["properties"]["tool"]["type"] == "string"
+    assert tool["properties"]["tool"]["minLength"] == 1
+    assert control["properties"]["tool"]["type"] == "null"
     for model in [schema, *schema.get("$defs", {}).values()]:
         assert model["additionalProperties"] is False
         assert set(model["required"]) == set(model["properties"])

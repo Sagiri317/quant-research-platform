@@ -32,6 +32,13 @@ from quant_research_platform.agents.session import (
     token_usage,
     usage_summary,
 )
+from quant_research_platform.agents.workspace import (
+    TOOLS,
+    _page,
+    read_local,
+    run_terminal,
+    search_local,
+)
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
@@ -47,7 +54,9 @@ from quant_research_platform.storage.atomic import atomic_write_json, reject_if_
 def run_agent(config, *, client=None, control=None, on_event=None):
     """Create and run a session; control returns queued user messages or /pause."""
     config, public = validate_config(config)
-    if set(config["tools"]) & set(BUILTINS):
+    if set(config["tools"]) & (
+        set(BUILTINS) | (set(TOOLS) if "workspace" in config else set())
+    ):
         raise ValueError("agent_tool_name_reserved")
     root = Path(config["output"]).resolve()
     reject_if_exists(root)
@@ -306,16 +315,56 @@ class _Runner:
         native = (
             dynamic or action.tool in self.config["tools"] or final_template is not None
         )
-        experiment = native or action.tool == "python"
-        if not self.budget_available(
-            experiment=experiment, request=action.tool == "web_search"
-        ):
+        arguments = action.arguments()
+        web = action.tool == "web_search" or (
+            action.tool == "search"
+            and "workspace" in self.config
+            and arguments.get("scope", "workspace") == "web"
+        )
+        experiment = native or action.tool in {"python", "terminal"}
+        if not self.budget_available(experiment=experiment, request=web):
             return None
         event, root = self.new_event(action, experiment=experiment)
         artifact, trusted = None, False
         try:
-            arguments = action.arguments()
-            if native:
+            if "workspace" in self.config and action.tool not in TOOLS:
+                raise ValueError("agent_tool_unknown")
+            if "workspace" in self.config:
+                if action.tool == "read":
+                    result = read_local(arguments, self.state, root)
+                elif action.tool == "terminal":
+                    result = run_terminal(
+                        arguments,
+                        self.state,
+                        root,
+                        timeout=max(0.001, self.remaining()),
+                    )
+                    artifact = root / "results"
+                elif web:
+                    arguments = _strict_config(
+                        arguments, {"query", "scope"}, {"offset", "limit"}
+                    )
+                    if not self.config.get("web_search", False):
+                        raise ValueError("agent_web_search_not_enabled")
+                    response = self.request(
+                        "web_search", sanitize_shared_text(arguments["query"])
+                    )
+                    atomic_write_json(root / "sources.json", response)
+                    result = {
+                        "status": "completed",
+                        **_page(response["text"], arguments),
+                        "sources": response["sources"],
+                    }
+                else:
+                    if arguments.get("scope", "workspace") != "workspace":
+                        raise ValueError("agent_search_scope_invalid")
+                    result = search_local(
+                        arguments,
+                        self.state,
+                        root,
+                        timeout=max(0.001, self.remaining()),
+                    )
+            elif native:
                 if self.config["protocol"] is None:
                     raise ValueError("agent_research_protocol_required")
                 if dynamic:

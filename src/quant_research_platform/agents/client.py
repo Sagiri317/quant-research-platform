@@ -36,15 +36,32 @@ class AgentAction(BaseModel):
     def arguments(self):
         return parse_qrp_json_object(self.arguments_json.encode("utf-8"))
 
-    @classmethod
-    def response_schema(cls):
+    @staticmethod
+    def response_schema():
         """Make all action fields explicit as required by strict Structured Outputs."""
-        schema = cls.model_json_schema()
+        schema = _ModelResponse.model_json_schema()
         for model in [schema, *schema.get("$defs", {}).values()]:
             model["required"] = list(model["properties"])
             for field in model["properties"].values():
                 field.pop("default", None)
         return schema
+
+
+class _ToolAction(AgentAction):
+    kind: Literal["tool"]
+    tool: str = Field(min_length=1)
+
+
+class _ControlAction(AgentAction):
+    kind: Literal["ask_user", "freeze", "finish"]
+    tool: None = None
+
+
+class _ModelResponse(BaseModel):
+    """Keep kind/tool consistency inside the provider's supported nested union."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    action: _ToolAction | _ControlAction
 
 
 class OpenAIResponsesClient:
@@ -108,9 +125,10 @@ class OpenAIResponsesClient:
                 },
             },
         )
-        return AgentAction.model_validate(
+        response = _ModelResponse.model_validate(
             parse_qrp_json_object(self._text(payload).encode("utf-8"))
         )
+        return response.action
 
     def search(self, query, *, timeout):
         """Search public sources without sending local research context."""

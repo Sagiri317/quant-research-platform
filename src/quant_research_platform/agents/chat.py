@@ -21,6 +21,7 @@ from quant_research_platform.agents.session import (
     replace_json,
     usage_summary,
 )
+from quant_research_platform.agents.workspace import TOOLS
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -59,7 +60,9 @@ def chat_status(root):
         "pending_question": state["pending_question"] if state else None,
         "waiting_for_model": running,
         "inputs": list(config.get("inputs", {})),
-        "tools": sorted(OPERATIONS)
+        "tools": list(TOOLS)
+        if "workspace" in config
+        else sorted(OPERATIONS)
         if "inputs" in config
         else list(config.get("tools", {})),
         "total_usage": total,
@@ -87,7 +90,14 @@ class _Terminal:
                     if key in profile
                 }
                 self.config["documents"] = deepcopy(profile.get("documents", {}))
-                self.config.update(question="", protocol=None, tools={}, inputs={})
+                self.config.update(
+                    question="",
+                    protocol=None,
+                    tools={},
+                    inputs={},
+                    workspace=str(Path.cwd()),
+                    web_search=True,
+                )
                 self.config["budget"].update(
                     max_requests=40,
                     max_experiments=30,
@@ -161,9 +171,19 @@ class _Terminal:
                 if (self.root / "session.json").exists()
                 else self.config
             )
-            names = sorted(OPERATIONS) if "inputs" in config else list(config["tools"])
-            self.emit("原生研究工具：" + ", ".join(names))
-            self.emit("研究前需明确数据、标签、窗口和成本；缺少依赖只限制相应计算。")
+            if "workspace" in config:
+                self.emit(
+                    "工具：read（文件、数据结构和图片）、search（本地/网络）、terminal（本地命令）。"
+                )
+                self.emit(
+                    "可以直接读取当前仓库和 data/，调用源码完成因子研究；"
+                    "复杂文件用现有 Python 库处理。"
+                )
+            else:
+                names = (
+                    sorted(OPERATIONS) if "inputs" in config else list(config["tools"])
+                )
+                self.emit("原生研究工具：" + ", ".join(names))
         elif line.startswith("/data "):
             if not self.conversation:
                 raise ValueError("agent_data_requires_conversation")
@@ -310,8 +330,8 @@ class _Terminal:
 
     def run(self, *, resume=None, message=None, budget=None):
         self.emit(
-            "量化研究助手。直接提问；用 /data 绑定数据后，"
-            "可在对话中建立日频或高频研究任务。"
+            "量化研究助手。可直接查看当前仓库和 data/，"
+            "搜索资料，调用本地命令开展因子研究。"
             if self.conversation
             else "研究会话已启动。"
         )
