@@ -128,7 +128,7 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
     sessions = {
         name: open_dataset_session(**_dataset_input_options(path))
         for name, path in inputs.items()
@@ -137,8 +137,6 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         if session.spec["data_id"] != name:
             raise ValueError("hft_input_identity_mismatch")
         validate_input_market(session.spec, "a_share")
-    from quant_research_platform.sources.venvoo import interim_spec
-
     missing = set(spec.optional_source_input_data_ids) - sessions.keys()
     absent = {
         name: pd.DataFrame(
@@ -150,7 +148,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     if column in {"volume", "price"}
                     else "object"
                 )
-                for column in interim_spec(name).required_columns
+                for column in source_catalog.get(name).required_columns
             }
         )
         for name in missing

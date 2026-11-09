@@ -457,6 +457,9 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 `prepare-source`的`source_id=public_research`接收带版本清单的结构化JSON、CSV、XLSX或ZIP内的表格。
 默认读取raw根下的`manifest.json`，也可用`manifests`显式列出多个相对raw根的清单，合并冻结批次和增量批次。
 文件路径必须在该根内；读取所需文件时核验原始字节数和SHA-256，不扫描或解码无关来源。
+可定位的坏数字／非有限业务单元格在唯一数值解释边界保留为NA，并按字段累计
+`source_invalid_numeric_cells`，其他字段及记录继续规范化；不补零。主键、来源结构、
+单位、哈希与可用时钟错误仍明确失败，不以数值缺失规则掩盖。
 表定义和单位由`sources/public_research/normalization.py`的`DATASETS`唯一声明：
 
 | 原生表 | 主要事实与口径 |

@@ -26,8 +26,10 @@ from quant_research_platform.research.factors.macro_liquidity.calculations impor
     calculate_macro_factors,
     macro_states,
     parameters,
+    required_factors,
 )
 from quant_research_platform.research.factors.macro_liquidity.definitions import (
+    PUBLIC_SERIES,
     RECIPES,
     factor_unit,
 )
@@ -69,8 +71,16 @@ def processed_specs():
             column_roles={**keys, **dict.fromkeys(RECIPES, "factor")},
             column_units={name: factor_unit(name) for name in RECIPES},
             processed_input_data_ids=("decision_panel",),
-            source_input_data_ids=("macro_observations", "trading_calendar"),
-            optional_source_input_data_ids=("trading_calendar",),
+            source_input_data_ids=(
+                "macro_observations",
+                "trading_calendar",
+                *dict.fromkeys(recipe[0] for recipe in PUBLIC_SERIES.values()),
+            ),
+            optional_source_input_data_ids=(
+                "macro_observations",
+                "trading_calendar",
+                *dict.fromkeys(recipe[0] for recipe in PUBLIC_SERIES.values()),
+            ),
         ),
     )
 
@@ -245,11 +255,84 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             )
     else:
         validate_input_market(session.spec, spec.market_id)
-        observations = materialize_dataset_session(
-            open_dataset_session(**_dataset_input_options(inputs["macro_observations"]))
-        )
         columns = tuple(
             name for name, role in spec.column_roles.items() if role == "factor"
+        )
+        from quant_research_platform.research.factors.macro_liquidity.public_observations import (  # noqa: E501
+            observations_for_series,
+        )
+
+        needed = required_factors(columns, parameters(config))
+        public_names = {
+            RECIPES[name][1]
+            for name in needed
+            if RECIPES[name][0] == "series" and RECIPES[name][1] in PUBLIC_SERIES
+        }
+        needs_macro = any(
+            RECIPES[name][0] == "series" and RECIPES[name][1] not in PUBLIC_SERIES
+            for name in needed
+        )
+        observations = (
+            materialize_dataset_session(
+                open_dataset_session(
+                    **_dataset_input_options(inputs["macro_observations"])
+                ).projected_view(
+                    ("series_id", "observation_date", "timestamp", "value")
+                )
+            )
+            if needs_macro and "macro_observations" in inputs
+            else observations_for_series(None, ())
+        )
+        missing_public = []
+        public_clocks = {}
+        for table in dict.fromkeys(
+            PUBLIC_SERIES[name][0] for name in sorted(public_names)
+        ):
+            if table not in inputs:
+                missing_public.append(table)
+                continue
+            names = [
+                name for name in sorted(public_names) if PUBLIC_SERIES[name][0] == table
+            ]
+            fields = tuple(
+                dict.fromkeys(
+                    field for name in names for field in PUBLIC_SERIES[name][2]
+                )
+            )
+            public_session = open_dataset_session(
+                **_dataset_input_options(inputs[table])
+            )
+            if public_session.spec["data_id"] != table:
+                raise ValueError("macro_public_input_identity_mismatch")
+            facts = materialize_dataset_session(
+                public_session.projected_view(
+                    (
+                        "asset_id",
+                        "timestamp",
+                        "available_at",
+                        "availability_basis",
+                        *fields,
+                    )
+                )
+            )
+            public_clocks[table] = {
+                "unknown_availability_rows": int(facts.available_at.isna().sum()),
+                "estimated_availability_rows": int(
+                    (
+                        facts.available_at.notna()
+                        & facts.availability_basis.ne("publication_timestamp")
+                    ).sum()
+                ),
+            }
+            converted = observations_for_series(facts, names)
+            public_clocks[table]["input_invalid_numeric_cells"] = converted.attrs[
+                "input_invalid_numeric_cells"
+            ]
+            observations = pd.concat((observations, converted), ignore_index=True)
+        metadata["producer_diagnostics"]["missing_public_sources"] = missing_public
+        metadata["producer_diagnostics"]["public_source_clocks"] = public_clocks
+        metadata["producer_diagnostics"]["missing_macro_observations"] = (
+            needs_macro and "macro_observations" not in inputs
         )
         declared = set(session.logical_columns)
         if (

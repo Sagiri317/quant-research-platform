@@ -5,7 +5,10 @@ import json
 import re
 import zipfile
 
+import numpy as np
 import pandas as pd
+
+from quant_research_platform.contracts.validation import strict_real_numeric_series
 
 DATASETS = {
     "public_finra_margin": {
@@ -156,14 +159,20 @@ def accepts(data_id, record):
 
 
 def _numbers(frame, columns):
+    counts = frame.attrs.setdefault("invalid_numeric_cells", {})
     for column in columns:
-        frame[column] = pd.to_numeric(
+        values = (
             frame[column]
             .astype("str")
             .str.replace(",", "", regex=False)
-            .replace({"": None, "--": None, "-": None, "N/A": None}),
-            errors="raise",
+            .replace({"": None, "--": None, "-": None, "N/A": None})
         )
+        numeric = strict_real_numeric_series(
+            values, error="public_numeric_invalid", errors="coerce"
+        )
+        finite = np.isfinite(numeric)
+        counts[column] = counts.get(column, 0) + int((values.notna() & ~finite).sum())
+        frame[column] = numeric.where(finite)
     return frame
 
 
@@ -527,9 +536,10 @@ def _sec(path, source):
                         "INFOTABLE_SK": "_holding_id",
                     },
                 )
-                result["value_usd"] = pd.to_numeric(
-                    result.value_usd, errors="raise"
-                ) * result.publication_date.lt("2023-01-03").map({True: 1000, False: 1})
+                _numbers(result, ("value_usd",))
+                result["value_usd"] *= result.publication_date.lt("2023-01-03").map(
+                    {True: 1000, False: 1}
+                )
             else:
                 result = _rename(
                     joined,

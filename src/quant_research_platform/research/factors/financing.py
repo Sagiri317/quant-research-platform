@@ -4,7 +4,10 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.factors import FactorDefinition
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_real_numeric_series,
+    strict_string_series,
+)
 
 RECIPES = {
     "financing_balance_to_float_cap": (
@@ -107,8 +110,28 @@ def calculate(
     if not required <= set(decisions):
         raise ValueError("financing_decision_inputs_missing")
     frame = decisions.loc[:, list(required)].reset_index(drop=True).copy()
+    frame["asset_id"] = strict_string_series(
+        frame.asset_id, error="financing_asset_id_invalid"
+    )
     if frame.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("financing_decision_key_duplicate")
+    counts = {}
+    numeric_context = required - {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "signal_session",
+        "listing_date",
+        "eligible",
+    }
+    for field in numeric_context:
+        raw = frame[field]
+        numeric = strict_real_numeric_series(
+            raw, error="financing_numeric_invalid", errors="coerce"
+        )
+        valid = np.isfinite(numeric) & numeric.ge(0)
+        counts[field] = int((raw.notna() & ~valid).sum())
+        frame[field] = numeric.where(valid)
     cutoffs = (
         pd.to_datetime(frame.timestamp, utc=True)
         .astype("datetime64[ns, UTC]")
@@ -144,7 +167,7 @@ def calculate(
         )[list(denominators)]
         historical = (
             reference.first()
-            .where(reference.nunique().le(1))
+            .where(reference.nunique(dropna=False).le(1))
             .reindex(pd.MultiIndex.from_arrays([frame.asset_id, base_dates, listed]))
             .set_axis(frame.index)
         )
@@ -152,6 +175,9 @@ def calculate(
     facts = observations.loc[
         :, ["asset_id", "timestamp", "available_at", *fields]
     ].copy()
+    facts["asset_id"] = strict_string_series(
+        facts.asset_id, error="financing_asset_id_invalid"
+    )
     facts["_obs"] = (
         pd.to_datetime(facts.pop("timestamp")).astype("datetime64[ns]").dt.normalize()
     )
@@ -165,15 +191,19 @@ def calculate(
     closing = facts._obs + pd.Timedelta(hours=7, minutes=30)
     facts["_clock"] = facts._clock.where(facts._clock.ge(closing), closing)
     for field in fields:
-        facts[field] = strict_finite_numeric_series(
-            facts[field],
-            error=f"financing_input_invalid:{field}",
-            allow_null=True,
-        ).where(lambda x: x.ge(0))
+        raw = facts[field]
+        numeric = strict_real_numeric_series(
+            raw, error="financing_numeric_invalid", errors="coerce"
+        )
+        valid = np.isfinite(numeric) & numeric.ge(0)
+        counts[field] = int((raw.notna() & ~valid).sum())
+        facts[field] = numeric.where(valid)
     key = ["asset_id", "_obs", "_clock"]
     # Identical archives may overlap; conflicting cells stay unknown at that clock.
     grouped = facts.groupby(key, sort=False, dropna=False)[list(fields)]
-    values = grouped.first().where(grouped.nunique().le(1)).reset_index()
+    values = grouped.first().where(grouped.nunique(dropna=False).le(1)).reset_index()
+    # pandas group keys may infer StringDtype when reset, unlike canonical PANEL keys.
+    values["asset_id"] = values.asset_id.astype("object")
     values = values.sort_values("_clock", kind="mergesort")
     cache = {}
 
@@ -216,12 +246,10 @@ def calculate(
     for name in columns:
         field, denominator, _ = RECIPES[name]
         if denominator:
-            divisor = strict_finite_numeric_series(
+            divisor = (
                 historical[denominator]
                 if historical is not None
-                else frame[denominator],
-                error=f"financing_input_invalid:{denominator}",
-                allow_null=True,
+                else frame[denominator]
             )
             result = known(field) / divisor.where(divisor.gt(0))
         else:
@@ -229,13 +257,10 @@ def calculate(
             baseline = known(field, lag)
             result = known(field) / baseline.where(baseline.gt(0)) - 1
         if name == "leveraged_liquidity_pressure":
-            descriptors = {}
-            for field in ("peak_drawdown_20d", "amihud_20d", "amihud_60d"):
-                descriptors[field] = strict_finite_numeric_series(
-                    frame[field],
-                    error=f"financing_input_invalid:{field}",
-                    allow_null=True,
-                )
+            descriptors = {
+                field: frame[field]
+                for field in ("peak_drawdown_20d", "amihud_20d", "amihud_60d")
+            }
             pressure = (
                 descriptors["amihud_20d"]
                 / descriptors["amihud_60d"].where(descriptors["amihud_60d"].gt(0))
@@ -248,4 +273,5 @@ def calculate(
                 * pressure
             )
         output[name] = result.where(np.isfinite(result) & frame.eligible.fillna(False))
+    output.attrs["input_invalid_numeric_cells"] = counts
     return output

@@ -1418,7 +1418,7 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
 
 @pytest.mark.parametrize(
     "missing",
-    ("stock_master", "market_cap", "trading_no_limit", "special_treatment_changes"),
+    ("market_bars_1d", "trading_calendar"),
 )
 def test_missing_mandatory_panel_source_fails_before_materialization(
     tmp_path, monkeypatch, missing

@@ -281,9 +281,10 @@ def processed_specs():
             partition_columns=("year",),
             column_roles=_roles(columns, factors=factors, labels=selected_labels),
             column_units={
-                column: "decimal_return"
-                if "return" in column
-                or column in {"realized_volatility_60s", "peak_drawdown_300s"}
+                column: "log_return"
+                if column == "realized_volatility_60s"
+                else "decimal_return"
+                if "return" in column or column == "peak_drawdown_300s"
                 else "direction"
                 if "direction" in column
                 else "CNY"

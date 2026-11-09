@@ -85,8 +85,17 @@ def prepare(config: Mapping) -> Path:
             from quant_research_platform.markets.implementations.a_share.processed.high_frequency import (  # noqa: E501
                 produce,
             )
+            from quant_research_platform.sources.venvoo import interim_spec
 
-            producer, kwargs = produce, {}
+            producer, kwargs = (
+                produce,
+                {
+                    "source_catalog": InterimDataCatalog(
+                        interim_spec(name)
+                        for name in ("hft_quotes", "hft_orders", "hft_trades")
+                    )
+                },
+            )
         elif spec.data_id == "financing_factors":
             from quant_research_platform.markets.implementations.a_share.processed.financing import (  # noqa: E501
                 produce,

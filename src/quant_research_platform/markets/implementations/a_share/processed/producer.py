@@ -138,12 +138,9 @@ def produce_a_share_processed_data(
         validate_input_market(source_sessions[data_id].spec, spec.market_id)
     if spec.data_id == "market_panel_1d":
         missing = {
-            "market_bars_1d",
-            "stock_master",
-            "market_cap",
-            "trading_calendar",
-            "trading_no_limit",
-            "special_treatment_changes",
+            name
+            for name in spec.source_input_data_ids
+            if name not in spec.optional_source_input_data_ids
         }.difference(source_sessions)
         if missing:
             raise ValueError(
@@ -939,11 +936,6 @@ def _align_panel_observations(declared, dependencies):
         indicator="_panel_observed",
     )
     panel["_panel_observed"] = panel["_panel_observed"].eq("both")
-    unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
-    if unknown.any():
-        for column in observed:
-            panel[column] = panel[column].where(~unknown)
-
     return panel, selected[keys]
 
 

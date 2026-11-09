@@ -227,7 +227,7 @@ def test_source_units_cancellation_and_snapshot_math():
     units = next(
         item.column_units for item in processed_specs() if item.data_id == "hft_factors"
     )
-    assert units["realized_volatility_60s"] == "dimensionless"
+    assert units["realized_volatility_60s"] == "log_return"
     assert units["observed_trade_volume_30s"] == "shares"
 
 

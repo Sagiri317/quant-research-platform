@@ -108,6 +108,63 @@ def test_sse_missing_lending_amount_is_not_zero(tmp_path):
     assert frame.financing_balance.tolist() == [100]
 
 
+def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_path):
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+
+    source = tmp_path / "raw"
+    source.mkdir()
+    records = []
+    for i in (1, 2):
+        payload = json.dumps(
+            {
+                "result": [
+                    {
+                        "opDate": "20240102",
+                        "stockCode": f"{i:06}",
+                        "rzye": i * 100,
+                        "rzmre": "invalid",
+                        "rzche": 3,
+                        "rqylje": "inf",
+                        "rqyl": 2,
+                        "rqmcl": 1,
+                    }
+                ]
+            }
+        ).encode()
+        name = f"margin-{i}.json"
+        (source / name).write_bytes(payload)
+        records.append(
+            {
+                "path": name,
+                "source": "sse_margin",
+                "status": "downloaded",
+                "url": "https://example.org/margin",
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "bytes": len(payload),
+                "retrieved_at": "2026-11-09T00:00:00Z",
+            }
+        )
+    (source / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": records})
+    )
+    output = tmp_path / "interim"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(source),
+            "outputs": {"public_margin_balances": str(output)},
+        }
+    )
+    frame = read_dataset(output)
+    assert sorted(frame.financing_balance) == [100, 200]
+    assert frame.financing_buy_amount.isna().all()
+    assert frame.lending_balance.isna().all()
+    manifest = open_dataset_session(output).manifest
+    counts = manifest["producer_diagnostics"]["source_invalid_numeric_cells"]
+    assert counts["financing_buy_amount"] == counts["lending_balance"] == 2
+    assert len(manifest["source_evidence"]["records"]) == 2
+
+
 @pytest.mark.parametrize(
     "clock,error",
     [

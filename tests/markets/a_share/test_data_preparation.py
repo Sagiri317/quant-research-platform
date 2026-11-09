@@ -876,9 +876,94 @@ def test_only_optional_absence_can_proceed(tmp_path, failure):
     if failure == "present_invalid":
         inputs["industry_classification"] = tmp_path / "missing-provided-source"
     else:
-        del inputs["market_cap"]
+        del inputs["trading_calendar"]
     with pytest.raises((ValueError, FileNotFoundError)):
         _prepare(
             tmp_path / "result", "market_panel_1d", inputs, sessions[0], sessions[-1]
         )
     assert not (tmp_path / "result" / "market_panel_1d").exists()
+
+
+@pytest.mark.parametrize(
+    "missing", ["market_cap", "trading_no_limit", "special_treatment_changes"]
+)
+def test_missing_auxiliary_fact_only_limits_its_dependent_fields(tmp_path, missing):
+    dates = pd.bdate_range("2024-01-02", periods=5).as_unit("ns")
+    inputs = _write_inputs(tmp_path / "source", _synthetic_interim_frames(dates))
+    del inputs[missing]
+    panel_root = _prepare(
+        tmp_path / "panel", "market_panel_1d", inputs, dates[0], dates[-1]
+    )
+    panel = read_dataset(panel_root)
+    assert len(panel) == 15 and panel.close.notna().all()
+    if missing == "market_cap":
+        assert panel.total_shares.isna().all()
+        assert panel.a_float_shares.isna().all()
+    inputs["market_panel_1d"] = panel_root
+    labels = read_dataset(
+        _prepare(tmp_path / "labels", "forward_returns", inputs, dates[0], dates[-1])
+    )
+    assert labels.forward_return_1d.notna().sum() == 9
+    from quant_research_platform.markets.prepare import prepare
+
+    factors = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "price_volume_facts",
+            "inputs": {
+                "market_panel_1d": str(panel_root),
+                "trading_calendar": str(inputs["trading_calendar"]),
+            },
+            "factor_columns": ["share_price", "reversal_1d"],
+            "time_window": {
+                "start": str(dates[0].date()),
+                "end": str(dates[-1].date()),
+            },
+            "output_root": str(tmp_path / "factors"),
+        }
+    )
+    result = read_dataset(factors)
+    assert result.share_price.notna().sum() == 15
+    assert result.reversal_1d.notna().sum() == 12
+
+
+def test_missing_lifecycle_preserves_observed_prices_without_inventing_history(
+    tmp_path,
+):
+    dates = pd.bdate_range("2024-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    frames["market_bars_1d"] = frames["market_bars_1d"].iloc[1:].copy()
+    inputs = _write_inputs(tmp_path / "source", frames)
+    del inputs["stock_master"]
+    panel_root = _prepare(
+        tmp_path / "panel", "market_panel_1d", inputs, dates[0], dates[-1]
+    )
+    panel = read_dataset(panel_root)
+    assert len(panel) == 14 and panel.close.notna().sum() == 14
+    assert panel.listing_date.isna().all()
+    from quant_research_platform.markets.prepare import prepare
+
+    factors = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "price_volume_facts",
+            "inputs": {
+                "market_panel_1d": str(panel_root),
+                "trading_calendar": str(inputs["trading_calendar"]),
+            },
+            "factor_columns": ["share_price", "reversal_1d"],
+            "time_window": {
+                "start": str(dates[0].date()),
+                "end": str(dates[-1].date()),
+            },
+            "output_root": str(tmp_path / "factors"),
+        }
+    )
+    values = read_dataset(factors)
+    assert values.share_price.notna().sum() == 14
+    assert values.reversal_1d.isna().all()
+    inputs["market_panel_1d"] = panel_root
+    labels = read_dataset(
+        _prepare(tmp_path / "labels", "forward_returns", inputs, dates[0], dates[-1])
+    )
+    assert labels.forward_return_1d.isna().all()

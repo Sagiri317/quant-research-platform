@@ -84,6 +84,11 @@ def _prepare(root, panel, calendar, target, start=None, end=None, **options):
         column_roles={
             column: spec.column_roles.get(column, "context") for column in panel
         },
+        column_units={
+            column: unit
+            for column, unit in spec.column_units.items()
+            if column in panel
+        },
     )
     source, clock = root / "panel", root / "calendar"
     write_dataset(source, panel, spec=spec)
@@ -408,6 +413,44 @@ def test_narrow_factor_unknown_barrier_never_borrows_earlier_warmup(tmp_path):
     )
     assert pd.isna(result.set_index("asset_id").loc["a", "avg_amount_20d"])
     assert result.set_index("asset_id").loc["b", "avg_amount_20d"] == 20.0
+
+
+@pytest.mark.parametrize("unknown_column", ["listing_date", "market_type"])
+def test_single_session_prices_do_not_depend_on_selecting_a_history_factor(
+    tmp_path, unknown_column
+):
+    dates = pd.bdate_range("2024-01-02", periods=5)
+    a, b = _panel(dates), _panel(dates, "b", 4)
+    a.loc[2, unknown_column] = pd.NaT if unknown_column == "listing_date" else np.nan
+    frame = pd.concat([a, b], ignore_index=True)
+    clock = _calendar({1: dates, 4: dates})
+    single = _prepare(
+        tmp_path / "single",
+        frame,
+        clock,
+        "price_volume_facts",
+        factor_columns=["share_price"],
+    )
+    together = _prepare(
+        tmp_path / "together",
+        frame,
+        clock,
+        "price_volume_facts",
+        factor_columns=["share_price", "reversal_1d"],
+    )
+    pd.testing.assert_series_equal(single.share_price, together.share_price)
+    assert together.share_price.notna().sum() == 10
+    own = together.loc[together.asset_id.eq("a")]
+    assert own.reversal_1d.notna().tolist() == [False, True, False, False, True]
+    labels = _prepare(
+        tmp_path / "labels",
+        frame,
+        clock,
+        "forward_returns",
+        label_columns=["forward_return_1d"],
+    )
+    assert labels.loc[labels.asset_id.eq("a"), "forward_return_1d"].isna().all()
+    assert labels.loc[labels.asset_id.eq("b"), "forward_return_1d"].notna().sum() == 3
 
 
 @pytest.mark.parametrize("unknown_column", ("listing_date", "market_type"))

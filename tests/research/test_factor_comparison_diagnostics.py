@@ -146,7 +146,7 @@ def _diagnostic_input(tmp_path):
         ]
     )
     frame.loc[0, "peer"] = np.nan
-    # Missing a third factor also removes this row from the x/peer comparison.
+    # A missing third factor does not remove a valid x/peer pair.
     frame.loc[7, "constant"] = np.nan
     frame.loc[frame.timestamp.eq(dates[5]), "label_available_at"] = pd.Timestamp(
         "2023-01-01"
@@ -196,9 +196,10 @@ def test_annual_and_correlation_diagnostics_keep_missing_clocks_and_signed_means
         ]
         assert set(pair.statistic) == {"pearson", "spearman"}
         assert pair.input_date_count.eq(7).all()
-        assert pair.observation_count.eq(6).all()
-        assert pair.observation_pairs.eq(22).all()
-        np.testing.assert_allclose(pair["mean"], 0.0, atol=1e-15)
+        assert pair.observation_count.eq(7).all()
+        assert pair.observation_pairs.eq(27).all()
+        # Seven date signs sum to one; X correlations do not depend on label clocks.
+        np.testing.assert_allclose(pair["mean"], 1 / 7, atol=1e-15)
         np.testing.assert_allclose(pair.mean_absolute, 1.0, atol=1e-15)
         constant = correlation.loc[correlation.comparison_factor_id.eq("constant")]
         assert constant.status.eq("UNDEFINED").all()

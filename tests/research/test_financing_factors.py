@@ -112,6 +112,34 @@ def test_lifecycle_and_unrelated_fields_do_not_gate_buy_activity():
     assert selected.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_clock_report_withdrawal_only_invalidates_its_field(reverse):
+    decisions, observations, sessions = inputs()
+    withdrawn = observations.iloc[[-1]].assign(financing_buy_amount=np.nan)
+    reports = pd.concat([observations, withdrawn], ignore_index=True)
+    if reverse:
+        reports = reports.iloc[::-1]
+    result = calculate(decisions, reports, sessions=sessions)
+    assert result.financing_buy_intensity.isna().all()
+    assert result.financing_balance_to_float_cap.tolist() == pytest.approx([0.1, 0.1])
+
+
+def test_invalid_business_numeric_cells_only_limit_their_financing_dependents():
+    decisions, observations, sessions = inputs()
+    observations["financing_balance"] = "invalid"
+    observations["lending_balance"] = float("inf")
+    decisions["amihud_20d"] = float("inf")
+    result = calculate(decisions, observations, sessions=sessions)
+    assert result.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
+    assert result.financing_balance_change_1d.isna().all()
+    assert result.lending_balance_to_float_cap.isna().all()
+    assert result.leveraged_liquidity_pressure.isna().all()
+    assert result.attrs["input_invalid_numeric_cells"]["financing_balance"] == len(
+        observations
+    )
+    assert result.attrs["input_invalid_numeric_cells"]["amihud_20d"] == len(decisions)
+
+
 def test_conservative_lag_uses_the_report_sessions_denominator_and_current_stress():
     decisions, observations, sessions = inputs()
     preceding = decisions.iloc[[0]].assign(
@@ -157,6 +185,24 @@ def test_mixed_pandas_datetime_resolutions_preserve_the_disclosure_join(
     assert result.financing_balance_change_5d.tolist() == pytest.approx([1.0, 1.0])
 
 
+@pytest.mark.parametrize(
+    "decision_dtype,source_dtype",
+    [
+        ("object", "str"),
+        ("str", "object"),
+        ("string[pyarrow]", "string[python]"),
+    ],
+)
+def test_native_string_key_carriers_have_the_same_financing_identity(
+    decision_dtype, source_dtype
+):
+    decisions, observations, sessions = inputs()
+    decisions["asset_id"] = decisions.asset_id.astype(decision_dtype)
+    observations["asset_id"] = observations.asset_id.astype(source_dtype)
+    result = calculate(decisions, observations, sessions=sessions)
+    assert result.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
+
+
 def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
     from quant_research_platform.contracts.data import ProcessedDataSpec
     from quant_research_platform.markets.prepare import prepare
@@ -164,6 +210,8 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
 
     decisions, observations, sessions = inputs()
+    # PANEL's strict string owner and public raw normalization use different carriers.
+    decisions["asset_id"] = decisions.asset_id.astype("object")
     decisions["execution_session"] = pd.Timestamp("2024-01-10")
     decisions["return_available_at"] = decisions.signal_session + pd.Timedelta(
         hours=7, minutes=30

@@ -19,6 +19,11 @@ from quant_research_platform.research.factors.macro_liquidity.definitions import
 from quant_research_platform.research.features.transforms import _industry_group_codes
 
 DEFAULT_WINDOWS = {"D": 60, "W": 26, "M": 24, "Q": 12, "event": 20}
+_LATEST_BALANCE_RATIOS = {
+    "ml_us_reserve_asset_ratio": "us_reserves_wed",
+    "ml_us_tga_asset_ratio": "us_tga_wed",
+    "ml_us_rrp_asset_ratio": "us_on_rrp",
+}
 BETA_INPUT_COLUMNS = (
     "listing_date",
     "period_return",
@@ -219,14 +224,8 @@ def _align(history, cutoffs, columns):
     return result
 
 
-def macro_states(observations, cutoffs, *, columns, config):
-    """Return one row per distinct actual decision time in chronological order."""
-    cutoffs = (
-        pd.DatetimeIndex(pd.to_datetime(cutoffs, utc=True))
-        .tz_localize(None)
-        .unique()
-        .sort_values()
-    )
+def required_factors(columns, config):
+    """Resolve the existing finite macro recipe dependencies once for all callers."""
     selected = set(columns)
     unknown = selected - RECIPES.keys()
     if unknown:
@@ -246,16 +245,23 @@ def macro_states(observations, cutoffs, *, columns, config):
     for name, components in STATE_PRODUCTS.items():
         if "ml_" + name in needed:
             needed.update("ml_" + item for item in components)
-    ratio_inputs = {
-        "ml_us_reserve_asset_ratio": "us_reserves_wed",
-        "ml_us_tga_asset_ratio": "us_tga_wed",
-        "ml_us_rrp_asset_ratio": "us_on_rrp",
-    }
-    if needed & {"ml_us_net_liquidity_latest", *ratio_inputs}:
+    if needed & {"ml_us_net_liquidity_latest", *_LATEST_BALANCE_RATIOS}:
         needed.update(
             "ml_" + item + "_level"
             for item in ("us_fed_assets", "us_tga_wed", "us_on_rrp", "us_reserves_wed")
         )
+    return needed
+
+
+def macro_states(observations, cutoffs, *, columns, config):
+    """Return one row per distinct actual decision time in chronological order."""
+    cutoffs = (
+        pd.DatetimeIndex(pd.to_datetime(cutoffs, utc=True))
+        .tz_localize(None)
+        .unique()
+        .sort_values()
+    )
+    needed = required_factors(columns, config)
     series_requests = {}
     for column in sorted(needed):
         recipe = RECIPES[column]
@@ -301,7 +307,7 @@ def macro_states(observations, cutoffs, *, columns, config):
             - output["ml_us_tga_wed_level"]
             - 1000 * output["ml_us_on_rrp_level"]
         )
-    for name, variable in ratio_inputs.items():
+    for name, variable in _LATEST_BALANCE_RATIOS.items():
         if name in needed:
             denominator = output["ml_us_fed_assets_level"].where(lambda x: x.gt(0))
             output[name] = (

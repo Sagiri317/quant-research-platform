@@ -169,6 +169,10 @@ def processed_catalog() -> ProcessedDataCatalog:
                 ProcessedDataKind.PANEL,
                 PANEL_COLUMNS,
                 optional_source_input_data_ids=(
+                    "stock_master",
+                    "market_cap",
+                    "trading_no_limit",
+                    "special_treatment_changes",
                     "industry_classification",
                     "industry_classification_sets",
                     "industry_classification_versions",

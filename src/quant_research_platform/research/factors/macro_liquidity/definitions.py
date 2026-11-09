@@ -39,8 +39,49 @@ VOLATILITY_INDICES = {
     "us_ovx",
     "us_gvz",
 }
+# Explicit public hypotheses, not another transform/interaction Cartesian library.
+# (native table, exact instrument/scope, input fields, unit, frequency, transforms)
+PUBLIC_SERIES = {
+    "us_finra_margin_debit": (
+        "public_finra_margin",
+        "US_MARGIN_ACCOUNTS",
+        ("margin_debit",),
+        "USD_million",
+        "M",
+        ("level", "growth", "yoy_growth"),
+    ),
+}
+for _index, _code in (("sp500", "13874A"), ("nasdaq", "209742")):
+    for _group in ("leveraged", "asset_manager"):
+        PUBLIC_SERIES[f"us_cftc_{_index}_{_group}_net_share"] = (
+            "public_cftc_positions",
+            f"{_code}:futures_only",
+            (f"{_group}_long", f"{_group}_short", "open_interest"),
+            "dimensionless",
+            "W",
+            ("level", "change", "percentile"),
+        )
+    PUBLIC_SERIES[f"us_cftc_{_index}_leveraged_net_contracts"] = (
+        "public_cftc_positions",
+        f"{_code}:futures_only",
+        ("leveraged_long", "leveraged_short"),
+        "contracts",
+        "W",
+        ("level", "change"),
+    )
+for _scope in ("equity", "index", "total"):
+    PUBLIC_SERIES[f"us_cboe_{_scope}_put_call"] = (
+        "public_option_put_call",
+        f"{_scope.upper()} PUT/CALL RATIO",
+        ("put_call_ratio",),
+        "dimensionless",
+        "D",
+        ("level", "zscore", "percentile"),
+    )
+
 VARIABLES = {
     **MACRO_VARIABLES,
+    **{name: (recipe[3], recipe[4]) for name, recipe in PUBLIC_SERIES.items()},
     **{name: (unit, frequency) for name, (_, unit, frequency) in COMPOSITES.items()},
     **dict.fromkeys(RATIOS, ("dimensionless", "D")),
 }
@@ -124,6 +165,10 @@ BETA_VARIABLES = (
 def recipes():
     output = {}
     for name, (_, frequency) in VARIABLES.items():
+        if name in PUBLIC_SERIES:
+            for transform in PUBLIC_SERIES[name][5]:
+                output[f"ml_{name}_{transform}"] = ("series", name, transform)
+            continue
         transforms = tuple(
             item for item in TRANSFORMS if frequency != "event" or item != "yoy_change"
         )
@@ -173,6 +218,24 @@ PRESERVE_AMPLITUDE_FACTORS = frozenset(
 )
 
 
+def _description(recipe):
+    if recipe[0] == "series" and recipe[1] in PUBLIC_SERIES:
+        table, identity, fields, _unit, _frequency, _transforms = PUBLIC_SERIES[
+            recipe[1]
+        ]
+        formula = fields[0]
+        if table == "public_cftc_positions":
+            formula = f"({fields[0]} - {fields[1]})"
+            if len(fields) == 3:
+                formula += f" / {fields[2]}"
+        return (
+            f"Public market context: {recipe[2]} of {formula}, exact scope {identity}; "
+            "versions enter the common release history only at available_at. "
+            "Not a stock cross-sectional score or observed investor sentiment."
+        )
+    return "Declared macro history or exposure; preserve macro amplitude."
+
+
 def factor_definitions():
     return tuple(
         FactorDefinition(
@@ -180,14 +243,18 @@ def factor_definitions():
             market_id="a_share",
             factor_set="experimental",
             family="macro_liquidity",
-            input_columns=("timestamp", "value"),
+            input_columns=(*PUBLIC_SERIES[recipe[1]][2], "available_at")
+            if recipe[0] == "series" and recipe[1] in PUBLIC_SERIES
+            else ("timestamp", "value"),
             output_column=name,
-            required_input_data_id="macro_observations",
+            required_input_data_id=PUBLIC_SERIES[recipe[1]][0]
+            if recipe[0] == "series" and recipe[1] in PUBLIC_SERIES
+            else "macro_observations",
             timing_semantics="released_vintage_at_or_before_explicit_decision_time",
             null_policy="preserve_missing_components_and_insufficient_history",
-            description="Declared macro history or exposure; preserve macro amplitude.",
+            description=_description(recipe),
         )
-        for name in RECIPES
+        for name, recipe in RECIPES.items()
     )
 
 

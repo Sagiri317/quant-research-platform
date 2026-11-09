@@ -120,6 +120,9 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         result = calculate(
             frame, observations, factor_columns=selected, sessions=sessions, **config
         )
+        metadata["producer_diagnostics"]["input_invalid_numeric_cells"] = result.attrs[
+            "input_invalid_numeric_cells"
+        ]
         result = result.loc[
             result.timestamp.ge(start_at)
             & (result.timestamp.le(end_at) if closed else result.timestamp.lt(end_at))

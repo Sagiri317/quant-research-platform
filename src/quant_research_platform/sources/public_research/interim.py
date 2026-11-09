@@ -11,7 +11,7 @@ from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.storage.datasets.writing import write_dataset
 
-from .normalization import DATASETS, normalize
+from .normalization import DATASETS, _numbers, normalize
 
 PROVENANCE = (
     "source",
@@ -99,10 +99,14 @@ def materialize_interim_data(
     skipped = []
     for data_id in data_ids:
         evidence = []
+        numeric_counts = {}
         complete_archives = set()
 
         def frames(
-            data_id=data_id, evidence=evidence, complete_archives=complete_archives
+            data_id=data_id,
+            evidence=evidence,
+            complete_archives=complete_archives,
+            numeric_counts=numeric_counts,
         ):
             for record in records:
                 if record["status"] != "downloaded":
@@ -222,6 +226,16 @@ def materialize_interim_data(
                                 pd.Timestamp(end_date) + pd.Timedelta(days=1)
                             )
                         ]
+                    numeric_fields = [
+                        field
+                        for field, unit in DATASETS[data_id].items()
+                        if unit not in {"identifier", "text", "date"}
+                    ]
+                    _numbers(frame, numeric_fields)
+                    for field, count in frame.attrs.get(
+                        "invalid_numeric_cells", {}
+                    ).items():
+                        numeric_counts[field] = numeric_counts.get(field, 0) + count
                     for field, unit in DATASETS[data_id].items():
                         if unit in {"identifier", "text"}:
                             frame[field] = frame[field].astype("str")
@@ -230,9 +244,7 @@ def materialize_interim_data(
                                 "datetime64[ns]"
                             )
                         else:
-                            frame[field] = pd.to_numeric(
-                                frame[field], errors="raise"
-                            ).astype("Float64")
+                            frame[field] = frame[field].astype("Float64")
                     if not frame.empty:
                         yield frame.loc[:, list(catalog.get(data_id).required_columns)]
 
@@ -249,6 +261,9 @@ def materialize_interim_data(
             chain((first,), iterator),
             spec=catalog.get(data_id),
             metadata={
+                "producer_diagnostics": {
+                    "source_invalid_numeric_cells": numeric_counts
+                },
                 "source_evidence": {
                     "manifests": manifest_evidence,
                     "records": evidence,
