@@ -80,5 +80,138 @@
       "completed"
     ],
     "report_sha256": "e3c671a454026ab1dfd00caf8d92ab6db410d92f96d562aeedbf93101b0ab1f4"
+  },
+  "iterative_mining_real_a_share": {
+    "as_of": "2026-11-09",
+    "status": "completed",
+    "phase": "discussion",
+    "usage": {
+      "requests": 8,
+      "input_tokens": 69398,
+      "output_tokens": 3367,
+      "usage_missing": 0,
+      "elapsed_seconds": 55.0384932999732,
+      "experiments": 3
+    },
+    "experiment_count": 3,
+    "experiment_statuses": [
+      "completed",
+      "completed",
+      "completed"
+    ],
+    "phases": [
+      "train",
+      "train",
+      "validation"
+    ],
+    "sample": {
+      "source": "CSMAR",
+      "stocks": 100,
+      "selection_as_of": "2022-12-30",
+      "listed_before": "2021-01-01",
+      "sampling_seed": 42,
+      "later_delistings_retained": true,
+      "minimum_listing_sessions": 0,
+      "training_eligible_rows": 1188,
+      "previously_researched_period": true
+    },
+    "protocol": {
+      "columns": [
+        "reversal_5d",
+        "turnover_20d",
+        "volatility_20d",
+        "log_float_market_cap"
+      ],
+      "baseline_columns": [
+        "reversal_5d",
+        "turnover_20d",
+        "volatility_20d",
+        "log_float_market_cap"
+      ],
+      "label": "forward_return_5d",
+      "train_window": {
+        "end": "2023-01-20",
+        "start": "2023-01-03"
+      },
+      "train_cutoff": "2023-02-03",
+      "validation_window": {
+        "end": "2023-02-17",
+        "start": "2023-02-06"
+      },
+      "selection_cutoff": "2023-02-28",
+      "budget": 4
+    },
+    "candidates": [
+      {
+        "expression": "rank(reversal_5d) * (1 + rank(turnover_20d))",
+        "status": "DEFINED",
+        "train_incremental_rank_ic": -0.06840032982890125,
+        "train_rank_ic": 0.051644528815641126,
+        "validation_incremental_rank_ic": -0.0447569573283859,
+        "validation_rank_ic": -0.032022366955020365
+      },
+      {
+        "expression": "rank(reversal_5d) * (1 - rank(turnover_20d))",
+        "status": "DEFINED",
+        "train_incremental_rank_ic": 0.056917130488559065,
+        "train_rank_ic": 0.08073386930529787,
+        "validation_incremental_rank_ic": 0.011781076066790356,
+        "validation_rank_ic": -0.021643813218453437
+      },
+      {
+        "expression": "rank(reversal_5d) * (1 - rank(volatility_20d))",
+        "status": "DEFINED",
+        "train_incremental_rank_ic": 0.009609358895073179,
+        "train_rank_ic": 0.07164873468907645,
+        "validation_incremental_rank_ic": 0.06743846629560915,
+        "validation_rank_ic": -0.015262156097454831
+      },
+      {
+        "expression": "rank(reversal_5d) * (1 + rank(volatility_20d))",
+        "status": "DEFINED",
+        "train_incremental_rank_ic": -0.02191197691197692,
+        "train_rank_ic": 0.06250773036487321,
+        "validation_incremental_rank_ic": -0.09137414965986394,
+        "validation_rank_ic": -0.035743941700008296
+      }
+    ],
+    "selected_expression": "rank(reversal_5d) * (1 - rank(volatility_20d))",
+    "validation_score": 0.06743846629560915,
+    "native_compute_seconds": [
+      0.132,
+      0.126,
+      0.363
+    ],
+    "preparation_included_in_elapsed_seconds": false,
+    "final_test_evaluated": false,
+    "account_backtest_run": false,
+    "report_sha256": "da91836935453b33b7da9af491ec6bca594f29919506180e551368dc6f48be68",
+    "factor_search_sha256": "23eecbdece23d53557d8e92ed909bc587b37be12de37a735122bd4d1b5271807",
+    "source_evidence_sha256": "64c7683ba8624966ba373fe1b274d29d475d843ac6c9ef8d5d6480ad81ffbd9b"
+  },
+  "natural_conversation": {
+    "as_of": "2026-11-09",
+    "status": "completed",
+    "completed_turns": 4,
+    "requests_per_turn": [
+      3,
+      2,
+      6,
+      1
+    ],
+    "terminal_calls_per_turn": [
+      0,
+      0,
+      1,
+      0
+    ],
+    "failed_events": [],
+    "terminal_workload": "synthetic_four_asset_formula_example",
+    "report_sha256_per_turn": [
+      "6b29cc826c495e4cf210a19639bc713c4542486fbf19cfb5df55f7fd83a7fde2",
+      "5c20db163dd69e6085bd97d177b7b24d8519d81ab1bc82c29497b64ae5c92c31",
+      "87c76fb257709ef32b4bcf5c938ba3291b6fbd47a922f3b34b34796929856e48",
+      "5e12d9fb0691e35a59fba8717ea04987a67e9f7f2d4625214d603f8f21ccd2c6"
+    ]
   }
 }
