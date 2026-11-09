@@ -669,14 +669,15 @@ def _normalize_mapped_frame(
             market_type.eq(16) & dates.ge(pd.Timestamp("2020-08-24"))
         )
         # The 2026 rules expand after-hours trading to all A shares on July 6.
-        active_board |= market_type.isin((1, 4, 64)) & dates.ge(
-            pd.Timestamp("2026-07-06")
-        )
-        not_applicable = (
+        active_board |= market_type.isin((1, 4)) & dates.ge(pd.Timestamp("2026-07-06"))
+        known_applicability = (
             dates.le(pd.Timestamp("2026-12-31"))
-            & market_type.isin((1, 2, 4, 8, 16, 32, 64))
-            & (~active_board | filling.isin((1, 2)))
+            & market_type.isin((1, 2, 4, 8, 16, 32))
+        ) | (
+            # BSE's after-hours chapter was expressly deferred on July 6.
+            market_type.eq(64) & dates.le(pd.Timestamp("2026-07-06"))
         )
+        not_applicable = known_applicability & (~active_board | filling.isin((1, 2)))
         for column in ("after_hours_volume", "after_hours_amount"):
             values = result[column]
             result[column] = values.mask(
