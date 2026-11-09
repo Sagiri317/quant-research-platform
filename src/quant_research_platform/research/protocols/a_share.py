@@ -93,6 +93,9 @@ def dataset_factor_columns(dataset_id: str) -> tuple[str, ...]:
 
 
 def factor_catalog() -> FactorCatalog:
+    from quant_research_platform.research.factors.financing import (
+        factor_definitions as financing_definitions,
+    )
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
         factor_definitions,
     )
@@ -102,6 +105,7 @@ def factor_catalog() -> FactorCatalog:
 
     return FactorCatalog(
         (
+            *financing_definitions(),
             *factor_definitions(),
             *market_structure_definitions(),
             *price_volume_factor_definitions(

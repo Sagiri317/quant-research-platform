@@ -10,6 +10,7 @@ from pathlib import Path
 
 from quant_research_platform.agents.workspace import TOOLS
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+from quant_research_platform.policy.lifecycle import closing_iterator
 
 WORKSPACE_SYSTEM = """You are a local quantitative research assistant. Return a JSON
 object with action containing one action: kind=tool with tool=read|search|terminal
@@ -222,22 +223,25 @@ def replace_json(path, value):
 
 def replace_text(path, value):
     path = Path(path)
-    with tempfile.NamedTemporaryFile(
+    handle = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, delete=False
-    ) as handle:
-        temporary = Path(handle.name)
-        try:
+    )
+    temporary = Path(handle.name)
+    try:
+        with closing_iterator(handle):
             handle.write(value)
             handle.flush()
             os.fsync(handle.fileno())
-        except BaseException:
-            handle.close()
-            temporary.unlink()
-            raise
-    try:
         os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    except BaseException as primary:
+        try:
+            temporary.unlink(missing_ok=True)
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "session checkpoint cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+        raise
 
 
 @contextmanager

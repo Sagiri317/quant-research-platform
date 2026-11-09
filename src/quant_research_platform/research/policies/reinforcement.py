@@ -192,7 +192,7 @@ def train_policy(config):
             atomic_write_directory(output, write)
         trial.finish(result={"actual_timesteps": model.num_timesteps})
     except BaseException as error:
-        trial.finish(error=error)
+        trial.fail(error)
         raise
     finally:
         torch.set_num_threads(old_threads)

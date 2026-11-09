@@ -115,6 +115,28 @@ DESCRIPTIONS = {
     ),
 }
 
+MARKET_CONTEXT_FACTORS = frozenset(
+    name for name in DESCRIPTIONS if name.startswith("market_")
+) | {"industry_return_dispersion_20d", "industry_positive_return_hhi_20d"}
+INDUSTRY_CONTEXT_FACTORS = frozenset(
+    {
+        "industry_amount_hhi",
+        "industry_activity_pressure",
+        "industry_isolation_20d",
+    }
+)
+# A common breadth multiplier is a state hypothesis, not a new stock ranking.
+PRESERVE_AMPLITUDE_FACTORS = (
+    MARKET_CONTEXT_FACTORS | INDUSTRY_CONTEXT_FACTORS | {"leader_breadth_fragility"}
+)
+FACTOR_UNITS = dict.fromkeys(DESCRIPTIONS, "dimensionless")
+FACTOR_UNITS.update(
+    dict.fromkeys(
+        ("industry_return_dispersion_20d", "industry_return_relative_20d"),
+        "decimal_return",
+    )
+)
+
 
 def factor_definitions():
     return tuple(

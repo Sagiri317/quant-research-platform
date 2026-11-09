@@ -22,6 +22,7 @@ PROVENANCE = (
     "published_at",
     "available_at",
     "availability_basis",
+    "availability_evidence_url",
 )
 
 
@@ -64,6 +65,7 @@ def materialize_interim_data(
     start_date=None,
     end_date=None,
     manifests=("manifest.json",),
+    release_csv=None,
 ):
     """Normalize explicitly requested facts, preserving source-file versions.
 
@@ -92,6 +94,7 @@ def materialize_interim_data(
     if len({r["path"] for r in records}) != len(records):
         raise ValueError("public_source_path_duplicate")
     catalog = interim_catalog()
+    clocks, clock_hash = _release_clocks(release_csv)
     roots = {}
     skipped = []
     for data_id in data_ids:
@@ -135,31 +138,30 @@ def materialize_interim_data(
                     frame["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
                     if "publication_date" not in frame:
                         frame["publication_date"] = pd.NaT
+                    publication_dates = frame.publication_date
                     frame["publication_date"] = pd.to_datetime(
                         frame.publication_date
                     ).astype("datetime64[ns]")
+                    if (
+                        publication_dates.notna()
+                        & publication_dates.astype("str").str.strip().ne("")
+                        & frame.publication_date.isna()
+                    ).any():
+                        raise ValueError("public_release_date_invalid")
                     if "published_at" not in frame:
                         frame["published_at"] = record.get("historical_published_at")
-                    frame["published_at"] = pd.to_datetime(
-                        frame.published_at, utc=True
-                    ).astype("datetime64[ns, UTC]")
-                    frame["retrieved_at"] = pd.to_datetime(
-                        frame.retrieved_at, utc=True
-                    ).astype("datetime64[ns, UTC]")
+                    frame["published_at"] = _utc_times(frame.published_at)
+                    frame["retrieved_at"] = _utc_times(frame.retrieved_at)
                     frame["timestamp"] = pd.to_datetime(frame.timestamp).astype(
                         "datetime64[ns]"
                     )
+                    if frame.timestamp.isna().any():
+                        raise ValueError("public_observation_date_invalid")
                     from quant_research_platform.sources.macro.interim import (
                         date_end_available,
                     )
 
-                    zone = (
-                        "Asia/Shanghai"
-                        if record["source"].startswith(
-                            ("chinaamc", "sse_", "szse_", "cffex")
-                        )
-                        else "America/New_York"
-                    )
+                    zone = _source_timezone(record["source"])
                     dated_release = date_end_available(frame.publication_date, zone)
                     frame["available_at"] = frame.published_at.fillna(dated_release)
                     frame["availability_basis"] = "unknown_historical_release"
@@ -169,6 +171,49 @@ def materialize_interim_data(
                     frame.loc[frame.published_at.notna(), "availability_basis"] = (
                         "publication_timestamp"
                     )
+                    frame["availability_evidence_url"] = pd.Series(
+                        pd.NA, index=frame.index, dtype="str"
+                    )
+                    if clocks is not None:
+                        keys = pd.MultiIndex.from_arrays(
+                            [frame.source, frame.timestamp.dt.normalize()]
+                        )
+                        clock = clocks.reindex(keys).set_axis(frame.index)
+                        actual = frame.published_at.isna() & clock.published_at.notna()
+                        frame.loc[actual, "published_at"] = clock.loc[
+                            actual, "published_at"
+                        ]
+                        frame.loc[actual, "available_at"] = clock.loc[
+                            actual, "estimated_available_at"
+                        ]
+                        estimated = (
+                            frame.available_at.isna()
+                            & clock.estimated_available_at.notna()
+                        )
+                        applied = actual | estimated
+                        frame.loc[estimated, "available_at"] = clock.loc[
+                            estimated, "estimated_available_at"
+                        ]
+                        frame.loc[applied, "availability_basis"] = clock.loc[
+                            applied, "availability_basis"
+                        ]
+                        frame.loc[applied, "availability_evidence_url"] = clock.loc[
+                            applied, "evidence_url"
+                        ]
+                    observed = frame.timestamp.dt.normalize()
+                    if data_id == "public_finra_margin":
+                        observed += pd.offsets.MonthEnd(0)
+                    for name in ("published_at", "available_at"):
+                        local_date = (
+                            frame[name]
+                            .dt.tz_convert(zone)
+                            .dt.tz_localize(None)
+                            .dt.normalize()
+                        )
+                        if local_date.lt(observed).any():
+                            raise ValueError("public_release_clock_precedes_dependency")
+                    if frame.publication_date.lt(observed).any():
+                        raise ValueError("public_release_clock_precedes_dependency")
                     if start_date is not None:
                         frame = frame.loc[frame.timestamp.ge(pd.Timestamp(start_date))]
                     if end_date is not None:
@@ -207,12 +252,84 @@ def materialize_interim_data(
                 "source_evidence": {
                     "manifests": manifest_evidence,
                     "records": evidence,
+                    **(
+                        {"release_clock_sha256": clock_hash}
+                        if clock_hash is not None
+                        else {}
+                    ),
                 },
                 "parameters": {
                     "timestamp_semantics": "observation_not_availability",
-                    "publication_imputation": "none",
+                    "publication_imputation": "explicit_release_csv"
+                    if clocks is not None
+                    else "none",
                 },
             },
         )
         roots[data_id] = target
     return PublicImportResult(roots, tuple(skipped))
+
+
+def _source_timezone(source):
+    return (
+        "Asia/Shanghai"
+        if source.startswith(("chinaamc", "sse_", "szse_", "cffex"))
+        else "America/New_York"
+    )
+
+
+def _utc_times(values):
+    populated = values.dropna().astype("str")
+    if not populated.str.contains(r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True).all():
+        raise ValueError("public_release_clock_timezone_required")
+    result = pd.to_datetime(values, utc=True, format="mixed").astype(
+        "datetime64[ns, UTC]"
+    )
+    if (values.notna() & result.isna()).any():
+        raise ValueError("public_release_clock_invalid")
+    return result
+
+
+def _release_clocks(path):
+    """Read caller-supplied release evidence without deriving a hidden calendar."""
+    if path is None:
+        return None, None
+    payload = Path(path).read_bytes()
+    import io
+
+    clocks = pd.read_csv(io.BytesIO(payload), dtype="str")
+    required = {
+        "source",
+        "observation_date",
+        "estimated_available_at",
+        "availability_basis",
+        "evidence_url",
+    }
+    if not required <= set(clocks) or set(clocks) - required - {"published_at"}:
+        raise ValueError("public_release_clock_columns_invalid")
+    if clocks[list(required)].isna().any(axis=None):
+        raise ValueError("public_release_clock_required_value_missing")
+    if "published_at" not in clocks:
+        clocks["published_at"] = pd.NA
+    for name in ("estimated_available_at", "published_at"):
+        clocks[name] = _utc_times(clocks[name])
+    clocks["observation_date"] = pd.to_datetime(clocks.observation_date)
+    if clocks.observation_date.isna().any():
+        raise ValueError("public_observation_date_invalid")
+    if clocks.duplicated(["source", "observation_date"]).any():
+        raise ValueError("public_release_clock_duplicate")
+    if clocks.estimated_available_at.lt(clocks.published_at).any():
+        raise ValueError("public_release_clock_precedes_dependency")
+    for source, rows in clocks.groupby("source", sort=False):
+        for name in ("estimated_available_at", "published_at"):
+            dates = (
+                rows[name]
+                .dt.tz_convert(_source_timezone(source))
+                .dt.tz_localize(None)
+                .dt.normalize()
+            )
+            if dates.lt(rows.observation_date).any():
+                raise ValueError("public_release_clock_precedes_dependency")
+    return clocks.set_index(["source", "observation_date"]), hashlib.sha256(
+        payload
+    ).hexdigest()

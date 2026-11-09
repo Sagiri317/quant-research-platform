@@ -81,10 +81,18 @@ def build_a_share_factor_statistics_tables(
     """Publish factor inference once, independently of fitted model artifacts."""
     spec = dataset_session.spec
     evaluation = config["evaluation"]
-    primary_label = evaluation["primary_label"]
-    availability = _statistics_label_availability(config["evaluation"], spec)
     factors = tuple(evaluation["factors"])
     analyses = _factor_analyses(config)
+    uses_label = bool(set(analyses) - {"factor_correlation"})
+    primary_label = evaluation["primary_label"] if uses_label else None
+    availability = (
+        _statistics_label_availability(evaluation, spec) if uses_label else None
+    )
+    if not uses_label and any(
+        str(spec["column_roles"].get(factor)) not in {"factor", "feature"}
+        for factor in factors
+    ):
+        raise ValueError("statistics_factor_role_invalid")
     statistics = config["statistics"]
     families = (
         _factor_families(statistics["factor_fdr_families"], factors)
@@ -113,8 +121,7 @@ def build_a_share_factor_statistics_tables(
             (
                 *spec["primary_key"],
                 "eligible",
-                primary_label,
-                availability,
+                *((primary_label, availability) if uses_label else ()),
                 *factors,
                 *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
             )
@@ -128,7 +135,7 @@ def build_a_share_factor_statistics_tables(
         else _statistics_window_bounds(window)[1]
     )
     business_columns = {
-        primary_label,
+        *((primary_label,) if uses_label else ()),
         *factors,
         *(("total_market_cap",) if "fama_macbeth" in analyses else ()),
     }
@@ -147,6 +154,12 @@ def build_a_share_factor_statistics_tables(
     with closing_iterator(chunks):
         for batch in chunks:
             input_dates.extend(map(pd.Timestamp, batch["timestamp"].drop_duplicates()))
+            if correlations:
+                _update_factor_correlations(
+                    batch.loc[batch.eligible.eq(True)], factors, correlations
+                )
+            if not uses_label:
+                continue
             mature = legal_training_rows(
                 batch,
                 fitting_cutoff=cutoff,
@@ -163,8 +176,6 @@ def build_a_share_factor_statistics_tables(
                         label_column=primary_label,
                     ).to_dict("records")
                 )
-            if correlations:
-                _update_factor_correlations(mature, factors, correlations)
             if "fama_macbeth" in analyses:
                 for _, session in mature.groupby("timestamp", sort=False):
                     periods.extend(
@@ -320,19 +331,21 @@ def _annual_factor_summary(rank_by_date, **summary_options):
 
 
 def _update_factor_correlations(frame, factors, accumulators):
-    """Accumulate daily correlations on one complete declared-factor domain."""
+    """Accumulate each pair on its own finite domain, independent of labels."""
     for _, session in frame.groupby("timestamp", sort=False):
         values = session.loc[:, factors]
-        values = values.loc[np.isfinite(values.to_numpy(dtype="float64")).all(axis=1)]
+        present = np.isfinite(values.to_numpy(dtype="float64"))
+        values = values.where(present)
         if len(values) < 2:
             continue
+        pairs = present.astype("int64").T @ present.astype("int64")
         for method, totals in accumulators.items():
-            correlation = values.corr(method=method).to_numpy()
+            correlation = values.corr(method=method, min_periods=2).to_numpy()
             valid = np.isfinite(correlation)
             totals[0] += valid
             totals[1] += np.where(valid, correlation, 0.0)
             totals[2] += np.where(valid, np.abs(correlation), 0.0)
-            totals[3] += valid * len(values)
+            totals[3] += np.where(valid, pairs, 0)
 
 
 def _factor_correlation_summary(accumulators, factors, *, input_date_count):
@@ -563,13 +576,18 @@ def factor_statistics(config):
     if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("statistics_sample_role_invalid")
     evaluation, policy = config["evaluation"], config["statistics"]
+    analyses = _factor_analyses(config)
     if (
         not isinstance(evaluation, dict)
         or set(evaluation) - {"factors", "primary_label", "label_availability_columns"}
-        or {"factors", "primary_label"} - set(evaluation)
+        or (
+            {"factors", "primary_label"}
+            if set(analyses) - {"factor_correlation"}
+            else {"factors"}
+        )
+        - set(evaluation)
     ):
         raise ValueError("factor_statistics_evaluation_invalid")
-    analyses = _factor_analyses(config)
     expected = {"hac_lag"} if set(analyses) != {"factor_correlation"} else set()
     if {"rank_ic", "annual_stability"}.intersection(analyses):
         if isinstance(policy, dict):
@@ -617,7 +635,7 @@ def factor_statistics(config):
             "column_units": {
                 column: unit
                 for column, unit in session.spec["column_units"].items()
-                if column in {evaluation["primary_label"], *evaluation["factors"]}
+                if column in {evaluation.get("primary_label"), *evaluation["factors"]}
             },
         },
         tables=tables,

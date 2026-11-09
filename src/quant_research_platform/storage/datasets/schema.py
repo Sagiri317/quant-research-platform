@@ -75,6 +75,7 @@ _DATASET_SPEC_RESEARCH_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "feature_columns",
     "feature_transforms",
     "target_transform",
+    "target_label_column",
     "target_clip",
     "eligibility_recipe",
     "minimum_listing_sessions",
@@ -794,6 +795,7 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                     for transform in spec.feature_transforms
                 ],
                 "target_transform": spec.target_transform,
+                "target_label_column": spec.target_label_column,
                 "target_clip": spec.target_clip,
                 "label_columns": list(spec.label_columns),
                 "filter_columns": list(spec.filter_columns),
@@ -979,6 +981,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             feature_columns=tuple(feature_columns),
             feature_transforms=tuple(feature_transforms),
             target_transform=spec.get("target_transform", "date_zscore"),
+            target_label_column=spec.get("target_label_column", "forward_return_20d"),
             target_clip=spec.get("target_clip", "none"),
             risk_model=(
                 FactorRiskModel.from_mapping(spec["risk_model"])

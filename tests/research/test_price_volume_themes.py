@@ -122,6 +122,20 @@ def test_pressure_rebound_and_impact_have_separate_economic_units():
     ].iloc[-1] == pytest.approx(float(Fraction(1, 180)))
 
 
+def test_gap_and_impact_do_not_consume_unrelated_field_times():
+    frame = panel(np.arange(1, 22, dtype=float))
+    frame.loc[20, "adj_close"] = np.nan
+    gap = calculate_price_volume_factors(frame, factor_columns=("opening_gap",))
+    assert gap.opening_gap.iloc[-1] == pytest.approx(21 / 20 - 1)
+    frame = panel(np.arange(1, 22, dtype=float))
+    frame.loc[0, "turnover"] = np.nan
+    frame.loc[5, "adj_close"] = np.nan
+    impact = calculate_price_volume_factors(
+        frame, factor_columns=("price_impact_efficiency_20d",)
+    )
+    assert impact.price_impact_efficiency_20d.iloc[-1] == 1
+
+
 def test_theme_catalog_windows_future_slices_and_listing_lives():
     names = tuple(PRICE_VOLUME_THEME_DESCRIPTIONS)
     definitions = tuple(d for d in factor_catalog().list() if d.output_column in names)

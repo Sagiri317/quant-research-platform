@@ -1116,7 +1116,7 @@ def _target_definition(declared, target, manifest=None):
                 .get("target_definitions", {})
                 .get(target)
             )
-        source = "forward_return_20d"
+        source = declared.get("target_label_column", "forward_return_20d")
     semantics = (
         (manifest or {})
         .get("producer_diagnostics", {})
@@ -1208,8 +1208,10 @@ def _validate_target_definition(definition, target):
         type(definition) is not dict
         or set(definition) - {"risk_model"}
         != {"source_label", "target_transform", "target_clip", "label_semantics"}
-        or definition["source_label"]
-        != ("forward_return_20d" if target == "model_target" else target)
+        or type(definition["source_label"]) is not str
+        or not definition["source_label"]
+        or target != "model_target"
+        and definition["source_label"] != target
         or type(definition["target_transform"]) is not str
         or type(definition["target_clip"]) is not str
         or definition["target_transform"]

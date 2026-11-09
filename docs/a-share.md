@@ -441,11 +441,13 @@ CSMAR 字段单位依据本地 `data/reference/股票市场交易(升级测试) 
 
 已知不适用的盘后成交额为 0；适用但缺失时，盘后成交额及依赖它的总成交额保留 NULL，其他独立字段和记录继续保留。
 
-2011–2025 来源适配边界：Markettype 32科创板自2019-07-22、16创业板自
+2011–2026 来源适配边界：Markettype 32科创板自2019-07-22、16创业板自
 2020-08-24适用；Filling=1/2为已知全天非交易。只有已知市场、状态及历史日期能证明
 不适用时才将盘后 NULL 置 0。适用交易行缺失或适用性未知时，仅相应盘后量及总量保留 NULL；依赖该量的使用方按自身有效样本域处理，已有非 NULL 值保留。
-2026以后NULL不套用旧适用表，本条不声明已支持2026市场规则。
-摄取保留混合来源文件中的Markettype 64北交所记录：2025及以前属于已知盘后不适用域，
+2026-07-06起，盘后交易扩展至沪深全部A股及北交所股票：Markettype 1、4、64的
+适用性在该日切换；此前普通主板及北交所的结构性盘后NULL可为0，切换后的交易行缺失
+仍为NULL。B股不套用A股扩围规则。2027及以后NULL不沿用本次已核实的适用范围。
+摄取保留混合来源文件中的Markettype 64北交所记录：2026-07-06以前属于已知盘后不适用域，
 不改变正式研究CURRENT_MARKET_TYPES。依据为[北交所2025交易方式问答](https://www.bse.cn/qt/200025234.html)
 及[2026新增盘后安排起草说明](https://www.bse.cn/uploads/6/file/public/202604/20260410155845_hs300rhb80.pdf)；
 历史计算按当时适用规则处理，执行研究范围仍为已声明的沪深 A 股。
@@ -454,7 +456,9 @@ CSMAR 字段单位依据本地 `data/reference/股票市场交易(升级测试) 
 [创业板实施日期](https://www.szse.cn/aboutus/trends/news/t20200821_580924.html)及
 [深交所停牌盘后规则](https://www.szse.cn/www/investor/index/update/t20200902_581220.html)、
 [上交所停牌盘后规则](https://edu.sse.com.cn/service/hotline/qa/c/4928890.shtml)。
-以上为历史适用范围的来源依据，不将此说明扩展为 2026 以后规则支持。
+2026扩围及生效日依据为[上交所修订说明](https://big5.sse.com.cn/site/cht/www.sse.com.cn/aboutus/mediacenter/hotandd/c/c_20260424_10816474.shtml)、
+[深交所发布通知](https://www.szse.cn/lawrules/rule/trade/current/t20260424_620190.html)及
+[北交所发布公告](https://www.bse.cn/jygl_list/200028217.html)。
 
 ### 5.6 基准数据与权重
 

@@ -412,6 +412,59 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
     assert pd.isna(row["group_monotonicity_score_reason"])
 
 
+def test_single_realized_group_is_undefined_for_spread_and_not_a_zero_day():
+    spec = EvaluationSpec(
+        evaluation_id="ties",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    state = evaluation_engine._EvaluationStreamingState(spec=spec)
+    grouped = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-03"]),
+            "signal": "signal",
+            "label": "label",
+            "group": [3, 1, 5],
+            "mean_label_value": [0.9, 0.1, 0.3],
+            "n_obs": 5,
+        }
+    )
+    state.consume(
+        pd.DataFrame(),
+        grouped.iloc[:1],
+        {
+            "rows_input": 5,
+            "rows_after_filter_mode": 5,
+            "filter_columns_used": [],
+            "filter_definition": "all",
+            "timestamp_count": 1,
+            "min_timestamp": "2024-01-02",
+            "max_timestamp": "2024-01-02",
+            "skipped_timestamp_count": 0,
+        },
+    )
+    assert state.group_spread_summary().empty
+    state.consume(
+        pd.DataFrame(),
+        grouped.iloc[1:],
+        {
+            "rows_input": 10,
+            "rows_after_filter_mode": 10,
+            "filter_columns_used": [],
+            "filter_definition": "all",
+            "timestamp_count": 1,
+            "min_timestamp": "2024-01-03",
+            "max_timestamp": "2024-01-03",
+            "skipped_timestamp_count": 0,
+        },
+    )
+    summary = state.group_spread_summary().iloc[0]
+    assert summary.top_bottom_label_value_spread_mean == pytest.approx(0.2)
+    assert summary.top_bottom_label_value_spread_hit_rate == 1
+
+
 def _evaluation_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {

@@ -34,9 +34,13 @@ from quant_research_platform.research.factors.fundamental.definitions import (
 from quant_research_platform.research.factors.market_structure import (
     DESCRIPTIONS as MARKET_STRUCTURE_FACTORS,
 )
+from quant_research_platform.research.factors.market_structure import (
+    FACTOR_UNITS as MARKET_STRUCTURE_UNITS,
+)
 from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
     PRICE_VOLUME_PATH_FACTORS,
+    PRICE_VOLUME_UNITS,
 )
 from quant_research_platform.research.factors.residual import RESIDUAL_FACTOR_WINDOWS
 from quant_research_platform.research.labels.forward_returns import (
@@ -147,6 +151,9 @@ BENCHMARK_WEIGHTS_COLUMNS = (
 
 
 def processed_catalog() -> ProcessedDataCatalog:
+    from quant_research_platform.markets.implementations.a_share.processed.financing import (  # noqa: E501
+        processed_spec as financing_spec,
+    )
     from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
         processed_specs as macro_specs,
     )
@@ -154,6 +161,7 @@ def processed_catalog() -> ProcessedDataCatalog:
 
     return ProcessedDataCatalog(
         (
+            financing_spec(),
             *processed_specs(),
             *macro_specs(),
             _spec(
@@ -325,7 +333,28 @@ def _spec(
         availability["next_session_intraday_return"] = (
             "next_session_intraday_return_available_at"
         )
-    units = {column: "decimal_return" for column in availability}
+    known_units = {
+        **PRICE_VOLUME_UNITS,
+        **MARKET_STRUCTURE_UNITS,
+        **dict.fromkeys(
+            ("open", "high", "low", "close", "adj_open", "adj_close", "prev_close"),
+            "CNY_per_share",
+        ),
+        **dict.fromkeys(
+            ("volume", "after_hours_volume", "total_shares", "a_float_shares"), "shares"
+        ),
+        **dict.fromkeys(
+            ("amount", "after_hours_amount", "total_market_cap", "float_market_cap"),
+            "CNY",
+        ),
+        "turnover": "share_turnover_fraction",
+        "period_return": "decimal_return",
+        "listing_age_trading_days": "trading_sessions",
+        "beta_252d": "dimensionless",
+        "residual_volatility_60d": "decimal_return",
+    }
+    units = {column: unit for column, unit in known_units.items() if column in roles}
+    units.update({column: "decimal_return" for column in availability})
     if data_id == "risk_residual_factors":
         units.update({column: "decimal_return" for column in factor_columns})
     if "median_forecast_age_days_fy1" in roles:

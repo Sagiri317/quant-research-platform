@@ -1,5 +1,6 @@
 """Public macro imports preserve vintages, missing values, and source clocks."""
 
+import hashlib
 import io
 import json
 import zipfile
@@ -114,6 +115,8 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
                 "file": filename,
                 "retrieved_at": f"2026-11-0{day}T00:00:00Z",
                 "url": "https://alfred.stlouisfed.org/",
+                "sha256": hashlib.sha256((source / filename).read_bytes()).hexdigest(),
+                "bytes": (source / filename).stat().st_size,
             }
         )
     (raw / "download.json").write_text(
@@ -141,6 +144,46 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
         pd.Timestamp("2014-02-07T06:00"),
     ]
     assert frame.retrieved_at.eq(pd.Timestamp("2026-11-05", tz="UTC")).all()
+
+
+def test_parseable_macro_file_tampering_does_not_reuse_old_evidence(tmp_path):
+    raw = tmp_path / "raw"
+    source = raw / "vvix"
+    source.mkdir(parents=True)
+    payload = b"DATE,VVIX\n01/02/2024,20.0\n"
+    member = source / "daily.csv"
+    member.write_bytes(payload)
+    record = {
+        "file": "daily.csv",
+        "retrieved_at": "2026-11-05T00:00:00Z",
+        "url": "https://example.org/vix",
+        "bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    (raw / "download.json").write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "vvix": {
+                        "status": "downloaded",
+                        "source": "cboe",
+                        "series_ids": ["us_vvix"],
+                        "responses": [record],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    materialize_interim_data(
+        raw_root=raw, output_roots={"macro_observations": tmp_path / "good"}
+    )
+    member.write_bytes(payload.replace(b"20.0", b"21.0"))
+    with pytest.raises(ValueError, match="macro_source_integrity_mismatch"):
+        materialize_interim_data(
+            raw_root=raw, output_roots={"macro_observations": tmp_path / "changed"}
+        )
+    assert not (tmp_path / "changed").exists()
 
 
 @pytest.mark.parametrize(

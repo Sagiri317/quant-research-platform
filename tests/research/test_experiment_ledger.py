@@ -82,3 +82,28 @@ def test_trial_rejects_rebound_terminal(tmp_path, legacy):
     path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="completion_mismatch"):
         read_trial_ledger(tmp_path)
+
+
+@pytest.mark.parametrize("primary", [RuntimeError("compute"), KeyboardInterrupt()])
+def test_failure_record_preserves_primary_when_storage_fails(
+    tmp_path, monkeypatch, primary
+):
+    import quant_research_platform.research.experiments as experiments
+
+    recorder = TrialRecorder(tmp_path / "trial", {})
+    recorder.begin()
+
+    def unavailable(*args, **kwargs):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(experiments, "append_trial_record", unavailable)
+    with pytest.raises(type(primary)) as caught:
+        try:
+            raise primary
+        except BaseException as error:
+            recorder.fail(error)
+            raise
+    assert caught.value is primary
+    assert primary.__notes__ == ["trial failure record also failed: OSError"]
+    assert (recorder.root / "attempted.json").exists()
+    assert not (recorder.root / "terminal.json").exists()

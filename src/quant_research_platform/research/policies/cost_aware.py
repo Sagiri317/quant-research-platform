@@ -228,7 +228,7 @@ def fit_cost_model(config):
             result={"periods": len(times), "objective": float(loss.detach())}
         )
     except BaseException as error:
-        recorder.finish(error=error)
+        recorder.fail(error)
         raise
     finally:
         torch.set_num_threads(old_threads)

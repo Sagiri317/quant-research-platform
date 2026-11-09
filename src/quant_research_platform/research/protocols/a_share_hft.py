@@ -283,6 +283,7 @@ def processed_specs():
             column_units={
                 column: "decimal_return"
                 if "return" in column
+                or column in {"realized_volatility_60s", "peak_drawdown_300s"}
                 else "direction"
                 if "direction" in column
                 else "CNY"
@@ -313,6 +314,9 @@ def processed_specs():
             source_input_data_ids=("hft_quotes", "hft_orders", "hft_trades")
             if kind == "panel"
             else (),
+            optional_source_input_data_ids=("hft_orders", "hft_trades")
+            if kind == "panel"
+            else (),
             processed_input_data_ids=() if kind == "panel" else ("hft_panel",),
             parameters_json=json.dumps({"max_gap_seconds": 6})
             if kind == "panel"
@@ -333,6 +337,7 @@ def processed_specs():
             column_roles=_roles((*KEY, *EVENT_FACTORS), factors=EVENT_FACTORS),
             column_units=EVENT_FACTORS,
             source_input_data_ids=("hft_orders", "hft_trades"),
+            optional_source_input_data_ids=("hft_orders", "hft_trades"),
             processed_input_data_ids=("hft_panel",),
             parameters_json=json.dumps(
                 {

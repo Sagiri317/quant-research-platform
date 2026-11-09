@@ -398,12 +398,6 @@ def fit(config: Mapping) -> Path:
         )
     except BaseException as exc:
         if not (recorder.root / "terminal.json").exists():
-            try:
-                recorder.finish(error=exc)
-            except BaseException as recording_error:
-                exc.add_note(
-                    "trial failure record also failed: "
-                    f"{type(recording_error).__name__}"
-                )
+            recorder.fail(exc)
         raise
     return output

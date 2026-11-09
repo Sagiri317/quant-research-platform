@@ -362,7 +362,7 @@ def search_factors(config):
             result={"candidate_count": len(records), "status": result["status"]}
         )
     except BaseException as error:
-        recorder.finish(error=error)
+        recorder.fail(error)
         raise
     return output
 

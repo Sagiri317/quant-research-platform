@@ -154,9 +154,10 @@ class _EvaluationStreamingState:
             previous_value: float | None = None
             monotonicity_sum = 0.0
             monotonicity_count = 0
+            group_count = 0
 
             def finish_group() -> None:
-                if current_key is None:
+                if current_key is None or group_count < 2:
                     return
                 signal, label, _timestamp = current_key
                 bottom = math.nan if first_value is None else first_value
@@ -195,6 +196,8 @@ class _EvaluationStreamingState:
                     previous_value = None
                     monotonicity_sum = 0.0
                     monotonicity_count = 0
+                    group_count = 0
+                group_count += 1
                 if first_value is None:
                     first_value = float(mean_label_value)
                 last_value = float(mean_label_value)

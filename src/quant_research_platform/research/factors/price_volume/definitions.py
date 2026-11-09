@@ -200,7 +200,7 @@ for _window in (20, 60, 252):
     }.items():
         _factor = f"{_name}_{_window}d"
         _fields = (
-            ("adj_close", "high", "low", "close")
+            ("adj_close", "low" if _name == "support_distance" else "high", "close")
             if _name in {"support_distance", "resistance_distance"}
             else ("adj_close",)
         )
@@ -223,7 +223,10 @@ for _name, _description in {
         "when current adjusted close is at or above that prior support, else zero"
     ),
 }.items():
-    _PRICE_VOLUME_INPUT_WINDOWS[_name] = (("adj_close", "high", "low", "close"), (21,))
+    _PRICE_VOLUME_INPUT_WINDOWS[_name] = (
+        ("adj_close", "high" if _name == "failed_up_breakout_20d" else "low", "close"),
+        (21,),
+    )
     PRICE_VOLUME_LEVEL_DESCRIPTIONS[_name] = (
         f"QRP candidate: {_description}. A same-session failed breach is known only "
         "after the close and released next session, never at the initial breach. "
@@ -302,6 +305,51 @@ PRICE_VOLUME_PATH_FACTORS = (
 _PRICE_VOLUME_INPUT_WINDOWS.update(
     {column: (("period_return",), (20,)) for column in PRICE_VOLUME_PATH_FACTORS}
 )
+
+PRICE_VOLUME_UNITS = dict.fromkeys(_PRICE_VOLUME_INPUT_WINDOWS, "dimensionless")
+for _name in PRICE_VOLUME_UNITS:
+    if _name.startswith(
+        (
+            "reversal_",
+            "momentum_",
+            "volatility_",
+            "downside_volatility_",
+            "upside_volatility_",
+            "peak_drawdown_",
+        )
+    ) or _name in {
+        "max_return_20d",
+        "min_return_20d",
+        "top5_return_mean_20d",
+        "drawdown_60d",
+        "opening_gap",
+        "intraday_return",
+        "qlib_resi_20d",
+    }:
+        # Compression is a ratio of two volatilities, not return volatility.
+        if _name != "volatility_compression_20_60":
+            PRICE_VOLUME_UNITS[_name] = "decimal_return"
+    elif _name.startswith("amihud_"):
+        PRICE_VOLUME_UNITS[_name] = "decimal_return_per_CNY"
+    elif _name.startswith("peak_age_"):
+        PRICE_VOLUME_UNITS[_name] = "trading_sessions"
+    elif _name.startswith("avg_amount_") or _name == "amount_volatility_20d":
+        PRICE_VOLUME_UNITS[_name] = "CNY"
+    elif _name in {"share_price"}:
+        PRICE_VOLUME_UNITS[_name] = "CNY_per_share"
+    elif _name in {
+        "log_float_market_cap",
+        "log_total_market_cap",
+        "log_avg_amount_20d",
+    }:
+        PRICE_VOLUME_UNITS[_name] = "log_CNY"
+    elif _name in {
+        "turnover_20d",
+        "turnover_60d",
+        "turnover_250d",
+        "turnover_volatility_20d",
+    }:
+        PRICE_VOLUME_UNITS[_name] = "share_turnover_fraction"
 
 
 # Only sample statistics admit partial observations within the nominal window.

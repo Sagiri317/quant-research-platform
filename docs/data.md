@@ -478,6 +478,17 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 未知时间不使用采集日期替代。原件哈希与结构化输入哈希分别保留，来源清单哈希写入原生元数据。
 规范化成功不表示该源已满足PIT因子或历史成分映射的输入条件。机制、研究范围和处理规则见[因子假设清单](factor-hypotheses.md)。
 
+`prepare-source`可显式传入`release_csv`补充有依据的历史可用时间。字段为`source`、
+`observation_date`、`estimated_available_at`、`availability_basis`、`evidence_url`，
+可选`published_at`仅用于确有真实发布时间证据的情况；估计值不填进真实发布时间。
+时刻必须带UTC偏移或Z，源清单和结构化来源自带的发布时间同样校验；发布／可用日
+不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。规则文件哈希进入原生
+元数据。原有实际发布时间优先，已有不可变产物不原地修改，应写新输出路径。
+
+`financing_factors`消费结构化`public_margin_balances`和`decision_panel`；可选
+`trading_calendar`仅用于精确1／5交易日变化。可用列和公式由融资因子owner声明，
+个股量价字段与因子单位由日频目录从其owner派生，拼装及存储继承这些单位。
+
 模型统计的科学样本仍按精确证券时点键、合格性和标签成熟时点配对。请求范围内没有对应标签行的预测数量记录在统计元数据 `prediction_coverage`；这些记录不参与计算，也不阻断其他有效配对。重复或非法键仍在输入边界拒绝。
 
 `macro_observations` 保留观测期、版本可用时刻、真实发布时刻（若已知）、修订区间、来源、单位及获取时间。缺少历史版本证据的快照按明确规则推测历史可用时点，`published_at` 保持缺失；这不等于恢复了当年初值。`decision_panel` 以实际决策时刻索引宏观输入。时间规则与操作由[宏观流动性](macro-liquidity.md)统一说明。

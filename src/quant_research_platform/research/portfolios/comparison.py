@@ -83,6 +83,14 @@ def endpoint_return(start, end):
     return (value, "") if np.isfinite(value) else (np.nan, "nonfinite_result")
 
 
+def _return_unit(value):
+    if value == "decimal_return":
+        return "decimal"
+    if value not in {"decimal", "percent"}:
+        raise ValueError("comparison_return_unit_invalid")
+    return value
+
+
 def _descriptor(item):
     if not isinstance(item, dict):
         raise ValueError("comparison_reference_invalid")
@@ -118,8 +126,8 @@ def _descriptor(item):
         or not item["valuation_currency"].isupper()
     ):
         raise ValueError("comparison_currency_invalid")
-    if "return_unit" in item and item["return_unit"] not in {"decimal", "percent"}:
-        raise ValueError("comparison_return_unit_invalid")
+    if "return_unit" in item:
+        item = {**item, "return_unit": _return_unit(item["return_unit"])}
     if representation == "endpoint_level" and "return_unit" in item:
         raise ValueError("comparison_level_return_unit_invalid")
     return item
@@ -173,6 +181,8 @@ def validate_comparison_config(config, analyses):
 
 
 def _read_reference(item):
+    if "return_unit" in item:
+        item = {**item, "return_unit": _return_unit(item["return_unit"])}
     options = _dataset_input_options(item["input"])
     requested = options.pop("columns", None)
     value = item["value_column"]
@@ -206,14 +216,16 @@ def _read_reference(item):
     for source in (spec.get("parameters", {}), manifest.get("parameters", {})):
         for key in (*_FACTS, "return_unit"):
             if key in source:
-                if key in inherited and inherited[key] != source[key]:
+                fact = (
+                    _return_unit(source[key]) if key == "return_unit" else source[key]
+                )
+                if key in inherited and inherited[key] != fact:
                     raise ValueError("comparison_source_facts_conflict")
-                inherited[key] = source[key]
+                inherited[key] = fact
     if item["representation"] == "interval_simple_return":
         unit = spec.get("column_units", {}).get(value)
         if unit is not None:
-            if unit not in {"decimal", "percent"}:
-                raise ValueError("comparison_return_unit_invalid")
+            unit = _return_unit(unit)
             if "return_unit" in inherited and inherited["return_unit"] != unit:
                 raise ValueError("comparison_source_facts_conflict")
             inherited["return_unit"] = unit

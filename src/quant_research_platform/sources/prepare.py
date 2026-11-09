@@ -81,7 +81,7 @@ def prepare_source(config: Mapping):
     if source != "venvoo" and {"instruments", "revision"} & set(config):
         raise ValueError("source_prepare_level2_parameters_not_consumed")
     if "release_csv" in config and (
-        source != "macro"
+        source not in {"macro", "public_research"}
         or type(config["release_csv"]) is not str
         or not config["release_csv"]
     ):

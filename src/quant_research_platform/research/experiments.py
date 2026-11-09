@@ -39,3 +39,12 @@ class TrialRecorder:
             terminal["error"] = type(error).__name__
         append_trial_record(self.root, terminal)
         return terminal
+
+    def fail(self, error: BaseException) -> None:
+        """Record failure without replacing an exception already being handled."""
+        try:
+            self.finish(error=error)
+        except BaseException as recording_error:
+            error.add_note(
+                f"trial failure record also failed: {type(recording_error).__name__}"
+            )

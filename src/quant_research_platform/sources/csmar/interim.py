@@ -668,8 +668,12 @@ def _normalize_mapped_frame(
         active_board = (market_type.eq(32) & dates.ge(pd.Timestamp("2019-07-22"))) | (
             market_type.eq(16) & dates.ge(pd.Timestamp("2020-08-24"))
         )
+        # The 2026 rules expand after-hours trading to all A shares on July 6.
+        active_board |= market_type.isin((1, 4, 64)) & dates.ge(
+            pd.Timestamp("2026-07-06")
+        )
         not_applicable = (
-            dates.le(pd.Timestamp("2025-12-31"))
+            dates.le(pd.Timestamp("2026-12-31"))
             & market_type.isin((1, 2, 4, 8, 16, 32, 64))
             & (~active_board | filling.isin((1, 2)))
         )

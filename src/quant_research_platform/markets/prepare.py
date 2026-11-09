@@ -87,6 +87,12 @@ def prepare(config: Mapping) -> Path:
             )
 
             producer, kwargs = produce, {}
+        elif spec.data_id == "financing_factors":
+            from quant_research_platform.markets.implementations.a_share.processed.financing import (  # noqa: E501
+                produce,
+            )
+
+            producer, kwargs = produce, {}
         elif spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
             from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
                 produce,

@@ -24,12 +24,16 @@ def a_share_model_target(
     *,
     transform: str = "date_zscore",
     clip: str = "none",
-    availability_column: str = "forward_return_20d_available_at",
+    label_column: str = "forward_return_20d",
+    availability_column: str | None = None,
     risk_model: FactorRiskModel | None = None,
     risk_sessions: dict | None = None,
 ) -> pd.DataFrame:
+    """Transform an explicit return label; no predictive model is trained."""
+    if availability_column is None:
+        availability_column = f"{label_column}_available_at"
     values = strict_finite_numeric_series(
-        frame["forward_return_20d"],
+        frame[label_column],
         error="invalid_a_share_model_target_label",
         allow_null=True,
     ).astype("float64")
@@ -37,7 +41,7 @@ def a_share_model_target(
         frame["eligible"], error="invalid_a_share_eligibility", allow_null=True
     ).fillna(False)
     scoped = frame.loc[eligible].copy()
-    scoped["forward_return_20d"] = values.loc[eligible]
+    scoped[label_column] = values.loc[eligible]
     if transform == "industry_size_residual":
         sizes = strict_finite_numeric_series(
             scoped["log_total_market_cap"],
@@ -49,18 +53,16 @@ def a_share_model_target(
         ].copy()
     groups = scoped.groupby("timestamp", sort=False).indices
     # Clipping can use returns whose rows are later excluded from risk regression.
-    dependencies = scoped.forward_return_20d.notna().reindex(
-        frame.index, fill_value=False
-    )
+    dependencies = scoped[label_column].notna().reindex(frame.index, fill_value=False)
     if clip == "mad":
-        scoped["forward_return_20d"] = _mad_winsorize(scoped.forward_return_20d, groups)
+        scoped[label_column] = _mad_winsorize(scoped[label_column], groups)
     elif clip == "quantile_1_99":
-        scoped["forward_return_20d"] = _winsorize(scoped.forward_return_20d, groups)
+        scoped[label_column] = _winsorize(scoped[label_column], groups)
     if transform == "industry_size_residual":
         scoped["industry_level1_code"] = _industry_group_codes(scoped)
         scoped = _neutralize_cross_section(
             scoped,
-            factor_columns=("forward_return_20d",),
+            factor_columns=(label_column,),
             industry_column="industry_level1_code",
             size_column="log_total_market_cap",
             rescale=False,
@@ -76,11 +78,11 @@ def a_share_model_target(
     )
     target = pd.Series(np.nan, index=frame.index, dtype="float64")
     for positions in groups.values():
-        group = scoped.forward_return_20d.iloc[positions]
+        group = scoped[label_column].iloc[positions]
         if state is not None:
             cross = scoped.iloc[positions]
             fit = state.fit_return_session(
-                cross.assign(asset_return=cross.forward_return_20d),
+                cross.assign(asset_return=cross[label_column]),
                 prepared=(risk_sessions or {}).get(
                     pd.Timestamp(cross.timestamp.iloc[0])
                 ),

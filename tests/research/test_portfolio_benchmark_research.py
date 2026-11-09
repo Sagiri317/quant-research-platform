@@ -238,6 +238,27 @@ def test_endpoint_interval_percent_hand_math_and_complete_subinterval_coverage(
         _compare(axis, [descriptor])
 
 
+@pytest.mark.parametrize("explicit_unit", [None, "decimal", "decimal_return"])
+def test_native_decimal_return_unit_is_the_same_simple_return(tmp_path, explicit_unit):
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    axis = _axis([0.1, -0.04], dates)
+    returns = reference_input(
+        tmp_path / "returns.parquet",
+        [0.05, 0.10, 0.0],
+        dates=dates,
+        representation="interval_simple_return",
+        unit="decimal_return",
+    )
+    if explicit_unit is not None:
+        returns["return_unit"] = explicit_unit
+    tables, _ = _compare(axis, [returns])
+    actual = tables["portfolio_benchmark_intervals"].benchmark_return
+    assert actual.tolist() == pytest.approx([0.05, 0.10])
+    returns["input"]["spec"]["column_units"]["value"] = "log_return"
+    with pytest.raises(ValueError, match="return_unit_invalid"):
+        _compare(axis, [returns])
+
+
 @pytest.mark.parametrize(
     "mutation, error",
     [

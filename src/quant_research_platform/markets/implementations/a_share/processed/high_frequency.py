@@ -137,9 +137,28 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         if session.spec["data_id"] != name:
             raise ValueError("hft_input_identity_mismatch")
         validate_input_market(session.spec, "a_share")
+    from quant_research_platform.sources.venvoo import interim_spec
+
+    missing = set(spec.optional_source_input_data_ids) - sessions.keys()
+    absent = {
+        name: pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype="datetime64[ns]"
+                    if column in {"timestamp", "session_date"}
+                    else "float64"
+                    if column in {"volume", "price"}
+                    else "object"
+                )
+                for column in interim_spec(name).required_columns
+            }
+        )
+        for name in missing
+    }
     metadata = {
         "producer_diagnostics": {
             "timestamp_semantics": "vendor_event_time_no_receive_clock",
+            "missing_source_streams": sorted(missing),
         },
     }
     definitions = [
@@ -169,6 +188,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 name: materialize_dataset_session(session.filtered_view(window))
                 for name, session in sessions.items()
             }
+            data.update(absent)
             if spec.data_id == "hft_panel":
                 frame = build_panel(
                     data["hft_quotes"],
@@ -199,6 +219,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                         if role == "factor"
                     ),
                     config=json.loads(spec.parameters_json),
+                    missing_streams=missing,
                 )
             elif spec.data_id == "hft_hawkes_factors":
                 from quant_research_platform.research.factors.hawkes import (

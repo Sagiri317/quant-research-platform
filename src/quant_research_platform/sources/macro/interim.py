@@ -1,5 +1,6 @@
 """Normalize macro vintages with explicit historical publication assumptions."""
 
+import hashlib
 import io
 import json
 import xml.etree.ElementTree as ET
@@ -315,7 +316,8 @@ def read_release_csv(path):
     Each row supplies a publication timestamp or a release date with its timezone.
     Source identity and units stay explicit, including for private vendor exports.
     """
-    data = pd.read_csv(path)
+    payload = Path(path).read_bytes()
+    data = pd.read_csv(io.BytesIO(payload))
     required = {
         "series_id",
         "observation_date",
@@ -354,7 +356,12 @@ def read_release_csv(path):
         data["published_at"] = pd.NaT
         data["availability_basis"] = "release_date_end"
     data["realtime_end_date"] = pd.Series(pd.NA, index=data.index, dtype="str")
-    return validate_observations(data)
+    result = validate_observations(data)
+    result.attrs["source_evidence"] = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+    }
+    return result
 
 
 def resolve_source_conflicts(frame):
@@ -405,7 +412,9 @@ def materialize_interim_data(
     raw_root = Path(raw_root)
     frames, skipped, sources, incomplete = [], [], {}, []
     if release_csv is not None:
-        frames.append(read_release_csv(release_csv))
+        release = read_release_csv(release_csv)
+        sources["release_csv"] = release.attrs.pop("source_evidence")
+        frames.append(release)
     else:
         manifest = read_qrp_json_file(raw_root / "download.json")[1]
         for key, metadata in manifest["sources"].items():
@@ -427,9 +436,15 @@ def materialize_interim_data(
                 member = raw_root / key / record["file"]
                 if not member.resolve().is_relative_to(raw_root.resolve()):
                     raise ValueError("macro_source_member_outside_root")
+                payload = member.read_bytes()
+                if (
+                    len(payload) != record["bytes"]
+                    or hashlib.sha256(payload).hexdigest() != record["sha256"]
+                ):
+                    raise ValueError("macro_source_integrity_mismatch")
                 chunks.extend(
                     _normalize_response(
-                        member.read_bytes(),
+                        payload,
                         metadata["series_ids"],
                         record,
                         incomplete=metadata["status"] != "downloaded",

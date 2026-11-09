@@ -28,6 +28,57 @@ from tests.helpers.high_frequency import daily_view, write_daily_inputs
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
 
 
+def test_quote_only_preparation_preserves_book_factors_and_labels(tmp_path):
+    from quant_research_platform.sources.venvoo import interim_spec
+    from quant_research_platform.storage.datasets import write_dataset
+
+    source = tmp_path / "quotes"
+    quotes = normalize(
+        raw_quotes(tuple(93000000 + 3000 * i for i in range(13))),
+        "hft_quotes",
+        INSTRUMENTS,
+    )
+    write_dataset(source, quotes, spec=interim_spec("hft_quotes"))
+    panel = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "hft_panel",
+            "inputs": {"hft_quotes": str(source)},
+            "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+            "output_root": str(tmp_path / "panel"),
+        }
+    )
+    observed = read_dataset(panel)
+    assert observed.mid.notna().all()
+    assert observed.observed_trade_volume.isna().all()
+    assert observed.observed_order_volume.isna().all()
+    for data_id, selection in (
+        ("hft_factors", {"factor_columns": ["relative_spread", "book_ofi"]}),
+        ("hft_labels", {"label_columns": ["future_mid_return_3s"]}),
+        ("hft_event_factors", {"factor_columns": ["trade_interval_seconds"]}),
+    ):
+        output = prepare(
+            {
+                "market_id": "a_share",
+                "data_id": data_id,
+                "inputs": {"hft_panel": str(panel)},
+                "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+                "output_root": str(tmp_path / data_id),
+                **selection,
+            }
+        )
+        actual = read_dataset(output)
+        if data_id == "hft_factors":
+            assert actual.relative_spread.notna().all()
+            assert actual.book_ofi.iloc[1:].notna().all()
+        elif data_id == "hft_labels":
+            assert actual.future_mid_return_3s.iloc[0] == pytest.approx(
+                observed.mid.iloc[1] / observed.mid.iloc[0] - 1
+            )
+        else:
+            assert actual.trade_interval_seconds.isna().all()
+
+
 def test_source_mixed_second_and_millisecond_clocks():
     raw = raw_quotes((93000, 93003123, 150001))
     counts = {"HHMMSS": 0, "HHMMSSmmm": 0}

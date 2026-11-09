@@ -34,11 +34,15 @@ class ResearchDatasetSpec(DataSpec):
     exclude_st: bool = True
     exclude_pt: bool = True
     target_transform: str = "date_zscore"
+    target_label_column: str = "forward_return_20d"
     target_clip: str = "none"
     risk_model: FactorRiskModel | None = None
     key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        _validate_non_empty_string(
+            self.target_label_column, "target_label_column_required"
+        )
         super().__post_init__()
         feature_risks = (
             tuple(
@@ -134,8 +138,6 @@ class ResearchDatasetSpec(DataSpec):
         _validate_column_tuple(self.label_columns, "label_columns", required=False)
         _validate_column_tuple(self.filter_columns, "filter_columns", required=False)
         _validate_column_tuple(self.context_columns, "context_columns", required=False)
-        if not self.factor_columns and not self.feature_columns:
-            raise ValueError("research_factor_or_feature_columns_required")
         factor_feature_overlap = sorted(
             set(self.factor_columns).intersection(self.feature_columns)
         )

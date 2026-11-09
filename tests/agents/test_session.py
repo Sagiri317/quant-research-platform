@@ -32,6 +32,36 @@ def finish(**arguments):
     }
 
 
+def test_checkpoint_preserves_primary_and_original_when_cleanup_fails(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    import quant_research_platform.agents.session as session
+
+    target = tmp_path / "checkpoint.json"
+    target.write_text("original")
+    primary = RuntimeError("synthetic fsync failure")
+
+    def fail_sync(*args):
+        raise primary
+
+    original_unlink = Path.unlink
+
+    def fail_cleanup(path, *args, **kwargs):
+        if path.parent == tmp_path and path != target:
+            raise OSError("synthetic cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(session.os, "fsync", fail_sync)
+    monkeypatch.setattr(Path, "unlink", fail_cleanup)
+    with pytest.raises(RuntimeError) as caught:
+        session.replace_text(target, "new")
+    assert caught.value is primary
+    assert primary.__notes__ == ["session checkpoint cleanup also failed: OSError"]
+    assert target.read_text() == "original"
+
+
 def test_pause_resume_reuses_successful_artifact_without_rerunning(tmp_path):
     config = agent_config(tmp_path)
     messages = []

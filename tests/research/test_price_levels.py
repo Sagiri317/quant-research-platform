@@ -125,3 +125,31 @@ def test_flat_bar_amount_profile_is_concentrated_and_zero_amount_undefined():
         .isna()
         .all()
     )
+    panel.loc[60, "adj_close"] = np.nan
+    assert (
+        calculate_price_volume_factors(panel, factor_columns=(column,))[column].iloc[-1]
+        == 1
+    )
+
+
+@pytest.mark.parametrize("window", (20, 60, 252))
+@pytest.mark.parametrize("side,unused", [("support", "high"), ("resistance", "low")])
+def test_level_uses_only_the_relevant_side_and_prior_reference_fields(
+    window, side, unused
+):
+    panel = pd.concat([level_panel().iloc[[0]]] * (window + 1), ignore_index=True)
+    panel.timestamp = pd.bdate_range("2024-01-02", periods=window + 1)
+    factor = f"{side}_distance_{window}d"
+    expected = calculate_price_volume_factors(panel, factor_columns=(factor,))
+    panel = panel.drop(columns=unused)
+    panel.loc[window, ["close", "low" if side == "support" else "high"]] = np.nan
+    actual = calculate_price_volume_factors(panel, factor_columns=(factor,))
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_peak_age_does_not_consume_current_price_or_unrelated_ohlc():
+    panel = level_panel().drop(columns=["high", "low", "close"])
+    factor = "peak_age_20d"
+    panel.loc[20, "adj_close"] = np.nan
+    actual = calculate_price_volume_factors(panel, factor_columns=(factor,))
+    assert actual[factor].iloc[-1] == 18

@@ -321,6 +321,30 @@ def produce_a_share_processed_data(
                     if definition.output_column in spec.required_columns
                 }
             }
+        if spec.data_id == "session_return_labels":
+            metadata["producer_diagnostics"] = {
+                "label_semantics": {
+                    definition.output_column: {
+                        "definition": definition.to_manifest(),
+                        "price_basis": "real_observed_adjusted_open_close",
+                        "endpoint_observation": "filling_flag_0_and_is_trading_true",
+                        "entry_offset_sessions": 1,
+                        "exit_offset_sessions": 1,
+                        "session_axis": "explicit_own_market_calendar_sessions",
+                        "execution_permissions_applied": False,
+                        "economic_price_event": (
+                            "next_session_open_09:30_to_close_15:00"
+                        ),
+                        "availability_basis": (
+                            "adjustment_inputs_at_entry_session_close"
+                        ),
+                        "timezone": "Asia/Shanghai",
+                        "stored_timezone": "UTC",
+                    }
+                    for definition in a_share.label_catalog().list()
+                    if definition.output_column in spec.required_columns
+                }
+            }
         if spec.data_id == "on_id_decomposition":
             clocks = {"on_id_pre_entry_log_return": "next_session_close_15:00"}
             for horizon in json.loads(spec.parameters_json)["horizons"]:

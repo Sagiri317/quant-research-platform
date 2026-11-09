@@ -50,6 +50,26 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     assert frame.timestamp.iloc[0] == pd.Timestamp("2024-01-02")
     assert frame.published_at.isna().all()
     assert frame.availability_basis.tolist() == ["unknown_historical_release"]
+    clocks = tmp_path / "release-clocks.csv"
+    clocks.write_text(
+        "source,observation_date,estimated_available_at,availability_basis,evidence_url\n"
+        "sse_etf_shares,2024-01-02,2024-01-03T01:30:00Z,assumed_next_open,https://example.org/rule\n",
+        encoding="utf-8",
+    )
+    assumed = tmp_path / "assumed"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(source),
+            "release_csv": str(clocks),
+            "outputs": {"public_fund_shares": str(assumed)},
+        }
+    )
+    published = read_dataset(assumed)
+    assert published.published_at.isna().all()
+    assert published.available_at.iloc[0] == pd.Timestamp("2024-01-03T01:30:00Z")
+    assert published.availability_basis.tolist() == ["assumed_next_open"]
+    assert published.availability_evidence_url.tolist() == ["https://example.org/rule"]
     (source / "shares.json").write_bytes(payload + b" ")
     with pytest.raises(ValueError, match="integrity_mismatch"):
         prepare_source(
@@ -86,6 +106,96 @@ def test_sse_missing_lending_amount_is_not_zero(tmp_path):
     assert frame.asset_id.tolist() == ["000001"]
     assert frame.lending_balance.isna().all()
     assert frame.financing_balance.tolist() == [100]
+
+
+@pytest.mark.parametrize(
+    "clock,error",
+    [
+        ("2000-01-01T00:00:00Z", "precedes_dependency"),
+        ("2024-01-03T00:00:00", "timezone_required"),
+        ("NaT", "timezone_required"),
+    ],
+)
+def test_manifest_publication_clock_cannot_invent_an_earlier_release(
+    tmp_path, clock, error
+):
+    source = tmp_path / "raw"
+    source.mkdir()
+    payload = (
+        b'{"result":[{"STAT_DATE":"2024-01-02","SEC_CODE":"510050","TOT_VOL":"1"}]}'
+    )
+    (source / "shares.json").write_bytes(payload)
+    record = {
+        "path": "shares.json",
+        "source": "sse_etf_shares",
+        "status": "downloaded",
+        "url": "https://example.org/shares",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "retrieved_at": "2026-11-09T00:00:00Z",
+        "historical_published_at": clock,
+    }
+    (source / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": [record]})
+    )
+    with pytest.raises(ValueError, match=error):
+        prepare_source(
+            {
+                "source_id": "public_research",
+                "raw_root": str(source),
+                "outputs": {"public_fund_shares": str(tmp_path / "invalid")},
+            }
+        )
+    assert not (tmp_path / "invalid").exists()
+
+
+def test_local_china_release_date_is_not_compared_to_utc_midnight(tmp_path):
+    from quant_research_platform.sources.public_research.interim import _release_clocks
+
+    clocks = tmp_path / "clock.csv"
+    clocks.write_text(
+        "source,observation_date,estimated_available_at,availability_basis,evidence_url\n"
+        "sse_etf_shares,2024-01-02,2024-01-01T18:00:00Z,assumption,https://example.org/rule\n"
+    )
+    frame, _ = _release_clocks(clocks)
+    assert frame.estimated_available_at.iloc[0] == pd.Timestamp(
+        "2024-01-02T02:00:00+08:00"
+    )
+
+
+@pytest.mark.parametrize(
+    "publication_date,published_at", [("2000-01-01", ""), ("", "2000-01-01T00:00:00Z")]
+)
+def test_extracted_source_release_has_the_same_chronology_boundary(
+    tmp_path, publication_date, published_at
+):
+    source = tmp_path / "raw"
+    source.mkdir()
+    payload = (
+        "observation_date,ratio_name,put_call_ratio,source_url,source_sha256,publication_date,published_at\n"
+        f"2024-01-02,TOTAL PUT/CALL RATIO,0.5,https://example.org/cboe,hash,{publication_date},{published_at}\n"
+    ).encode()
+    (source / "ratio.csv").write_bytes(payload)
+    record = {
+        "path": "ratio.csv",
+        "source": "cboe_put_call_extracted",
+        "status": "downloaded",
+        "url": "https://example.org/cboe",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "retrieved_at": "2026-11-09T00:00:00Z",
+    }
+    (source / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": [record]})
+    )
+    with pytest.raises(ValueError, match="precedes_dependency"):
+        prepare_source(
+            {
+                "source_id": "public_research",
+                "raw_root": str(source),
+                "outputs": {"public_option_put_call": str(tmp_path / "invalid")},
+            }
+        )
 
 
 def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
@@ -194,3 +304,29 @@ def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
     assert frame.published_at.isna().all()
     assert frame.source_sha256.tolist() == ["original-hash"]
     assert "current_vintage_not_historical_pit" in frame.adjustment_basis.iloc[0]
+
+
+@pytest.mark.parametrize(
+    "clock,error",
+    [
+        ("2024-01-03T01:30:00", "timezone_required"),
+        ("2024-01-01T01:30:00Z", "precedes_dependency"),
+    ],
+)
+def test_release_clock_requires_explicit_timezone_and_no_early_availability(
+    tmp_path, clock, error
+):
+    from quant_research_platform.sources.public_research.interim import _release_clocks
+
+    path = tmp_path / "clocks.csv"
+    pd.DataFrame(
+        {
+            "source": ["sse_margin"],
+            "observation_date": ["2024-01-02"],
+            "estimated_available_at": [clock],
+            "availability_basis": ["assumption"],
+            "evidence_url": ["https://example.org/rule"],
+        }
+    ).to_csv(path, index=False)
+    with pytest.raises(ValueError, match=error):
+        _release_clocks(path)

@@ -360,9 +360,9 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
         columns.extend(
             (
                 "eligible",
-                "forward_return_20d",
+                spec.target_label_column,
                 spec.label_availability_columns.get(
-                    "forward_return_20d", "forward_return_20d_available_at"
+                    spec.target_label_column, f"{spec.target_label_column}_available_at"
                 ),
             )
         )
@@ -640,15 +640,18 @@ def _add_a_share_semantic_columns(
                     cross
                 )
     if "model_target" in generated:
-        if "forward_return_20d" not in result.columns:
+        if dataset_spec.target_label_column not in result.columns:
             raise ValueError("a_share_model_target_label_missing")
-        maturity = dataset_spec.label_availability_columns.get("forward_return_20d")
+        maturity = dataset_spec.label_availability_columns.get(
+            dataset_spec.target_label_column
+        )
         if maturity is None:
             raise ValueError("model_target_label_availability_required")
         result[["model_target", "model_target_available_at"]] = a_share_model_target(
             result,
             transform=dataset_spec.target_transform,
             clip=dataset_spec.target_clip,
+            label_column=dataset_spec.target_label_column,
             availability_column=maturity,
             risk_model=dataset_spec.risk_model,
             risk_sessions=risk_sessions,
@@ -675,6 +678,7 @@ def assemble(config: Mapping) -> Path:
         "feature_transform",
         "feature_groups",
         "target_transform",
+        "target_label_column",
         "target_clip",
         "risk_model",
         "risk_exposure_input",
@@ -823,13 +827,16 @@ def assemble(config: Mapping) -> Path:
             if column in selected_factors
         ],
     )
+    target_label = config.get("target_label_column", "forward_return_20d")
+    if type(target_label) is not str or not target_label:
+        raise ValueError("target_label_column_required")
     labels = config.get(
         "label_columns",
         [
             column
             for column in (defaults.label_columns if defaults else selected_roles)
             if column in selected_labels
-            or (column == "model_target" and "forward_return_20d" in selected_labels)
+            or (column == "model_target" and target_label in selected_labels)
         ],
     )
     filters = config.get(
@@ -864,8 +871,6 @@ def assemble(config: Mapping) -> Path:
         raise ValueError("assemble_factor_not_selected")
     if set(reused_features) - selected_features:
         raise ValueError("assemble_feature_not_selected")
-    if not factors and not reused_features:
-        raise ValueError("research_factor_or_feature_columns_required")
     # Each selected feature has exactly one producer.
     feature_producers = {}
     for column in tuple(reused_features):
@@ -901,7 +906,7 @@ def assemble(config: Mapping) -> Path:
     ):
         raise ValueError("assemble_label_not_available")
     if set(labels) - selected_labels - generated_labels or (
-        "model_target" in labels and "forward_return_20d" not in selected_labels
+        "model_target" in labels and target_label not in selected_labels
     ):
         raise ValueError("assemble_label_not_selected")
     generated_context = (
@@ -909,9 +914,9 @@ def assemble(config: Mapping) -> Path:
     )
     if set(context) - set(selected_roles) - generated_context:
         raise ValueError("assemble_context_not_selected")
-    if {"target_transform", "target_clip"}.intersection(config) and (
-        config["market_id"] != "a_share" or "model_target" not in labels
-    ):
+    if {"target_transform", "target_clip", "target_label_column"}.intersection(
+        config
+    ) and (config["market_id"] != "a_share" or "model_target" not in labels):
         raise ValueError("assemble_target_transform_requires_model_target")
     business_columns = set((*factors, *labels, *filters, *context))
     recipe = config.get(
@@ -996,12 +1001,17 @@ def assemble(config: Mapping) -> Path:
         options.setdefault("industry_neutralize", False)
         options.setdefault("size_neutralize", False)
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
-        PRESERVE_AMPLITUDE_FACTORS,
+        PRESERVE_AMPLITUDE_FACTORS as MACRO_AMPLITUDE_FACTORS,
+    )
+    from quant_research_platform.research.factors.market_structure import (
+        PRESERVE_AMPLITUDE_FACTORS as STRUCTURE_AMPLITUDE_FACTORS,
     )
 
-    preserve = PRESERVE_AMPLITUDE_FACTORS.intersection(factors)
+    preserve = (MACRO_AMPLITUDE_FACTORS | STRUCTURE_AMPLITUDE_FACTORS).intersection(
+        factors
+    )
     if preserve and "raw" not in groups:
-        raise ValueError("macro_amplitude_factors_require_raw_group")
+        raise ValueError("amplitude_factors_require_raw_group")
     transform_factors = tuple(factor for factor in factors if factor not in preserve)
     transforms = (
         (
@@ -1039,7 +1049,7 @@ def assemble(config: Mapping) -> Path:
     maturity_producers = {}
     for label in (
         *labels,
-        *(("forward_return_20d",) if "model_target" in labels else ()),
+        *((target_label,) if "model_target" in labels else ()),
     ):
         candidates = [
             name
@@ -1059,9 +1069,9 @@ def assemble(config: Mapping) -> Path:
                     raise ValueError("duplicate_research_output_columns: " + maturity)
                 maturity_producers[maturity] = candidates[0]
     if "model_target" in labels:
-        if "forward_return_20d" not in availability:
+        if target_label not in availability:
             raise ValueError("model_target_label_availability_required")
-        labels.append("forward_return_20d")
+        labels.append(target_label)
         context.append("model_target_available_at")
         availability["model_target"] = "model_target_available_at"
     for label in tuple(labels):
@@ -1111,6 +1121,7 @@ def assemble(config: Mapping) -> Path:
         feature_columns=features,
         feature_transforms=transforms,
         target_transform=config.get("target_transform", "date_zscore"),
+        target_label_column=target_label,
         target_clip=config.get("target_clip", "none"),
         risk_model=risk_model,
         label_columns=labels,
@@ -1211,8 +1222,8 @@ def assemble(config: Mapping) -> Path:
     if "model_target" in labels:
         if spec.target_transform in {"raw", "industry_size_residual", "risk_residual"}:
             source_unit = consumed_specs[
-                producers["forward_return_20d"]
-            ].column_units.get("forward_return_20d")
+                producers[spec.target_label_column]
+            ].column_units.get(spec.target_label_column)
             if source_unit is not None:
                 units["model_target"] = source_unit
         else:
@@ -1281,6 +1292,7 @@ def assemble(config: Mapping) -> Path:
                 "feature_recipe": recipe,
                 "feature_groups": groups,
                 "target_transform": spec.target_transform,
+                "target_label_column": spec.target_label_column,
                 "target_clip": spec.target_clip,
                 **(
                     {"risk_exposure_input": dict(risk_exposure_input)}

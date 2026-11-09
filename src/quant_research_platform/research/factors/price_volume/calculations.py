@@ -447,8 +447,12 @@ def _calculate_theme_values(values, factor, start, stop):
         }
     elif "adj_open" in names:
         widths["adj_open"] = (1, 0)
-        if factor != "intraday_return":
+        if factor == "opening_gap":
+            widths["adj_close"] = (1, 1)
+        elif factor != "intraday_return":
             widths["adj_close"] = (2, 0)
+    elif factor == "price_impact_efficiency_20d":
+        widths["turnover"] = (20, 0)
     matrices = {
         name: sliding_window_view(
             values[name][first - width + 1 - lag : stop - lag], width
@@ -460,6 +464,8 @@ def _calculate_theme_values(values, factor, start, stop):
         required = (
             matrix[:, -1:]
             if name == "period_return" and factor == "drawdown_rebound_20d"
+            else matrix[:, (0, -1)]
+            if name == "adj_close" and factor == "price_impact_efficiency_20d"
             else matrix
         )
         valid &= np.isfinite(required).all(axis=1)
@@ -473,18 +479,19 @@ def _calculate_theme_values(values, factor, start, stop):
 
     if "adj_open" in names:
         opening = selected["adj_open"][:, -1]
-        closing = selected["adj_close"][:, -1]
-        intraday = closing / opening - 1
-        if factor == "intraday_return":
-            result = intraday
+        if factor == "opening_gap":
+            result = opening / selected["adj_close"][:, -1] - 1
         else:
-            gap = opening / selected["adj_close"][:, -2] - 1
-            if factor == "opening_gap":
-                result = gap
-            elif factor == "down_gap_recovery":
-                result = np.maximum(-gap, 0) * intraday
+            intraday = selected["adj_close"][:, -1] / opening - 1
+            if factor == "intraday_return":
+                result = intraday
             else:
-                result = np.maximum(gap, 0) * -intraday
+                gap = opening / selected["adj_close"][:, -2] - 1
+                result = (
+                    np.maximum(-gap, 0) * intraday
+                    if factor == "down_gap_recovery"
+                    else np.maximum(gap, 0) * -intraday
+                )
     elif factor.startswith("price_position_") or position_interaction:
         prices = selected["adj_close"]
         low, high = prices.min(axis=1), prices.max(axis=1)
@@ -648,14 +655,17 @@ def _calculate_amount_profile(values):
     )
     complete = pd.Series(valid.astype(int)).rolling(60).sum().shift(1).eq(60).to_numpy()
     totals = profiles.sum(axis=1)
-    usable = complete & np.isfinite(price) & (price > 0) & (totals > 0)
+    profile_known = complete & (totals > 0)
+    output["traded_amount_concentration_60d"][profile_known] = (
+        profiles[profile_known].max(axis=1) / totals[profile_known]
+    )
+    usable = profile_known & np.isfinite(price) & (price > 0)
     if not usable.any():
         return output
     profile = profiles[usable]
     total = totals[usable]
     node = np.exp((bins[np.argmax(profile, axis=1)] + 0.5) * step)
     output["traded_amount_node_distance_60d"][usable] = np.log(price[usable] / node)
-    output["traded_amount_concentration_60d"][usable] = profile.max(axis=1) / total
     above = np.clip((edges[1:] - price[usable, None]) / np.diff(edges), 0, 1)
     output["traded_amount_above_price_60d"][usable] = (profile * above).sum(
         axis=1
@@ -674,10 +684,18 @@ def _calculate_level_values(values, factor, start, stop):
         name: sliding_window_view(values[name][first - width + 1 : stop], width)
         for name in names
     }
+    reference_only = factor.startswith(("support_distance_", "resistance_distance_"))
     valid = np.logical_and.reduce(
         [
-            (np.isfinite(matrix) & (matrix > 0)).all(axis=1)
-            for matrix in matrices.values()
+            (np.isfinite(required) & (required > 0)).all(axis=1)
+            for name, matrix in matrices.items()
+            for required in (
+                matrix[:, :-1]
+                if factor.startswith("peak_age_")
+                or reference_only
+                and name != "adj_close"
+                else matrix,
+            )
         ]
     )
     if not valid.any():
@@ -701,25 +719,30 @@ def _calculate_level_values(values, factor, start, stop):
                 where=np.isfinite(low) & (peak > low),
             )
     else:
-        adjustment = prices / matrices["close"][valid]
-        high, low = (
-            matrices["high"][valid] * adjustment,
-            matrices["low"][valid] * adjustment,
+        side = (
+            "low"
+            if factor.startswith("support_") or factor == "failed_down_breakout_20d"
+            else "high"
         )
-        support, resistance = low[:, :-1].min(axis=1), high[:, :-1].max(axis=1)
+        extremes, close = matrices[side][valid], matrices["close"][valid]
+        reference = extremes[:, :-1] * prior / close[:, :-1]
+        level = reference.min(axis=1) if side == "low" else reference.max(axis=1)
         if factor.startswith("support_distance_"):
-            result = current / support - 1
+            result = current / level - 1
         elif factor.startswith("resistance_distance_"):
-            result = current / resistance - 1
+            result = current / level - 1
         elif factor == "failed_up_breakout_20d":
             result = np.where(
-                current <= resistance, np.maximum(high[:, -1] / resistance - 1, 0), 0
+                current <= level,
+                np.maximum(extremes[:, -1] * current / close[:, -1] / level - 1, 0),
+                0,
             )
         else:
             result = np.where(
-                current >= support, np.maximum(1 - low[:, -1] / support, 0), 0
+                current >= level,
+                np.maximum(1 - extremes[:, -1] * current / close[:, -1] / level, 0),
+                0,
             )
-        result = np.where((high >= low).all(axis=1), result, np.nan)
     output[first - start :][valid] = result
     return output
 

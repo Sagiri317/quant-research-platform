@@ -253,7 +253,9 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
     return pd.DataFrame(output, columns=names)
 
 
-def compute_event_factors(panel, orders, trades, *, columns, config):
+def compute_event_factors(
+    panel, orders, trades, *, columns, config, missing_streams=()
+):
     config = parameters(config)
     output = []
     for work, selected in observed_segments(panel, orders=orders, trades=trades):
@@ -310,6 +312,23 @@ def compute_event_factors(panel, orders, trades, *, columns, config):
             ],
             axis=1,
         )
+        for column in columns:
+            required = (
+                {"hft_trades"}
+                if column.startswith("trade_")
+                or column in {"large_trade_pressure", "small_trade_pressure"}
+                else {"hft_orders"}
+                if column
+                in {
+                    "observed_cancel_order_ratio",
+                    "observed_cancel_count_fraction",
+                    "observed_cancel_pressure_change",
+                }
+                and work.exchange.iloc[0] == "SSE"
+                else {"hft_orders", "hft_trades"}
+            )
+            if required.intersection(missing_streams):
+                aligned[column] = np.nan
         output.append(
             pd.concat([work.loc[:, protocol.KEY], aligned.loc[:, columns]], axis=1)
         )
