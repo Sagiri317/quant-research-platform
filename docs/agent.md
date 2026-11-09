@@ -27,6 +27,10 @@ qrp agent --resume results/agent-session --budget more-budget.json
 
 不带配置时直接进入连续对话，开放 `read`、`search`、`terminal` 三个工具：直接读当前仓库和 `data/`、搜索本地或网络资料、用当前项目 Python 调用仓库源码。无需先手动绑定本地数据或建立研究协议，就能盘点数据、查看因子和提出假设。默认继承报告复核示例的模型连接与预算设置，不继承其历史研究协议。每个新问题建立独立任务，近期问答直接进入上下文。生成目录默认为 `results/agent-chat/<对话编号>/`，由 `.gitignore` 忽略。
 
+交互界面按 Markdown 排版回答和表格，默认只显示计算进展、必要指标和失败原因，不展开成功的文件读取与检索，也不打印原始终端 JSON 或整份审计报告。完整行动、数值和报告仍保存在会话目录；`/status` 查看用量。退出时显示保存提示，`--status` 等非交互查询仍输出 JSON。
+
+需要预设本地数据说明、模型、预算或输出目录时，可在带 `workspace` 的配置中令 `question=""`、`protocol=null`，再执行 `qrp agent --config <配置.json> --interactive`。它先等待输入，不自动运行研究；每个问题形成新任务，后续追问继承前面的问答。非空 `question` 仍按显式研究任务启动。
+
 自动挖因子是主要研究用途，具体步骤、原生搜索的能力与限制见 [自动化挖因子](factor-mining.md)。Agent 不另外实现因子算法；它读取真实入口和配置，调用原有数据准备、公式搜索、统计、模型和回测代码，依据训练反馈继续研究。
 
 对话目录中的 `conversation.json` 保存工作配置，每轮的 `session.json` 保存任务事实。`qrp agent --resume <对话目录>` 恢复完整对话；`--status` 只读查看本轮及累计消耗。已完成的研究任务保持完成状态，追问建立新任务。

@@ -43,6 +43,19 @@ def test_agent_without_config_opens_chat(monkeypatch):
     assert calls == [{"config": None, "resume": None, "message": None, "budget": None}]
 
 
+def test_interactive_exit_prints_a_human_message_instead_of_path_json(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "quant_research_platform.agents.chat.chat_agent",
+        lambda **kwargs: tmp_path,
+    )
+    result = CliRunner().invoke(app, ["agent", "--interactive"])
+    assert result.exit_code == 0
+    assert "会话已保存。" in result.stdout
+    assert '"output"' not in result.stdout
+
+
 @pytest.mark.parametrize(
     "options", [["--message", "hello"], ["--status"], ["--budget", "budget.json"]]
 )

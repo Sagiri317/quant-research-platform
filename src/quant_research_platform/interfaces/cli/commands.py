@@ -370,6 +370,9 @@ def agent(
         result = chat_agent(
             config=settings, resume=resume, message=message, budget=limits
         )
+        if result is not None:
+            typer.echo("会话已保存。")
+        return
     elif resume is not None:
         result = resume_agent(resume, message=message, budget=limits)
     else:

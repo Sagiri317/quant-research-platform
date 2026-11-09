@@ -8,6 +8,10 @@ from threading import Event, RLock, Thread
 from uuid import uuid4
 
 import httpx
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.table import Table
+from rich.text import Text
 
 from quant_research_platform.agents.execution import error_feedback
 from quant_research_platform.agents.protocol import (
@@ -23,6 +27,7 @@ from quant_research_platform.agents.session import (
 )
 from quant_research_platform.agents.workspace import TOOLS
 from quant_research_platform.policy.share_safety import sanitize_shared_text
+from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 HELP = (
@@ -76,10 +81,22 @@ class _Terminal:
         self.conversation = config is None and (
             resumed is None or (resumed / "conversation.json").is_file()
         )
+        if config is not None:
+            self.conversation = (
+                config["protocol"] is None
+                and not config["question"]
+                and "workspace" in config
+            )
         if self.conversation:
             if resumed is not None:
                 self.config = read_qrp_json_file(resumed / "conversation.json")[1]
                 self.workspace = resumed
+            elif config is not None:
+                self.config = deepcopy(config)
+                self.config.setdefault("documents", {})
+                self.config.setdefault("inputs", {})
+                self.workspace = Path(config["output"]).resolve()
+                reject_if_exists(self.workspace)
             else:
                 profile = read_qrp_json_file(
                     Path("configs/research-learning/agent-report-review.json")
@@ -123,14 +140,20 @@ class _Terminal:
         self.quit = Event()
         self.active = Event()
         self.output = RLock()
+        self.console = Console(highlight=False)
 
     def emit(self, text):
         with self.output:
-            print(text, flush=True)
+            self.console.print(text, markup=False)
+
+    def reply(self, text):
+        self.emit(Text("\n助手", style="bold cyan"))
+        self.emit(Markdown(text))
+        self.emit("")
 
     def prompt(self):
         with self.output:
-            print("你> ", end="", flush=True)
+            self.console.print(Text("你> ", style="bold cyan"), end="")
 
     def save_workspace(self):
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -232,7 +255,7 @@ class _Terminal:
             except (ValueError, KeyError, OSError) as error:
                 self.emit(
                     "命令未执行："
-                    + json.dumps(error_feedback(error), ensure_ascii=False)
+                    + error_feedback(error).get("reason", type(error).__name__)
                 )
                 self.prompt()
                 continue
@@ -252,11 +275,21 @@ class _Terminal:
                     messages.append(line)
 
     def progress(self, event):
-        if event["tool"] or not self.conversation:
-            self.emit(
-                f"[{event['id']}] {event['tool'] or 'decision'}: "
-                f"{event['status']} — {event['summary']}"
+        if event["tool"] is None:
+            return
+        if (
+            event["tool"] in {"read", "search", "lookup"}
+            and event["status"] == "completed"
+            and not event.get("reason")
+        ):
+            return
+        failed = event["status"] != "completed"
+        self.emit(
+            Text(
+                f"  {'失败' if failed else '进展'} · {event['summary']}",
+                style="red" if failed else "dim",
             )
+        )
         if "reason" in event:
             self.emit("原因：" + event["reason"])
         rows = event.get("rows", [event])
@@ -265,18 +298,26 @@ class _Terminal:
                 self.emit(
                     f"对照 {row['evidence']}：{row['status']} " + row.get("reason", "")
                 )
-            if row.get("metrics"):
-                self.emit(
-                    f"指标（原始单位）：{row.get('evidence', event['id'])} "
-                    + json.dumps(row["metrics"], ensure_ascii=False, allow_nan=False)
-                )
-                if row.get("scope"):
-                    self.emit(
-                        "样本口径：" + json.dumps(row["scope"], ensure_ascii=False)
-                    )
+            for title, values in (
+                ("指标（原始单位）", row.get("metrics", {})),
+                ("样本口径", row.get("scope", {})),
+            ):
+                if values:
+                    table = Table(title=title, box=None, show_header=False)
+                    for name, value in values.items():
+                        displayed = (
+                            "未定义"
+                            if value is None
+                            else f"{value:.6g}"
+                            if isinstance(value, float)
+                            else str(value)
+                        )
+                        table.add_row(name, displayed)
+                    self.emit(table)
 
     def execute(self, *, settings=None, message=None, budget=None):
         self.active.set()
+        self.emit(Text("  正在研究…", style="dim"))
         try:
             if settings is not None:
                 run_agent(settings, control=self.control, on_event=self.progress)
@@ -289,9 +330,11 @@ class _Terminal:
                     on_event=self.progress,
                 )
         except (ValueError, RuntimeError, httpx.HTTPError) as error:
+            feedback = error_feedback(error)
             self.emit(
-                "本次任务失败，可查看 /status，补充条件或 /continue："
-                + json.dumps(error_feedback(error), ensure_ascii=False)
+                "本次任务未完成："
+                + feedback.get("reason", feedback["error"])
+                + "。可查看 /status，补充条件或 /continue。"
             )
         finally:
             self.active.clear()
@@ -329,13 +372,8 @@ class _Terminal:
         self.execute(settings=settings)
 
     def run(self, *, resume=None, message=None, budget=None):
-        self.emit(
-            "量化研究助手。可直接查看当前仓库和 data/，"
-            "搜索资料，调用本地命令开展因子研究。"
-            if self.conversation
-            else "研究会话已启动。"
-        )
-        self.emit(HELP)
+        self.emit(Text("\n量化研究助手", style="bold cyan"))
+        self.emit("直接输入问题，回答后可以继续追问。/help 查看命令，/quit 保存退出。")
         Thread(target=self.read_input, daemon=True).start()
         if not self.conversation:
             self.execute(
@@ -367,13 +405,13 @@ class _Terminal:
             )
             if state:
                 if state["status"] == "completed":
+                    if displayed != state["id"]:
+                        self.reply(state["conclusion"]["text"])
+                        displayed = state["id"]
                     if not self.conversation:
                         return self.root
-                    if displayed != state["id"]:
-                        self.emit(f"\nAgent> {state['conclusion']['text']}\n")
-                        displayed = state["id"]
                 elif state["pending_question"]:
-                    self.emit(state["pending_question"])
+                    self.reply(state["pending_question"])
                 else:
                     self.local_command("/status")
             self.prompt()
@@ -387,7 +425,10 @@ class _Terminal:
                 try:
                     self.local_command(line)
                 except (ValueError, KeyError, OSError) as error:
-                    self.emit("输入未绑定：" + json.dumps(error_feedback(error)))
+                    self.emit(
+                        "输入未绑定："
+                        + error_feedback(error).get("reason", type(error).__name__)
+                    )
                 continue
             if line == "/pause":
                 continue
@@ -401,7 +442,10 @@ class _Terminal:
                         )
                         self.save_workspace()
                 except (ValueError, TypeError) as error:
-                    self.emit("预算未修改：" + json.dumps(error_feedback(error)))
+                    self.emit(
+                        "预算未修改："
+                        + error_feedback(error).get("reason", type(error).__name__)
+                    )
                     continue
                 line = "/continue"
             if new_turn:

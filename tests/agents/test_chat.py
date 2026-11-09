@@ -4,9 +4,12 @@ import builtins
 import json
 from threading import Event
 
+import pytest
+
 from quant_research_platform.agents.chat import _Terminal, chat_agent, chat_status
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import read_session
+from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from tests.agents.support import ScriptedClient, agent_config
 
 
@@ -27,7 +30,7 @@ def test_interactive_question_answer_round_trip(tmp_path, monkeypatch):
         lambda config: client,
     )
     question_shown, done = Event(), Event()
-    original_print = builtins.print
+    original_reply = _Terminal.reply
     reads = 0
 
     def read_line():
@@ -39,13 +42,13 @@ def test_interactive_question_answer_round_trip(tmp_path, monkeypatch):
         done.wait(5)
         raise EOFError
 
-    def display(*args, **kwargs):
-        original_print(*args, **kwargs)
-        if args == (question,):
+    def display(terminal, text):
+        original_reply(terminal, text)
+        if text == question:
             question_shown.set()
 
     monkeypatch.setattr(builtins, "input", read_line)
-    monkeypatch.setattr(builtins, "print", display)
+    monkeypatch.setattr(_Terminal, "reply", display)
     try:
         root = chat_agent(config=agent_config(tmp_path))
     finally:
@@ -56,8 +59,9 @@ def test_interactive_question_answer_round_trip(tmp_path, monkeypatch):
     assert "positive momentum" in client.messages[1]
 
 
+@pytest.mark.parametrize("configured", [False, True])
 def test_direct_chat_waits_for_input_and_carries_completed_turn_into_followup(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, configured
 ):
     config = agent_config(tmp_path)
     config["tools"] = {}
@@ -81,7 +85,7 @@ def test_direct_chat_waits_for_input_and_carries_completed_turn_into_followup(
         lambda settings: client,
     )
     first_answer, second_answer = Event(), Event()
-    original_print = builtins.print
+    original_reply = _Terminal.reply
     reads = 0
 
     def read_line():
@@ -98,16 +102,23 @@ def test_direct_chat_waits_for_input_and_carries_completed_turn_into_followup(
         assert second_answer.wait(5)
         return "/quit"
 
-    def display(*args, **kwargs):
-        original_print(*args, **kwargs)
-        if args and str(args[0]).startswith("\nAgent> 第一轮"):
+    def display(terminal, text):
+        original_reply(terminal, text)
+        if text.startswith("第一轮"):
             first_answer.set()
-        if args and str(args[0]).startswith("\nAgent> 第二轮"):
+        if text.startswith("第二轮"):
             second_answer.set()
 
     monkeypatch.setattr(builtins, "input", read_line)
-    monkeypatch.setattr(builtins, "print", display)
-    workspace = chat_agent()
+    monkeypatch.setattr(_Terminal, "reply", display)
+    if configured:
+        config.update(
+            question="",
+            protocol=None,
+            workspace=str(tmp_path),
+        )
+        config.pop("documents")
+    workspace = chat_agent(config=config if configured else None)
     root = workspace / "turn-002"
     state = read_session(root)
     assert root.name == "turn-002"
@@ -151,7 +162,7 @@ def test_status_and_tools_redraw_prompt_without_consuming_question(
         lambda config: client,
     )
     answered = Event()
-    original_print = builtins.print
+    original_reply = _Terminal.reply
     lines = iter(["/status", "/tools", "解释 IC。"])
 
     def read_line():
@@ -161,13 +172,13 @@ def test_status_and_tools_redraw_prompt_without_consuming_question(
             assert answered.wait(5)
             return "/quit"
 
-    def display(*args, **kwargs):
-        original_print(*args, **kwargs)
-        if args and str(args[0]).startswith("\nAgent> 问题已回答"):
+    def display(terminal, text):
+        original_reply(terminal, text)
+        if text.startswith("问题已回答"):
             answered.set()
 
     monkeypatch.setattr(builtins, "input", read_line)
-    monkeypatch.setattr(builtins, "print", display)
+    monkeypatch.setattr(_Terminal, "reply", display)
     workspace = chat_agent()
     root = workspace / "turn-001"
     text = capsys.readouterr().out
@@ -232,4 +243,69 @@ def test_comparison_display_keeps_failed_windows_and_undefined_values(tmp_path, 
     )
     output = capsys.readouterr().out
     assert "e0001：failed missing_dependency" in output
-    assert '"rank_ic": null' in output
+    assert "rank_ic" in output and "未定义" in output
+    assert '"rank_ic": null' not in output
+
+
+def test_chat_progress_hides_successful_reads_and_raw_terminal_payloads(
+    tmp_path, capsys
+):
+    terminal = _Terminal(agent_config(tmp_path), None)
+    terminal.progress(
+        {
+            "id": "e0001",
+            "tool": "read",
+            "status": "completed",
+            "summary": "Internal schema inspection.",
+        }
+    )
+    terminal.progress(
+        {
+            "id": "e0002",
+            "tool": "terminal",
+            "status": "completed",
+            "summary": "已计算两个候选，准备比较排序关联。",
+            "text": '{"candidates": [{"full_precision_metric": 0.123456789}]}',
+        }
+    )
+    terminal.progress(
+        {
+            "id": "e0003",
+            "tool": "read",
+            "status": "failed",
+            "summary": "输入读取失败。",
+            "reason": "required_input_missing",
+        }
+    )
+    output = capsys.readouterr().out
+    assert "Internal schema inspection" not in output
+    assert "已计算两个候选" in output
+    assert "candidates" not in output
+    assert "required_input_missing" in output
+
+
+def test_chat_answer_renders_markdown_instead_of_printing_source(tmp_path, capsys):
+    terminal = _Terminal(agent_config(tmp_path), None)
+    terminal.reply(
+        "# 本轮结果\n\n"
+        "| 候选 | RankIC |\n|---|---|\n| `rank(x)` | 0.12 |\n\n"
+        "样本很短，只用于演示。"
+    )
+    output = capsys.readouterr().out
+    assert "助手" in output
+    assert "本轮结果" in output and "rank(x)" in output and "0.12" in output
+    assert "# 本轮结果" not in output
+    assert "|---|---|" not in output
+    assert "样本很短，只用于演示。" in output
+
+
+def test_configured_chat_requires_a_new_output_directory(tmp_path):
+    config = agent_config(tmp_path)
+    config.update(question="", protocol=None, tools={}, workspace=str(tmp_path))
+    root = tmp_path / "agent"
+    root.mkdir()
+    marker = root / "conversation.json"
+    marker.write_text("existing conversation", encoding="utf-8")
+    with pytest.raises(OutputAlreadyExistsError):
+        _Terminal(config, None)
+    assert marker.read_text(encoding="utf-8") == "existing conversation"
