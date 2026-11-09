@@ -583,7 +583,16 @@ class _Runner:
         event, _ = self.new_event(action, experiment=False)
         try:
             prior = {item["id"]: item for item in self.state["events"][:-1]}
-            if set(action.evidence) - prior.keys():
+            history = (
+                {
+                    item["details"]
+                    for item in self.config.get("history", [])
+                    if item.get("details") in self.config.get("documents", {})
+                }
+                if "workspace" in self.config
+                else set()
+            )
+            if set(action.evidence) - prior.keys() - history:
                 raise ValueError("agent_conclusion_evidence_invalid")
             if action.kind == "ask_user":
                 if action.arguments():
@@ -606,6 +615,8 @@ class _Runner:
                     )
                     if claim["evidence"] not in action.evidence:
                         raise ValueError("agent_claim_evidence_not_cited")
+                    if claim["evidence"] not in prior:
+                        raise ValueError("agent_claim_requires_current_metric_evidence")
                     metrics = prior[claim["evidence"]]["result"].get("metrics", {})
                     if claim["metric"] not in metrics:
                         raise ValueError("agent_claim_metric_not_found")

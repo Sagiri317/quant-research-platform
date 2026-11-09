@@ -23,7 +23,15 @@ class AgentAction(BaseModel):
     kind: Literal["tool", "ask_user", "freeze", "finish"]
     tool: str | None = None
     arguments_json: str = "{}"
-    summary: str = Field(min_length=1)
+    summary: str = Field(
+        min_length=1,
+        description=(
+            "For tool calls: a short progress description. For finish: the complete "
+            "user-facing answer, including requested explanations and results, "
+            "not a plan, heading, or description of what you would explain. "
+            "For ask_user: the actual question."
+        ),
+    )
     evidence: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")

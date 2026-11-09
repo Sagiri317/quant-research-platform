@@ -21,7 +21,9 @@ TOOLS = {
         "are sent as images. CSV/Parquet/Excel return schema, not private rows. "
         "DOCX returns paragraphs and tables. input:alias/member addresses bound "
         "data; output:e0001/member addresses saved tool files; session:session.json "
-        "retrieves omitted evidence. Never read credentials or raw process logs."
+        "retrieves this turn's evidence. document:alias/member reads a declared "
+        "document or an earlier turn's report. Never read credentials or raw "
+        "process logs."
     ),
     "search": (
         "Search {query: string, scope?: workspace|web (default workspace), "
@@ -29,6 +31,7 @@ TOOLS = {
         "offset?: character offset, limit?: output characters (default 30000)}. "
         "Workspace search uses a literal substring (one term at a time), not "
         "natural-language relevance; files=true searches names, including data. "
+        "Returned paths can be passed directly to read; keep their full prefix. "
         "Content search excludes raw data, generated results and secrets. Web "
         "search sends only the query to the configured provider, costing one request."
     ),
@@ -62,6 +65,11 @@ def local_path(reference, state):
     if reference.startswith("input:"):
         alias, _, member = reference[6:].partition("/")
         base = Path(state["config"]["inputs"][alias])
+    elif reference.startswith("document:"):
+        alias, _, member = reference[9:].partition("/")
+        if alias not in state["config"].get("documents", {}):
+            raise ValueError("agent_document_unknown")
+        base = Path(state["config"]["documents"][alias])
     elif reference.startswith("output:"):
         identifier, _, member = reference[7:].partition("/")
         if identifier not in {event["id"] for event in state["events"]}:
@@ -246,6 +254,8 @@ def search_local(arguments, state, root, *, timeout):
     args = [
         "rg",
         "--hidden",
+        "--path-separator",
+        "/",
         "-g",
         "!.git",
         "-g",
@@ -295,6 +305,11 @@ def search_local(arguments, state, root, *, timeout):
             if arguments["query"].casefold() in line.casefold()
             and not _secret(Path(line))
         )
+    prefix = (
+        arguments.get("path", ".").replace("\\", "/").rstrip("/").removeprefix("./")
+    )
+    prefix = "" if prefix == "." else prefix + "/"
+    text = "\n".join(prefix + line.removeprefix("./") for line in text.splitlines())
     return {"status": "completed", **_page(text, arguments)}
 
 

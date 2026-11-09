@@ -118,6 +118,123 @@ def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
     assert "private.csv" in result["text"] and "private-row" not in result["text"]
 
 
+@pytest.mark.parametrize("filenames", [False, True])
+@pytest.mark.parametrize("search_path", ["src/package", "./src/package"])
+def test_subdirectory_search_returns_paths_that_read_can_use(
+    tmp_path, filenames, search_path
+):
+    state, root = state_and_event(tmp_path)
+    source = tmp_path / "src/package/research/factors/search.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def formula_values(): pass\n", encoding="utf-8")
+    result = search_local(
+        {
+            "query": "search.py" if filenames else "formula_values",
+            "path": search_path,
+            "files": filenames,
+        },
+        state,
+        root,
+        timeout=10,
+    )
+    reference = result["text"].splitlines()[0].split(":")[0]
+    assert reference == "src/package/research/factors/search.py"
+    assert read_local({"path": reference}, state, root)["text"] == source.read_text()
+
+
+def test_declared_document_alias_reads_prior_report_and_keeps_path_boundaries(tmp_path):
+    state, root = state_and_event(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    state["config"]["workspace"] = str(workspace)
+    report = tmp_path / "prior-report.md"
+    report.write_text(
+        "The previous experiment compared two formulas.", encoding="utf-8"
+    )
+    secret = tmp_path / ".env"
+    secret.write_text("PRIVATE", encoding="utf-8")
+    state["config"]["documents"] = {"prior": str(report), "secret": str(secret)}
+    result = read_local({"path": "document:prior"}, state, root)
+    assert result["text"] == report.read_text()
+    with pytest.raises(ValueError, match="document_unknown"):
+        local_path("document:missing", state)
+    with pytest.raises(ValueError, match="not_allowed"):
+        local_path("document:secret", state)
+
+
+def test_followup_can_cite_declared_history_without_losing_the_full_answer(tmp_path):
+    config = workspace_config(tmp_path)
+    report = tmp_path / "previous.json"
+    report.write_text('{"conclusion":"Two formulas were compared."}', encoding="utf-8")
+    config["documents"] = {"previous_turn_001": str(report)}
+    config["history"] = [
+        {
+            "question": "Which factors are combined?",
+            "answer": "Reversal and turnover.",
+            "details": "previous_turn_001",
+        }
+    ]
+    answer = "The formula multiplies reversal rank by a turnover-based weight."
+    root = run_agent(
+        config,
+        client=ScriptedClient(
+            [
+                {
+                    "kind": "finish",
+                    "summary": "Unknown",
+                    "evidence": ["previous_turn_999"],
+                },
+                {
+                    "kind": "finish",
+                    "summary": answer,
+                    "evidence": ["previous_turn_001"],
+                },
+            ]
+        ),
+    )
+    state = read_session(root)
+    assert state["events"][0]["result"]["reason"] == "agent_conclusion_evidence_invalid"
+    assert state["status"] == "completed"
+    assert state["conclusion"]["text"] == answer
+    assert state["conclusion"]["evidence"] == ["previous_turn_001"]
+
+
+def test_history_citation_does_not_attest_a_formal_metric_claim(tmp_path):
+    config = workspace_config(tmp_path)
+    config["documents"] = {"previous_turn_001": str(tmp_path / "report.json")}
+    config["history"] = [{"details": "previous_turn_001", "answer": "A prior answer."}]
+    root = run_agent(
+        config,
+        client=ScriptedClient(
+            [
+                {
+                    "kind": "finish",
+                    "summary": "A historical citation is not a measured metric.",
+                    "evidence": ["previous_turn_001"],
+                    "arguments_json": json.dumps(
+                        {
+                            "claims": [
+                                {
+                                    "evidence": "previous_turn_001",
+                                    "metric": "score",
+                                    "value": 1,
+                                }
+                            ]
+                        }
+                    ),
+                },
+                {"kind": "finish", "summary": "No formal metric was claimed."},
+            ]
+        ),
+    )
+    state = read_session(root)
+    assert (
+        state["events"][0]["result"]["reason"]
+        == "agent_claim_requires_current_metric_evidence"
+    )
+    assert state["status"] == "completed"
+
+
 def test_terminal_calls_project_python_and_keeps_credentials_out(tmp_path, monkeypatch):
     state, root = state_and_event(tmp_path)
     monkeypatch.setenv("QRP_TEST_KEY", "must-not-reach-child")
