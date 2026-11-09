@@ -378,6 +378,7 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
             "adj_close": values,
             "period_return": values.pct_change().fillna(0.0),
             "open": values,
+            "adj_open": values,
             "high": values + 1.0,
             "low": values - 1.0,
             "close": values,

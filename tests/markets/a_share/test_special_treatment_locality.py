@@ -73,12 +73,15 @@ def test_raw_conflict_preserves_prefix_prices_and_recovers(
     actual = _panel(history, daily_known=daily_known)
     assert len(actual) == 15
     pd.testing.assert_frame_equal(
-        actual.drop(columns=["is_st", "is_pt"]),
-        baseline.drop(columns=["is_st", "is_pt"]),
+        actual.drop(columns=["is_st", "is_pt", "is_delisting"]),
+        baseline.drop(columns=["is_st", "is_pt", "is_delisting"]),
     )
     independent = actual.asset_id.ne("000001")
     pd.testing.assert_frame_equal(actual.loc[independent], baseline.loc[independent])
     affected = actual.loc[~independent].set_index("timestamp")
+    # Both conflicting classifications explicitly exclude delisting treatment.
+    assert affected.is_delisting.eq(False).all()
+    assert baseline.loc[~independent, "is_delisting"].isna().all()
     assert affected.loc[:"2020-01-03", "is_st"].all()
     if daily_known:
         assert not affected.loc["2020-01-06", "is_st"]

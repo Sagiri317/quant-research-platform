@@ -45,6 +45,7 @@ def evaluation_config(
             "label_columns": list(spec.label_columns),
             "label_availability_columns": dict(spec.label_availability_columns),
             "evaluation_axis": spec.evaluation_axis,
+            "correlation_clock": spec.correlation_clock,
             "filter_mode": spec.filter_mode,
             "n_groups": spec.n_groups,
         },

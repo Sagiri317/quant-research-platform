@@ -11,7 +11,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
-@dataclass(frozen=True)
+@dataclass
 class ApiError(Exception):
     error_code: str
     status_code: int = 422

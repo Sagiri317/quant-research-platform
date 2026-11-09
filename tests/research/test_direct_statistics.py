@@ -224,6 +224,11 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
     if omit_fdr_defaults:
         config["statistics"].pop("fdr_primary")
         config["statistics"].pop("fdr_robustness")
+    if intraday:
+        config["sessions"] = [
+            value.isoformat()
+            for value in frame.timestamp.dt.normalize().drop_duplicates()
+        ]
     result = read_statistics_artifact(factor_statistics(config))
     assert result.metadata["statistics"]["fdr_primary"] == "BY_5pct"
     assert result.metadata["statistics"]["fdr_robustness"] == "BH_5pct"
@@ -468,6 +473,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
         },
         "window": {"start": "2020-01-02", "end": "2020-01-02"},
         "analyses": analyses,
+        "sessions": ["2020-01-02"],
         "evaluation": {"primary_label": "forward_return_20d", "factors": ["feature_x"]},
         "statistics": {
             "hac_lag": 1,
@@ -521,8 +527,9 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
             )
 
             if name == "factor_diagnostics.parquet":
-                assert left.input_date_count.eq(12).all()
-                assert left.observation_count.eq(0 if empty_labels else 8).all()
+                # Twelve snapshots contribute one session to HAC inference.
+                assert left.input_date_count.eq(1).all()
+                assert left.observation_count.eq(0 if empty_labels else 1).all()
             if name == "fama_macbeth_periods.parquet":
                 assert left.timestamp.nunique() == (0 if empty_labels else 9)
                 assert left.observation_count.le(4).all()

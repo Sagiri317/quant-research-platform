@@ -224,6 +224,7 @@ def _native_config(tmp_path, frame=None):
             signals=[asdict(spec.signals[0])],
             label_columns=list(spec.label_columns),
             evaluation_axis=spec.evaluation_axis,
+            correlation_clock=spec.correlation_clock,
         ),
         "window": {"start": "2026-01-02", "end": "2026-01-03"},
         "cutoff": "2026-01-04",

@@ -340,7 +340,14 @@ def run_terminal(arguments, state, root, *, timeout):
         PYTHONIOENCODING="utf-8",
     )
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(workspace / "src"), env.get("PYTHONPATH", "")]
+        filter(
+            None,
+            (
+                str(workspace / "src"),
+                str(Path(__file__).resolve().parents[2]),
+                env.get("PYTHONPATH"),
+            ),
+        )
     )
     if os.name == "nt":
         script = root / "command.ps1"

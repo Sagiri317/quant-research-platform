@@ -217,6 +217,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "is_a_share_scope": True,
         "is_st": False,
         "is_pt": False,
+        "is_delisting": False,
         "listing_date": pd.Timestamp("2020-01-01"),
         "delisting_date": pd.NaT,
         "delisting_date_unresolved": False,
@@ -248,10 +249,19 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "risk_residual_factors",
     ):
         factor_spec = processed.get(factor_id)
-        factors = keys.copy()
-        for column in factor_spec.required_columns:
-            if column not in factors:
-                factors[column] = [1.0, 2.0, 3.0]
+        factors = pd.concat(
+            [
+                keys,
+                pd.DataFrame(
+                    {
+                        column: [1.0, 2.0, 3.0]
+                        for column in factor_spec.required_columns
+                        if column not in keys
+                    }
+                ),
+            ],
+            axis=1,
+        )
         write_dataset(
             layout.processed_data_root(
                 factor_spec.market_id, factor_spec.kind, factor_spec.data_id

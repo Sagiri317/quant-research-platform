@@ -311,6 +311,7 @@ def test_native_operation_domains_share_discovery_and_persisted_consumers(tmp_pa
         "cutoff": "2020-01-06",
         "selection_group": "global",
         "validation_axis": "cross_sectional",
+        "correlation_clock": "observation",
         "output": str(tmp_path / "score.json"),
     }
     scored = json.loads(score(scoring).read_text())

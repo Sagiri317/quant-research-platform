@@ -447,14 +447,14 @@ def test_affine_attributions_use_independent_oracle_and_bounded_matrix_work(
         },
     )
     calls = 0
-    original = ModelMatrixScaler.input_matrix
+    original = ModelMatrixScaler.transform
 
     def measured(self, frame):
         nonlocal calls
         calls += 1
         return original(self, frame)
 
-    monkeypatch.setattr(ModelMatrixScaler, "input_matrix", measured)
+    monkeypatch.setattr(ModelMatrixScaler, "transform", measured)
     predictions, contributions, _ = explanations._attributions(
         result, frame, np.arange(len(frame)), "affine", None, "model_output"
     )

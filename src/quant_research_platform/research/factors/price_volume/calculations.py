@@ -136,14 +136,16 @@ def calculate_price_volume_factors(
             & (timestamps.le(upper) if closed else timestamps.lt(upper))
         ]
     ordered = ordered.reset_index(drop=True)
-    for factor in requested:
-        ordered[factor] = (
-            np.concatenate(output[factor])
+    computed = pd.DataFrame(
+        {
+            factor: np.concatenate(output[factor])
             if output[factor]
             else np.empty(0, dtype="float64")
-        )
-        ordered[factor] = ordered[factor].where(np.isfinite(ordered[factor]))
-    return ordered
+            for factor in requested
+        },
+        index=ordered.index,
+    )
+    return pd.concat([ordered, computed.where(np.isfinite(computed))], axis=1)
 
 
 def _calculate_values(

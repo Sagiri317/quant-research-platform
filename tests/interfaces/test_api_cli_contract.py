@@ -1,10 +1,26 @@
 """Read-only API bounds and direct catalog behavior."""
 
+import json
+from contextlib import contextmanager
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from quant_research_platform.interfaces.api.app import create_app
+from quant_research_platform.interfaces.api.errors import ApiError
 from tests.helpers.output_frames import native_bundle
+
+
+def test_api_error_survives_exception_context_unwinding():
+    @contextmanager
+    def request_scope():
+        yield
+
+    error = ApiError("invalid_request", field="path")
+    with pytest.raises(ApiError) as caught, request_scope():
+        raise error
+    assert caught.value is error
+    assert caught.value.field == "path"
 
 
 @pytest.mark.anyio
@@ -40,7 +56,8 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
 async def test_api_cannot_escape_root_or_read_raw(anyio_backend, tmp_path):
     root = tmp_path / "project"
     root.mkdir()
-    output, _, metadata = native_bundle(root)
+    output, _, _ = native_bundle(root)
+    metadata = json.loads((output / "manifest.json").read_text())["metadata"]
     async with AsyncClient(
         transport=ASGITransport(app=create_app(project_root=root)),
         base_url="http://testserver",

@@ -104,6 +104,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
             "cutoff": bound(8),
             "selection_group": "global",
             "validation_axis": "cross_sectional",
+            "correlation_clock": "observation",
             "label_unit": "decimal_return",
             "output": str(tmp_path / "scores.json"),
         }

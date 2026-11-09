@@ -141,7 +141,7 @@ def test_relocated_source_can_reduce_existing_daily_facts(tmp_path):
         }
     )
     artifact = read_statistics_artifact(root)
-    assert artifact.metadata["hac_lag_unit"] == "supplied_complete_input_date_clock"
+    assert artifact.metadata["hac_lag_unit"] == "trading_session"
     with artifact.table("factor_stratified_diagnostics.parquet") as saved:
         assert set(saved.sample_scope) == {"own", "common"}
 

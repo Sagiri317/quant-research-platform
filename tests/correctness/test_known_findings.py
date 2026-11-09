@@ -47,6 +47,7 @@ def _panel():
                     low=10.0,
                     close=10.0,
                     adj_open=10.0 + np.arange(25) * slope,
+                    adj_close=10.0 + np.arange(25) * slope,
                 )
             )
             for asset, slope in (("a", 1.0), ("b", 2.0), ("c", 3.0))
