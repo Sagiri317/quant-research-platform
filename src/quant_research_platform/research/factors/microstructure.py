@@ -24,7 +24,9 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
     for _, group in panel.groupby(["asset_id", "segment_id"], sort=False):
         work = group.sort_values("timestamp").reset_index(drop=True)
         values = work.loc[:, protocol.KEY].copy()
-        spread = work.ask_px1 - work.bid_px1
+        spread = (work.ask_px1 - work.bid_px1).where(
+            work.bid_px1.gt(0) & work.ask_px1.gt(work.bid_px1)
+        )
         values["spread_cny"] = spread
         values["relative_spread"] = spread / work.mid
         for level in (1, 5, 10):
@@ -58,7 +60,10 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
             - work.ask_vol1.where(work.ask_px1.le(previous.ask_px1), 0)
             + previous.ask_vol1.where(work.ask_px1.ge(previous.ask_px1), 0)
         )
-        ofi.iloc[0] = np.nan
+        prices = ["bid_px1", "ask_px1"]
+        ofi = ofi.where(
+            work[prices].gt(0).all(axis=1) & previous[prices].gt(0).all(axis=1)
+        )
         values["book_ofi"] = ofi
         values["depth_normalized_ofi"] = ofi / depth1
         times = work.timestamp.to_numpy(dtype="datetime64[ns]")
@@ -90,7 +95,6 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
         if set(columns) - set(protocol.DEFAULT_FACTORS):
             extended = _book_features(work, ofi_halflife_seconds)
             values = pd.concat([values, extended], axis=1)
-        values.loc[~work.eligible, list(columns)] = np.nan
         output.append(values)
     return (
         pd.concat(output, ignore_index=True)

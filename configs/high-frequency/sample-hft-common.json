@@ -1,0 +1,19 @@
+{
+  "inputs": "data/research/a_share/a_share_hft",
+  "output": "data/research/a_share/hft_common_3s",
+  "dataset_id": "hft_common_3s",
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "interval_seconds": 3,
+  "quote_visibility_delay_ms": 1,
+  "max_quote_age_seconds": 6,
+  "label_tolerance_seconds": 6,
+  "stock_pool": {
+    "stock_master": "data/processed/a_share/stock_master_pit",
+    "status": "data/processed/a_share/stock_status_pit",
+    "available_at_column": "status_available_at",
+    "trading_calendar": "data/interim/csmar/trading_calendar"
+  }
+}

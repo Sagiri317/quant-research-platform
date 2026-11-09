@@ -158,3 +158,41 @@ def test_residual_factors_prepare_and_native_read_keep_window_and_units(tmp_path
         .reset_index(drop=True)
     )
     pd.testing.assert_frame_equal(saved.drop(columns="market_id"), expected)
+
+
+def test_residual_factor_clipping_uses_prior_complete_cross_section():
+    panel, dates, _, _ = _panel()
+    dates = dates[:6]
+    panel = panel.loc[panel.timestamp.isin(dates)].copy()
+    values = np.r_[np.linspace(-1.0, 1.0, 100), np.linspace(3.0, 20.0, 28)]
+    responses = 0.0001 * values**2 + 0.001 * np.cos(np.arange(128))
+    panel["industry_level1_code"] = "one"
+    panel["log_total_market_cap"] = np.tile(values, len(dates))
+    panel["period_return"] = np.tile(responses, len(dates))
+    # The final day's missing asset was observable in the entire prior cross section.
+    panel = panel.loc[~(panel.timestamp.eq(dates[-1]) & panel.asset_id.eq("a127"))]
+    actual = calculate_residual_factors(
+        panel,
+        style_columns=("log_total_market_cap",),
+        factor_columns=("risk_residual_reversal_5d",),
+        history_keys=("asset_id", "listing_date"),
+        min_fresh_fraction=0.75,
+    )
+    median = np.median(values)
+    bound = 3 * 1.4826 * np.median(np.abs(values - median))
+    clipped = np.clip(values, median - bound, median + bound)
+    design = np.column_stack((np.ones(128), (clipped - clipped.mean()) / clipped.std()))
+    full_residual = (
+        responses - design @ np.linalg.lstsq(design, responses, rcond=None)[0]
+    )
+    final_residual = (
+        responses[:-1]
+        - design[:-1] @ np.linalg.lstsq(design[:-1], responses[:-1], rcond=None)[0]
+    )
+    last = actual.loc[actual.timestamp.eq(dates[-1])].sort_values("asset_id")
+    np.testing.assert_allclose(
+        last.risk_residual_reversal_5d,
+        -(4 * full_residual[:-1] + final_residual),
+        rtol=1e-11,
+        atol=1e-13,
+    )

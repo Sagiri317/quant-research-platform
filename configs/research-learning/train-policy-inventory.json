@@ -37,7 +37,7 @@
             "000001": 2000,
             "600000": 2000
           },
-          "latency_ms": 1,
+          "latency_ms": 10,
           "participation_rate": 0.05,
           "minimum_commission": 5.0,
           "restore_at": null

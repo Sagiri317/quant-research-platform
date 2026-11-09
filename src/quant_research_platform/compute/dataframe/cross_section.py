@@ -296,3 +296,75 @@ def _pearson_correlation_result(
     if not np.isfinite(value):
         return None, "nonfinite_result"
     return value, None
+
+
+def _winsorize(
+    values: pd.Series,
+    grouped: pd.core.groupby.SeriesGroupBy,
+) -> pd.Series:
+    source = grouped.obj if hasattr(grouped, "obj") else values
+    lower = np.full(len(values), np.nan)
+    upper = np.full(len(values), np.nan)
+    for positions in (
+        grouped.indices if hasattr(grouped, "indices") else grouped
+    ).values():
+        lower[positions], upper[positions] = _quantile(
+            source.iloc[positions], 0.01, 0.99
+        )
+    return values.clip(
+        lower=pd.Series(lower, index=values.index),
+        upper=pd.Series(upper, index=values.index),
+    )
+
+
+def _quantile(values: pd.Series, *quantiles: float) -> tuple[float, ...]:
+    observed = values.dropna().to_numpy(dtype="float64")
+    return (
+        tuple(np.quantile(observed, quantiles))
+        if len(observed)
+        else (np.nan,) * len(quantiles)
+    )
+
+
+def _mad_winsorize(
+    values: pd.Series,
+    grouped: pd.core.groupby.SeriesGroupBy,
+    *,
+    zero_counts: dict[str, int] | None = None,
+    column: str | None = None,
+) -> pd.Series:
+    source = grouped.obj if hasattr(grouped, "obj") else values
+    lower = np.full(len(values), np.nan)
+    upper = np.full(len(values), np.nan)
+    for positions in (
+        grouped.indices if hasattr(grouped, "indices") else grouped
+    ).values():
+        observed = source.iloc[positions].dropna().to_numpy(dtype="float64")
+        if not len(observed):
+            continue
+        center = np.median(observed)
+        mad = np.median(np.abs(observed - center))
+        if mad == 0:
+            if zero_counts is not None:
+                zero_counts[column] += 1
+            continue
+        bound = 3 * 1.4826 * mad
+        lower[positions], upper[positions] = center - bound, center + bound
+    return values.clip(
+        lower=pd.Series(lower, index=values.index),
+        upper=pd.Series(upper, index=values.index),
+    )
+
+
+def _industry_group_codes(
+    frame: pd.DataFrame, industry_column: str = "industry_level1_code"
+) -> pd.Series:
+    """Encode the standard/code pair without conflating literal separators."""
+    standard, code = (
+        frame[column]
+        .astype("string")
+        .str.replace("\\", "\\\\", regex=False)
+        .str.replace(":", "\\:", regex=False)
+        for column in ("industry_standard_id", industry_column)
+    )
+    return standard.str.cat(code, sep=":")

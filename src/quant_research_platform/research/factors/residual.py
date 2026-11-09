@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.research.filtering import a_share_eligibility
-from quant_research_platform.research.risk import FactorRiskState
+from quant_research_platform.research.risk import FactorExposureSession, FactorRiskState
 
 RESIDUAL_FACTOR_WINDOWS = {
     "risk_residual_reversal_5d": 5,
@@ -26,6 +26,12 @@ def calculate_residual_factors(
     """Fit today's return on prior-session facts, then aggregate past residuals."""
     frame = panel.sort_values([*history_keys, "timestamp"], kind="stable").copy()
     frame["eligible"] = a_share_eligibility(frame, "a_share_all")
+    state = FactorRiskState(style_columns=style_columns)
+    for _, cross in frame.groupby("timestamp", sort=True):
+        prepared = state.prepare_exposure_session(cross)
+        frame.loc[cross.index, list(style_columns)] = prepared.frame.reindex(
+            cross.index
+        )[list(style_columns)]
     groups = frame.groupby(list(history_keys), sort=False, dropna=False)
     prior_columns = [
         "industry_standard_id",
@@ -40,9 +46,11 @@ def calculate_residual_factors(
     prior["timestamp"] = frame.timestamp
     prior["asset_return"] = frame.period_return.where(frame.is_trading.eq(True))
     residuals = pd.Series(np.nan, index=frame.index, dtype="float64")
-    state = FactorRiskState(style_columns=style_columns)
     for _, cross in prior.groupby("timestamp", sort=True):
-        fitted = state.fit_return_session(cross)
+        prepared = FactorExposureSession.from_preprocessed(
+            state.prepare_exposures(cross)
+        )
+        fitted = state.fit_return_session(cross, prepared=prepared)
         if fitted is not None:
             residuals.loc[cross.index] = cross.asset_id.map(fitted.residuals)
     frame["_residual"] = residuals

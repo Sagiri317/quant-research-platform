@@ -17,6 +17,7 @@ from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_AXES,
     EvaluationAxis,
+    evaluation_sessions,
 )
 from quant_research_platform.contracts.experiments import (
     legal_training_mask,
@@ -135,10 +136,24 @@ def evaluate_model_trial_metrics_from_chunks(
     prediction_column: str,
     validation_axis: EvaluationAxis = "cross_sectional",
     label_prediction_column: str | None = None,
+    correlation_clock: str = "observation",
+    sessions=None,
 ) -> dict[str, object]:
     """Evaluate time-ordered chunks, including timestamps split across chunks."""
     if type(validation_axis) is not str or validation_axis not in EVALUATION_AXES:
         raise ValueError("model_validation_axis_invalid")
+    if correlation_clock not in {"observation", "trading_day"}:
+        raise ValueError("evaluation_correlation_clock_invalid")
+    if correlation_clock == "trading_day":
+        return _daily_trial_metrics(
+            chunks,
+            model_id=model_id,
+            label_column=label_column,
+            prediction_column=prediction_column,
+            validation_axis=validation_axis,
+            label_prediction_column=label_prediction_column,
+            sessions=sessions,
+        )
 
     stats = {
         f"{prefix}_{suffix}": 0.0 if suffix in ("mean", "m2") else 0
@@ -203,6 +218,25 @@ def evaluate_model_trial_metrics_from_chunks(
     if row_count == 0:
         raise ValueError("empty_model_selection_validation_window")
     mse = None if any(value is None for value in losses) else float(np.mean(losses))
+    return _trial_metric_summary(
+        model_id,
+        row_count,
+        mse,
+        stats,
+        legacy_time_series=validation_axis == "single_asset_time_series",
+        time_series_result=time_series_result,
+    )
+
+
+def _trial_metric_summary(
+    model_id,
+    row_count,
+    mse,
+    stats,
+    *,
+    legacy_time_series=False,
+    time_series_result=None,
+):
     result = {"model_id": model_id, "validation_rows": row_count, "validation_mse": mse}
     for prefix in ("ic", "rankic"):
         summary = _summarize_correlation_aggregates(
@@ -211,7 +245,7 @@ def evaluate_model_trial_metrics_from_chunks(
             m2=stats[f"{prefix}_m2"],
             positive_count=int(stats[f"{prefix}_positive"]),
         )
-        if validation_axis == "single_asset_time_series":
+        if legacy_time_series:
             if prefix == "ic":
                 summary["mean"], summary["reason"] = time_series_result
             else:
@@ -233,6 +267,108 @@ def evaluate_model_trial_metrics_from_chunks(
                 None if isinstance(value, float) and not np.isfinite(value) else value
             )
     return result
+
+
+def _daily_trial_metrics(
+    chunks,
+    *,
+    model_id,
+    label_column,
+    prediction_column,
+    validation_axis,
+    label_prediction_column,
+    sessions,
+):
+    """Apply the final evaluation's daily weighting to the validation sample."""
+    from quant_research_platform.research.evaluations.time_series import (
+        daily_signal_metrics,
+    )
+
+    if sessions is None:
+        raise ValueError("model_validation_sessions_required")
+    dates = evaluation_sessions(sessions)
+    pending, daily = [], []
+    current_day, asset = None, None
+    row_count = 0
+
+    def finish_day():
+        if not pending:
+            return
+        frame = pd.concat(pending, ignore_index=True)
+        daily.append(
+            daily_signal_metrics(
+                frame,
+                evaluation_axis=validation_axis,
+                sessions=[current_day],
+                asset_ids=tuple(frame.asset_id.unique()),
+                regression=True,
+                prediction_column="economic",
+            )
+        )
+        pending.clear()
+
+    with closing_iterator(
+        iter_complete_time_frames(iter(chunks), timestamp_column="timestamp")
+    ) as source:
+        for frame in source:
+            if frame.empty:
+                continue
+            values = _metric_chunk(
+                frame, label_column=label_column, prediction_column=prediction_column
+            )
+            if validation_axis == "single_asset_time_series":
+                assets = frame.asset_id.drop_duplicates()
+                if (
+                    len(assets) != 1
+                    or assets.isna().any()
+                    or (asset is not None and assets.iloc[0] != asset)
+                ):
+                    raise ValueError(
+                        "single_asset_time_series_evaluation_requires_one_asset"
+                    )
+                asset = assets.iloc[0]
+            selected = pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(
+                        values.timestamp_ns.to_numpy(), unit="ns"
+                    ),
+                    "asset_id": frame.asset_id.to_numpy(),
+                    "signal": values.prediction.to_numpy(),
+                    "label": values.label.to_numpy(),
+                    "economic": frame[
+                        label_prediction_column or prediction_column
+                    ].to_numpy(dtype="float64"),
+                }
+            )
+            for day, group in selected.groupby(
+                selected.timestamp.dt.normalize(), sort=False
+            ):
+                if day not in dates:
+                    raise ValueError("evaluation_input_session_not_declared")
+                if current_day is not None and day != current_day:
+                    finish_day()
+                current_day = day
+                pending.append(group)
+            row_count += len(frame)
+    finish_day()
+    if not row_count:
+        raise ValueError("empty_model_selection_validation_window")
+    metrics = pd.concat(daily, ignore_index=True)
+    return _daily_trial_summary(metrics, model_id=model_id, row_count=row_count)
+
+
+def _daily_trial_summary(metrics, *, model_id, row_count):
+    stats = {
+        f"{prefix}_{suffix}": 0.0 if suffix in ("mean", "m2") else 0
+        for prefix in ("ic", "rankic")
+        for suffix in ("count", "mean", "m2", "positive")
+    }
+    for prefix, metric in (("ic", "ic"), ("rankic", "rank_ic")):
+        for value in metrics.loc[metrics.metric.eq(metric), "value"]:
+            _add_correlation_aggregate(stats, prefix, value)
+    losses = metrics.loc[metrics.metric.eq("mse"), "value"].dropna()
+    mse = float(losses.mean()) if len(losses) else None
+    return _trial_metric_summary(model_id, row_count, mse, stats)
 
 
 def _mean_squared_error(predictions, labels) -> float | None:
@@ -331,7 +467,7 @@ def score(config):
             "validation_axis",
             "output",
         },
-        {"label_spec", "label_unit"},
+        {"label_spec", "label_unit", "correlation_clock", "sessions"},
     )
     if (
         type(config["validation_axis"]) is not str
@@ -378,6 +514,22 @@ def score(config):
         label_session.spec["primary_key"], label_session.spec["column_roles"]
     )
     declared = label_session.spec
+    config.setdefault(
+        "correlation_clock",
+        "trading_day" if declared["frequency"] == "tick" else "observation",
+    )
+    if config["correlation_clock"] not in {"observation", "trading_day"}:
+        raise ValueError("evaluation_correlation_clock_invalid")
+    if config["correlation_clock"] == "trading_day":
+        if "sessions" not in config:
+            raise ValueError("model_validation_sessions_required")
+        dates = evaluation_sessions(config["sessions"])
+        if len(dates) and (
+            dates[0] < pd.Timestamp(window.start).normalize()
+            or dates[-1] > pd.Timestamp(window.end).normalize()
+        ):
+            raise ValueError("evaluation_sessions_outside_window")
+        config["sessions"] = [str(day.date()) for day in dates]
     labels = None
     candidates, frames, common, target, market = [], [], None, None, None
     for candidate_id, candidate_paths in zip(ids, paths, strict=True):
@@ -560,10 +712,13 @@ def score(config):
         del pieces, joined
         if not candidate_frame.index.is_unique:
             raise ValueError("candidate_validation_keys_duplicate")
+        finite_keys = candidate_frame.index[
+            np.isfinite(candidate_frame.prediction_score)
+        ]
         common = (
-            candidate_frame.index
+            finite_keys
             if common is None
-            else common.intersection(candidate_frame.index, sort=False)
+            else common.intersection(finite_keys, sort=False)
         )
         frames.append(candidate_frame)
         candidates.append(
@@ -587,9 +742,9 @@ def score(config):
                 "mse_reason": mse_reason,
                 "coverage": {
                     "current_mature_label_rows": len(labels),
-                    "paired_prediction_rows": len(candidate_frame),
+                    "paired_prediction_rows": len(finite_keys),
                     "mature_label_rows_without_prediction": len(labels)
-                    - len(candidate_frame),
+                    - len(finite_keys),
                     "prediction_rows_without_label": missing_label_rows,
                 },
             }
@@ -603,7 +758,7 @@ def score(config):
 
         validate_model_selection([_model_spec(item["model"]) for item in candidates])
     common_rows = 0 if common is None else len(common)
-    rows = []
+    rows, blocks = [], []
     for index, candidate in enumerate(candidates):
         frame = frames[index]
         frames[index] = None
@@ -633,14 +788,44 @@ def score(config):
         comparable = comparable.reset_index().sort_values(
             ["timestamp", "asset_id"], kind="stable"
         )
-        metrics = evaluate_model_trial_metrics_from_chunks(
-            [comparable],
-            model_id=candidate["model_id"],
-            label_column="label",
-            prediction_column="prediction_score",
-            validation_axis=config["validation_axis"],
-            label_prediction_column="prediction_label_value",
-        )
+        if config["correlation_clock"] == "trading_day":
+            from quant_research_platform.research.evaluations.time_series import (
+                _signal_metric_blocks,
+            )
+
+            assets = tuple(comparable.asset_id.unique())
+            if (
+                config["validation_axis"] == "single_asset_time_series"
+                and len(assets) != 1
+            ):
+                raise ValueError(
+                    "single_asset_time_series_evaluation_requires_one_asset"
+                )
+            blocks.append(
+                _signal_metric_blocks(
+                    comparable.rename(columns={"prediction_score": "signal"}),
+                    evaluation_axis=config["validation_axis"],
+                    sessions=config["sessions"],
+                    asset_ids=assets,
+                    regression=True,
+                    prediction_column="prediction_label_value",
+                ).assign(candidate_id=candidate["model_id"])
+            )
+            metrics = {
+                "model_id": candidate["model_id"],
+                "validation_rows": len(comparable),
+            }
+        else:
+            metrics = evaluate_model_trial_metrics_from_chunks(
+                [comparable],
+                model_id=candidate["model_id"],
+                label_column="label",
+                prediction_column="prediction_score",
+                validation_axis=config["validation_axis"],
+                label_prediction_column="prediction_label_value",
+                correlation_clock=config["correlation_clock"],
+                sessions=config.get("sessions"),
+            )
         if candidate["model"]["model_algorithm"] == "deeplob_classifier":
             from quant_research_platform.compute.classification import (
                 classification_metrics,
@@ -658,6 +843,43 @@ def score(config):
             )
         rows.append(_json_metrics(metrics))
         del comparable
+    if blocks:
+        from quant_research_platform.research.evaluations.time_series import (
+            _common_metric_blocks,
+            _daily_signal_metrics_from_blocks,
+        )
+
+        scored_ids = [row["model_id"] for row in rows if row["validation_rows"]]
+        regressors = [
+            item["model_id"]
+            for item in candidates
+            if item["model_id"] in scored_ids and item.get("mse_reason") is None
+        ]
+        paired = _common_metric_blocks(
+            pd.concat(blocks, ignore_index=True),
+            metric_candidates={
+                "ic": scored_ids,
+                "rank_ic": scored_ids,
+                "mse": regressors,
+                "mae": regressors,
+            },
+        )
+        blocks.clear()
+        for row in rows:
+            if not row["validation_rows"]:
+                continue
+            daily = _daily_signal_metrics_from_blocks(
+                paired.loc[paired.candidate_id.eq(row["model_id"])]
+            )
+            row.update(
+                _json_metrics(
+                    _daily_trial_summary(
+                        daily,
+                        model_id=row["model_id"],
+                        row_count=row["validation_rows"],
+                    )
+                )
+            )
     payload = {
         "candidate_ids": ids,
         "candidates": candidates,
@@ -667,6 +889,14 @@ def score(config):
         "cutoff": cutoff.isoformat(),
         "selection_group": config["selection_group"],
         "validation_axis": config["validation_axis"],
+        **(
+            {
+                "correlation_clock": config["correlation_clock"],
+                "sessions": config["sessions"],
+            }
+            if config["correlation_clock"] == "trading_day"
+            else {}
+        ),
         "common_rows": common_rows,
         "label_unit": config["label_unit"],
         "target_column": target,

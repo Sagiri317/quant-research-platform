@@ -1,6 +1,5 @@
 """Evaluate a frozen Hawkes model on the later observed event history."""
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.level2 import (
@@ -28,7 +27,6 @@ def compute_hawkes_factors(panel, trades, model):
                 "hawkes_excitation_fraction": 1 - params[0].sum() / total,
             }
         )
-        factors.loc[~quotes.eligible] = np.nan
         frame = pd.concat([quotes.loc[:, KEY], factors], axis=1)
         output.append(frame.loc[frame.timestamp.gt(cutoff)])
     return pd.concat(output, ignore_index=True).sort_values(

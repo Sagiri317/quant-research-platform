@@ -22,7 +22,7 @@
 - `markets.prepare.prepare(config)`：指定已准备表或原生源，生成一个市场数据表
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
 - `research.features.book_normalization.normalize_book(config)` 使用显式交易日轴及历史回看长度，保存因果标准化盘口与每日参数
-- `research.evaluations.time_series.evaluate_time_series(config)` 生成日级单资产指标、共同样本比较与统计推断
+- `research.evaluations.time_series.evaluate_time_series(config)` 生成股票截面或单资产日内的日级指标、共同样本比较与统计推断
 - `research.portfolios.inventory_analysis.analyze_inventory(config)` 从策略与持有基准账本计算日级经济分解
 - `research.models.production.fit(config)`：一次真实拟合及只追加的试验记录；选择后的最终重新拟合仍用该函数
 - `research.models.hawkes.fit_hawkes(config)`：在明确逐笔训练窗内拟合指数核，保存参数与截止时点
@@ -41,7 +41,7 @@
 - `research.policies.cost_aware.fit_cost_model(config)` / `backtest_cost_model(config)`：连续权重训练近似与原生日频验证
 - `research.factors.search.search_factors(config)` / `apply_formula(config)`：训练域搜索、验证域选型与冻结应用
 - `research.predictions.uncertainty.calibrate_uncertainty(config)` / `apply_uncertainty(config)` / `evaluate_uncertainty(config)`：冻结残差区间及独立覆盖评价
-- `agents.runner.run_agent(config)` / `resume_agent(root)`：固定口径的研究会话、工具循环与冻结评价；生成 Python 只进入隔离容器，CLI 为 `qrp agent`
+- `agents.runner.run_agent(config)` / `resume_agent(root)`：固定口径的研究会话、工具循环与冻结评价。`qrp agent` 默认连续对话使用宿主终端，具有当前用户的文件和网络权限；只有显式配置的 `python` 工具使用无网络容器，详见 [Agent 权限边界](agent.md#本地命令网络与复杂文件)。
 
 策略学习操作的配置、产物、单位与资源安排见[研究学习文档](research-learning.md)；Agent 的交互、记忆、报告及验证边界见[Agent 文档](agent.md)。
 宏观来源、决策时钟和因子见[宏观流动性](macro-liquidity.md)；微观结构、DeepLOB 和队列模型见[A 股高频](a-share-hft.md)。
@@ -261,9 +261,15 @@ DeepLOB 的完整盘口要求属于算法输入域，仍排除不完整盘口。
 序列模型通过 `hyperparameters.sequence_group_columns` 声明额外边界列。资产始终独立，
 LSTM/Transformer 默认使用资产历史，DeepLOB 默认使用 `session_date,segment_id`。
 高频调用方可显式给三类模型传入相同边界列。模型保存边界配置，预测和解释复用该配置。
-`fit.validation` 可声明 `windows,cutoff`，训练截止须早于验证窗口且训练标签已成熟。
-学习曲线保存每轮在线加权训练损失、轮末逐行等权验证损失和训练序列长度分布。
-预处理与回归目标尺度均由训练样本估计。验证窗口和最终重新拟合范围由调用方分别安排。
+序列模型和 XGBoost 的 `fit.validation` 可声明 `windows,cutoff`，训练截止须早于验证窗口，
+验证样本只使用截至该 cutoff 已成熟的标签。序列学习曲线保存每轮在线加权训练损失、
+轮末逐行等权验证损失和训练序列长度分布；预处理与回归目标尺度均只由训练样本估计。
+显式设置正整数 `hyperparameters.early_stopping_rounds` 才启用早停，此时验证样本必填。
+连续指定轮数未改善后停止，并保存验证损失最优的网络状态或 XGBoost 树前缀；
+`epochs` / `n_estimators` 仍是上限，不保证提前停止。序列回归用 MSE，三分类用交叉熵，
+XGBoost 遵循其配置的验证指标与原生早停方向。元数据保存零起点 `best_iteration`、实际轮数、
+验证样本数与成熟边界，预测窗口必须晚于验证 cutoff。省略早停或设为 `null` 时，
+验证仅作诊断，不改变固定训练预算。验证窗口和最终重新拟合范围由调用方分别安排。
 PPO 和成本感知模型同样复用训练中位数；PPO 从有界训练 episode 的真实决策特征拟合，
 仅 PPO 所需观察归一化继续由 VecNormalize 负责。原始环境观察保留空值，基准策略不凭空填特征。
 
@@ -285,9 +291,17 @@ PPO 和成本感知模型同样复用训练中位数；PPO 从有界训练 episo
 
 EVAL 按实际预测键与标签键配对；预测声明窗可以只覆盖评估窗的一部分，无预测日期只影响对应信号的观察数。
 因子统计的 RankIC-only 读取 metrics；分层和覆盖成员仅在所选分析实际依赖时读取。
-因子统计可分别选择 RankIC、Fama–MacBeth；组合统计可分别选择绩效、基准、归因、容量、
-Sharpe 推断、CSCV 和组间比较。未选分析不读取其专用输入，也不生成占位表。
-Fama–MacBeth 等权与市值加权分别使用其合法样本域；不可用市值仅影响依赖它的加权结果，保留各自观测数和未定义原因。
+数据集因子统计默认选择 RankIC、Fama–MacBeth，也可显式选择 `annual_stability` 和 `factor_correlation`。
+年度分析复用每日 RankIC 和 HAC，按自然年及声明的因子族分别计算 BY/BH；日期不完整、样本不足或
+退化时保留描述均值及未定义推断，不跨年压缩样本。数据集和已有 EVAL 均可供年度分析使用。
+相关摘要仅从数据集计算：在各日 eligible、主标签成熟且所有声明因子有限的共同证券上计算
+Pearson/Spearman，按有效日期等权汇总有符号及绝对相关均值，记录日期数与证券对数。
+绝对相关用于观察相似性，不自动判定、删除冗余因子；相关性不是增量样本外预测能力。
+Fama–MacBeth 的 `statistics.fama_macbeth_sample_scope` 默认 `own`，各回归及权重分别使用其合法样本域；
+不可用市值只影响加权结果。显式 `common` 则在每期统一取全部声明因子、成熟标签均有限且总市值
+有限为正的交集，覆盖所有单因子/核心多因子回归及等权/市值加权；空交集保留零观察和未定义。
+组合统计可分别选择绩效、基准、归因、容量、Sharpe 推断、CSCV 和组间比较。
+未选分析不读取其专用输入，也不生成占位表。
 这些数值结果默认作为探索性研究输出；完整研究是否保留了独立最终评价，由研究设计与真实
 决策记录判断，不能凭 `test` 或 `global` 名称自动授予统计资格。
 
@@ -314,16 +328,26 @@ HAC、自助法、模型联合检验、FMB 和分层推断不把已知缺失日�
 实际输入日期轴上缺少有效统计量时推断记 `incomplete_session_clock`，有效值的描述均值仍保留。
 完全未出现在输入中的交易日仍依赖上游完整市场日历事实，市场交易日历与普通工作日索引分开处理。
 
+日内因子/模型统计以顶层 `sessions` 声明完整交易日轴，也可继承 EVAL 的同名元数据；
+明确子窗口只按请求边界裁剪这条轴，不按观测起止裁剪。逐时点截面相关先在日内等权取均值，
+再使用现有日级 HAC/FDR；原始时点明细保留，HAC lag 的单位是交易日。
+空轴只与空观测相容，有观测却不在声明日轴内时拒绝；日内输入缺轴不能用观测日期代替。
+
 ## 共同因子域、分层与持久化评价复用
 
 `evaluate` 的 `sample_scope` 明确选择 `own` 或 `common`，默认 `own`。
-共同样本与分层功能只适用于 A 股横截面（cross_sectional）评价中符合 eligible 的因子/特征信号；预测信号和时间序列评价不使用这套截面分层约定。
+共同样本与分层支持 A 股横截面（cross_sectional）评价中符合 eligible 的因子、特征和原生预测信号。
+单资产日内时序评价使用 `evaluate-time-series` 的逐日自身/共同域，不套用截面分层。
 `comparison_inputs` 只描述真实输入选择器与其参与共同域的因子/特征列，不用研究昵称证明配置相同。
 共同域逐标签核对精确资产/日期、资格、真实 observed 值及各自成熟时点；只比较最终共同域内同目标、同单位的标签。
 独立浮点标签使用相对容差 `rtol=1e-12, atol=0` 核对，保留标签量纲和零值边界。
 共同域中的真实目标、单位、缺失或成熟时点变化仍按对应约定检查。
 整数标签在成熟掩码、缺键对齐后仍保留精确整数表示，不能转浮点而吞掉一个整数单位的差异。
 特征值不重做中性化，先在焦点方案的完整截面上变换信号，再施加共同样本掩码；对照方案缺少日期时，保留共同样本为空的诊断。
+预测共同域先取同资产、同决策时点的有限值交集，再各自重新排名。
+`correlation_clock=trading_day` 的共同评价还分别对 IC、RankIC 取各候选共同可定义的时点块，
+保证日内归约权重一致；保存 EVAL 后的统计复用同一规则。旧 observation 产物保留原口径，
+不追认新的共同块规则。某项相关未定义不删除独立有效的预测误差或自然覆盖。
 
 可选 `strata` 明确主标签及行业、规模、流动性或预测年龄分层。
 行业按已声明的分类标准与代码分组；未声明标准的输入沿用代码域，已声明但缺失的标准归入未知层。

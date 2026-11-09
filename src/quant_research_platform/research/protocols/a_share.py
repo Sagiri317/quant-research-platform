@@ -16,6 +16,9 @@ from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
 )
+from quant_research_platform.contracts.risk import (
+    RISK_STYLE_COLUMNS as RISK_STYLE_COLUMNS,
+)
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
 from quant_research_platform.research.factors.expectations.definitions import (
     ALL_EXPECTATIONS_FACTORS,
@@ -56,13 +59,6 @@ EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
     impact_bps=25.0,
     adv_participation=0.05,
     adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
-)
-RISK_STYLE_COLUMNS = (
-    "log_total_market_cap",
-    "beta_252d",
-    "momentum_252_20",
-    "residual_volatility_60d",
-    "amihud_60d",
 )
 
 

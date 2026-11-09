@@ -98,6 +98,14 @@ def fit(config: Config) -> None:
     _echo_result(fit(read_qrp_json_file(config)[1]))
 
 
+@app.command("sample-hft")
+def sample_hft(config: Config) -> None:
+    """Sample raw quote-axis inputs on a common A-share decision clock."""
+    from quant_research_platform.research.datasets.high_frequency import sample_hft
+
+    _echo_result(sample_hft(read_qrp_json_file(config)[1]))
+
+
 @app.command("normalize-book")
 def normalize_book(config: Config) -> None:
     """Normalize daily books using explicit preceding trading sessions."""

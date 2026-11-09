@@ -1,5 +1,5 @@
 {
-  "inputs": "data/research/a_share/a_share_hft",
+  "inputs": "data/research/a_share/hft_common_3s",
   "model": "results/hft/model",
   "output": "results/hft/predictions",
   "prediction_window": {

@@ -10,7 +10,6 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
-    DEEPLOB_ALGORITHMS,
     PROBABILITY_COLUMNS,
     SEQUENCE_ALGORITHMS,
     _model_spec,
@@ -24,12 +23,14 @@ from quant_research_platform.contracts.time import (
     _window_payload,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import (
     prediction_callable,
 )
 from quant_research_platform.research.models.persisted import load_model
-from quant_research_platform.research.predictions.outputs import prediction_rows
+from quant_research_platform.research.predictions.outputs import (
+    prediction_input_mask,
+    prediction_rows,
+)
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -99,13 +100,13 @@ def predict(config: Mapping) -> Path:
     from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
     def outputs():
-        predict_values = prediction_callable(
-            tuple(result.metadata["input_columns"]), result.prediction_model
-        )
-        if classification:
-            predict_values = result.prediction_model.prediction_function(
-                probabilities=True
+        predict_values = (
+            result.prediction_model.prediction_function(probabilities=True)
+            if classification
+            else prediction_callable(
+                tuple(result.metadata["input_columns"]), result.prediction_model
             )
+        )
         with closing_iterator(
             iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
         ) as source:
@@ -119,8 +120,8 @@ def predict(config: Mapping) -> Path:
                 if usable.empty:
                     continue
                 values = predict_values(usable)
-                if algorithm in DEEPLOB_ALGORITHMS:
-                    valid = complete_book_rows(usable).to_numpy()
+                if sequence:
+                    valid = prediction_input_mask(usable, result.metadata).to_numpy()
                     usable, values = usable.loc[valid], values[valid]
                 if classification:
                     if values.shape != (len(usable), 3):
@@ -211,6 +212,9 @@ def predict(config: Mapping) -> Path:
         "input_spec": config.get("input_spec"),
         "asset_ids": assets,
     }
+    if "early_stopping" in result.metadata:
+        metadata["model_metadata"]["early_stopping"] = result.metadata["early_stopping"]
+        metadata["model_facts"]["validation"] = facts["validation"]
     if "training_target_mean" in result.metadata:
         metadata["model_metadata"]["training_target_mean"] = result.metadata[
             "training_target_mean"

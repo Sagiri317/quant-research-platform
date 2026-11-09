@@ -5,81 +5,24 @@ market-session clocks.
 from __future__ import annotations
 
 from array import array
-from dataclasses import dataclass
-from math import ceil
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_group_codes,
+    _mad_winsorize,
+)
+from quant_research_platform.contracts.risk import (
+    FactorRiskConfig,
+    RiskInputsUnavailable,
+)
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_real_numeric_series,
     strict_timestamp_series,
 )
-from quant_research_platform.research.features.transforms import (
-    _industry_group_codes,
-    _mad_winsorize,
-)
-
-
-@dataclass(frozen=True)
-class FactorRiskConfig:
-    factor_window: int = 504
-    specific_window: int = 252
-    factor_half_life: float = 126.0
-    specific_half_life: float = 63.0
-    minimum_factor_dates: int | None = None
-    minimum_specific_dates: int | None = None
-    min_fresh_fraction: float = 0.75
-    minimum_cross_section: int = 100
-    diagonal_shrinkage: float = 0.20
-    annualization: float = 252.0
-    weight_column: str = "total_market_cap"
-    weighting: str = "sqrt_cap"
-
-    def __post_init__(self):
-        if (
-            type(self.min_fresh_fraction) not in {int, float}
-            or not np.isfinite(self.min_fresh_fraction)
-            or not 0 < self.min_fresh_fraction <= 1
-        ):
-            raise ValueError("factor_risk_config_invalid")
-        for name in ("factor_window", "specific_window"):
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError("factor_risk_config_invalid")
-        for name, window in (
-            ("minimum_factor_dates", self.factor_window),
-            ("minimum_specific_dates", self.specific_window),
-        ):
-            if getattr(self, name) is None:
-                object.__setattr__(
-                    self, name, max(2, ceil(self.min_fresh_fraction * window))
-                )
-        for name in (
-            "minimum_factor_dates",
-            "minimum_specific_dates",
-            "minimum_cross_section",
-        ):
-            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
-                raise ValueError("factor_risk_config_invalid")
-        if (
-            self.minimum_factor_dates > self.factor_window
-            or self.minimum_specific_dates > self.specific_window
-            or type(self.diagonal_shrinkage) not in {int, float}
-            or not np.isfinite(self.diagonal_shrinkage)
-            or not 0 <= self.diagonal_shrinkage <= 1
-            or self.weighting != "sqrt_cap"
-            or type(self.weight_column) is not str
-            or not self.weight_column
-        ):
-            raise ValueError("factor_risk_config_invalid")
-        for value in (
-            self.factor_half_life,
-            self.specific_half_life,
-            self.annualization,
-        ):
-            if type(value) not in {float, int} or not np.isfinite(value) or value <= 0:
-                raise ValueError("factor_risk_config_invalid")
 
 
 @dataclass(frozen=True)
@@ -108,12 +51,9 @@ def preprocess_risk_styles(
     time_groups = timestamps.groupby(timestamps, sort=False).indices
     eligible = pd.Series(True, index=result.index)
     if "eligible" in result:
-        if (
-            not pd.api.types.is_bool_dtype(result.eligible)
-            or result.eligible.isna().any()
-        ):
+        if not pd.api.types.is_bool_dtype(result.eligible):
             raise ValueError("factor_risk_eligibility_invalid")
-        eligible = result.eligible
+        eligible = result.eligible.fillna(False)
     for column in style_columns:
         values = strict_real_numeric_series(
             result[column], error="risk_style_numeric_invalid"
@@ -145,6 +85,25 @@ class FactorReturnFit:
     factor_returns: pd.Series
     residuals: pd.Series
     asset_returns: pd.Series
+
+
+@dataclass(frozen=True)
+class FactorExposureSession:
+    """Decision-date normalized exposures, before future return availability."""
+
+    frame: pd.DataFrame
+    industry_columns: tuple[str, ...]
+    fit_cache: dict = field(default_factory=dict, repr=False, compare=False)
+
+    @classmethod
+    def from_preprocessed(cls, frame: pd.DataFrame) -> FactorExposureSession:
+        frame = frame.drop(columns=["asset_return"], errors="ignore")
+        codes = _industry_group_codes(frame)
+        industries = pd.get_dummies(codes, dtype="float64").reindex(
+            columns=sorted(set(codes)), fill_value=0.0
+        )
+        industries.columns = tuple(f"industry_{code}" for code in industries.columns)
+        return cls(pd.concat((frame, industries), axis=1), tuple(industries.columns))
 
 
 class FactorRiskState:
@@ -188,11 +147,9 @@ class FactorRiskState:
             + (["asset_return"] if "asset_return" in cross else []),
         ].copy()
         if "eligible" in frame:
-            if (
-                not pd.api.types.is_bool_dtype(frame.eligible)
-                or frame.eligible.isna().any()
-            ):
+            if not pd.api.types.is_bool_dtype(frame.eligible):
                 raise ValueError("factor_risk_eligibility_invalid")
+            frame["eligible"] = frame.eligible.fillna(False)
             if not include_ineligible:
                 frame = frame.loc[frame.eligible].copy()
         frame["asset_id"] = frame.asset_id.astype("string")
@@ -213,17 +170,31 @@ class FactorRiskState:
             weighted & frame.industry_level1_code.astype(str).ne("")
         ].copy()
 
+    def prepare_exposure_session(
+        self, cross: pd.DataFrame, *, include_ineligible: bool = False
+    ) -> FactorExposureSession:
+        """Build the risk design once on the complete decision-date domain."""
+        frame = self.prepare_exposures(cross, include_ineligible=include_ineligible)
+        if not frame.empty and (
+            frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1
+        ):
+            raise ValueError("factor_return_cross_section_keys_invalid")
+        frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
+        return FactorExposureSession.from_preprocessed(frame)
+
     def fit_return_session(
         self,
         cross: pd.DataFrame,
         *,
         require_complete: bool = False,
         project_ineligible: bool = False,
+        prepared: FactorExposureSession | None = None,
     ) -> FactorReturnFit | None:
         fitted, industries = self._fit_return_session(
             cross,
             require_complete=require_complete,
             project_ineligible=project_ineligible,
+            prepared=prepared,
         )
         self._industry_codes.update(industries)
         return fitted
@@ -234,19 +205,31 @@ class FactorRiskState:
         *,
         require_complete: bool = False,
         project_ineligible: bool = False,
+        prepared: FactorExposureSession | None = None,
     ) -> tuple[FactorReturnFit | None, tuple[str, ...]]:
         if "asset_return" not in cross:
             raise ValueError("factor_risk_columns_invalid")
-        frame = self.prepare_exposures(cross, include_ineligible=project_ineligible)
-        frame["asset_return"] = strict_real_numeric_series(
-            frame.asset_return, error="factor_risk_numeric_invalid"
-        )
-        if frame.empty:
+        if prepared is None:
+            prepared = self.prepare_exposure_session(
+                cross, include_ineligible=project_ineligible
+            )
+        frame = prepared.frame
+        if not project_ineligible and "eligible" in frame:
+            frame = frame.loc[frame.eligible]
+        observations = cross.loc[cross.asset_id.astype("string").isin(frame.asset_id)]
+        if observations.empty:
             return None, ()
-        if frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1:
+        if (
+            observations.asset_id.duplicated().any()
+            or observations.timestamp.nunique() != 1
+        ):
             raise ValueError("factor_return_cross_section_keys_invalid")
-        # Joint regression availability must not define each style's fit domain.
-        frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
+        returns = strict_real_numeric_series(
+            observations.asset_return, error="factor_risk_numeric_invalid"
+        )
+        returns.index = observations.asset_id.astype("string")
+        frame = frame.loc[frame.asset_id.isin(returns.index)].copy()
+        frame["asset_return"] = frame.asset_id.map(returns)
         frame = frame.dropna(subset=list(self.style_columns))
         if require_complete and (
             frame.asset_return.isna().any() or not np.isfinite(frame.asset_return).all()
@@ -259,21 +242,14 @@ class FactorRiskState:
             frame = frame.loc[frame.eligible]
         if frame.empty:
             return None, ()
-        group_codes = _industry_group_codes(frame)
-        current_industries = sorted(set(group_codes))
-        industry_columns = tuple(f"industry_{code}" for code in current_industries)
-        exposure_columns = (*industry_columns, *self.style_columns)
-        design = np.column_stack(
-            (
-                group_codes.eq(current_industries[0])
-                if len(current_industries) == 1
-                else pd.get_dummies(
-                    group_codes,
-                    dtype="float64",
-                ).reindex(columns=sorted(current_industries), fill_value=0.0),
-                frame.loc[:, list(self.style_columns)].to_numpy(dtype="float64"),
-            )
+        industry_columns = tuple(
+            column for column in prepared.industry_columns if frame[column].any()
         )
+        current_industries = tuple(
+            column.removeprefix("industry_") for column in industry_columns
+        )
+        exposure_columns = (*industry_columns, *self.style_columns)
+        design = frame.loc[:, list(exposure_columns)].to_numpy(dtype="float64")
         p = design.shape[1]
         if len(frame) < max(self.config.minimum_cross_section, 5 * p):
             return None, tuple(current_industries)
@@ -282,6 +258,7 @@ class FactorRiskState:
             design,
             returns,
             np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64")),
+            cache=prepared.fit_cache,
         )
         if fitted is None:
             return None, tuple(current_industries)
@@ -290,19 +267,10 @@ class FactorRiskState:
             raise ValueError("factor_risk_fit_non_finite")
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
         if not projection.empty:
-            projection_codes = _industry_group_codes(projection)
-            identified = projection_codes.isin(current_industries)
+            identified = projection.loc[:, list(industry_columns)].any(axis=1)
             projection = projection.loc[identified]
-            projection_codes = projection_codes.loc[identified]
-            projected_design = np.column_stack(
-                (
-                    pd.get_dummies(projection_codes, dtype="float64").reindex(
-                        columns=current_industries, fill_value=0.0
-                    ),
-                    projection.loc[:, list(self.style_columns)].to_numpy(
-                        dtype="float64"
-                    ),
-                )
+            projected_design = projection.loc[:, list(exposure_columns)].to_numpy(
+                dtype="float64"
             )
             projected_returns = projection.asset_return.to_numpy(dtype="float64")
             # Project with the eligible fit; these rows never enter risk history.
@@ -327,7 +295,10 @@ class FactorRiskState:
         cross: pd.DataFrame,
         *,
         closed_assets=frozenset(),
+        prepared: FactorExposureSession | None = None,
     ) -> None:
+        if prepared is None:
+            prepared = self.prepare_exposure_session(cross)
         fresh = (
             strict_bool_series(
                 cross["is_trading"],
@@ -363,7 +334,9 @@ class FactorRiskState:
                 self._specific_session_counts[asset] = (
                     self._specific_session_counts.get(asset, 0) + 1
                 )
-        fitted, industries = self._fit_return_session(cross.loc[listings.notna()])
+        fitted, industries = self._fit_return_session(
+            cross.loc[listings.notna()], prepared=prepared
+        )
         fitted = None if fitted is None else (fitted.factor_returns, fitted.residuals)
         self._industry_codes.update(industries)
         self._session_count += 1
@@ -424,36 +397,38 @@ class FactorRiskState:
                 self._specific_session_counts[asset]
             )
 
-    def current_exposures(self, cross: pd.DataFrame) -> pd.DataFrame:
-        frame = preprocess_risk_styles(
-            self.prepare_exposures(cross, include_ineligible=True),
-            style_columns=self.style_columns,
-        ).dropna(subset=list(self.style_columns))
-        codes = _industry_group_codes(frame)
-        self._industry_codes = set(codes)
-        industries = pd.get_dummies(codes, dtype="float64").reindex(
-            columns=sorted(self._industry_codes),
-            fill_value=0.0,
+    def current_exposures(
+        self, cross: pd.DataFrame | FactorExposureSession
+    ) -> pd.DataFrame:
+        prepared = (
+            cross
+            if isinstance(cross, FactorExposureSession)
+            else self.prepare_exposure_session(cross, include_ineligible=True)
         )
-        industries.columns = tuple(f"industry_{code}" for code in industries.columns)
-        result = pd.concat(
-            (
-                frame.loc[
-                    :, ("asset_id", "industry_standard_id", "industry_level1_code")
-                ].reset_index(drop=True),
-                industries.reset_index(drop=True),
-                frame.loc[:, list(self.style_columns)].reset_index(drop=True),
-            ),
-            axis=1,
+        frame = prepared.frame.dropna(subset=list(self.style_columns))
+        industry_columns = tuple(
+            column for column in prepared.industry_columns if frame[column].any()
         )
-        return result
+        self._industry_codes = {
+            column.removeprefix("industry_") for column in industry_columns
+        }
+        return frame.loc[
+            :,
+            [
+                "asset_id",
+                "industry_standard_id",
+                "industry_level1_code",
+                *industry_columns,
+                *self.style_columns,
+            ],
+        ].reset_index(drop=True)
 
     def estimate(self) -> FactorRiskEstimate:
         if (
             self._session_count < self.config.factor_window
             or len(self._factor_rows) < self.config.minimum_factor_dates
         ):
-            raise ValueError("factor_risk_factor_history_insufficient")
+            raise RiskInputsUnavailable("factor_risk_factor_history_insufficient")
         industry_columns = tuple(
             f"industry_{code}" for code in sorted(self._industry_codes)
         )
@@ -467,7 +442,7 @@ class FactorRiskState:
             len(factor_returns) < self.config.minimum_factor_dates
             or factor_returns["fresh"].sum() < self.config.minimum_factor_dates
         ):
-            raise ValueError("factor_risk_factor_history_insufficient")
+            raise RiskInputsUnavailable("factor_risk_factor_history_insufficient")
         factor_returns.pop("fresh")
         factor_ages = self._session_count - factor_returns.pop("session").to_numpy()
         covariance = _ewma_covariance(
@@ -529,15 +504,34 @@ def _validated_covariance(covariance: np.ndarray, *, error_prefix: str) -> np.nd
 
 
 def _weighted_fit(
-    design: np.ndarray, returns: np.ndarray, weights: np.ndarray
+    design: np.ndarray, returns: np.ndarray, weights: np.ndarray, *, cache=None
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Solve the sqrt(cap)-weighted objective without normal equations."""
+    """Solve WLS, reusing only the most recent identical observed design."""
     root_weights = np.sqrt(weights / weights.max())
-    coefficients, _, rank, _ = np.linalg.lstsq(
-        design * root_weights[:, None], returns * root_weights, rcond=None
-    )
-    if rank != design.shape[1]:
-        return None
+    if cache is None:
+        coefficients, _, rank, _ = np.linalg.lstsq(
+            design * root_weights[:, None], returns * root_weights, rcond=None
+        )
+        if rank != design.shape[1]:
+            return None
+    else:
+        if (
+            "design" not in cache
+            or not np.array_equal(cache["design"], design)
+            or not np.array_equal(cache["root_weights"], root_weights)
+        ):
+            u, singular, vh = np.linalg.svd(
+                design * root_weights[:, None], full_matrices=False
+            )
+            cutoff = np.finfo(float).eps * max(design.shape) * singular[0]
+            projection = (vh.T / singular) @ u.T if np.all(singular > cutoff) else None
+            cache.clear()
+            cache.update(
+                design=design, root_weights=root_weights, projection=projection
+            )
+        if cache["projection"] is None:
+            return None
+        coefficients = cache["projection"] @ (returns * root_weights)
     residuals = returns - design @ coefficients
     # An exactly explained ordinary return should not create specific risk.
     tolerance = 1e-12 * float(np.max(np.abs(returns)))

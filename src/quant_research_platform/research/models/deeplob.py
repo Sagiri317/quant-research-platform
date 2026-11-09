@@ -8,8 +8,8 @@ from quant_research_platform.contracts.models import DEEPLOB_INPUT_COLUMNS
 
 
 def complete_book_rows(frame):
-    """Only complete eligible books can enter a DeepLOB sequence or output."""
-    return frame.loc[:, DEEPLOB_INPUT_COLUMNS].notna().all(axis=1) & frame.eligible
+    """Require the full book, independently of research-universe membership."""
+    return frame.loc[:, DEEPLOB_INPUT_COLUMNS].notna().all(axis=1)
 
 
 def network(algorithm, parameters):

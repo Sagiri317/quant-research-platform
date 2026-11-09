@@ -11,6 +11,7 @@ from quant_research_platform.contracts.evaluations import (
     GROUP_SPREAD_REASON_CODES,
     EvaluationDiagnostics,
     EvaluationSpec,
+    evaluation_sessions,
     strict_non_negative_count_series,
     strict_positive_group_series,
 )
@@ -86,6 +87,17 @@ def validate_evaluation_science(metadata):
     from quant_research_platform.contracts.time import TimeWindow
 
     base = {"window", "cutoff", "sample_role"}
+    if isinstance(metadata, dict) and "sessions" in metadata:
+        from quant_research_platform.contracts.time import TimeWindow
+
+        dates = evaluation_sessions(metadata["sessions"])
+        window = TimeWindow(**metadata["window"])
+        if len(dates) and (
+            dates[0] < pd.Timestamp(window.start).normalize()
+            or dates[-1] > pd.Timestamp(window.end).normalize()
+        ):
+            raise ValueError("evaluation_sessions_outside_window")
+        base.add("sessions")
     if isinstance(metadata, dict) and "classification_metrics" in metadata:
         from quant_research_platform.contracts.models import (
             CLASSIFICATION_METRICS,
@@ -278,14 +290,21 @@ def validate_evaluation_output_metadata_shape(
     metadata: object,
 ) -> dict[str, object]:
     science = {"window", "cutoff", "sample_role"}
+    if isinstance(metadata, dict) and "sessions" in metadata:
+        science.add("sessions")
     if isinstance(metadata, dict) and "classification_metrics" in metadata:
         science.add("classification_metrics")
     if isinstance(metadata, dict) and "response_diagnostics" in metadata:
         science.add("response_diagnostics")
+    base = _EVALUATION_OUTPUT_METADATA_KEYS | (
+        {"correlation_clock"}
+        if isinstance(metadata, dict) and "correlation_clock" in metadata
+        else set()
+    )
     if type(metadata) is not dict or set(metadata) not in (
-        _EVALUATION_OUTPUT_METADATA_KEYS,
-        _EVALUATION_OUTPUT_METADATA_KEYS | science,
-        _EVALUATION_OUTPUT_METADATA_KEYS | science | EVALUATION_SCIENCE_KEYS,
+        base,
+        base | science,
+        base | science | EVALUATION_SCIENCE_KEYS,
     ):
         raise ValueError("output_manifest_metadata_invalid")
     if science <= set(metadata):
@@ -428,7 +447,13 @@ def validate_evaluation_output_metadata_shape(
             len(signals) * len(label_columns) if diagnostics["timestamp_count"] else 0
         )
         if (
-            diagnostics["metric_rows"] != expected_metric_rows
+            (
+                diagnostics["metric_rows"] != expected_metric_rows
+                if metadata.get("correlation_clock", "observation") == "observation"
+                else not expected_metric_rows
+                <= diagnostics["metric_rows"]
+                <= expected_metric_rows * diagnostics["timestamp_count"]
+            )
             or diagnostics["grouped_label_value_rows"] != 0
             or diagnostics["group_spread_summary_rows"] != 0
         ):
@@ -469,6 +494,7 @@ def validate_evaluation_output_metadata_shape(
             label_columns=tuple(label_columns),
             label_availability_columns=label_availability_columns,
             evaluation_axis=metadata["evaluation_axis"],
+            correlation_clock=metadata.get("correlation_clock", "observation"),
             filter_mode=metadata["filter_mode"],
             n_groups=evaluation_diagnostics.n_groups,
             run_type=metadata["run_type"],
@@ -517,8 +543,13 @@ def validate_evaluation_artifact_structure(
         if (
             not grouped_label_values.empty
             or not group_spread_summary.empty
-            or not metrics["rankic"].isna().all()
-            or not metrics["rankic_reason"].eq("not_applicable").all()
+            or (
+                spec.correlation_clock == "observation"
+                and (
+                    not metrics["rankic"].isna().all()
+                    or not metrics["rankic_reason"].eq("not_applicable").all()
+                )
+            )
         ):
             raise ValueError("single_asset_time_series_evaluation_artifact_invalid")
     _validate_correlation_metrics(metrics, spec=spec)
@@ -577,6 +608,7 @@ def validate_evaluation_artifact_structure(
             min(1, timestamp_count)
             if timestamp_count is not None
             and spec.evaluation_axis == "single_asset_time_series"
+            and spec.correlation_clock == "observation"
             else timestamp_count
         )
         if maximum is not None and counts.gt(maximum).any():
@@ -586,6 +618,7 @@ def validate_evaluation_artifact_structure(
             "not_applicable"
             if statistic == "rankic"
             and spec.evaluation_axis == "single_asset_time_series"
+            and spec.correlation_clock == "observation"
             else "no_valid_observations"
         )
         if (
@@ -614,6 +647,7 @@ def validate_evaluation_artifact_structure(
                 "not_applicable"
                 if prefix == "rankic"
                 and spec.evaluation_axis == "single_asset_time_series"
+                and spec.correlation_clock == "observation"
                 else "no_valid_observations"
             )
             if (count == 0 and reason != expected_empty) or (
@@ -714,6 +748,7 @@ def _validate_correlation_metrics(metrics, *, spec):
         if (
             value_column == "rankic"
             and spec.evaluation_axis == "single_asset_time_series"
+            and spec.correlation_clock == "observation"
         ):
             continue
         for n_obs, value, reason in zip(

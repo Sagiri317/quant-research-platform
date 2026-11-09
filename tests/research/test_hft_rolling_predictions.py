@@ -11,8 +11,8 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     summarize_portfolio_ledger,
 )
 from quant_research_platform.research.portfolios.high_frequency import backtest
+from tests.helpers.high_frequency import parameters, quotes
 from tests.helpers.output_frames import make_price_volume_prediction_output_frame
-from tests.research.test_hft_portfolio import parameters, quotes
 from tests.research.test_policy_learning import hft_episode
 
 

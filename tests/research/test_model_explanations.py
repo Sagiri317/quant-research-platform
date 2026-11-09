@@ -16,6 +16,7 @@ from tests.research.direct_model_test_support import fit_frame, predict_frame
 _ALGORITHMS = {
     "linear_regression": "affine",
     "lasso_regression": "affine",
+    "ridge_regression": "affine",
     "xgboost_regressor": "native_tree",
 }
 
@@ -37,6 +38,7 @@ def _case(tmp_path, algorithm="linear_regression", *, parameters=None):
     )
     params = {
         "lasso_regression": {"alpha": 0.001},
+        "ridge_regression": {"alpha": 1.5},
         "xgboost_regressor": {"n_estimators": 4, "max_depth": 2, "n_jobs": 1},
     }.get(algorithm, {})
     params.update(parameters or {})
@@ -265,7 +267,9 @@ def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
     )
 
 
-@pytest.mark.parametrize("algorithm", ["linear_regression", "lasso_regression"])
+@pytest.mark.parametrize(
+    "algorithm", ["linear_regression", "lasso_regression", "ridge_regression"]
+)
 def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     case, frame, config = _case(tmp_path, algorithm)
     config["methods"] = ["linear_shap"]

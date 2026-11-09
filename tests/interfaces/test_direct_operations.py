@@ -9,6 +9,57 @@ from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.cli import commands
 
+CONFIG_OPERATIONS = (
+    ("prepare-source", "sources.prepare", "prepare_source"),
+    ("fetch-macro", "sources.macro.download", "fetch_macro"),
+    ("prepare", "markets.prepare", "prepare"),
+    ("assemble", "research.datasets.assembler", "assemble"),
+    ("fit", "research.models.production", "fit"),
+    ("predict", "research.predictions.runner", "predict"),
+    ("explain", "research.models.explanations", "explain"),
+    ("score", "research.models.trial_selection", "score"),
+    ("select", "research.models.trial_selection", "select"),
+    ("backtest", "research.portfolios.production", "backtest"),
+    ("calibrate", "research.portfolios.production", "calibrate"),
+    ("plot", "reports.plots", "plot"),
+    ("backtest-hft", "research.portfolios.high_frequency", "backtest"),
+    ("run-quarterly", "research.rolling", "run_quarterly"),
+    ("normalize-book", "research.features.book_normalization", "normalize_book"),
+    ("sample-hft", "research.datasets.high_frequency", "sample_hft"),
+    (
+        "evaluate-time-series",
+        "research.evaluations.time_series",
+        "evaluate_time_series",
+    ),
+    (
+        "analyze-inventory",
+        "research.portfolios.inventory_analysis",
+        "analyze_inventory",
+    ),
+    ("fit-hawkes", "research.models.hawkes", "fit_hawkes"),
+    ("statistics-factors", "research.factors.statistics", "factor_statistics"),
+    ("statistics-model", "research.models.statistics", "model_statistics"),
+    ("statistics-portfolio", "research.portfolios.diagnostics", "portfolio_statistics"),
+    ("evaluate", "research.evaluations.runner", "evaluate"),
+    ("train-policy", "research.policies.reinforcement", "train_policy"),
+    ("backtest-policy", "research.policies.reinforcement", "backtest_policy"),
+    ("search-factors", "research.factors.search", "search_factors"),
+    ("apply-formula", "research.factors.search", "apply_formula"),
+    (
+        "calibrate-uncertainty",
+        "research.predictions.uncertainty",
+        "calibrate_uncertainty",
+    ),
+    ("apply-uncertainty", "research.predictions.uncertainty", "apply_uncertainty"),
+    (
+        "evaluate-uncertainty",
+        "research.predictions.uncertainty",
+        "evaluate_uncertainty",
+    ),
+    ("fit-cost-model", "research.policies.cost_aware", "fit_cost_model"),
+    ("backtest-cost-model", "research.policies.cost_aware", "backtest_cost_model"),
+)
+
 
 def test_cli_rejects_non_strict_json_before_computation(tmp_path, monkeypatch):
     from quant_research_platform.research.models import production
@@ -29,16 +80,23 @@ def test_cli_rejects_non_strict_json_before_computation(tmp_path, monkeypatch):
     assert received == []
 
 
-def test_cli_has_independent_operations_without_orchestration_options():
+def test_cli_registers_independent_operations_with_help():
     from typer.main import get_command
 
     command = get_command(commands.app)
-    assert {"fit", "predict", "score", "select", "prepare", "assemble"} <= set(
-        command.commands
-    )
-    assert {"research", "report", "data", "status"}.isdisjoint(command.commands)
-    for name in ("fit", "predict", "score", "select", "prepare", "assemble"):
+    assert set(command.commands) == {
+        *(name for name, _, _ in CONFIG_OPERATIONS),
+        "agent",
+        "inspect",
+        "catalog",
+    }
+    for name, _, _ in CONFIG_OPERATIONS:
         assert [param.name for param in command.commands[name].params] == ["config"]
+    assert all(item.help for item in command.commands.values())
+    assert all(item.help for item in command.commands["catalog"].commands.values())
+    result = CliRunner().invoke(commands.app, ["explain", "--help"])
+    assert result.exit_code == 0
+    assert "frozen model" in result.output
 
 
 def test_cli_main_preserves_interrupt_and_redacts_failure(monkeypatch, capsys):
@@ -70,32 +128,7 @@ def test_catalog_cli_is_read_only_and_outputs_native_catalog():
     assert json.loads(result.output)["dataset_id"] == "pv_all"
 
 
-@pytest.mark.parametrize(
-    "command,module,function",
-    (
-        ("prepare-source", "sources.prepare", "prepare_source"),
-        ("prepare", "markets.prepare", "prepare"),
-        ("assemble", "research.datasets.assembler", "assemble"),
-        ("fit", "research.models.production", "fit"),
-        ("predict", "research.predictions.runner", "predict"),
-        ("explain", "research.models.explanations", "explain"),
-        ("score", "research.models.trial_selection", "score"),
-        ("select", "research.models.trial_selection", "select"),
-        ("backtest", "research.portfolios.production", "backtest"),
-        ("calibrate", "research.portfolios.production", "calibrate"),
-        ("plot", "reports.plots", "plot"),
-        ("backtest-hft", "research.portfolios.high_frequency", "backtest"),
-        ("run-quarterly", "research.rolling", "run_quarterly"),
-        ("statistics-factors", "research.factors.statistics", "factor_statistics"),
-        ("statistics-model", "research.models.statistics", "model_statistics"),
-        (
-            "statistics-portfolio",
-            "research.portfolios.diagnostics",
-            "portfolio_statistics",
-        ),
-        ("evaluate", "research.evaluations.runner", "evaluate"),
-    ),
-)
+@pytest.mark.parametrize("command,module,function", CONFIG_OPERATIONS)
 def test_every_cli_operation_passes_the_same_config_without_overrides(
     tmp_path, monkeypatch, command, module, function
 ):
@@ -156,7 +189,7 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
 
 def test_inspect_prediction_uses_native_manifest_without_reading_scores(tmp_path):
     from quant_research_platform.interfaces.queries import inspect
-    from tests.artifacts.test_outputs_core import native_bundle
+    from tests.helpers.output_frames import native_bundle
 
     root, _, metadata = native_bundle(tmp_path)
     (root / "prediction.parquet").write_bytes(b"unselected damaged member")
@@ -195,17 +228,6 @@ def test_source_stage_json_boundary_precedes_materialization(
     with pytest.raises(ValueError):
         prepare_source(config)
     assert not list(tmp_path.iterdir())
-
-
-def test_cli_help_describes_each_registered_operation():
-    from typer.main import get_command
-
-    command = get_command(commands.app)
-    assert all(item.help for item in command.commands.values())
-    assert all(item.help for item in command.commands["catalog"].commands.values())
-    result = CliRunner().invoke(commands.app, ["explain", "--help"])
-    assert result.exit_code == 0
-    assert "frozen model" in result.output
 
 
 @pytest.mark.parametrize("kind", ["missing", "not_a_directory", "malformed"])

@@ -248,6 +248,8 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     raw.mkdir(parents=True)
     for stream, name in STREAM_FILES.items():
         frame = raw_quotes() if stream == "hft_quotes" else raw_events(stream)
+        if stream == "hft_quotes":
+            frame.loc[1, "bid_vol1"] = np.nan
         pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), raw / name)
     outputs = {stream: str(tmp_path / stream) for stream in STREAM_FILES}
     result = prepare_source(
@@ -297,6 +299,8 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     assert len(result) == 4
     assert result.future_mid_return_3s.notna().sum() == 3
     assert result.eligible.all()
+    assert result.relative_spread.iloc[1] == pytest.approx(0.02 / 10.01)
+    assert pd.isna(result.imbalance_1.iloc[1])
     assert result.observed_cancel_flow_imbalance.iloc[1] == 1.0
 
     from quant_research_platform.artifacts.portfolio_ledger import (
@@ -636,4 +640,61 @@ def test_sale_requires_cash_to_cover_minimum_commission(
     # Selling yields 3 CNY and costs 5: only the account with 2 CNY cash can execute.
     assert sum(row.value for row in ending.values()) == (
         4.0 if not expected_trades else 0.0
+    )
+
+
+@pytest.mark.parametrize("missing", ["bid_vol1", "ask_vol1", "bid_px1"])
+def test_missing_book_field_keeps_independent_price_and_event_history(missing):
+    quotes = normalize(raw_quotes(), "hft_quotes", INSTRUMENTS)
+    trades = normalize(raw_events("hft_trades"), "hft_trades", INSTRUMENTS)
+    orders = normalize(raw_events("hft_orders"), "hft_orders", INSTRUMENTS)
+    baseline = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    quotes.loc[1, missing] = np.nan
+    panel = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    assert not panel.eligible.iloc[1]
+    assert panel.segment_id.nunique() == 1
+    pd.testing.assert_series_equal(
+        panel.observed_trade_volume, baseline.observed_trade_volume
+    )
+    factors = compute_factors(panel)
+    expected = compute_factors(baseline)
+    pd.testing.assert_series_equal(
+        factors.observed_order_flow_imbalance, expected.observed_order_flow_imbalance
+    )
+    labels = compute_labels(panel, label_catalog().list())
+    if missing.endswith("vol1"):
+        assert panel.mid.iloc[1] == baseline.mid.iloc[1]
+        assert factors.spread_cny.iloc[1] == pytest.approx(0.02)
+        assert labels.future_mid_return_3s.iloc[0] == pytest.approx(10.01 / 10 - 1)
+        assert (
+            labels.future_mid_return_3s_available_at.iloc[0] == panel.timestamp.iloc[1]
+        )
+        assert pd.isna(factors.imbalance_1.iloc[1])
+    else:
+        assert pd.isna(panel.mid.iloc[1])
+        assert pd.isna(factors.spread_cny.iloc[1])
+        assert pd.isna(factors.book_ofi.iloc[1])
+        assert pd.isna(factors.book_ofi.iloc[2])
+        # A price-only label selects the next valid quote in the observed segment.
+        assert labels.future_mid_return_3s.iloc[0] == pytest.approx(10.02 / 10 - 1)
+        assert (
+            labels.future_mid_return_3s_available_at.iloc[0] == panel.timestamp.iloc[2]
+        )
+    from quant_research_platform.research.factors.event_microstructure import (
+        compute_event_factors,
+    )
+    from quant_research_platform.research.factors.hawkes import compute_hawkes_factors
+
+    options = {"columns": ("trade_signed_run",), "config": {}}
+    pd.testing.assert_frame_equal(
+        compute_event_factors(panel, orders, trades, **options),
+        compute_event_factors(baseline, orders, trades, **options),
+    )
+    model = (
+        (np.array([1.0, 1.0]), np.zeros((2, 2)), 1.0),
+        panel.timestamp.iloc[0] - pd.Timedelta(seconds=1),
+    )
+    pd.testing.assert_frame_equal(
+        compute_hawkes_factors(panel, trades, model),
+        compute_hawkes_factors(baseline, trades, model),
     )

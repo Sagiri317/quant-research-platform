@@ -1,0 +1,38 @@
+{
+  "market_id": "a_share",
+  "inputs": "data/research/a_share/hft_common_3s",
+  "output": "results/hft/xgboost-early-stopping",
+  "model": {
+    "model_id": "hft_common_xgboost_early_stopping",
+    "model_algorithm": "xgboost_regressor",
+    "input_factor_columns": [
+      "relative_spread",
+      "imbalance_1",
+      "microprice_deviation"
+    ],
+    "target_column": "future_mid_return_30s",
+    "hyperparameters": {
+      "n_estimators": 200,
+      "max_depth": 4,
+      "learning_rate": 0.05,
+      "early_stopping_rounds": 20,
+      "device": "cuda"
+    }
+  },
+  "fit_windows": [
+    {
+      "start": "2018-02-14T01:30:00",
+      "end": "2018-02-14T03:29:00"
+    }
+  ],
+  "fit_cutoff": "2018-02-14T03:30:00",
+  "validation": {
+    "windows": [
+      {
+        "start": "2018-02-14T05:00:00",
+        "end": "2018-02-14T05:59:00"
+      }
+    ],
+    "cutoff": "2018-02-14T06:00:00"
+  }
+}

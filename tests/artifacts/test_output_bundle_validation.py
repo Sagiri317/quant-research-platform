@@ -16,8 +16,10 @@ from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from tests.artifacts.test_outputs_core import native_bundle
-from tests.helpers.output_frames import make_price_volume_prediction_output_frame
+from tests.helpers.output_frames import (
+    make_price_volume_prediction_output_frame,
+    native_bundle,
+)
 
 
 def test_bundle_returns_actual_members_and_private_paths(tmp_path):

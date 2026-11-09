@@ -589,6 +589,24 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             (w - ref).dot(inputs[0].fitted.residuals)
         )
         assert detail["benchmark_replication_gap"] != 0.0
+        fitted = inputs[0].fitted
+        factor_detail = detail.reindex(
+            [f"factor:{name}" for name in fitted.factor_returns.index]
+        )
+        expected_detail = (
+            fitted.exposures.mul(w - ref, axis=0).sum() * fitted.factor_returns
+        )
+        np.testing.assert_allclose(factor_detail, expected_detail, atol=1e-14)
+        industry = fitted.factor_returns.index.str.startswith("industry_")
+        assert factor_detail.loc[industry].sum() == pytest.approx(detail["industry"])
+        assert factor_detail.loc[~industry].sum() == pytest.approx(detail["style"])
+        assert (
+            attribution.loc[
+                attribution.component_id.str.startswith("factor:"), "component_type"
+            ]
+            .eq("detail")
+            .all()
+        )
         assert detail["residual_unexplained"] == pytest.approx(
             detail["stock_residual_difference"] + detail["benchmark_replication_gap"]
         )
@@ -863,6 +881,26 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         if relist_step is not None:
             assert assets[-2] not in first.fitted.exposures.index
         assert assets[-1] not in first.fitted.exposures.index
+        # Future listing changes select return observations, never the decision
+        # date's per-style winsorization or normalization sample.
+        decision_styles = risk_data.loc[
+            risk_data.timestamp.eq(first.decision_at)
+        ].set_index("asset_id")
+        for column in RISK_STYLE_COLUMNS:
+            values = decision_styles[column]
+            eligible_values = values.drop(index=assets[0]) if st_holding else values
+            median = eligible_values.median()
+            mad = (eligible_values - median).abs().median()
+            bound = 3 * 1.4826 * mad
+            clipped = values.clip(median - bound, median + bound)
+            fitting = clipped.reindex(eligible_values.index).dropna()
+            expected_style = (clipped - fitting.mean()) / fitting.std(ddof=0)
+            np.testing.assert_allclose(
+                first.fitted.exposures[column],
+                expected_style.reindex(first.fitted.exposures.index),
+                rtol=1e-12,
+                atol=1e-14,
+            )
         assert (
             first.decision_at == dates[-4]
             and first.entry_at == dates[-3]

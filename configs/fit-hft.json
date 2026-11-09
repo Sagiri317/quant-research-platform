@@ -1,9 +1,9 @@
 {
-  "inputs": "data/research/a_share/a_share_hft",
+  "inputs": "data/research/a_share/hft_common_3s",
   "output": "results/hft/model",
   "market_id": "a_share",
   "model": {
-    "model_id": "hft_ols",
+    "model_id": "hft_common_ols",
     "model_algorithm": "linear_regression",
     "input_factor_columns": [
       "relative_spread",

@@ -83,7 +83,11 @@ class PreparedTraining:
             else "impute",
             scaling=self.training_scaling,
         )
-        return weights, scaler, scaler.transform(matrix)
+        return weights, scaler
+
+    @cached_property
+    def matrix(self):
+        return self.preprocessing[1].transform(self.training.loc[:, self.input_columns])
 
 
 def prediction_callable(input_columns: tuple[str, ...], prediction_model: object):
@@ -235,7 +239,7 @@ def _fit_model_result(
     elif spec.model_algorithm in SEQUENCE_ALGORITHMS:
         from quant_research_platform.research.models.neural import fit_sequence
 
-        predictor, curve = fit_sequence(prepared_training, spec, validation)
+        predictor, curve, stopping = fit_sequence(prepared_training, spec, validation)
         result = ModelFitResult(
             metadata=model_metadata(
                 spec,
@@ -246,9 +250,11 @@ def _fit_model_result(
             prediction_model=predictor,
         )
         result.metadata["learning_curve"] = curve
+        if stopping is not None:
+            result.metadata["early_stopping"] = stopping
     else:
         result = _fit_estimator_model_result(
-            prepared_training, spec, estimator=estimator
+            prepared_training, spec, estimator=estimator, validation=validation
         )
     target = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     result.metadata["training_target_mean"] = float(
@@ -266,8 +272,8 @@ def _fit_linear_model_result(
     filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
-    weights, scaler, matrix = prepared_training.preprocessing
-    transformed = matrix.to_numpy(dtype="float64")
+    weights, scaler = prepared_training.preprocessing
+    transformed = prepared_training.matrix.to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
     target = training[spec.target_column].to_numpy(dtype="float64")
@@ -343,6 +349,7 @@ def _fit_estimator_model_result(
     spec: ModelSpec,
     *,
     estimator: object,
+    validation=None,
 ) -> ModelFitResult:
     training = prepared_training.training
     row_counts = prepared_training.row_counts
@@ -350,7 +357,10 @@ def _fit_estimator_model_result(
     if training.empty:
         raise ValueError("model_training_sample_empty")
     predictor = _fit_predictor(
-        spec, prepared_training=prepared_training, estimator=estimator
+        spec,
+        prepared_training=prepared_training,
+        estimator=estimator,
+        validation=validation,
     )
 
     resolved_hyperparameters = estimators.resolved_model_hyperparameters(spec)
@@ -364,6 +374,12 @@ def _fit_estimator_model_result(
         resolved_hyperparameters=resolved_hyperparameters,
         scaler=predictor.scaler if isinstance(predictor, ScaledPredictor) else None,
     )
+    if spec.hyperparameters.get("early_stopping_rounds") is not None:
+        metrics = estimator.evals_result()["validation_0"]
+        metadata["early_stopping"] = {
+            "best_iteration": int(estimator.best_iteration),
+            "iterations": len(next(iter(metrics.values()))),
+        }
     result = ModelFitResult(metadata=metadata, prediction_model=predictor)
     return result
 
@@ -593,21 +609,45 @@ def _fit_predictor(
     *,
     prepared_training: PreparedTraining,
     estimator: object,
+    validation=None,
 ) -> object:
     y = prepared_training.training[spec.target_column].to_numpy(
         dtype="float64", copy=True
     )
-    weights, scaler, matrix = prepared_training.preprocessing
+    weights, scaler = prepared_training.preprocessing
     weights = weights.copy()
     from sklearn.exceptions import ConvergenceWarning
 
-    scaled_matrix = matrix.copy(deep=True)
+    scaled_matrix = prepared_training.matrix.copy(deep=True)
+    fit_options = {}
+    patience = spec.hyperparameters.get("early_stopping_rounds")
+    if validation is not None:
+        fit_options = {
+            "eval_set": [
+                (
+                    scaler.transform(validation.training.loc[:, spec.input_columns]),
+                    validation.training[spec.target_column].to_numpy(dtype="float64"),
+                )
+            ],
+            "verbose": False,
+        }
+    if patience is not None:
+        from xgboost.callback import EarlyStopping
+
+        # Native save_best discards later trees for prediction and explanations.
+        estimator.set_params(
+            early_stopping_rounds=None,
+            callbacks=[EarlyStopping(rounds=patience, save_best=True)],
+        )
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
-            estimator.fit(scaled_matrix, y, sample_weight=weights)
+            estimator.fit(scaled_matrix, y, sample_weight=weights, **fit_options)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
+    finally:
+        if patience is not None:
+            estimator.set_params(early_stopping_rounds=patience, callbacks=None)
     return ScaledPredictor(estimator, scaler)
 
 

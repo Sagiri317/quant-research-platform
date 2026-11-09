@@ -629,3 +629,66 @@ def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
     state.observe_return_session(cross)
     assert assets[0] not in state.estimate().specific_variance
     assert assets[1] in state.estimate().specific_variance
+
+
+@pytest.mark.parametrize("future_change", ("missing", "unknown_listing", "new_life"))
+def test_lagged_risk_keeps_decision_scaling_when_future_membership_changes(
+    future_change,
+):
+    dates = pd.bdate_range("2023-01-02", periods=2)
+    assets = [f"a{i:02d}" for i in range(26)]
+    panel = _panel(assets, dates[:1])
+    panel["industry_level1_code"] = "one"
+    panel["total_market_cap"] = 100.0
+    styles = panel[["asset_id", "timestamp"]].assign(
+        style=np.r_[np.linspace(-2.0, 2.0, 25), 20.0]
+    )
+    previous = daily._enhanced_risk_cross(
+        panel=panel, risk_frames=[styles], style_columns=("style",)
+    )
+    state = FactorRiskState(
+        style_columns=("style",),
+        config=FactorRiskConfig(
+            factor_window=1,
+            specific_window=1,
+            minimum_factor_dates=1,
+            minimum_specific_dates=1,
+            minimum_cross_section=10,
+        ),
+    )
+    values = styles["style"].to_numpy()
+    median = np.median(values)
+    bound = 3 * 1.4826 * np.median(np.abs(values - median))
+    clipped = np.clip(values, median - bound, median + bound)
+    expected_style = (clipped - clipped.mean()) / clipped.std()
+    prepared = state.prepare_exposure_session(previous, include_ineligible=True)
+    np.testing.assert_allclose(
+        state.current_exposures(prepared)["style"], expected_style, atol=1e-14
+    )
+    current = panel.assign(timestamp=dates[1])
+    current["period_return"] = (
+        0.01 + 0.02 * expected_style + 0.001 * np.cos(np.arange(len(assets)))
+    )
+    if future_change == "missing":
+        current = current.loc[current.asset_id.ne(assets[-1])]
+    else:
+        current.loc[current.asset_id.eq(assets[-1]), "listing_date"] = (
+            pd.NaT if future_change == "unknown_listing" else dates[1]
+        )
+    returns = daily._factor_return_cross(exposures=previous, panel=current)
+    fit = state.fit_return_session(returns, prepared=prepared)
+    assert fit is not None and assets[-1] not in fit.exposures.index
+    np.testing.assert_allclose(fit.exposures["style"], expected_style[:-1], atol=1e-14)
+    design = np.column_stack((np.ones(25), expected_style[:-1]))
+    expected = np.linalg.lstsq(
+        design,
+        current.set_index("asset_id").loc[assets[:-1], "period_return"],
+        rcond=None,
+    )[0]
+    np.testing.assert_allclose(fit.factor_returns, expected, atol=1e-14)
+    state.observe_return_session(returns, prepared=prepared)
+    np.testing.assert_allclose(
+        state.estimate().factor_returns.iloc[0, 1:].to_numpy(dtype=float),
+        expected,
+        atol=1e-14,
+    )

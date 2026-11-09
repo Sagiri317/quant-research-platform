@@ -95,19 +95,13 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
         work = group.reset_index(drop=True).copy()
         work["market_id"] = "a_share"
         work["last_price"] = work.price
-        valid = (
-            work.bid_px1.gt(0)
-            & work.ask_px1.gt(work.bid_px1)
-            & work.bid_vol1.gt(0)
-            & work.ask_vol1.gt(0)
-        )
-        work["eligible"] = valid
-        work["mid"] = ((work.bid_px1 + work.ask_px1) / 2).where(valid)
-        breaks = (
-            work.timestamp.diff().dt.total_seconds().gt(max_gap_seconds)
-            | ~valid
-            | ~valid.shift(1, fill_value=False)
-        )
+        valid_price = work.bid_px1.gt(0) & work.ask_px1.gt(work.bid_px1)
+        # Keep the legacy complete top-of-book flag; it is not a row-wide mask.
+        work["eligible"] = valid_price & work.bid_vol1.gt(0) & work.ask_vol1.gt(0)
+        work["mid"] = ((work.bid_px1 + work.ask_px1) / 2).where(valid_price)
+        # Missing book fields do not break independent observed event histories.
+        breaks = work.timestamp.diff().dt.total_seconds().gt(max_gap_seconds)
+        breaks.iloc[0] = True
         work["segment_id"] = (
             f"{asset}:{day:%Y%m%d}:{session}:" + breaks.cumsum().astype(str)
         )

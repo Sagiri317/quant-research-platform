@@ -17,7 +17,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import write_dataset
 
 
-def inventory_daily_economics(ledger):
+def inventory_daily_economics(ledger, *, on_batch=None):
     """Separate price exposure, execution marks, corporate claims and explicit fees."""
     economic = _LedgerEconomics(ledger.capital)
     days = {}
@@ -120,6 +120,8 @@ def inventory_daily_economics(ledger):
                 nav_end=fsum(item.value for item in end.values()),
                 cash_post=end[PORTFOLIO_CASH_ASSET_ID].value,
             )
+            if on_batch is not None:
+                on_batch(batch, before, end, row["nav_before"])
     result = pd.DataFrame(days.values())
     if result.empty:
         raise ValueError("inventory_ledger_empty")

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import _validate_column_tuple
 
 FEATURE_RECIPES = {"a_share_canonical", "a_share_quantile_1_99"}
@@ -38,8 +40,19 @@ class FeatureTransformSpec:
     scale: bool = True
     size_column: str = "log_total_market_cap"
     output_groups: tuple[str, ...] = ("processed",)
+    risk_model: FactorRiskModel | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.risk_model, Mapping):
+            object.__setattr__(
+                self, "risk_model", FactorRiskModel.from_mapping(self.risk_model)
+            )
+        if self.risk_model is not None and (
+            type(self.risk_model) is not FactorRiskModel
+            or self.industry_neutralize
+            or self.size_neutralize
+        ):
+            raise ValueError("feature_risk_neutralization_conflict")
         if type(self.recipe_id) is not str or self.recipe_id not in FEATURE_RECIPES:
             raise ValueError("unsupported_feature_recipe")
         _validate_column_tuple(self.source_columns, "source_columns")
@@ -79,6 +92,19 @@ class FeatureTransformSpec:
     @property
     def support_columns(self) -> tuple[str, ...]:
         columns = ["eligible"]
+        if "processed" in self.output_groups and self.risk_model is not None:
+            return tuple(
+                dict.fromkeys(
+                    (
+                        *columns,
+                        "asset_id",
+                        "industry_standard_id",
+                        "industry_level1_code",
+                        self.risk_model.config.weight_column,
+                        *self.risk_model.style_columns,
+                    )
+                )
+            )
         if "processed" in self.output_groups and self.industry_neutralize:
             columns.extend(("industry_standard_id", "industry_level1_code"))
         if (

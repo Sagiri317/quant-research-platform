@@ -412,8 +412,17 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
     assert other not in result[1].logical_columns
 
 
-@pytest.mark.parametrize("column", ["total_market_cap", "float_market_cap"])
-def test_native_backtest_persists_resolved_risk_and_size_defaults(tmp_path, column):
+@pytest.mark.parametrize(
+    ("column", "declaration"),
+    [
+        ("total_market_cap", "default"),
+        ("float_market_cap", "legacy"),
+        ("float_market_cap", "model"),
+    ],
+)
+def test_native_backtest_persists_resolved_risk_and_size_defaults(
+    tmp_path, column, declaration
+):
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
     )
@@ -497,10 +506,51 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(tmp_path, colu
             "adv_sensitivities": [1.0],
         },
     }
-    if column == "float_market_cap":
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _portfolio_risk_models,
+    )
+
+    model = FactorRiskModel(("signal",), FactorRiskConfig(weight_column=column))
+    if declaration == "legacy":
         config["risk_config"] = {"weight_column": column}
+    elif declaration == "model":
+        config["risk_model"] = model.to_dict()
+        config["candidate"].pop("risk_style_columns")
     artifact = read_portfolio_ledger_artifact(backtest(config))
     assert list(artifact.iter_chunks())
     assert artifact.metadata["candidate"]["size_cap_column"] == "total_market_cap"
     assert artifact.metadata["risk_config"]["weight_column"] == column
     assert artifact.metadata["risk_config"]["weighting"] == "sqrt_cap"
+
+    assert artifact.metadata["risk_model"] == model.to_dict()
+    candidate = PortfolioCandidateSpec(
+        **{**artifact.metadata["candidate"], "risk_style_columns": ("signal",)}
+    )
+    assert _portfolio_risk_models({"native": artifact}, (candidate,), {}) == {
+        "native": model
+    }
+    legacy = SimpleNamespace(
+        metadata={
+            key: value
+            for key, value in artifact.metadata.items()
+            if key != "risk_model"
+        }
+    )
+    assert _portfolio_risk_models({"native": legacy}, (candidate,), {}) == {
+        "native": model
+    }
+    with pytest.raises(ValueError, match="portfolio_attribution_risk_model_conflict"):
+        _portfolio_risk_models(
+            {"native": artifact},
+            (candidate,),
+            {
+                "risk": {
+                    "weight_column": "float_market_cap"
+                    if column == "total_market_cap"
+                    else "total_market_cap"
+                }
+            },
+        )

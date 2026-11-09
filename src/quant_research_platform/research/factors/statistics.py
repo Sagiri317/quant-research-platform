@@ -1,4 +1,4 @@
-"""Compute factor RankIC and Fama-MacBeth inference on declared mature samples.
+"""Compute factor inference and diagnostics on declared mature samples.
 
 Read explicit datasets or saved evaluations and publish native statistics tables,
 including missing-sample and undefined-inference outcomes."""
@@ -6,6 +6,7 @@ including missing-sample and undefined-inference outcomes."""
 from __future__ import annotations
 
 from collections.abc import Mapping
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +31,9 @@ from quant_research_platform.research.protocols.a_share import (
 from quant_research_platform.research.statistics import (
     _apply_fdr,
     _selected_analyses,
+    common_correlation_mask,
     cross_sectional_rank_ic,
+    daily_mean_frame,
     fama_macbeth_period,
     hac_mean,
     time_series_inference_summary,
@@ -57,6 +60,18 @@ _FAMA_MACBETH_PERIOD_COLUMNS = (
 )
 
 
+def _factor_analyses(config, *, saved_evaluation=False):
+    defaults = ("rank_ic", "stratified_ic" if saved_evaluation else "fama_macbeth")
+    return _selected_analyses(
+        {"analyses": config.get("analyses", list(defaults))},
+        (
+            *defaults,
+            "annual_stability",
+            *(("factor_correlation",) if not saved_evaluation else ()),
+        ),
+    )
+
+
 def build_a_share_factor_statistics_tables(
     *,
     dataset_session: DatasetSession,
@@ -69,11 +84,11 @@ def build_a_share_factor_statistics_tables(
     primary_label = evaluation["primary_label"]
     availability = _statistics_label_availability(config["evaluation"], spec)
     factors = tuple(evaluation["factors"])
-    analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
+    analyses = _factor_analyses(config)
     statistics = config["statistics"]
     families = (
         _factor_families(statistics["factor_fdr_families"], factors)
-        if "rank_ic" in analyses
+        if {"rank_ic", "annual_stability"}.intersection(analyses)
         else {}
     )
     core = (
@@ -83,13 +98,13 @@ def build_a_share_factor_statistics_tables(
     )
     if any(factor not in factors for factor in core):
         raise ValueError("statistics_core_factors_missing")
-    max_lags = statistics["hac_lag"]
+    max_lags = statistics.get("hac_lag", 0)
     methods = (
         (
             _fdr_method(statistics["fdr_primary"], expected="BY"),
             _fdr_method(statistics["fdr_robustness"], expected="BH"),
         )
-        if "rank_ic" in analyses
+        if {"rank_ic", "annual_stability"}.intersection(analyses)
         else ()
     )
     window = time_window
@@ -120,6 +135,11 @@ def build_a_share_factor_statistics_tables(
     if business_columns - set(dataset_session.logical_columns):
         raise ValueError("statistics_required_columns_excluded")
     ranks, periods, input_dates = [], [], []
+    correlations = {
+        method: np.zeros((4, len(factors), len(factors)), dtype="float64")
+        for method in ("pearson", "spearman")
+        if "factor_correlation" in analyses
+    }
     chunks = iter_complete_time_frames(
         iter_dataset_chunks(dataset_session.projected_view(columns)),
         timestamp_column="timestamp",
@@ -135,7 +155,7 @@ def build_a_share_factor_statistics_tables(
             )
             if mature.empty:
                 continue
-            if "rank_ic" in analyses:
+            if {"rank_ic", "annual_stability"}.intersection(analyses):
                 ranks.extend(
                     cross_sectional_rank_ic(
                         mature,
@@ -143,6 +163,8 @@ def build_a_share_factor_statistics_tables(
                         label_column=primary_label,
                     ).to_dict("records")
                 )
+            if correlations:
+                _update_factor_correlations(mature, factors, correlations)
             if "fama_macbeth" in analyses:
                 for _, session in mature.groupby("timestamp", sort=False):
                     periods.extend(
@@ -151,20 +173,40 @@ def build_a_share_factor_statistics_tables(
                             return_column=primary_label,
                             factors=factors,
                             core_factors=core,
+                            sample_scope=statistics.get(
+                                "fama_macbeth_sample_scope", "own"
+                            ),
                         )
                     )
     tables = {}
-    if "rank_ic" in analyses:
-        tables["factor_diagnostics"] = _factor_summary(
+    if {"rank_ic", "annual_stability"}.intersection(analyses):
+        rank_by_date = (
             pd.DataFrame.from_records(ranks, columns=["timestamp", *factors])
             .set_index("timestamp")
             .reindex(input_dates)
             .rename_axis("timestamp")
-            .reset_index(),
+            .reset_index()
+        )
+        rank_by_date = daily_mean_frame(
+            rank_by_date.set_index("timestamp"), sessions=config.get("sessions")
+        ).reset_index()
+        summary_options = dict(
             factors=factors,
             families=families,
             methods=methods if _inference_blocker(config) is None else (None,),
             max_lags=max_lags,
+        )
+        if "rank_ic" in analyses:
+            tables["factor_diagnostics"] = _factor_summary(
+                rank_by_date, **summary_options
+            )
+        if "annual_stability" in analyses:
+            tables["factor_annual_diagnostics"] = _annual_factor_summary(
+                rank_by_date, **summary_options
+            )
+    if correlations:
+        tables["factor_correlation"] = _factor_correlation_summary(
+            correlations, factors, input_date_count=len(input_dates)
         )
     if "fama_macbeth" in analyses:
         period_frame = pd.DataFrame.from_records(
@@ -259,6 +301,66 @@ def _factor_summary(
     return result
 
 
+def _annual_factor_summary(rank_by_date, **summary_options):
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+
+    parts = [
+        _factor_summary(group, **summary_options).assign(year=int(year))
+        for year, group in rank_by_date.groupby(
+            pd.to_datetime(rank_by_date["timestamp"]).dt.year, sort=True
+        )
+    ]
+    return (
+        pd.concat(parts, ignore_index=True)
+        if parts
+        else pd.DataFrame(
+            columns=STATISTICS_TABLE_COLUMNS["factor_annual_diagnostics.parquet"]
+        )
+    )
+
+
+def _update_factor_correlations(frame, factors, accumulators):
+    """Accumulate daily correlations on one complete declared-factor domain."""
+    for _, session in frame.groupby("timestamp", sort=False):
+        values = session.loc[:, factors]
+        values = values.loc[np.isfinite(values.to_numpy(dtype="float64")).all(axis=1)]
+        if len(values) < 2:
+            continue
+        for method, totals in accumulators.items():
+            correlation = values.corr(method=method).to_numpy()
+            valid = np.isfinite(correlation)
+            totals[0] += valid
+            totals[1] += np.where(valid, correlation, 0.0)
+            totals[2] += np.where(valid, np.abs(correlation), 0.0)
+            totals[3] += valid * len(values)
+
+
+def _factor_correlation_summary(accumulators, factors, *, input_date_count):
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+
+    rows = []
+    for left, right in combinations(range(len(factors)), 2):
+        for method, totals in accumulators.items():
+            count, total, absolute_total, pairs = totals[:, left, right]
+            rows.append(
+                {
+                    "factor_id": factors[left],
+                    "comparison_factor_id": factors[right],
+                    "statistic": method,
+                    "input_date_count": input_date_count,
+                    "observation_count": int(count),
+                    "observation_pairs": int(pairs),
+                    "status": "DEFINED" if count else "UNDEFINED",
+                    "reason": None if count else "no_defined_cross_sections",
+                    "mean": float(total / count) if count else np.nan,
+                    "mean_absolute": float(absolute_total / count) if count else np.nan,
+                }
+            )
+    return pd.DataFrame.from_records(
+        rows, columns=STATISTICS_TABLE_COLUMNS["factor_correlation.parquet"]
+    )
+
+
 def _fama_macbeth_definitions(factors, core_factors):
     definitions = tuple((f"single:{factor}", (factor,)) for factor in factors)
     if core_factors:
@@ -279,8 +381,21 @@ def _fama_macbeth_period_records(
     return_column: str,
     factors: tuple[str, ...],
     core_factors: tuple[str, ...],
+    sample_scope: str = "own",
 ) -> list[dict[str, object]]:
     timestamp = pd.Timestamp(frame["timestamp"].iloc[0])
+    if sample_scope not in ("own", "common"):
+        raise ValueError("fama_macbeth_sample_scope_invalid")
+    if sample_scope == "common":
+        # The family includes every declared regression and both weightings.
+        values = frame.loc[:, [return_column, *factors]].to_numpy(dtype="float64")
+        weights = strict_real_numeric_series(
+            frame["total_market_cap"],
+            error="fama_macbeth_weights_invalid",
+            errors="coerce",
+        )
+        common = np.isfinite(values).all(axis=1) & np.isfinite(weights) & weights.gt(0)
+        frame = frame.loc[common]
     rows: list[dict[str, object]] = []
     for regression_id, regression_factors, weight_column in _fama_macbeth_definitions(
         factors, core_factors
@@ -298,6 +413,8 @@ def _fama_macbeth_period_records(
             complete &= np.isfinite(weights) & weights.gt(0)
         complete_count = int(complete.sum())
         try:
+            if frame.empty:
+                raise ValueError("fama_macbeth_period_insufficient")
             result = fama_macbeth_period(
                 frame,
                 return_column=return_column,
@@ -431,6 +548,7 @@ def factor_statistics(config):
     }
     optional = {
         "sample_role",
+        "sessions",
         "input_spec",
         "analyses",
         "label_cutoff",
@@ -451,28 +569,32 @@ def factor_statistics(config):
         or {"factors", "primary_label"} - set(evaluation)
     ):
         raise ValueError("factor_statistics_evaluation_invalid")
-    analyses = _selected_analyses(config, ("rank_ic", "fama_macbeth"))
-    expected = {"hac_lag"}
-    if "rank_ic" in analyses:
+    analyses = _factor_analyses(config)
+    expected = {"hac_lag"} if set(analyses) != {"factor_correlation"} else set()
+    if {"rank_ic", "annual_stability"}.intersection(analyses):
         if isinstance(policy, dict):
             policy = {"fdr_primary": "BY_5pct", "fdr_robustness": "BH_5pct", **policy}
             config["statistics"] = policy
         expected.update(("factor_fdr_families", "fdr_primary", "fdr_robustness"))
     if "fama_macbeth" in analyses:
         expected.add("fama_macbeth_core_factors")
+        if isinstance(policy, dict):
+            policy.setdefault("fama_macbeth_sample_scope", "own")
     known = {
         "hac_lag",
         "factor_fdr_families",
         "fdr_primary",
         "fdr_robustness",
         "fama_macbeth_core_factors",
+        "fama_macbeth_sample_scope",
     }
     if (
         not isinstance(policy, dict)
         or expected - set(policy)
         or set(policy) - known
-        or type(policy["hac_lag"]) is not int
-        or policy["hac_lag"] < 0
+        or type(policy.get("hac_lag", 0)) is not int
+        or policy.get("hac_lag", 0) < 0
+        or policy.get("fama_macbeth_sample_scope", "own") not in ("own", "common")
     ):
         raise ValueError("factor_statistics_policy_invalid")
     output = Path(config["output"])
@@ -490,6 +612,8 @@ def factor_statistics(config):
             **{key: value for key, value in config.items() if key != "output"},
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
+            "correlation_clock": "trading_day",
+            "hac_lag_unit": "trading_session",
             "column_units": {
                 column: unit
                 for column, unit in session.spec["column_units"].items()
@@ -524,7 +648,7 @@ def _factor_statistics_from_evaluations(config):
     from quant_research_platform.storage.atomic import reject_if_exists
 
     required = {"evaluation_inputs", "output", "statistics"}
-    optional = {"window", "analyses", "sample_role", "evaluation"}
+    optional = {"window", "analyses", "sample_role", "evaluation", "sessions"}
     if required - set(config) or set(config) - required - optional:
         raise ValueError("factor_statistics_evaluation_config_invalid")
     paths = config["evaluation_inputs"]
@@ -534,14 +658,14 @@ def _factor_statistics_from_evaluations(config):
         or any(type(path) is not str or not path for path in paths)
     ):
         raise ValueError("factor_statistics_evaluation_inputs_invalid")
-    analyses = _selected_analyses(config, ("rank_ic", "stratified_ic"))
-    if "rank_ic" in analyses and len(paths) != 1:
+    analyses = _factor_analyses(config, saved_evaluation=True)
+    if {"rank_ic", "annual_stability"}.intersection(analyses) and len(paths) != 1:
         raise ValueError("factor_statistics_rank_ic_multiple_evaluations")
     policy = config["statistics"]
     needed = {"hac_lag"}
     if isinstance(policy, dict):
         defaults = {}
-        if "rank_ic" in analyses:
+        if {"rank_ic", "annual_stability"}.intersection(analyses):
             defaults.update(fdr_primary="BY_5pct", fdr_robustness="BH_5pct")
         if "stratified_ic" in analyses:
             defaults.update(fdr_method="BY", fdr_alpha=0.05)
@@ -549,7 +673,7 @@ def _factor_statistics_from_evaluations(config):
         config["statistics"] = policy
     if "stratified_ic" in analyses:
         needed |= {"fdr_method", "fdr_alpha"}
-    if "rank_ic" in analyses:
+    if {"rank_ic", "annual_stability"}.intersection(analyses):
         needed |= {"factor_fdr_families", "fdr_primary", "fdr_robustness"}
     if (
         type(policy) is not dict
@@ -627,6 +751,7 @@ def _factor_statistics_from_evaluations(config):
     series = {}
     input_counts = {}
     input_dates = {}
+    session_axes = {}
     for path, metadata, window in entries:
         scope = metadata["sample_scope"]
         input_dates[scope] = []
@@ -636,8 +761,7 @@ def _factor_statistics_from_evaluations(config):
                     "ic": [],
                     "rankic": [],
                     "pairs": 0,
-                    "dates": 0,
-                    "rankic_daily": [],
+                    "timestamps": [],
                 }
         members = ["metrics"]
         if "stratified_ic" in analyses and metadata["optional_member_rows"]:
@@ -647,7 +771,6 @@ def _factor_statistics_from_evaluations(config):
             expected_definition_id="evaluation_outputs",
             selected_files=tuple(name + ".parquet" for name in members),
         )
-        date_count = 0
         with closing_iterator(ExitStack()) as stack:
             streams = {
                 name: stack.enter_context(
@@ -675,7 +798,6 @@ def _factor_statistics_from_evaluations(config):
                 if metrics.empty:
                     continue
                 timestamp = metrics.timestamp.iloc[0]
-                date_count += 1
                 input_dates[scope].append(timestamp)
                 daily = {}
                 for name in heads:
@@ -715,6 +837,22 @@ def _factor_statistics_from_evaluations(config):
                 ):
                     if frame is None:
                         continue
+                    if (
+                        scope == "common"
+                        and metadata.get("correlation_clock") == "trading_day"
+                    ):
+                        frame = frame.copy()
+                        frame[["ic", "rankic"]] = frame[["ic", "rankic"]].where(
+                            common_correlation_mask(
+                                frame,
+                                groups=("timestamp", "label")
+                                + (
+                                    ("stratification", "stratum")
+                                    if name == "daily_strata"
+                                    else ()
+                                ),
+                            )
+                        )
                     for row in frame.itertuples(index=False):
                         kind = "all" if name == "metrics" else row.stratification
                         stratum = (
@@ -724,20 +862,34 @@ def _factor_statistics_from_evaluations(config):
                         )
                         values = series.setdefault(
                             (row.signal, row.label, scope, kind, stratum),
-                            {"ic": [], "rankic": [], "pairs": 0, "dates": 0},
+                            {"ic": [], "rankic": [], "pairs": 0, "timestamps": []},
                         )
-                        if "rank_ic" in analyses and name == "metrics":
-                            values["rankic_daily"].append(float(row.rankic))
-                        if "stratified_ic" in analyses:
-                            values["dates"] += 1
-                            values["pairs"] += int(row.n_obs)
-                            for statistic in ("ic", "rankic"):
-                                value = getattr(row, statistic)
-                                if pd.notna(value):
-                                    values[statistic].append(float(value))
+                        values["timestamps"].append(timestamp)
+                        values["pairs"] += int(row.n_obs)
+                        for statistic in ("ic", "rankic"):
+                            value = getattr(row, statistic)
+                            values[statistic].append(
+                                float(value) if pd.notna(value) else np.nan
+                            )
             if any(head is not None and not head.empty for head in heads.values()):
                 raise ValueError("evaluation_daily_dates_mismatch")
-        input_counts[scope] = date_count
+        declared_sessions = config.get("sessions", metadata.get("sessions"))
+        if declared_sessions is not None:
+            from quant_research_platform.contracts.evaluations import (
+                evaluation_sessions,
+            )
+
+            declared_sessions = evaluation_sessions(declared_sessions)
+            low, high = _statistics_window_bounds(TimeWindow(**config["window"]))
+            declared_sessions = declared_sessions[
+                (declared_sessions >= low.normalize())
+                & (declared_sessions <= high.normalize())
+            ]
+        session_axes[scope] = daily_mean_frame(
+            pd.DataFrame(index=pd.DatetimeIndex(input_dates[scope])),
+            sessions=declared_sessions,
+        ).index
+        input_counts[scope] = len(session_axes[scope])
     stratum_domains = {
         kind: sorted(
             {key[4] for key in series if key[3] == kind},
@@ -762,12 +914,22 @@ def _factor_statistics_from_evaluations(config):
                                 kind,
                                 stratum,
                             ),
-                            {"ic": [], "rankic": [], "pairs": 0, "dates": 0},
+                            {"ic": [], "rankic": [], "pairs": 0, "timestamps": []},
                         )
         rows = []
         for key, values in series.items():
+            daily = daily_mean_frame(
+                pd.DataFrame(
+                    {
+                        "timestamp": values["timestamps"],
+                        "ic": values["ic"],
+                        "rankic": values["rankic"],
+                    }
+                ).set_index("timestamp"),
+                sessions=session_axes[key[2]],
+            )
             for statistic in ("ic", "rankic"):
-                observations = values[statistic]
+                observations = daily[statistic].dropna().tolist()
                 row = dict(
                     zip(
                         (
@@ -784,7 +946,9 @@ def _factor_statistics_from_evaluations(config):
                 row.update(
                     statistic=statistic,
                     input_date_count=input_counts[key[2]],
-                    observed_date_count=values["dates"],
+                    observed_date_count=pd.DatetimeIndex(values["timestamps"])
+                    .normalize()
+                    .nunique(),
                     observation_count=len(observations),
                     observation_pairs=values["pairs"],
                     mean=float(np.mean(observations)) if observations else np.nan,
@@ -832,7 +996,7 @@ def _factor_statistics_from_evaluations(config):
         tables["factor_stratified_diagnostics"] = _apply_fdr(
             result, policy["fdr_method"], policy["fdr_alpha"], len(result)
         )
-    if "rank_ic" in analyses:
+    if {"rank_ic", "annual_stability"}.intersection(analyses):
         evaluation = config.get("evaluation")
         if not isinstance(evaluation, dict) or set(evaluation) != {
             "primary_label",
@@ -852,13 +1016,16 @@ def _factor_statistics_from_evaluations(config):
                 **{
                     factor: series[
                         (factor, evaluation["primary_label"], scope, "all", None)
-                    ]["rankic_daily"]
+                    ]["rankic"]
                     for factor in factors
                 },
             }
         )
-        tables["factor_diagnostics"] = _factor_summary(
-            ranks,
+        ranks = daily_mean_frame(
+            ranks.set_index("timestamp"),
+            sessions=session_axes[scope],
+        ).reset_index()
+        summary_options = dict(
             factors=factors,
             families=_factor_families(policy["factor_fdr_families"], factors),
             methods=(
@@ -867,6 +1034,12 @@ def _factor_statistics_from_evaluations(config):
             ),
             max_lags=lag,
         )
+        if "rank_ic" in analyses:
+            tables["factor_diagnostics"] = _factor_summary(ranks, **summary_options)
+        if "annual_stability" in analyses:
+            tables["factor_annual_diagnostics"] = _annual_factor_summary(
+                ranks, **summary_options
+            )
     return write_statistics_artifact(
         Path(config["output"]),
         table_group="factor",
@@ -879,6 +1052,10 @@ def _factor_statistics_from_evaluations(config):
                 metadata["sample_scope"]: {
                     "comparison_inputs": metadata["comparison_inputs"],
                     "sample_role": metadata["sample_role"],
+                    "sessions": [
+                        date.date().isoformat()
+                        for date in session_axes[metadata["sample_scope"]]
+                    ],
                 }
                 for _, metadata, _ in entries
             },
@@ -886,7 +1063,8 @@ def _factor_statistics_from_evaluations(config):
             "input_date_counts": input_counts,
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
-            "hac_lag_unit": "supplied_complete_input_date_clock",
+            "correlation_clock": "trading_day",
+            "hac_lag_unit": "trading_session",
             "multiple_testing_scope": (
                 "all_defined_signals_labels_strata_scopes_ic_rankic_in_explicit_inputs"
             ),

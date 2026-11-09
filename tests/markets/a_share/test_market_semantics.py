@@ -987,6 +987,114 @@ def test_special_treatment_equal_effective_conflict_is_local_to_unknown_field():
     assert not actual.is_pt.iloc[0]
 
 
+def test_delisting_consolidation_is_a_source_fact_not_pt_and_respects_known_time(
+    tmp_path,
+):
+    from quant_research_platform.sources.csmar.interim import (
+        interim_catalog,
+        normalize_raw_frame,
+    )
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    transitions = ["AT", "TC", "TA", "TX", "TS", "ZZ"]
+    history = normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Symbol": [f"{index:06}" for index in range(len(transitions))],
+                "Chgtype": transitions,
+                "Annoudt": "2020-01-02",
+                "Execudt": "2020-01-01",
+            }
+        ),
+        "special_treatment_changes",
+    )
+    root = tmp_path / "status"
+    write_dataset(
+        root, history, spec=interim_catalog().get("special_treatment_changes")
+    )
+    restored = read_dataset(root)
+    assert restored.is_delisting.iloc[:5].tolist() == [True, False, False, False, False]
+    assert pd.isna(restored.is_delisting.iloc[5])
+    assert restored.is_pt.iloc[1] and not restored.is_delisting.iloc[1]
+    assert pd.isna(restored.is_pt.iloc[0]) and restored.is_delisting.iloc[0]
+
+    panel = pd.DataFrame(
+        {
+            "asset_id": pd.Series(["000000"] * 3, dtype=object),
+            "timestamp": pd.date_range("2020-01-01", periods=3).as_unit("ns"),
+            "trading_status_code": pd.array([None] * 3, dtype="Int64"),
+        }
+    )
+    result = _apply_special_treatment(panel, restored)
+    assert pd.isna(result.is_delisting.iloc[0])
+    assert result.is_delisting.iloc[1:].all()
+    assert (
+        _apply_special_treatment(panel, restored.drop(columns="is_delisting"))
+        .is_delisting.isna()
+        .all()
+    )
+
+
+@pytest.mark.parametrize("has_earlier_record", [False, True])
+def test_future_stock_record_does_not_backfill_delisting_or_erase_listing(
+    has_earlier_record,
+):
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    listing, known_at = pd.Timestamp("2024-12-02"), pd.Timestamp("2025-01-10 01:30")
+    decisions = pd.DataFrame(
+        {
+            "asset_id": pd.Series(["A"] * 4, dtype=object),
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-01-02 01:30",
+                    "2025-01-10 01:29",
+                    "2025-01-10 01:30",
+                    "2025-01-20 01:30",
+                ]
+            ).as_unit("ns"),
+        }
+    )
+    outputs = []
+    for delisting in ("2025-01-01", "2025-01-20"):
+        stocks = pd.DataFrame(
+            {
+                "source_asset_id": ["A"],
+                "listing_date": [listing],
+                "timestamp": [known_at],
+                "delisting_date": pd.to_datetime([delisting]),
+                "stock_name": ["later record"],
+            }
+        )
+        if has_earlier_record:
+            stocks = pd.concat(
+                [
+                    pd.DataFrame(
+                        {
+                            "source_asset_id": ["A"],
+                            "listing_date": [listing],
+                            "timestamp": [listing],
+                            "stock_name": ["earlier record"],
+                        }
+                    ),
+                    stocks,
+                ],
+                ignore_index=True,
+            )
+        actual = panels._asof_join_stock_master(
+            decisions, _canonical_stock_master(stocks)
+        )
+        assert actual.listing_date.eq(listing).all()
+        assert actual.delisting_date.iloc[2:].eq(pd.Timestamp(delisting)).all()
+        if not has_earlier_record:
+            assert actual.delisting_date.iloc[:2].isna().all()
+            assert actual.delisting_date_unresolved.iloc[:2].all()
+            assert actual.stock_name.iloc[:2].isna().all()
+        outputs.append(actual)
+    # Changing a future record cannot change any field of an earlier observation.
+    pd.testing.assert_frame_equal(outputs[0].iloc[:2], outputs[1].iloc[:2])
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_special_treatment_shared_availability_and_repeated_state(reverse):
     from quant_research_platform.sources.csmar.interim import normalize_raw_frame

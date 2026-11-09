@@ -7,10 +7,16 @@ from math import fsum
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_group_codes,
+    _mad_winsorize,
+    _stable_zscore,
+    _winsorize,
+)
 from quant_research_platform.contracts.features import (
     FeatureTransformSpec,
 )
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
@@ -19,6 +25,7 @@ def apply_feature_transforms(
     transforms: tuple[FeatureTransformSpec, ...],
     *,
     diagnostics: dict | None = None,
+    risk_sessions: dict | None = None,
 ) -> pd.DataFrame:
     if len(transforms) != 1:
         raise ValueError("feature_recipe_must_be_exclusive")
@@ -35,64 +42,8 @@ def apply_feature_transforms(
         scale=recipe.scale,
         diagnostics=diagnostics,
         output_groups=recipe.output_groups,
-    )
-
-
-def _winsorize(
-    values: pd.Series,
-    grouped: pd.core.groupby.SeriesGroupBy,
-) -> pd.Series:
-    source = grouped.obj if hasattr(grouped, "obj") else values
-    lower = np.full(len(values), np.nan)
-    upper = np.full(len(values), np.nan)
-    for positions in (
-        grouped.indices if hasattr(grouped, "indices") else grouped
-    ).values():
-        lower[positions], upper[positions] = _quantile(
-            source.iloc[positions], 0.01, 0.99
-        )
-    return values.clip(
-        lower=pd.Series(lower, index=values.index),
-        upper=pd.Series(upper, index=values.index),
-    )
-
-
-def _quantile(values: pd.Series, *quantiles: float) -> tuple[float, ...]:
-    observed = values.dropna().to_numpy(dtype="float64")
-    return (
-        tuple(np.quantile(observed, quantiles))
-        if len(observed)
-        else (np.nan,) * len(quantiles)
-    )
-
-
-def _mad_winsorize(
-    values: pd.Series,
-    grouped: pd.core.groupby.SeriesGroupBy,
-    *,
-    zero_counts: dict[str, int] | None = None,
-    column: str | None = None,
-) -> pd.Series:
-    source = grouped.obj if hasattr(grouped, "obj") else values
-    lower = np.full(len(values), np.nan)
-    upper = np.full(len(values), np.nan)
-    for positions in (
-        grouped.indices if hasattr(grouped, "indices") else grouped
-    ).values():
-        observed = source.iloc[positions].dropna().to_numpy(dtype="float64")
-        if not len(observed):
-            continue
-        center = np.median(observed)
-        mad = np.median(np.abs(observed - center))
-        if mad == 0:
-            if zero_counts is not None:
-                zero_counts[column] += 1
-            continue
-        bound = 3 * 1.4826 * mad
-        lower[positions], upper[positions] = center - bound, center + bound
-    return values.clip(
-        lower=pd.Series(lower, index=values.index),
-        upper=pd.Series(upper, index=values.index),
+        risk_model=recipe.risk_model,
+        risk_sessions=risk_sessions,
     )
 
 
@@ -218,22 +169,8 @@ def _neutralize_cross_section(
     return result
 
 
-def _industry_group_codes(
-    frame: pd.DataFrame, industry_column: str = "industry_level1_code"
-) -> pd.Series:
-    """Encode the standard/code pair without conflating literal separators."""
-    standard, code = (
-        frame[column]
-        .astype("string")
-        .str.replace("\\", "\\\\", regex=False)
-        .str.replace(":", "\\:", regex=False)
-        for column in ("industry_standard_id", industry_column)
-    )
-    return standard.str.cat(code, sep=":")
-
-
-def _center_scale(values, *, center, scale):
-    if center and scale:
+def _center_scale(values, *, center, scale, weights=None):
+    if center and scale and weights is None:
         return _stable_zscore(values)
     if not center and not scale:
         return values.astype("float64")
@@ -244,6 +181,8 @@ def _center_scale(values, *, center, scale):
     shifted = observed - observed.iloc[0]
     centered = shifted - shifted.mean()
     targets = centered if center else observed
+    if center and weights is not None:
+        targets = shifted - np.average(shifted, weights=weights.loc[observed.index])
     if scale:
         std = centered.std(ddof=0)
         if std == 0:
@@ -267,6 +206,8 @@ def a_share_feature_pipeline(
     center: bool = True,
     scale: bool = True,
     output_groups: tuple[str, ...] = ("processed",),
+    risk_model: FactorRiskModel | None = None,
+    risk_sessions: dict | None = None,
 ) -> pd.DataFrame:
     """Clip, neutralize, center and scale in that fixed order on eligible rows."""
     recipe = FeatureTransformSpec(
@@ -279,15 +220,16 @@ def a_share_feature_pipeline(
         scale,
         size_column=size_column,
         output_groups=output_groups,
+        risk_model=risk_model,
     )
     industry_neutralize = industry_neutralize and "processed" in output_groups
     size_neutralize = size_neutralize and "processed" in output_groups
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")
     universe = frame["eligible"]
-    if not pd.api.types.is_bool_dtype(universe) or universe.isna().any():
+    if not pd.api.types.is_bool_dtype(universe):
         raise ValueError("feature_eligibility_invalid")
-    scoped = frame.loc[universe].copy()
+    scoped = frame.loc[universe.fillna(False)].copy()
     if industry_neutralize and (
         industry_column not in scoped or "industry_standard_id" not in scoped
     ):
@@ -323,16 +265,48 @@ def a_share_feature_pipeline(
         winsorized[factor] = values
     if industry_neutralize:
         winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
-    residualized = _neutralize_cross_section(
-        winsorized,
-        factor_columns=factor_columns,
-        industry_column=industry_column,
-        size_column=size_column,
-        rescale=center and scale,
-        industry_neutralize=industry_neutralize,
-        size_neutralize=size_neutralize,
-        time_groups=time_groups,
-    )
+    if risk_model is not None and "processed" in output_groups:
+        from quant_research_platform.research.risk import FactorRiskState
+
+        state = FactorRiskState(
+            style_columns=risk_model.style_columns, config=risk_model.config
+        )
+        risk_weights = pd.Series(np.nan, index=scoped.index, dtype="float64")
+        residualized = winsorized.copy()
+        residualized.loc[:, list(factor_columns)] = np.nan
+        for positions in time_groups.values():
+            # Keep raw risk descriptors separate from clipped alpha responses.
+            cross = scoped.iloc[positions]
+            prepared = (risk_sessions or {}).get(pd.Timestamp(cross.timestamp.iloc[0]))
+            if prepared is None:
+                prepared = state.prepare_exposure_session(cross)
+            risk_weights.loc[cross.index] = cross.asset_id.map(
+                np.sqrt(
+                    prepared.frame.set_index("asset_id")[
+                        risk_model.config.weight_column
+                    ]
+                )
+            )
+            for factor in factor_columns:
+                response = cross[["timestamp", "asset_id"]].assign(
+                    asset_return=winsorized[factor].iloc[positions]
+                )
+                fitted = state.fit_return_session(response, prepared=prepared)
+                if fitted is not None:
+                    residualized.loc[cross.index, factor] = cross.asset_id.map(
+                        fitted.residuals
+                    )
+    else:
+        residualized = _neutralize_cross_section(
+            winsorized,
+            factor_columns=factor_columns,
+            industry_column=industry_column,
+            size_column=size_column,
+            rescale=center and scale,
+            industry_neutralize=industry_neutralize,
+            size_neutralize=size_neutralize,
+            time_groups=time_groups,
+        )
     feature_values: dict[str, pd.Series] = {}
     result = frame.copy()
     for group_name in output_groups:
@@ -353,7 +327,14 @@ def a_share_feature_pipeline(
                     and observed.eq(observed.iloc[0]).all()
                 ):
                     variance_counts[suffix] += 1
-                transformed = _center_scale(group, center=center, scale=scale)
+                weights = (
+                    risk_weights.loc[group.index]
+                    if risk_model is not None and group_name == "processed" and center
+                    else None
+                )
+                transformed = _center_scale(
+                    group, center=center, scale=scale, weights=weights
+                )
                 scoped_feature.iloc[positions] = transformed
             feature_values["feature_" + suffix] = scoped_feature.reindex(result.index)
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)

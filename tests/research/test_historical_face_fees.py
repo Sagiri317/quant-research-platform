@@ -25,11 +25,9 @@ from quant_research_platform.research.portfolios.daily import _PANEL_COLUMNS
 from quant_research_platform.research.portfolios.high_frequency import inventory_batches
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
-from tests.helpers.high_frequency import daily_view
+from tests.helpers.high_frequency import daily_view, parameters, quotes, trade_input
 from tests.helpers.portfolio_inputs import _processed_specs, closed_market_inputs
 from tests.helpers.portfolio_ledger import stock_orders
-from tests.research.test_hft_portfolio import parameters, quotes
-from tests.research.test_passive_execution import trade_input
 from tests.research.test_portfolio_ledger import _real_fee_schedule
 from tests.research.test_stock_execution import SETTINGS
 

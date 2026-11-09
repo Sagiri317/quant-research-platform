@@ -1,7 +1,12 @@
 """Small native fixtures; scientific behavior has real pipeline tests."""
 
+from copy import deepcopy
+
 import pandas as pd
 
+from quant_research_platform.artifacts.outputs.prediction import (
+    write_prediction_outputs,
+)
 from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.labels.forward_returns import (
@@ -72,3 +77,12 @@ def _price_volume_prediction_metadata():
         "input_spec": None,
         "status": "complete",
     }
+
+
+def native_bundle(tmp_path):
+    frame = make_price_volume_prediction_output_frame()
+    metadata = deepcopy(frame.attrs["prediction_metadata"])
+    path = write_prediction_outputs(
+        output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
+    )
+    return path, frame, metadata

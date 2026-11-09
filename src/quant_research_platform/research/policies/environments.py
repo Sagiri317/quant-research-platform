@@ -76,12 +76,17 @@ class TradingEnv(gym.Env):
         self.stream = self._context.__enter__()
         self.fees = self.filled = self.shortfall = 0.0
         self.arrival_price = None
+        self.observed_marks = {}
+        self.last_block_reasons = {}
         self.nav = None
         self.done = False
         self.decision = None
         self._advance(None)
         if self.done:
-            raise ValueError("policy_episode_no_decisions")
+            if "prediction" not in self.episode:
+                raise ValueError("policy_episode_no_decisions")
+            self.initial_nav = self.nav
+            return self._observation(), self._info()
         self.initial_nav = self.decision.nav
         self.nav = self.initial_nav
         if self.task == "execution":
@@ -110,6 +115,20 @@ class TradingEnv(gym.Env):
                     for row in event.cashflows
                     if row.kind not in {"principal", "dividend", "recovery"}
                 )
+                if self.task == "execution":
+                    end_marks = {row.asset_id: row.mark_price for row in ends}
+                    for diagnostic in event.diagnostics:
+                        if (
+                            diagnostic.name == "mark_source"
+                            and diagnostic.text == "observed_mid"
+                        ):
+                            self.observed_marks[diagnostic.asset_id] = end_marks[
+                                diagnostic.asset_id
+                            ]
+                        elif diagnostic.name == "order_block_reason":
+                            self.last_block_reasons[diagnostic.asset_id] = (
+                                diagnostic.text
+                            )
                 if self.task == "execution" and self.arrival_price is not None:
                     order = self.episode["order"]
                     sign = np.sign(order["quantity"])
@@ -184,13 +203,55 @@ class TradingEnv(gym.Env):
     def _info(self):
         result = {"nav": self.nav, "fees": self.fees}
         if self.task == "execution" and self.arrival_price is not None:
-            quantity = abs(self.episode["order"]["quantity"])
+            order = self.episode["order"]
+            quantity = abs(order["quantity"])
+            remaining = max(0.0, quantity - self.filled)
+            terminal_mark = self.observed_marks.get(order["asset_id"])
+            opportunity = None
+            if self.done:
+                if remaining == 0:
+                    opportunity = 0.0
+                elif (
+                    terminal_mark is not None
+                    and np.isfinite(terminal_mark)
+                    and terminal_mark > 0
+                ):
+                    opportunity = float(
+                        np.sign(order["quantity"])
+                        * remaining
+                        * (terminal_mark - self.arrival_price)
+                        / (quantity * self.arrival_price)
+                        * 10000
+                    )
+            shortfall = (
+                (self.shortfall + self.fees) / (quantity * self.arrival_price) * 10000
+            )
             result.update(
                 completion_rate=self.filled / quantity,
                 filled_quantity=self.filled,
-                implementation_shortfall_bps=(self.shortfall + self.fees)
-                / (quantity * self.arrival_price)
-                * 10000,
+                implementation_shortfall_bps=shortfall,
+                unfilled_quantity=remaining,
+                unfilled_reason=(
+                    None
+                    if remaining == 0
+                    else "execution_window_ended"
+                    if self.done
+                    else "pending"
+                ),
+                last_block_reason=self.last_block_reasons.get(order["asset_id"]),
+                arrival_price=self.arrival_price,
+                terminal_observed_mark=terminal_mark if self.done else None,
+                opportunity_cost_bps=opportunity,
+                opportunity_cost_reason=(
+                    "episode_in_progress"
+                    if not self.done
+                    else "terminal_observed_mark_missing"
+                    if opportunity is None
+                    else None
+                ),
+                total_implementation_shortfall_bps=(
+                    shortfall + opportunity if opportunity is not None else None
+                ),
             )
         return result
 
@@ -206,7 +267,6 @@ class TradingEnv(gym.Env):
         ):
             raise ValueError("policy_action_invalid")
         decision = self.decision
-        before_nav, before_shortfall, before_fees = self.nav, self.shortfall, self.fees
         if self.task == "execution":
             order = self.episode["order"]
             remaining = max(0, abs(order["quantity"]) - self.filled)
@@ -230,6 +290,17 @@ class TradingEnv(gym.Env):
                     self.episode["account"]["parameters"]["maximum_inventory"]
                 )
                 target = target.clip(upper=maximum).fillna(0)
+        return self.step_targets(target)
+
+    def step_targets(self, target):
+        """Submit native targets; missing forecasts do not change existing orders."""
+        if self.done:
+            raise RuntimeError("policy_episode_finished")
+        decision = self.decision
+        before_nav, before_shortfall, before_fees = self.nav, self.shortfall, self.fees
+        if self.task == "execution":
+            order = self.episode["order"]
+            remaining = max(0, abs(order["quantity"]) - self.filled)
         target = target.reindex(decision.features.index, fill_value=0)
         self._advance(target)
         if self.task == "execution":

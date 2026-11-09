@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 from threadpoolctl import threadpool_limits
 
-from quant_research_platform.contracts.models import TrainingWeighting
+from quant_research_platform.contracts.models import ModelSpec, TrainingWeighting
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
@@ -74,7 +74,8 @@ def test_scaler_and_linear_fit_match_weighted_oracle(kind, weighting, monkeypatc
         training=training,
         row_counts={},
         filter_metadata={},
-        preprocessing=(weights, actual_scaler, matrix),
+        preprocessing=(weights, actual_scaler),
+        matrix=matrix,
     )
     spec = SimpleNamespace(target_column="label", input_columns=tuple(frame.columns))
     monkeypatch.setattr(fitting, "model_metadata", lambda *args, **kwargs: {})
@@ -179,7 +180,8 @@ def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatc
         training=frame.assign(label=np.arange(len(frame), dtype=float)),
         row_counts={},
         filter_metadata={},
-        preprocessing=(weights, scaler, matrix),
+        preprocessing=(weights, scaler),
+        matrix=matrix,
     )
     spec = SimpleNamespace(target_column="label", input_columns=tuple(frame.columns))
     monkeypatch.setattr(fitting, "model_metadata", lambda *args, **kwargs: {})
@@ -246,3 +248,68 @@ def test_collected_training_releases_chunks_and_preserves_source(
         pd.testing.assert_extension_array_equal(
             source[column].array, before[column].array, check_exact=True
         )
+
+
+@pytest.mark.parametrize("missing", [None, "impute", "native"])
+def test_scaler_parses_each_source_column_once(missing, monkeypatch):
+    import quant_research_platform.research.models.scaler as scaling
+
+    frame = _case("ordinary")
+    if missing is not None:
+        frame.loc[0, "0"] = np.nan
+    calls = []
+    parse = scaling.strict_finite_numeric_series
+
+    def counted(values, **kwargs):
+        calls.append(values.name)
+        return parse(values, **kwargs)
+
+    monkeypatch.setattr(scaling, "strict_finite_numeric_series", counted)
+    scaler = ModelMatrixScaler.fit(frame, missing=missing, scaling=True)
+    assert calls == list(frame.columns)
+    calls.clear()
+    scaler.transform(frame)
+    assert calls == list(frame.columns)
+
+
+def test_sequence_fit_only_materializes_its_context_matrix(monkeypatch):
+    timestamps = pd.date_range("2024-01-01", periods=4).repeat(2)
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "asset_id": ["a", "b"] * 4,
+            "x": np.arange(8.0),
+            "label": np.arange(8.0) ** 2,
+            "eligible": [True, False] + [True] * 6,
+            "label_available_at": timestamps,
+        }
+    )
+    spec = ModelSpec(
+        model_id="sequence",
+        model_algorithm="lstm_regressor",
+        input_factor_columns=("x",),
+        target_column="label",
+        hyperparameters={
+            "device": "cpu",
+            "hidden_size": 2,
+            "epochs": 1,
+            "sequence_length": 2,
+        },
+    )
+    prepared = fitting._collect_training_frame(
+        [frame], spec, fitting_cutoff="2024-01-04"
+    )
+    rows = []
+    transform = ModelMatrixScaler.transform
+
+    def counted(self, inputs):
+        rows.append(len(inputs))
+        return transform(self, inputs)
+
+    monkeypatch.setattr(ModelMatrixScaler, "transform", counted)
+    result = fitting._fit_model_result(prepared, spec, estimator=None)
+    assert rows == [len(frame)]
+    assert "matrix" not in prepared.__dict__
+    assert result.metadata["training_target_mean"] == pytest.approx(
+        frame.loc[frame.eligible].groupby("timestamp").label.mean().mean()
+    )

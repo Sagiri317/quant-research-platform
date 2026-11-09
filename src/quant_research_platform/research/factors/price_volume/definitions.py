@@ -65,6 +65,50 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "top5_return_mean_20d": (("period_return",), (20,)),
     "turnover_250d": (("turnover",), (250,)),
     "abnormal_turnover_20_250": (("turnover",), (250, 20)),
+    "alpha101_054": (("open", "high", "low", "close"), ()),
+    "alpha191_046": (("adj_close",), (24, 12, 6, 3)),
+    "qlib_rsqr_20d": (("adj_close",), (20,)),
+    "qlib_resi_20d": (("adj_close",), (20,)),
+    # Twenty consecutive close differences require twenty-one session prices.
+    "qlib_sump_20d": (("adj_close",), (21,)),
+}
+
+_PUBLISHED_PRICE_VOLUME_DESCRIPTIONS = {
+    "alpha101_054": (
+        "Alpha101 #54: -((low-close)*open^5)/((low-high)*close^5). "
+        "Uses same-session raw OHLC; a common price adjustment cancels. "
+        "Zero denominators preserve NULL. QRP releases at the next session, "
+        "not the paper's delay-0 close execution. "
+        "Source: https://arxiv.org/pdf/1601.00991v3, Appendix A, p. 11."
+    ),
+    "alpha191_046": (
+        "Alpha191 #46: (Mean(C,3)+Mean(C,6)+Mean(C,12)+Mean(C,24))/(4*C), "
+        "C=adj_close. Requires 24 complete own-market sessions; zero close "
+        "preserves NULL. Source: Guotai Junan, 2017-06-15, Table 6, p. 12, "
+        "https://guorn.com/static/upload/file/3/134065454575605.pdf."
+    ),
+    "qlib_rsqr_20d": (
+        "Qlib Alpha158 RSQR20: R-squared of adj_close on an intercept and "
+        "session positions 1..20. Requires 20 complete own-market sessions; "
+        "sample standard deviation <= 2e-5 preserves NULL as in Qlib v0.9.7. "
+        "Source: https://github.com/microsoft/qlib/blob/v0.9.7/"
+        "qlib/contrib/data/loader.py; operator: qlib/data/ops.py."
+    ),
+    "qlib_resi_20d": (
+        "Qlib Alpha158 RESI20: current OLS residual / current adj_close, "
+        "regressing adj_close on an intercept and session positions 1..20. "
+        "Requires 20 complete own-market sessions; zero current close "
+        "preserves NULL. Source: https://github.com/microsoft/qlib/blob/"
+        "v0.9.7/qlib/contrib/data/loader.py; operator: qlib/data/_libs/rolling.pyx."
+    ),
+    "qlib_sump_20d": (
+        "Qlib Alpha158 SUMP20: Sum(max(delta(C,1),0),20) / "
+        "(Sum(abs(delta(C,1)),20)+1e-12), C=adj_close. Requires 21 complete "
+        "own-market session prices; a complete flat path is zero. "
+        "Source: https://github.com/microsoft/qlib/blob/v0.9.7/"
+        "qlib/contrib/data/loader.py. Unlike upstream partial rolling windows, "
+        "QRP preserves NULL for incomplete history."
+    ),
 }
 
 PRICE_VOLUME_LIBRARY = tuple(_PRICE_VOLUME_INPUT_WINDOWS)
@@ -152,7 +196,8 @@ def price_volume_factor_definitions(
                 else inputs,
                 output_column=column,
                 display_name=column,
-                description=(
+                description=_PUBLISHED_PRICE_VOLUME_DESCRIPTIONS.get(column)
+                or (
                     (
                         "Share of nonpositive amount (amount <= 0) over 20 complete "
                         "sessions; missing amounts propagate."

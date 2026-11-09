@@ -7,6 +7,14 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.models.deeplob import complete_book_rows
+
+
+def prediction_input_mask(frame, metadata):
+    """Identify rows with enough observed inputs for this model's output."""
+    if metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
+        return complete_book_rows(frame)
+    return frame.loc[:, metadata["input_columns"]].notna().any(axis=1)
 
 
 def prediction_rows(frame, metadata, window, *, include_context=False):
@@ -37,7 +45,6 @@ def prediction_rows(frame, metadata, window, *, include_context=False):
             error=f"invalid_prediction_input: {column}",
             allow_null=True,
         )
-    observed = filtered.loc[:, metadata["input_columns"]].notna().any(axis=1)
-    if include_context and metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
-        return filtered.sort_values(["timestamp", "asset_id"], kind="stable")
-    return filtered.loc[observed].sort_values(["timestamp", "asset_id"], kind="stable")
+    if not include_context:
+        filtered = filtered.loc[prediction_input_mask(filtered, metadata)]
+    return filtered.sort_values(["timestamp", "asset_id"], kind="stable")

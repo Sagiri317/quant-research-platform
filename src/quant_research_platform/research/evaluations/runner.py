@@ -18,6 +18,7 @@ from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_FORECAST_AGE_BOUNDS,
     EvaluationSpec,
+    evaluation_sessions,
 )
 from quant_research_platform.contracts.experiments import (
     label_maturity_mask,
@@ -85,6 +86,7 @@ def evaluate(config):
             "strata",
             "response_diagnostics",
             "workers",
+            "sessions",
         },
     )
     reject_if_exists(Path(config["output"]))
@@ -115,6 +117,17 @@ def evaluate(config):
     session = open_dataset_session(**options)
     declared = session.spec
     values = dict(config["evaluation"])
+    if declared["frequency"] == "tick":
+        values.setdefault("correlation_clock", "trading_day")
+    dates = None
+    if "sessions" in config:
+        dates = evaluation_sessions(config["sessions"])
+        if len(dates) and (
+            dates[0] < pd.Timestamp(window.start).normalize()
+            or dates[-1] > pd.Timestamp(window.end).normalize()
+        ):
+            raise ValueError("evaluation_sessions_outside_window")
+        config["sessions"] = [str(day.date()) for day in dates]
     values["signals"] = tuple(SignalSpec(**item) for item in values["signals"])
     values["label_columns"] = tuple(values["label_columns"])
     supplied_availability = values.get("label_availability_columns", {})
@@ -200,32 +213,6 @@ def evaluate(config):
         and spec.filter_mode == "eligible"
         and not prediction_sources
     )
-    if config["sample_scope"] == "common" or strata or supports_daily:
-        columns = tuple(
-            dict.fromkeys(
-                (
-                    *columns,
-                    *extra_columns,
-                    *(
-                        ("market_id",)
-                        if "market_id" in declared["column_roles"]
-                        else ()
-                    ),
-                )
-            )
-        )
-        return _scoped_evaluate(
-            config,
-            spec=spec,
-            session=session,
-            source=source,
-            columns=columns,
-            cutoff=cutoff,
-            window=window,
-            strata=strata,
-        )
-    if "workers" in config:
-        raise ValueError("evaluation_workers_requires_a_share_factors")
     if prediction_sources.intersection(columns):
         raise ValueError("evaluation_prediction_input_column_conflict")
     predictions, classifications = {}, {}
@@ -256,6 +243,35 @@ def evaluate(config):
             )
         del frame
 
+    if config["sample_scope"] == "common" or strata or supports_daily:
+        columns = tuple(
+            dict.fromkeys(
+                (
+                    *columns,
+                    *extra_columns,
+                    *(
+                        ("market_id",)
+                        if "market_id" in declared["column_roles"]
+                        else ()
+                    ),
+                )
+            )
+        )
+        return _scoped_evaluate(
+            config,
+            spec=spec,
+            session=session,
+            source=source,
+            columns=columns,
+            cutoff=cutoff,
+            window=window,
+            strata=strata,
+            predictions=predictions,
+            classifications=classifications,
+        )
+    if "workers" in config:
+        raise ValueError("evaluation_workers_requires_a_share_factors")
+
     def prepared():
         # The reader owns the declared PK; only a wider PK needs this
         # additional, narrower evaluation-key invariant.
@@ -270,6 +286,11 @@ def evaluate(config):
             iter_dataset_chunks(session.projected_view(columns))
         ) as source:
             for frame in source:
+                if (
+                    dates is not None
+                    and not frame.timestamp.dt.normalize().isin(dates).all()
+                ):
+                    raise ValueError("evaluation_input_session_not_declared")
                 if seen is not None and seen.add_table(
                     pa.Table.from_pandas(
                         frame.loc[:, ["timestamp", "asset_id"]],
@@ -348,23 +369,20 @@ def evaluate(config):
             summary_factory=result.summaries,
             spec=spec,
             output_path=Path(config["output"]),
-            classification_summary=(
-                lambda: {
-                    column: {
-                        "target_column": target,
-                        "class_threshold": accumulator.threshold,
-                        "rows": accumulator.count,
-                        **accumulator.summary(),
-                    }
-                    for column, (target, _, accumulator) in classifications.items()
-                }
-            )
+            classification_summary=(lambda: _classification_summaries(classifications))
             if classifications
             else None,
             metadata={
                 **{
                     key: config[key]
-                    for key in ("window", "cutoff", "sample_role", "sample_scope")
+                    for key in (
+                        "window",
+                        "cutoff",
+                        "sample_role",
+                        "sample_scope",
+                        "sessions",
+                    )
+                    if key in config
                 },
                 "input_facts": _evaluation_source_facts(
                     source,
@@ -582,7 +600,19 @@ def _scoped_evaluation_frames(sources):
             yield raw, [daily[source["scan_key"]] for source in sources[1:]]
 
 
-def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, strata):
+def _scoped_evaluate(
+    config,
+    *,
+    spec,
+    session,
+    source,
+    columns,
+    cutoff,
+    window,
+    strata,
+    predictions,
+    classifications,
+):
     from quant_research_platform.research.evaluations.engine import (
         build_scoped_evaluation_result,
     )
@@ -592,7 +622,8 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         or spec.evaluation_axis != "cross_sectional"
         or spec.filter_mode != "eligible"
         or any(
-            signal.source_kind not in {"factor", "feature"} for signal in spec.signals
+            signal.source_kind not in {"factor", "feature", "prediction"}
+            for signal in spec.signals
         )
     ):
         raise ValueError("evaluation_scoped_requires_a_share_factors")
@@ -602,6 +633,9 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         "signal_columns": [signal.source_column for signal in spec.signals],
         "availability": dict(spec.label_availability_columns),
         "columns": columns,
+    }
+    focal["classification_targets"] = {
+        column: target for column, (target, _, _) in classifications.items()
     }
     focal["classification_columns"] = [
         column
@@ -616,7 +650,11 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         source,
         session,
         columns=columns,
-        signals=focal["signal_columns"],
+        signals=[
+            signal.source_column
+            for signal in spec.signals
+            if signal.source_kind != "prediction"
+        ],
         availability=focal["availability"],
     )
     sources = [focal]
@@ -698,7 +736,9 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
             }
         )
     science = {
-        key: config[key] for key in ("window", "cutoff", "sample_role", "sample_scope")
+        key: config[key]
+        for key in ("window", "cutoff", "sample_role", "sample_scope", "sessions")
+        if key in config
     }
     science.update(
         input_facts=focal["facts"],
@@ -708,8 +748,38 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         optional_member_rows={"daily_coverage": 0, "daily_strata": 0},
         common_rule="mask_only_no_retransform",
     )
+
+    dates = pd.DatetimeIndex(config["sessions"]) if "sessions" in config else None
+
+    def aligned_frames():
+        with closing_iterator(_scoped_evaluation_frames(sources)) as frames:
+            for raw, peers in frames:
+                if (
+                    dates is not None
+                    and not raw.timestamp.dt.normalize().isin(dates).all()
+                ):
+                    raise ValueError("evaluation_input_session_not_declared")
+                if predictions:
+                    raw = raw.copy()
+                    keys = pd.MultiIndex.from_frame(raw[["timestamp", "asset_id"]])
+                    for column, (prediction, _metadata) in predictions.items():
+                        raw[column] = prediction.reindex(keys).to_numpy()
+                    if all(
+                        signal.source_kind == "prediction" for signal in spec.signals
+                    ) and all(
+                        metadata.get("asset_ids") is not None
+                        for _, metadata in predictions.values()
+                    ):
+                        assets = {
+                            asset
+                            for _, metadata in predictions.values()
+                            for asset in metadata["asset_ids"]
+                        }
+                        raw = raw.loc[raw.asset_id.isin(assets)]
+                yield raw, peers
+
     with build_scoped_evaluation_result(
-        _scoped_evaluation_frames(sources),
+        aligned_frames(),
         spec=spec,
         sources=sources,
         cutoff=cutoff,
@@ -717,10 +787,43 @@ def _scoped_evaluate(config, *, spec, session, source, columns, cutoff, window, 
         strata=strata,
         workers=config.get("workers", 1),
     ) as result:
+
+        def classified_chunks():
+            with closing_iterator(result.output_chunks) as chunks:
+                for metrics, grouped, facts in chunks:
+                    for column, paired in facts.pop(
+                        "classification_samples", {}
+                    ).items():
+                        target, probabilities, accumulator = classifications[column]
+                        keys = pd.MultiIndex.from_frame(
+                            paired[["timestamp", "asset_id"]]
+                        )
+                        probabilities = probabilities.reindex(keys).to_numpy()
+                        valid = np.isfinite(probabilities).all(axis=1)
+                        accumulator.add(
+                            paired[target].to_numpy()[valid], probabilities[valid]
+                        )
+                    yield metrics, grouped, facts
+
         return write_evaluation_outputs_from_chunks(
-            result.output_chunks,
+            classified_chunks(),
             summary_factory=result.summaries,
             spec=spec,
             output_path=Path(config["output"]),
             metadata=science,
+            classification_summary=(lambda: _classification_summaries(classifications))
+            if classifications
+            else None,
         )
+
+
+def _classification_summaries(classifications):
+    return {
+        column: {
+            "target_column": target,
+            "class_threshold": accumulator.threshold,
+            "rows": accumulator.count,
+            **accumulator.summary(),
+        }
+        for column, (target, _, accumulator) in classifications.items()
+    }

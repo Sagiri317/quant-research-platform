@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
+    strict_bool_series,
     strict_finite_numeric_series,
     strict_integer_series,
     strict_string_series,
@@ -259,11 +260,19 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
     result["asset_id"] = strict_string_series(
         result["source_asset_id"], error="invalid_stock_master_asset_id"
     )
+    if "is_initial_listing" in result:
+        result["is_initial_listing"] = strict_bool_series(
+            result["is_initial_listing"],
+            error="invalid_stock_master_initial_listing",
+            allow_null=True,
+        )
     for column in ("listing_date", "delisting_date", "timestamp"):
         if column in result:
             result[column] = strict_timestamp_series(
                 result[column], error="invalid_stock_master_date", allow_null=True
-            ).dt.normalize()
+            )
+            if column != "timestamp":
+                result[column] = result[column].dt.normalize()
     if "delisting_date" not in result:
         result["delisting_date"] = pd.NaT
     result["delisting_date_unresolved"] = (
@@ -425,12 +434,16 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "delisting_date_unresolved",
         "company_status",
     )
+    if "is_initial_listing" in stocks:
+        columns += ("is_initial_listing",)
     right = stocks.loc[stocks.asset_id.isin(panel.asset_id)]
     # Listing is a life fact; a later status cannot erase or backfill it.
     lives = right.drop_duplicates(["asset_id", "listing_date"], keep="first").loc[
-        :, ["asset_id", "listing_date", "delisting_date", "delisting_date_unresolved"]
+        :, ["asset_id", "listing_date"]
     ]
     lives = lives.loc[lives.listing_date.notna()].copy()
+    lives["delisting_date"] = pd.NaT
+    lives["delisting_date_unresolved"] = True
     lives["stock_effective_date"] = lives.listing_date
     key = ["asset_id", "stock_effective_date"]
     lives = lives.loc[
@@ -1123,6 +1136,28 @@ def _apply_no_limit_exceptions(
     return result
 
 
+def _status_event_frontier(right, *, keys, effective_at, known_at, columns):
+    """Keep the latest known event and field-local conflicts on the same event."""
+    right = right.sort_values([known_at, effective_at, *keys], kind="stable").copy()
+    event_key = [right[name] for name in (*keys, effective_at)]
+    for column in columns:
+        state = right[column].astype("string").fillna("<unknown>")
+        first = state.groupby(event_key, sort=False).transform("first")
+        conflict_at = (
+            right[known_at]
+            .where(state.ne(first))
+            .groupby(event_key, sort=False)
+            .transform("min")
+        )
+        right[column] = right[column].where(
+            conflict_at.isna() | right[known_at].lt(conflict_at)
+        )
+    frontier = right.groupby(list(keys), sort=False)[effective_at].cummax()
+    return right.loc[right[effective_at].eq(frontier)].drop_duplicates(
+        [*keys, known_at], keep="last"
+    )
+
+
 def _apply_special_treatment(
     panel: pd.DataFrame,
     history: pd.DataFrame | None,
@@ -1132,44 +1167,33 @@ def _apply_special_treatment(
     known = status.between(0, 16).fillna(False)
     result["is_st"] = status.isin(ST_STATUS_CODES).astype("boolean").where(known)
     result["is_pt"] = status.eq(16).where(known)
+    result["is_delisting"] = pd.Series(pd.NA, index=result.index, dtype="boolean")
     if history is None or history.empty:
         return result
     history = history.rename(columns={"source_asset_id": "asset_id"})
     history["asset_id"] = strict_string_series(
         history["asset_id"], error="invalid_special_treatment_asset_id"
     )
-    right = history.loc[
-        :, ["asset_id", "announcement_date", "effective_date", "is_st", "is_pt"]
-    ].copy()
+    columns = ("is_st", "is_pt", "is_delisting")
+    # Earlier persisted status datasets did not carry consolidation status.
+    right = history.reindex(
+        columns=["asset_id", "announcement_date", "effective_date", *columns]
+    ).copy()
     right = right.loc[
         right["announcement_date"].notna() & right["effective_date"].notna()
     ].copy()
     right["timestamp"] = right[["announcement_date", "effective_date"]].max(axis=1)
     right = right.loc[right["timestamp"] <= result["timestamp"].max()]
-    right = right.sort_values(
-        ["timestamp", "effective_date", "asset_id"], kind="mergesort"
+    for column in columns:
+        right[column] = right[column].astype("boolean")
+    right = _status_event_frontier(
+        right,
+        keys=("asset_id",),
+        effective_at="effective_date",
+        known_at="timestamp",
+        columns=columns,
     )
-    # Disagreement becomes unknown only when both facts are known. The earlier
-    # prefix and any agreeing state field remain usable; no source row wins.
-    event_key = [right["asset_id"], right["effective_date"]]
-    for column in ("is_st", "is_pt"):
-        state = right[column].astype("boolean").astype("Int8").fillna(-1)
-        first = state.groupby(event_key, sort=False).transform("first")
-        conflict_at = (
-            right["timestamp"]
-            .where(state.ne(first))
-            .groupby(event_key, sort=False)
-            .transform("min")
-        )
-        right[column] = right[column].where(
-            conflict_at.isna() | right["timestamp"].lt(conflict_at)
-        )
-    right = right.drop_duplicates()
-    # A late announcement of an older effective event must not replace newer facts.
-    latest_effective = right.groupby("asset_id", sort=False)["effective_date"].cummax()
-    right = right.loc[right["effective_date"].eq(latest_effective)]
-    right = right.drop_duplicates(["asset_id", "timestamp"], keep="last")
-    right = right.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].sort_values(
+    right = right.loc[:, ["asset_id", "timestamp", *columns]].sort_values(
         ["timestamp", "asset_id"], kind="mergesort"
     )
     merged = pd.merge_asof(
@@ -1181,9 +1205,9 @@ def _apply_special_treatment(
         allow_exact_matches=True,
         suffixes=("", "_event"),
     )
-    merged["is_st"] = merged["is_st_event"].combine_first(merged["is_st"])
-    merged["is_pt"] = merged["is_pt_event"].combine_first(merged["is_pt"])
-    return merged.drop(columns=["is_st_event", "is_pt_event"])
+    for column in columns:
+        merged[column] = merged.pop(column + "_event").combine_first(merged[column])
+    return merged
 
 
 def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:

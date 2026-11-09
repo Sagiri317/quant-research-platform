@@ -154,6 +154,8 @@ def _calculate_values(
     min_fresh_fraction: float = 0.75,
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    if factor.startswith(("alpha101_", "alpha191_", "qlib_")):
+        return _calculate_published_values(values, factor, start, stop)
     if fresh is None:
         fresh = np.ones(len(values[names[0]]), dtype=bool)
     minimum = ceil(min_fresh_fraction * windows[0]) if windows else 0
@@ -408,6 +410,81 @@ def _calculate_values(
             result = 1.0 - result
     elif factor == "zero_amount_ratio_20d":
         result = np.mean(current <= 0.0, axis=1)
+    else:
+        raise ValueError("price_volume_calculation_missing")
+    output[first - start :][valid] = result
+    return output
+
+
+def _calculate_published_values(
+    values: dict[str, np.ndarray], factor: str, start: int, stop: int
+) -> np.ndarray:
+    """Evaluate the catalog's published formulas directly."""
+    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    output = np.full(stop - start, np.nan)
+    if factor == "alpha101_054":
+        opening, high, low, close = (values[name][start:stop] for name in names)
+        valid = (
+            np.isfinite(opening)
+            & np.isfinite(high)
+            & np.isfinite(low)
+            & np.isfinite(close)
+            & (low != high)
+            & (close != 0)
+        )
+        # Cancel the common fifth power before evaluation to avoid price-scale overflow.
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            output[valid] = (
+                -(low[valid] - close[valid])
+                / (low[valid] - high[valid])
+                * (opening[valid] / close[valid]) ** 5
+            )
+        return output
+
+    size = windows[0]
+    first = max(start, size - 1)
+    if first >= stop:
+        return output
+    matrix = sliding_window_view(values["adj_close"][first - size + 1 : stop], size)
+    valid = np.isfinite(matrix).all(axis=1)
+    current = matrix[valid]
+    if not len(current):
+        return output
+    if factor == "alpha191_046":
+        normalized = np.divide(
+            current,
+            current[:, -1, None],
+            out=np.full_like(current, np.nan),
+            where=current[:, -1, None] != 0,
+        )
+        result = sum(np.mean(normalized[:, -width:], axis=1) for width in windows) / 4
+    elif factor == "qlib_sump_20d":
+        differences = np.diff(current, axis=1)
+        result = np.maximum(differences, 0).sum(axis=1) / (
+            np.abs(differences).sum(axis=1) + 1e-12
+        )
+    elif factor in {"qlib_rsqr_20d", "qlib_resi_20d"}:
+        positions = np.arange(1, size + 1, dtype=float)
+        positions -= positions.mean()
+        paired = np.ones(current.shape, dtype=bool)
+        if factor == "qlib_rsqr_20d":
+            result = (
+                _pearson_correlations(
+                    current, np.broadcast_to(positions, current.shape), paired=paired
+                )
+                ** 2
+            )
+            result[_sample_standard_deviation(current) <= 2e-5] = np.nan
+        else:
+            centered = _centered_values(current, paired)
+            slope = np.sum(centered * positions, axis=1) / np.sum(positions**2)
+            residual = centered[:, -1] - slope * positions[-1]
+            result = np.divide(
+                residual,
+                current[:, -1],
+                out=np.full(len(current), np.nan),
+                where=current[:, -1] != 0,
+            )
     else:
         raise ValueError("price_volume_calculation_missing")
     output[first - start :][valid] = result

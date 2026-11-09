@@ -39,7 +39,8 @@ UNIQUE_FACTORS = (
 )
 
 
-def test_price_volume_selections_use_one_definition_and_minimum_inputs():
+@pytest.mark.parametrize("timestamp_unit", ["us", "ns"])
+def test_price_volume_selections_use_one_definition_and_minimum_inputs(timestamp_unit):
     binding = dict(market_id=MarketId("a_share"), required_input_data_id="price_volume")
     standard = price_volume_factor_definitions(**binding, factor_columns=PV25_FACTORS)
     assert factor_lookback_bars(standard) == 252
@@ -67,7 +68,10 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
             "market_id": "a_share",
             "filling_flag": 0,
             "asset_id": "asset",
-            "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
+            "timestamp": pd.bdate_range("2020-01-01", periods=len(x)).as_unit(
+                timestamp_unit
+            )
+            + pd.Timedelta(1, unit=timestamp_unit),
             "adj_close": x,
             "period_return": np.sin(x) * 0.01,
             "high": x + 2.0,
@@ -89,11 +93,19 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
     mixed = calculate_factors_for_panel(
         panel, definitions=definitions, output_window=window
     )
+    # Compare physical instants exactly, independently of pandas merge units.
+    mixed["timestamp"] = mixed.timestamp.dt.as_unit("ns")
+    pd.testing.assert_series_equal(
+        mixed.timestamp,
+        panel.timestamp.iloc[280:].reset_index(drop=True).dt.as_unit("ns"),
+        check_exact=True,
+    )
     for definition in definitions:
         minimum = panel.loc[:, factor_panel_input_columns((definition,))]
         single = calculate_factors_for_panel(
             minimum, definitions=(definition,), output_window=window
         )
+        single["timestamp"] = single.timestamp.dt.as_unit("ns")
         pd.testing.assert_frame_equal(
             single,
             mixed.loc[:, single.columns],
@@ -104,6 +116,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
     reverse = calculate_factors_for_panel(
         panel.iloc[::-1], definitions=definitions[::-1], output_window=window
     )
+    reverse["timestamp"] = reverse.timestamp.dt.as_unit("ns")
     pd.testing.assert_frame_equal(
         reverse.sort_values("timestamp").reset_index(drop=True),
         mixed.loc[:, reverse.columns],
@@ -608,11 +621,17 @@ def test_volatility_preserves_units_and_native_roundtrip(name, scale, tmp_path):
 def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     from math import sqrt
 
-    from quant_research_platform.research.factors.price_volume.definitions import (
-        PRICE_VOLUME_LIBRARY,
+    names = (
+        "share_price",
+        "avg_amount_126d",
+        "amount_cv_126d",
+        "turnover_cv_126d",
+        "amihud_126d",
+        "skewness_20d",
+        "top5_return_mean_20d",
+        "turnover_250d",
+        "abnormal_turnover_20_250",
     )
-
-    names = PRICE_VOLUME_LIBRARY[-9:]
     x = np.arange(1.0, 251.0)
     returns = np.resize(np.array([-0.02, 0.0, 0.01, 0.03]), len(x))
     panel = pd.DataFrame(

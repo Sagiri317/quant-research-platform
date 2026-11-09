@@ -45,14 +45,16 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.filtering import apply_filter_mode
-from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
 from quant_research_platform.research.models.trial_selection import (
     _mean_squared_error,
 )
-from quant_research_platform.research.predictions.outputs import prediction_rows
+from quant_research_platform.research.predictions.outputs import (
+    prediction_input_mask,
+    prediction_rows,
+)
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.atomic import reject_if_exists
@@ -318,18 +320,8 @@ def _output(result, frame, output_space, *, intervention=False):
     if np.shape(raw) != (len(frame),) or np.shape(explained) != (len(frame),):
         raise ValueError("explanation_prediction_nonfinite")
     valid = np.ones(len(frame), dtype=bool)
-    deep = result.metadata["model_algorithm"] in DEEPLOB_ALGORITHMS
-    if intervention or deep:
-        missing = (
-            (~complete_book_rows(frame)).to_numpy()
-            if deep
-            else (
-                frame.loc[:, result.metadata["input_columns"]]
-                .isna()
-                .all(axis=1)
-                .to_numpy()
-            )
-        )
+    if intervention or result.metadata["model_algorithm"] in SEQUENCE_ALGORITHMS:
+        missing = ~prediction_input_mask(frame, result.metadata).to_numpy()
         if not np.isnan(raw[missing]).all():
             raise ValueError("explanation_prediction_nonfinite")
         explained = np.asarray(explained, dtype="float64").copy()
@@ -968,8 +960,7 @@ def explain(config: Mapping) -> Path:
             mode=result.metadata["sample_filter_mode"],
             metadata_key="sample_filter_mode",
         )
-        if result.metadata["model_algorithm"] in DEEPLOB_ALGORITHMS:
-            selectable = selectable.loc[complete_book_rows(selectable)]
+        selectable = selectable.loc[prediction_input_mask(selectable, result.metadata)]
         positions = _selected_indices(
             selectable, selection, window=window if sequence else None
         )

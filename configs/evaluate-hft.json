@@ -1,14 +1,5 @@
 {
-  "inputs": {
-    "path": "data/research/a_share/a_share_hft",
-    "row_filters": [
-      [
-        "asset_id",
-        "==",
-        "000001"
-      ]
-    ]
-  },
+  "inputs": "data/research/a_share/hft_common_3s",
   "predictions": {
     "model_score": "results/hft/predictions"
   },
@@ -21,7 +12,7 @@
   "evaluation": {
     "evaluation_id": "hft_30s",
     "market_id": "a_share",
-    "research_dataset_id": "a_share_hft",
+    "research_dataset_id": "hft_common_3s",
     "signals": [
       {
         "signal_id": "model",
@@ -32,6 +23,10 @@
     "label_columns": [
       "future_mid_return_30s"
     ],
-    "evaluation_axis": "single_asset_time_series"
-  }
+    "evaluation_axis": "cross_sectional",
+    "correlation_clock": "trading_day"
+  },
+  "sessions": [
+    "2018-02-14"
+  ]
 }

@@ -1,7 +1,6 @@
 """Native prediction metadata, atomic publication and streaming safety."""
 
 import json
-from copy import deepcopy
 
 import pandas as pd
 import pytest
@@ -15,26 +14,26 @@ from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
-from tests.helpers.output_frames import make_price_volume_prediction_output_frame
+from tests.helpers.output_frames import (
+    make_price_volume_prediction_output_frame,
+    native_bundle,
+)
 
 
-def native_bundle(tmp_path):
-    frame = make_price_volume_prediction_output_frame()
-    metadata = deepcopy(frame.attrs["prediction_metadata"])
-    path = write_prediction_outputs(
-        output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
-    )
-    return path, frame, metadata
-
-
-def test_manifest_actual_model_and_paths(tmp_path):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_manifest_actual_model_and_paths(tmp_path, legacy):
     root, frame, metadata = native_bundle(tmp_path)
     manifest = json.loads((root / "manifest.json").read_text())
+    assert not {"model_id", "family_id", "label_unit"} & set(manifest["metadata"])
     assert validate_output_manifest(manifest) is manifest
     assert manifest["metadata"] == metadata
     assert "run_id" not in manifest
+    if legacy:
+        (root / "manifest.json").write_text(json.dumps(manifest))
+    actual, restored = read_predictions(root)
+    assert restored == metadata
     pd.testing.assert_frame_equal(
-        read_predictions(root)[0],
+        actual,
         frame,
         check_flags=False,
         check_dtype=False,
@@ -55,6 +54,9 @@ def test_manifest_actual_model_and_paths(tmp_path):
         ("sample_role", ""),
         ("prediction_rows", True),
         ("scope", "LOCAL_ONLY"),
+        ("model_id", "another-model"),
+        ("family_id", "another-family"),
+        ("label_unit", "another-unit"),
     ],
 )
 def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value):

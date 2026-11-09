@@ -25,6 +25,7 @@ from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
     strict_integer_series,
+    strict_timestamp_series,
 )
 
 if TYPE_CHECKING:
@@ -110,6 +111,20 @@ EvaluationAxis = Literal["cross_sectional", "single_asset_time_series"]
 EVALUATION_AXES = frozenset({"cross_sectional", "single_asset_time_series"})
 
 
+def evaluation_sessions(values) -> pd.DatetimeIndex:
+    """Validate the caller's complete trading-day axis without inventing holidays."""
+    dates = pd.DatetimeIndex(
+        strict_timestamp_series(pd.Series(values), error="evaluation_sessions_invalid")
+    )
+    if (
+        not dates.is_unique
+        or not dates.is_monotonic_increasing
+        or not dates.equals(dates.normalize())
+    ):
+        raise ValueError("evaluation_sessions_invalid")
+    return dates
+
+
 @dataclass(frozen=True)
 class EvaluationSpec:
     evaluation_id: str
@@ -119,6 +134,7 @@ class EvaluationSpec:
     label_columns: tuple[str, ...]
     label_availability_columns: Mapping[str, str] = field(default_factory=dict)
     evaluation_axis: EvaluationAxis = "cross_sectional"
+    correlation_clock: Literal["observation", "trading_day"] = "observation"
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
     run_type: str = "evaluation"
@@ -139,6 +155,11 @@ class EvaluationSpec:
             or self.evaluation_axis not in EVALUATION_AXES
         ):
             raise ValueError("evaluation_axis_invalid")
+        if type(self.correlation_clock) is not str or self.correlation_clock not in {
+            "observation",
+            "trading_day",
+        }:
+            raise ValueError("evaluation_correlation_clock_invalid")
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")

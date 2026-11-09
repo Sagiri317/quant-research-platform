@@ -4,7 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from quant_research_platform.interfaces.api.app import create_app
-from tests.artifacts.test_outputs_core import native_bundle
+from tests.helpers.output_frames import native_bundle
 
 
 @pytest.mark.anyio

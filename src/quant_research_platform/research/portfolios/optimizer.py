@@ -1,4 +1,4 @@
-"""Deterministic SLSQP benchmark-relative optimizer."""
+"""Self-financing SLSQP targets with relative or explicit absolute risk limits."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioTargetBlocked,
 )
+from quant_research_platform.contracts.risk import RiskInputsUnavailable
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
@@ -37,58 +38,109 @@ class OptimizerConfig:
 
 
 @dataclass(frozen=True)
+class AbsoluteRiskConfig:
+    """Optional absolute limits, independent of benchmark-relative defaults.
+
+    Name and industry limits are fractions of post-fee total NAV. Style limits
+    bound absolute NAV-weighted exposure in the supplied style units. Total
+    volatility and its covariance/specific inputs are annualized; short-horizon
+    alpha is never added to an annualized risk penalty. None means no limit,
+    not a default risk budget. Turnover is half the absolute pre-trade-NAV
+    weight change, including cash. Solver tolerances are numerical settings.
+    """
+
+    name_weight_limit: float | None = None
+    total_volatility_limit: float | None = None
+    target_turnover_limit: float | None = None
+    industry_weight_limit: float | None = None
+    style_exposure_limit: float | None = None
+    solver_ftol: float = 1e-12
+    solver_maxiter: int = 1000
+
+    def __post_init__(self) -> None:
+        _validate_config(self)
+
+
+@dataclass(frozen=True)
 class OptimizationResult:
+    """Target weights and risk in the configured reference and annualized units.
+
+    Absolute results never label total volatility as tracking error. Missing
+    total-risk inputs leave its diagnostics undefined when no such limit is set.
+    """
+
     weights: pd.Series
-    predicted_tracking_error: float
-    factor_variance: float
-    specific_variance: float
+    predicted_tracking_error: float | None
+    factor_variance: float | None
+    specific_variance: float | None
     target_turnover: float
     expected_transaction_cost: float
-    maximum_adv_participation: float
+    maximum_adv_participation: float | None
+    predicted_total_volatility: float | None = None
+    risk_mode: str = "benchmark_relative"
 
 
 def optimize_portfolio(
     assets: pd.DataFrame,
     *,
-    factor_covariance: pd.DataFrame,
+    factor_covariance: pd.DataFrame | None = None,
     industry_columns: tuple[str, ...] = (),
     style_columns: tuple[str, ...] = (),
     expected_transaction_cost: Callable[
         [np.ndarray, np.ndarray], tuple[float, np.ndarray, np.ndarray]
     ],
     nav: float,
-    assumptions: ExecutionAssumptions,
+    assumptions: ExecutionAssumptions | None = None,
     financial_column: str | None = None,
     cash_column: str,
-    config: OptimizerConfig | None = None,
+    config: OptimizerConfig | AbsoluteRiskConfig | None = None,
     eligibility_column: str | None = None,
     receivable_weight: float = 0.0,
 ) -> OptimizationResult:
-    """Maximize active alpha less actual costs in a self-financing account.
+    """Maximize expected alpha less actual costs in a self-financing account.
 
     Holdings and explicit cash use pre-trade NAV units; cash reserves the true
     fee, while name and risk limits use post-fee NAV. The cost owner supplies
     convex side costs and marginal rates, with zero cash cost. Its smooth
     extension covers signed epigraph iterates; feasibility uses actual trades.
+
+    AbsoluteRiskConfig selects total risk without a benchmark. Optional
+    trade_capacity_weight is this decision's remaining capacity, never daily
+    ADV reused at each tick; absent capacity leaves execution to the account.
+    Optional sellable_weight bounds sales in pre-trade NAV units (including
+    partial T+1 availability). Missing absolute-mode alpha freezes the actual
+    holding; it is not a zero signal. Targets are not actual fills.
     """
+    config = OptimizerConfig() if config is None else config
+    absolute = isinstance(config, AbsoluteRiskConfig)
+    risk_limit = (
+        config.total_volatility_limit if absolute else config.tracking_error_limit
+    )
+    industry_limit = (
+        config.industry_weight_limit if absolute else config.industry_active_limit
+    )
+    style_limit = config.style_exposure_limit if absolute else config.style_active_limit
     required = {
         "asset_id",
         "expected_alpha",
         "current_weight",
-        "benchmark_weight",
-        "specific_variance",
-        "adv",
         *industry_columns,
         *style_columns,
     }
+    if not absolute:
+        required.update(("benchmark_weight", "specific_variance", "adv"))
     if not isinstance(assets, pd.DataFrame) or not required.issubset(assets.columns):
         raise ValueError("optimizer_columns_invalid")
-    if not industry_columns and (not style_columns):
+    if not absolute and not industry_columns and not style_columns:
         raise ValueError("optimizer_exposure_columns_required")
     if not callable(expected_transaction_cost):
         raise ValueError("optimizer_cost_provider_invalid")
-    config = OptimizerConfig() if config is None else config
-    if not isinstance(assumptions, ExecutionAssumptions):
+    if absolute and (
+        (industry_limit is not None and not industry_columns)
+        or (style_limit is not None and not style_columns)
+    ):
+        raise RiskInputsUnavailable("optimizer_exposure_columns_required")
+    if not absolute and not isinstance(assumptions, ExecutionAssumptions):
         raise ValueError("optimizer_execution_assumptions_invalid")
     if type(nav) is not float or not np.isfinite(nav) or nav <= 0:
         raise ValueError("optimizer_nav_invalid")
@@ -106,26 +158,46 @@ def optimize_portfolio(
     if cash_column is not None and cash_column not in assets:
         raise ValueError("optimizer_cash_column_missing")
     columns = tuple(dict.fromkeys((*industry_columns, *style_columns)))
-    if (
-        tuple(factor_covariance.index) != columns
-        or tuple(factor_covariance.columns) != columns
-    ):
-        raise ValueError("optimizer_covariance_columns_invalid")
-    covariance = factor_covariance.apply(
-        strict_finite_numeric_series, error="optimizer_covariance_invalid"
-    ).to_numpy(dtype="float64")
-    covariance = _validated_covariance(covariance, error_prefix="optimizer_covariance")
+    covariance = None
+    if factor_covariance is None:
+        if risk_limit is not None:
+            raise RiskInputsUnavailable("optimizer_covariance_unavailable")
+    else:
+        if (
+            tuple(factor_covariance.index) != columns
+            or tuple(factor_covariance.columns) != columns
+        ):
+            raise ValueError("optimizer_covariance_columns_invalid")
+        covariance = factor_covariance.apply(
+            strict_finite_numeric_series, error="optimizer_covariance_invalid"
+        ).to_numpy(dtype="float64")
+        if columns:
+            covariance = _validated_covariance(
+                covariance, error_prefix="optimizer_covariance"
+            )
     data = assets.copy().reset_index(drop=True)
     if data["asset_id"].duplicated().any():
         raise ValueError("optimizer_asset_duplicate")
-    for column in (
+    if absolute and "specific_variance" not in data:
+        data["specific_variance"] = np.nan
+    numeric_columns = [
         "expected_alpha",
         "current_weight",
-        "benchmark_weight",
         "specific_variance",
-        "adv",
         *columns,
-    ):
+    ]
+    numeric_columns.extend(
+        ("trade_capacity_weight",)
+        if absolute and "trade_capacity_weight" in data
+        else ()
+    )
+    if not absolute:
+        numeric_columns.extend(("benchmark_weight", "adv"))
+    if "sellable_weight" in data:
+        numeric_columns.append("sellable_weight")
+    if absolute and "maximum_weight" in data:
+        numeric_columns.append("maximum_weight")
+    for column in numeric_columns:
         data[column] = strict_real_numeric_series(
             data[column], error="optimizer_numeric_invalid"
         )
@@ -134,18 +206,45 @@ def optimize_portfolio(
             not pd.api.types.is_bool_dtype(data[column]) or data[column].isna().any()
         ):
             raise ValueError("optimizer_boolean_column_invalid")
-    for column in ("current_weight", "benchmark_weight"):
+    for column in (
+        ("current_weight",) if absolute else ("current_weight", "benchmark_weight")
+    ):
         if data[column].lt(0.0).any():
             raise ValueError("optimizer_weight_invalid")
     current = data["current_weight"].to_numpy()
-    benchmark = data["benchmark_weight"].to_numpy()
-    if not np.isclose(current.sum(), budget) or not np.isclose(benchmark.sum(), 1.0):
+    benchmark = None if absolute else data["benchmark_weight"].to_numpy()
+    if not np.isclose(current.sum(), budget) or (
+        benchmark is not None and not np.isclose(benchmark.sum(), 1.0)
+    ):
         raise ValueError("optimizer_weight_sum_invalid")
-    valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
     cash = data[cash_column].to_numpy(dtype=bool)
-    if cash.sum() != 1 or benchmark[cash].any():
+    if cash.sum() != 1 or (benchmark is not None and benchmark[cash].any()):
         raise ValueError("optimizer_cash_asset_invalid")
-    frozen = ~valid_adv.to_numpy(dtype=bool) & ~cash
+    sellable = current
+    if "sellable_weight" in data:
+        sellable = data["sellable_weight"].to_numpy(dtype="float64", copy=True)
+        sellable[cash] = current[cash]
+        if (
+            not np.isfinite(sellable).all()
+            or (sellable < 0.0).any()
+            or (sellable > current).any()
+        ):
+            raise ValueError("optimizer_sellable_weight_invalid")
+    if absolute:
+        capacity = np.full(len(current), np.inf)
+        if "trade_capacity_weight" in data:
+            capacity[~cash] = data.loc[~cash, "trade_capacity_weight"]
+            if not np.isfinite(capacity[~cash]).all() or (capacity[~cash] < 0.0).any():
+                raise ValueError("optimizer_trade_capacity_invalid")
+        frozen = (capacity == 0.0) & ~cash
+        data.loc[cash, ["specific_variance", *columns]] = 0.0
+        adv = None
+    else:
+        valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
+        frozen = ~valid_adv.to_numpy(dtype=bool) & ~cash
+        data["adv"] = data["adv"].where(valid_adv, np.inf)
+        adv = data["adv"].to_numpy(dtype="float64")
+        capacity = assumptions.adv_participation * adv / nav
     for column in ("can_enter", "can_exit"):
         if column in data:
             if not pd.api.types.is_bool_dtype(data[column]):
@@ -160,31 +259,44 @@ def optimize_portfolio(
     risk_missing = data["specific_variance"].isna() | data.loc[:, columns].isna().any(
         axis=1
     )
-    incomplete = risk_missing | ~np.isfinite(data["expected_alpha"])
-    # Frozen holdings remain real active risk. Missing volume never authorizes
-    # replacing their exposures or specific variance with zero.
-    cannot_reduce = frozen.copy()
-    if "can_exit" in data:
-        cannot_reduce |= ~data.can_exit.fillna(False).to_numpy(dtype=bool)
-    # Fees can raise a frozen underweight to its net benchmark, but cannot
-    # reduce an overweight. Keep the same normalization policy at admission.
-    if (
-        risk_missing
-        & (current > benchmark)
-        & ~_normalization_matches(current, benchmark)
-        & cannot_reduce
-    ).any():
-        raise ValueError("optimizer_held_risk_unavailable")
-    data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
+    alpha_missing = ~np.isfinite(data["expected_alpha"])
+    if absolute:
+        constrained_missing = pd.Series(False, index=data.index)
+        if risk_limit is not None:
+            constrained_missing |= risk_missing
+        for names, limit in (
+            (industry_columns, industry_limit),
+            (style_columns, style_limit),
+        ):
+            if limit is not None:
+                constrained_missing |= data.loc[:, names].isna().any(axis=1)
+        if (constrained_missing & (current > 0.0)).any():
+            raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
+        incomplete = constrained_missing
+        frozen |= alpha_missing.to_numpy(dtype=bool) & ~cash
+    else:
+        incomplete = risk_missing | alpha_missing
+        # Frozen holdings remain real active risk. Missing volume never
+        # authorizes replacing their exposures or specific variance with zero.
+        cannot_reduce = frozen.copy() | (sellable == 0.0)
+        if "can_exit" in data:
+            cannot_reduce |= ~data.can_exit.fillna(False).to_numpy(dtype=bool)
+        if (
+            risk_missing
+            & (current > benchmark)
+            & ~_normalization_matches(current, benchmark)
+            & cannot_reduce
+        ).any():
+            raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
+    data["expected_alpha"] = data["expected_alpha"].where(
+        ~(incomplete | alpha_missing), 0.0
+    )
     original_specific = data["specific_variance"].to_numpy(dtype="float64")
     original_exposure = data.loc[:, columns].to_numpy(dtype="float64")
     data["specific_variance"] = data["specific_variance"].where(~risk_missing, 0.0)
-    data["adv"] = data["adv"].where(valid_adv, np.inf)
     exposure = np.where(np.isfinite(original_exposure), original_exposure, 0.0)
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
-    adv = data["adv"].to_numpy(dtype="float64")
-    capacity = assumptions.adv_participation * adv / nav
     # Side costs at the maximum trades bound every feasible fee. Actual
     # self-financing constraints below still price each candidate's net trades.
     maximum_cost = expected_transaction_cost(
@@ -202,8 +314,19 @@ def optimize_portfolio(
         frozen=frozen,
         config=config,
         minimum_nav_ratio=minimum_nav_ratio,
+        sellable=sellable,
     )
     tolerance = 1e-8
+    if absolute and "maximum_weight" in data:
+        maximum = data.maximum_weight.to_numpy(dtype="float64")
+        if not np.isfinite(maximum).all() or (maximum < 0).any():
+            raise ValueError("optimizer_maximum_weight_invalid")
+        bounds = tuple(
+            (lower, min(upper, limit))
+            for (lower, upper), limit in zip(bounds, maximum, strict=True)
+        )
+        if any(lower > upper + tolerance for lower, upper in bounds):
+            raise ValueError("optimizer_inventory_bounds_infeasible")
     lower, upper = np.asarray(bounds, dtype="float64").T
     net_lower, net_upper = np.asarray(net_bounds, dtype="float64").T
     if (
@@ -224,7 +347,10 @@ def optimize_portfolio(
         np.maximum(reachable_lower - current, 0.0).sum(),
         np.maximum(current - reachable_upper, 0.0).sum(),
     )
-    if minimum_turnover > config.target_turnover_limit + tolerance:
+    if (
+        config.target_turnover_limit is not None
+        and minimum_turnover > config.target_turnover_limit + tolerance
+    ):
         raise ValueError("optimizer_turnover_bounds_infeasible")
 
     relative_exposure = _stock_leg_exposures(exposure, benchmark, cash)
@@ -250,10 +376,13 @@ def optimize_portfolio(
     def net_risk(point, *, derivative=False):
         weights = point[:count]
         cost, gradient = actual_cost(weights)
-        active = weights - benchmark + (benchmark - cash_direction) * cost
+        fee_direction = -cash_direction if absolute else benchmark - cash_direction
+        active = weights + fee_direction * cost
+        if not absolute:
+            active = active - benchmark
         variance = sum(_risk_variances(active, exposure, covariance, specific))
         if not derivative:
-            return config.tracking_error_limit**2 * (1.0 - cost) ** 2 - variance
+            return risk_limit**2 * (1.0 - cost) ** 2 - variance
         factor_active = active @ exposure
         variance_gradient = (
             exposure @ (covariance @ factor_active + covariance.T @ factor_active)
@@ -261,12 +390,10 @@ def optimize_portfolio(
         )
         # Apply the rank-one chain rule without materializing an N-by-N matrix.
         risk_gradient = (
-            variance_gradient
-            + (variance_gradient @ (benchmark - cash_direction)) * gradient
+            variance_gradient + (variance_gradient @ fee_direction) * gradient
         )
         return np.r_[
-            -2.0 * config.tracking_error_limit**2 * (1.0 - cost) * gradient
-            - risk_gradient,
+            -2.0 * risk_limit**2 * (1.0 - cost) * gradient - risk_gradient,
             np.zeros(count),
         ]
 
@@ -295,51 +422,68 @@ def optimize_portfolio(
         return np.r_[cash_direction - gradient, np.zeros(count)]
 
     def exposure_bands(matrix, limit):
-        return np.concatenate(
-            (limit * (~cash)[None, :] - matrix.T, limit * (~cash)[None, :] + matrix.T)
-        )
+        if absolute:
+            bands = np.concatenate((-matrix.T, matrix.T))
+        else:
+            bands = np.concatenate(
+                (
+                    limit * (~cash)[None, :] - matrix.T,
+                    limit * (~cash)[None, :] + matrix.T,
+                )
+            )
+        padded = np.pad(bands, ((0, 0), (0, count)))
 
-    industry_bands = exposure_bands(
-        relative_exposure[:, : len(industry_columns)], config.industry_active_limit
-    )
-    style_bands = exposure_bands(
-        relative_exposure[:, len(industry_columns) :], config.style_active_limit
-    )
+        def value(point):
+            value = bands @ point[:count]
+            if absolute:
+                value += limit * (1.0 - actual_cost(point[:count])[0])
+            return value
+
+        def jacobian(point):
+            if not absolute:
+                return padded
+            return (
+                padded - np.r_[limit * actual_cost(point[:count])[1], np.zeros(count)]
+            )
+
+        return {"type": "ineq", "fun": value, "jac": jacobian}
 
     turnover_jacobian = np.r_[np.zeros(count), np.full(count, -0.5)]
     trade_jacobian = np.block(
         [[-np.eye(count), np.eye(count)], [np.eye(count), np.eye(count)]]
     )
-    industry_jacobian = np.pad(industry_bands, ((0, 0), (0, count)))
-    style_jacobian = np.pad(style_bands, ((0, 0), (0, count)))
     constraints = [
         {
             "type": "eq",
             "fun": lambda point: float(point[:count].sum() - budget),
             "jac": lambda point: np.r_[np.ones(count), np.zeros(count)],
-        },
-        {
-            "type": "ineq",
-            "fun": net_risk,
-            "jac": lambda point: net_risk(point, derivative=True),
-        },
-        {
-            "type": "ineq",
-            "fun": lambda point: float(
-                config.target_turnover_limit - 0.5 * point[count:].sum()
-            ),
-            "jac": lambda point: turnover_jacobian,
-        },
-        {
-            "type": "ineq",
-            "fun": lambda point: industry_bands @ point[:count],
-            "jac": lambda point: industry_jacobian,
-        },
-        {
-            "type": "ineq",
-            "fun": lambda point: style_bands @ point[:count],
-            "jac": lambda point: style_jacobian,
-        },
+        }
+    ]
+    if risk_limit is not None:
+        constraints.append(
+            {
+                "type": "ineq",
+                "fun": net_risk,
+                "jac": lambda point: net_risk(point, derivative=True),
+            }
+        )
+    if config.target_turnover_limit is not None:
+        constraints.append(
+            {
+                "type": "ineq",
+                "fun": lambda point: float(
+                    config.target_turnover_limit - 0.5 * point[count:].sum()
+                ),
+                "jac": lambda point: turnover_jacobian,
+            }
+        )
+    for matrix, limit in (
+        (relative_exposure[:, : len(industry_columns)], industry_limit),
+        (relative_exposure[:, len(industry_columns) :], style_limit),
+    ):
+        if limit is not None:
+            constraints.append(exposure_bands(matrix, limit))
+    constraints.append(
         {
             "type": "ineq",
             "fun": lambda point: np.concatenate(
@@ -349,8 +493,8 @@ def optimize_portfolio(
                 )
             ),
             "jac": lambda point: trade_jacobian,
-        },
-    ]
+        }
+    )
 
     constraints.extend(
         (
@@ -374,7 +518,11 @@ def optimize_portfolio(
             ((absolute_trade - delta) / 2.0) * nav,
         )
         return (
-            float(-expected_alpha @ (point[:count] - benchmark) + cost / nav),
+            float(
+                -expected_alpha
+                @ (point[:count] if absolute else point[:count] - benchmark)
+                + cost / nav
+            ),
             np.r_[
                 -expected_alpha + (buy_gradient - sell_gradient) / 2.0,
                 (buy_gradient + sell_gradient) / 2.0,
@@ -414,22 +562,36 @@ def optimize_portfolio(
         assumptions=assumptions,
         cash=cash,
         receivable_weight=receivable_weight,
+        capacity=capacity,
     )
     active = _risk_active_weights(
         net_weights, benchmark, original_exposure, original_specific
     )
-    factor_variance, specific_variance = _risk_variances(
-        active, original_exposure, covariance, original_specific
+    complete = (
+        covariance is not None
+        and np.isfinite(original_exposure[active != 0.0]).all()
+        and np.isfinite(original_specific[active != 0.0]).all()
     )
-    participation = np.abs(weights - current) * nav / adv
+    factor_variance, specific_variance = (
+        _risk_variances(active, original_exposure, covariance, original_specific)
+        if complete
+        else (None, None)
+    )
+    volatility = (
+        float(np.sqrt(factor_variance + specific_variance)) if complete else None
+    )
     return OptimizationResult(
         weights=pd.Series(weights, index=data["asset_id"], name="weight"),
-        predicted_tracking_error=float(np.sqrt(factor_variance + specific_variance)),
+        predicted_tracking_error=None if absolute else volatility,
         factor_variance=factor_variance,
         specific_variance=specific_variance,
         target_turnover=float(0.5 * np.abs(weights - current).sum()),
         expected_transaction_cost=float(cost_ratio * nav),
-        maximum_adv_participation=float(participation.max(initial=0.0)),
+        maximum_adv_participation=None
+        if absolute
+        else float((np.abs(weights - current) * nav / adv).max(initial=0.0)),
+        predicted_total_volatility=volatility if absolute else None,
+        risk_mode="absolute" if absolute else "benchmark_relative",
     )
 
 
@@ -451,6 +613,8 @@ def _risk_active_weights(weights, benchmark, exposure, specific):
     risk. A true position against a zero benchmark never meets this relative
     test, and known-risk coefficients retain their full numerical value.
     """
+    if benchmark is None:
+        return weights.copy()
     active = weights - benchmark
     unavailable = (
         ~np.isfinite(exposure).all(axis=1) | ~np.isfinite(specific) | (specific < 0.0)
@@ -599,19 +763,34 @@ def _portfolio_risk_limits(
 def _bounds(
     data: pd.DataFrame,
     *,
-    benchmark: np.ndarray,
+    benchmark: np.ndarray | None,
     financial_column: str | None,
     cash_column: str | None,
     eligibility_column: str | None,
     incomplete: np.ndarray,
     frozen: np.ndarray,
-    config: OptimizerConfig,
+    config: OptimizerConfig | AbsoluteRiskConfig,
     minimum_nav_ratio: float,
+    sellable: np.ndarray,
 ) -> tuple[tuple[tuple[float, float], ...], tuple[tuple[float, float], ...]]:
     bounds: list[tuple[float, float]] = []
     for position, row in data.iterrows():
         if cash_column is not None and bool(row[cash_column]):
             bounds.append((0.0, 1.0))
+            continue
+        if benchmark is None:
+            bounds.append(
+                (
+                    0.0,
+                    0.0
+                    if incomplete[position]
+                    else (
+                        1.0
+                        if config.name_weight_limit is None
+                        else config.name_weight_limit
+                    ),
+                )
+            )
             continue
         fixed = (
             financial_column is not None
@@ -634,6 +813,14 @@ def _bounds(
         lower, upper = bounds[position]
         lower *= minimum_nav_ratio
         current = float(row.current_weight)
+        lower = max(lower, current - sellable[position])
+        if (
+            benchmark is None
+            and eligibility_column is not None
+            and not bool(row[eligibility_column])
+            and not bool(row[cash_column])
+        ):
+            upper = min(upper, current)
         if frozen[position]:
             lower, upper = max(lower, current), min(upper, current)
         if "can_enter" in data and (pd.isna(row.can_enter) or not bool(row.can_enter)):
@@ -651,6 +838,10 @@ def _bounds(
 
 def _stock_leg_exposures(exposure, benchmark, cash):
     """Center stock exposures on the full benchmark stock leg, excluding cash."""
+    if benchmark is None:
+        result = exposure.copy()
+        result[cash] = 0.0
+        return result
     reference = benchmark.copy()
     reference[cash] = 0.0
     gross = reference.sum()
@@ -686,21 +877,30 @@ def _verify_solution(
     net_bounds: tuple[tuple[float, float], ...],
     bounds: tuple[tuple[float, float], ...],
     current: np.ndarray,
-    benchmark: np.ndarray,
+    benchmark: np.ndarray | None,
     exposure: np.ndarray,
-    covariance: np.ndarray,
+    covariance: np.ndarray | None,
     specific: np.ndarray,
-    adv: np.ndarray,
-    config: OptimizerConfig,
+    adv: np.ndarray | None,
+    config: OptimizerConfig | AbsoluteRiskConfig,
     industry_count: int,
     nav: float,
-    assumptions: ExecutionAssumptions,
+    assumptions: ExecutionAssumptions | None,
     cash: np.ndarray | None = None,
     receivable_weight: float = 0.0,
+    capacity: np.ndarray | None = None,
 ) -> None:
     tolerance = 1e-08
+    absolute = isinstance(config, AbsoluteRiskConfig)
+    risk_limit = (
+        config.total_volatility_limit if absolute else config.tracking_error_limit
+    )
     active = _risk_active_weights(net_weights, benchmark, exposure, specific)
-    risk = sum(_risk_variances(active, exposure, covariance, specific))
+    risk = (
+        sum(_risk_variances(active, exposure, covariance, specific))
+        if risk_limit is not None
+        else None
+    )
     if not np.isfinite(weights).all() or not np.isclose(
         weights.sum(), 1.0 - receivable_weight, atol=tolerance
     ):
@@ -717,12 +917,32 @@ def _verify_solution(
         for value, (lower, upper) in zip(net_weights, net_bounds, strict=True)
     ):
         raise ValueError("optimizer_solution_invalid")
-    if risk > config.tracking_error_limit**2 + tolerance:
+    if risk_limit is not None and risk > risk_limit**2 + tolerance:
         raise ValueError("optimizer_solution_invalid")
-    if 0.5 * np.abs(weights - current).sum() > config.target_turnover_limit + tolerance:
+    if (
+        config.target_turnover_limit is not None
+        and 0.5 * np.abs(weights - current).sum()
+        > config.target_turnover_limit + tolerance
+    ):
         raise ValueError("optimizer_solution_invalid")
     if cash is None:
         cash = np.zeros(len(weights), dtype=bool)
+    if absolute:
+        held = net_weights != 0.0
+        for matrix, limit in (
+            (exposure[:, :industry_count], config.industry_weight_limit),
+            (exposure[:, industry_count:], config.style_exposure_limit),
+        ):
+            if limit is not None and (
+                not np.isfinite(matrix[held]).all()
+                or np.any(
+                    np.abs(matrix[held].T @ net_weights[held]) > limit + tolerance
+                )
+            ):
+                raise ValueError("optimizer_solution_invalid")
+        if np.any(np.abs(weights - current) > capacity + tolerance):
+            raise ValueError("optimizer_solution_invalid")
+        return
     stock_gross = weights[~cash].sum()
     if (
         stock_gross > 0.0
@@ -753,21 +973,36 @@ def _verify_solution(
         raise ValueError("optimizer_solution_invalid")
 
 
-def _validate_config(config: OptimizerConfig) -> None:
-    values = (
-        config.active_name_limit,
-        config.tracking_error_limit,
-        config.target_turnover_limit,
-        config.industry_active_limit,
-        config.style_active_limit,
-        config.solver_ftol,
-    )
+def _validate_config(config: OptimizerConfig | AbsoluteRiskConfig) -> None:
+    if isinstance(config, AbsoluteRiskConfig):
+        limits = (
+            config.name_weight_limit,
+            config.total_volatility_limit,
+            config.target_turnover_limit,
+            config.industry_weight_limit,
+            config.style_exposure_limit,
+        )
+        values = (*[value for value in limits if value is not None], config.solver_ftol)
+    else:
+        values = (
+            config.active_name_limit,
+            config.tracking_error_limit,
+            config.target_turnover_limit,
+            config.industry_active_limit,
+            config.style_active_limit,
+            config.solver_ftol,
+        )
     if any(
         type(value) is not float or not np.isfinite(value) or value < 0.0
         for value in values
     ):
         raise ValueError("optimizer_config_invalid")
-    if (
+    if isinstance(config, AbsoluteRiskConfig) and any(
+        value is not None and value > 1.0
+        for value in (config.name_weight_limit, config.industry_weight_limit)
+    ):
+        raise ValueError("optimizer_config_invalid")
+    if not isinstance(config, AbsoluteRiskConfig) and (
         config.active_name_limit <= 0.0
         or config.tracking_error_limit <= 0.0
         or config.target_turnover_limit <= 0.0

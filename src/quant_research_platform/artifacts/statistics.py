@@ -75,6 +75,26 @@ _ARROW_SCHEMAS = {
             pa.field("defined_hypothesis_count", pa.int64(), nullable=False),
         ]
     ),
+    "factor_correlation.parquet": pa.schema(
+        [
+            *[
+                pa.field(name, pa.string(), nullable=False)
+                for name in ("factor_id", "comparison_factor_id", "statistic")
+            ],
+            *[
+                pa.field(name, pa.int64(), nullable=False)
+                for name in (
+                    "input_date_count",
+                    "observation_count",
+                    "observation_pairs",
+                )
+            ],
+            pa.field("status", pa.string(), nullable=False),
+            pa.field("reason", pa.string()),
+            pa.field("mean", pa.float64()),
+            pa.field("mean_absolute", pa.float64()),
+        ]
+    ),
     "factor_diagnostics.parquet": pa.schema(
         [
             pa.field("family_id", pa.string()),
@@ -539,6 +559,8 @@ STATISTICS_TABLE_GROUPS = {
     "factor": (
         "factor_stratified_diagnostics.parquet",
         "factor_diagnostics.parquet",
+        "factor_annual_diagnostics.parquet",
+        "factor_correlation.parquet",
         "fama_macbeth.parquet",
         "fama_macbeth_periods.parquet",
     ),
@@ -568,6 +590,8 @@ STATISTICS_TABLE_GROUPS = {
 _EMPTY_TABLE_MEMBERS = frozenset(
     {
         *_COMPARISON_MEMBERS,
+        "factor_annual_diagnostics.parquet",
+        "factor_correlation.parquet",
         "fama_macbeth_periods.parquet",
         "holding_factor_returns.parquet",
         "model_comparison.parquet",
@@ -590,6 +614,10 @@ for _member in (
     _ARROW_SCHEMAS[_member] = _ARROW_SCHEMAS[_member].append(
         pa.field("input_date_count", pa.int64(), nullable=False)
     )
+
+_ARROW_SCHEMAS["factor_annual_diagnostics.parquet"] = _ARROW_SCHEMAS[
+    "factor_diagnostics.parquet"
+].append(pa.field("year", pa.int64(), nullable=False))
 
 _TABLE_COLUMNS = {
     member: tuple(schema.names) for member, schema in _ARROW_SCHEMAS.items()
@@ -774,6 +802,10 @@ def _validate_table_binding(frame, *, member, metadata):
     start, stop, inclusive = time_window_timestamp_interval(
         TimeWindow(**metadata["window"])
     )
+    if member == "factor_annual_diagnostics.parquet":
+        last = stop if inclusive else stop - pd.Timedelta(nanoseconds=1)
+        if not frame.year.between(start.year, last.year).all():
+            raise ValueError("statistics_table_window_mismatch")
     for column in _TIMESTAMP_COLUMNS[member]:
         valid = frame[column].ge(start)
         valid &= frame[column].le(stop) if inclusive else frame[column].lt(stop)
@@ -882,6 +914,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                         "model_comparison.parquet",
                         "factor_stratified_diagnostics.parquet",
                         "factor_diagnostics.parquet",
+                        "factor_annual_diagnostics.parquet",
                         "fama_macbeth.parquet",
                     }
                 ],
@@ -925,6 +958,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             "prediction_diagnostics.parquet",
             "model_comparison.parquet",
             "factor_diagnostics.parquet",
+            "factor_annual_diagnostics.parquet",
             "fama_macbeth.parquet",
         }:
             count = result[
@@ -945,7 +979,10 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         ):
             if lower in result and result[lower].gt(result[upper]).any():
                 raise ValueError("statistics_table_interval_invalid")
-        if member == "factor_diagnostics.parquet":
+        if member in {
+            "factor_diagnostics.parquet",
+            "factor_annual_diagnostics.parquet",
+        }:
             applicable = result.fdr_method.isin(("BH", "BY"))
             if (
                 not (applicable | result.fdr_method.eq("NOT_APPLICABLE")).all()
@@ -971,6 +1008,20 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 or result.loc[~applicable, "fdr_alpha"].notna().any()
             ):
                 raise ValueError("statistics_table_fdr_invalid")
+        if member == "factor_correlation.parquet":
+            if (
+                not result.statistic.isin(("pearson", "spearman")).all()
+                or result.factor_id.str.strip().eq("").any()
+                or result.comparison_factor_id.str.strip().eq("").any()
+                or result.factor_id.eq(result.comparison_factor_id).any()
+                or defined.ne(result.observation_count.gt(0)).any()
+                or result.observation_pairs.lt(2 * result.observation_count).any()
+                or result.mean_absolute.notna().ne(defined).any()
+                or not result.loc[defined, "mean"].between(-1, 1).all()
+                or not result.loc[defined, "mean_absolute"].between(0, 1).all()
+                or (result.mean_absolute + 1e-12 < result["mean"].abs()).any()
+            ):
+                raise ValueError("statistics_factor_correlation_invalid")
         if member == "fama_macbeth_periods.parquet":
             white_defined = result.white_p_value.notna()
             if (
@@ -1283,6 +1334,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             "holding_factor_returns.parquet": (
                 "attribution_group",
                 "entry_at",
+                "end_at",
                 "factor_id",
             ),
         }[member]
@@ -1368,10 +1420,14 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 raise ValueError("statistics_return_status_invalid")
         if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
             raise ValueError("statistics_holding_interval_invalid")
-        if "decision_at" in result and (
-            not result.decision_at.lt(result.entry_at).all()
-        ):
-            raise ValueError("statistics_holding_interval_invalid")
+        if "decision_at" in result:
+            ordered = (
+                result.decision_at.le(result.entry_at)
+                if metadata.get("attribution_clock") == "inventory_intervals"
+                else result.decision_at.lt(result.entry_at)
+            )
+            if not ordered.all():
+                raise ValueError("statistics_holding_interval_invalid")
         if member == "portfolio_attribution.parquet" and (
             not result.component_type.isin(("additive", "detail")).all()
         ):
@@ -1387,6 +1443,17 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         "prediction_diagnostics.parquet": ("prediction_id",),
         "robustness.parquet": ("test_id",),
         "factor_diagnostics.parquet": ("family_id", "factor_id", "fdr_method"),
+        "factor_annual_diagnostics.parquet": (
+            "year",
+            "family_id",
+            "factor_id",
+            "fdr_method",
+        ),
+        "factor_correlation.parquet": (
+            "factor_id",
+            "comparison_factor_id",
+            "statistic",
+        ),
         "fama_macbeth.parquet": ("regression_id", "coefficient_id"),
         "fama_macbeth_periods.parquet": (
             "regression_id",
@@ -1502,10 +1569,7 @@ def _validate_factor_stratified(frame, metadata):
         raise ValueError("statistics_stratified_inference_invalid")
     for kind, block in frame.groupby("stratification", sort=False):
         if kind == "all":
-            if (
-                block.stratum.notna().any()
-                or not block.observed_date_count.eq(block.input_date_count).all()
-            ):
+            if block.stratum.notna().any():
                 raise ValueError("statistics_stratified_domain_invalid")
         elif (
             kind not in binding.get("strata", {}).get("kinds", [])

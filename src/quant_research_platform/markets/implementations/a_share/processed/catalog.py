@@ -72,6 +72,7 @@ PANEL_COLUMNS = (
     "is_a_share_scope",
     "is_st",
     "is_pt",
+    "is_delisting",
     "listing_date",
     "delisting_date",
     "delisting_date_unresolved",

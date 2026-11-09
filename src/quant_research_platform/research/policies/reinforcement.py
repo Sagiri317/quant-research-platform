@@ -22,7 +22,9 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.contracts.policies import PolicyDecision
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
+    PortfolioTargetBlocked,
 )
+from quant_research_platform.contracts.risk import RiskInputsUnavailable
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -35,6 +37,15 @@ from quant_research_platform.research.policies.environments import TradingEnv
 from quant_research_platform.research.policies.execution_schedules import (
     execution_fraction,
     execution_schedule_parameters,
+    validate_execution_as_of,
+)
+from quant_research_platform.research.policies.inventory_policy import (
+    inventory_policy_parameters,
+    inventory_targets,
+)
+from quant_research_platform.research.policies.portfolio_policy import (
+    portfolio_policy_parameters,
+    portfolio_targets,
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
@@ -188,12 +199,20 @@ def train_policy(config):
     return output
 
 
-def backtest_policy(config):
+def backtest_policy(config, *, portfolio_context=None):
     """Replay a frozen policy or explicit execution baseline into a native ledger."""
     config = _strict_config(
         config,
         {"episode", "output", "strategy"},
-        {"policy", "device", "volume_curve", "execution_parameters"},
+        {
+            "policy",
+            "device",
+            "volume_curve",
+            "execution_parameters",
+            "inventory_parameters",
+            "portfolio_parameters",
+            "portfolio_context",
+        },
     )
     episode = _episode(config["episode"])
     strategy = config["strategy"]
@@ -206,8 +225,62 @@ def backtest_policy(config):
         "signal_ac",
         "hold",
         "equal_weight",
+        "etf_inventory",
+        "stock_portfolio",
     }:
         raise ValueError("policy_strategy_invalid")
+    inventory_parameters = None
+    if strategy == "etf_inventory":
+        if "prediction" not in episode or episode["task"] != "inventory":
+            raise ValueError("inventory_prediction_episode_required")
+        inventory_parameters = inventory_policy_parameters(
+            config.get("inventory_parameters")
+        )
+        config["inventory_parameters"] = inventory_parameters
+    elif "inventory_parameters" in config:
+        raise ValueError("inventory_parameters_unused")
+    portfolio_parameters = None
+    if strategy == "stock_portfolio":
+        if episode["task"] != "portfolio" or "prediction" not in episode:
+            raise ValueError("stock_portfolio_prediction_episode_required")
+        portfolio_parameters = portfolio_policy_parameters(
+            config.get("portfolio_parameters")
+        )
+        config["portfolio_parameters"] = portfolio_parameters
+        if portfolio_context is not None and not callable(portfolio_context):
+            raise ValueError("portfolio_context_provider_invalid")
+        if (
+            "portfolio_context" in config
+            and portfolio_parameters["construction"] != "quantile_equal_weight"
+        ):
+            if portfolio_context is not None:
+                raise ValueError("portfolio_context_source_conflict")
+            from quant_research_platform.research.portfolios.risk_context import (
+                portfolio_risk_context,
+            )
+
+            provider = None
+
+            def portfolio_context(decision):
+                nonlocal provider
+                if provider is None:
+                    provider = portfolio_risk_context(
+                        config["portfolio_context"],
+                        window=TimeWindow(**episode["window"]),
+                        construction=portfolio_parameters["construction"],
+                    )
+                    config["portfolio_context"]["risk_model"] = (
+                        provider.risk_model.to_dict()
+                    )
+                return provider(decision)
+
+    elif (
+        "portfolio_parameters" in config
+        or "portfolio_context" in config
+        or portfolio_context is not None
+    ):
+        raise ValueError("portfolio_parameters_unused")
+    config["episode"] = episode
     env = TradingEnv([episode])
     model = normalization = None
     if strategy == "ppo":
@@ -260,11 +333,9 @@ def backtest_policy(config):
             {"as_of", "fractions", "cumulative_volume"},
             set(),
         )
-        lower = pd.Timestamp(
-            time_window_timestamp_interval(TimeWindow(**episode["window"]))[0]
+        validate_execution_as_of(
+            curve["as_of"], start=lower, error="policy_volume_curve_not_historical"
         )
-        if pd.Timestamp(curve["as_of"]) >= lower:
-            raise ValueError("policy_volume_curve_not_historical")
         x, y = (
             np.asarray(curve["fractions"], dtype=float),
             np.asarray(curve["cumulative_volume"], dtype=float),
@@ -295,13 +366,54 @@ def backtest_policy(config):
         env.on_batch = emit
         with closing_iterator(normalization if normalization is not None else env):
             observation, info = env.reset(seed=0)
-            done = False
+            done = env.done
             previous_desired = 0.0
             while not done:
                 if model is not None:
                     action, _ = model.predict(
                         normalization.normalize_obs(observation), deterministic=True
                     )
+                elif strategy == "etf_inventory":
+                    target = inventory_targets(
+                        env.decision,
+                        episode["account"]["parameters"]["maximum_inventory"],
+                        inventory_parameters,
+                    )
+                    observation, _, done, _, info = env.step_targets(target)
+                    continue
+                elif strategy == "stock_portfolio":
+                    context = (
+                        portfolio_context(env.decision)
+                        if portfolio_context is not None
+                        and portfolio_parameters["construction"]
+                        != "quantile_equal_weight"
+                        and env.decision.features.prediction_score.notna().any()
+                        else None
+                    )
+                    try:
+                        target, optimization = portfolio_targets(
+                            env.decision,
+                            episode["account"]["parameters"]["maximum_inventory"],
+                            portfolio_parameters,
+                            context=context,
+                        )
+                    except (RiskInputsUnavailable, PortfolioTargetBlocked):
+                        if "portfolio_context" not in config:
+                            raise
+                        # Unknown dependent facts leave this target undefined;
+                        # the native account still owns old orders and exits.
+                        target = pd.Series(np.nan, index=env.decision.features.index)
+                        optimization = None
+                    if optimization is not None:
+                        result["last_target_total_volatility"] = (
+                            optimization.predicted_total_volatility
+                        )
+                        result["last_target_tracking_error"] = None
+                        result["last_target_timestamp"] = (
+                            env.decision.timestamp.isoformat()
+                        )
+                    observation, _, done, _, info = env.step_targets(target)
+                    continue
                 elif episode["task"] == "execution":
                     lower, upper, _ = time_window_timestamp_interval(
                         TimeWindow(**episode["window"])
@@ -376,6 +488,72 @@ def backtest_policy(config):
                 "window": episode["window"],
                 "policy": config,
                 "execution": "native_account",
+                **(
+                    {
+                        "inventory_policy": {
+                            "kind": "transparent_quadratic_candidate_baseline",
+                            "forecast_horizon_seconds": episode["prediction"][
+                                "horizon_seconds"
+                            ],
+                            "decision_interval_seconds": episode["prediction"][
+                                "decision_interval_seconds"
+                            ],
+                            "holding_period": "realized_inventory_path",
+                            "capital_per_etf": 1_000_000.0 * episode["capital_scale"],
+                            "capital_scale": episode["capital_scale"],
+                            "capital_basis": "cash_plus_opening_inventory",
+                            "decision_cost": (
+                                "candidate_fees_plus_visible_spread_or_explicit_bps"
+                            ),
+                            "realized_cost": "native_execution_fees_only",
+                            "pending_assumption": "live_orders_not_inventory",
+                            "missing_prediction": (
+                                "no_new_target_existing_orders_continue"
+                            ),
+                        }
+                    }
+                    if strategy == "etf_inventory"
+                    else {}
+                ),
+                **(
+                    {
+                        "stock_portfolio_policy": {
+                            "construction": portfolio_parameters["construction"],
+                            "forecast_horizon_seconds": episode["prediction"][
+                                "horizon_seconds"
+                            ],
+                            "decision_interval_seconds": episode["prediction"][
+                                "decision_interval_seconds"
+                            ],
+                            "holding_period": "continuous_cross_session_holdings",
+                            "capital_scale": episode["capital_scale"],
+                            "benchmark": None,
+                            "risk_limits": portfolio_parameters.get("risk_limits"),
+                            "risk_scope": "target_only_not_guaranteed_realized_fills",
+                            "context_source": "native_point_in_time_daily_history"
+                            if "portfolio_context" in config
+                            and portfolio_parameters["construction"]
+                            != "quantile_equal_weight"
+                            else "caller_point_in_time_provider"
+                            if portfolio_context is not None
+                            else None,
+                            "decision_cost": "explicit_bps"
+                            if "trade_cost_bps" in portfolio_parameters
+                            else (
+                                "native_proportional_fee_plus_visible_spread_"
+                                "excluding_minimum_commission"
+                            )
+                            if portfolio_parameters["construction"] == "absolute_risk"
+                            else "ranking_only",
+                            "realized_cost": "native_execution_fees_only",
+                            "missing_prediction": (
+                                "no_new_target_existing_orders_continue"
+                            ),
+                        }
+                    }
+                    if strategy == "stock_portfolio"
+                    else {}
+                ),
             },
             produce=produce,
         )

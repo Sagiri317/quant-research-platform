@@ -99,8 +99,11 @@ def fit_model(
         raise ValueError("model_training_sample_empty")
     validation = None
     if validation_frames is not None:
-        if spec.model_algorithm not in SEQUENCE_ALGORITHMS or validation_cutoff is None:
-            raise ValueError("sequence_validation_configuration_invalid")
+        if spec.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}:
+            raise ValueError("model_validation_algorithm_unsupported")
+        validation_cutoff = strict_timestamp_series(
+            pd.Series([validation_cutoff]), error="invalid_validation_cutoff"
+        ).iloc[0]
         validation = fitting._collect_training_frame(
             validation_frames,
             spec,
@@ -124,12 +127,25 @@ def fit_model(
                 spec.model_algorithm, candidate_parameters, len(prepared.training)
             ),
         )
+    patience = spec.hyperparameters.get("early_stopping_rounds")
+    if patience is not None and validation is None:
+        raise ValueError("early_stopping_validation_required")
     result = fitting._fit_model_result(
         prepared,
         spec,
         estimator=build_estimator_from_model_spec(spec),
         validation=validation,
     )
+    if patience is not None:
+        result.metadata["early_stopping"].update(
+            validation_rows=len(validation.training),
+            validation_start=validation.row_counts["train_start"],
+            validation_end=validation.row_counts["train_end"],
+            label_available_max=validation.row_counts["label_available_max"],
+            validation_cutoff=time_value_isoformat(
+                validation_cutoff, preserve_datetime=True
+            ),
+        )
     return result
 
 
@@ -176,7 +192,7 @@ def fit(config: Mapping) -> Path:
             validation["windows"], pd.Timestamp(validation["cutoff"])
         )
         if (
-            spec.model_algorithm not in SEQUENCE_ALGORITHMS
+            spec.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}
             or pd.Timestamp(validation_windows[0].start) <= cutoff
         ):
             raise ValueError("model_validation_training_overlap")
@@ -354,7 +370,9 @@ def fit(config: Mapping) -> Path:
                         config["trading_calendar"],
                         time_window=TimeWindow(
                             pd.Timestamp(windows[0].start).date(),
-                            pd.Timestamp(windows[-1].end).date(),
+                            pd.Timestamp(
+                                (validation_windows or windows)[-1].end
+                            ).date(),
                         ),
                     )
                 )

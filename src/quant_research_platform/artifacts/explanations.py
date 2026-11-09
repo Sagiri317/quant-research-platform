@@ -21,7 +21,9 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 
-LINEAR_EXPLANATION_ALGORITHMS = frozenset({"linear_regression", "lasso_regression"})
+LINEAR_EXPLANATION_ALGORITHMS = frozenset(
+    {"linear_regression", "lasso_regression", "ridge_regression"}
+)
 
 ATTRIBUTION_METHODS = frozenset(
     {

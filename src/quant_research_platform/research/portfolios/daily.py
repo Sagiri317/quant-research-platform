@@ -90,6 +90,7 @@ from quant_research_platform.research.portfolios.schedules import (
     is_rebalance_session,
 )
 from quant_research_platform.research.risk import (
+    FactorExposureSession,
     FactorRiskConfig,
     FactorRiskEstimate,
     FactorRiskState,
@@ -465,6 +466,7 @@ def backtest_a_share(
         else None
     )
     previous_risk_cross: pd.DataFrame | None = None
+    previous_exposures: FactorExposureSession | None = None
     calibration_rows: list[dict[str, object]] = []
     pending_calibration: tuple[pd.Series, pd.Series, pd.Timestamp] | None = None
     waiting_alpha: tuple[pd.Series, pd.Timestamp] | None = None
@@ -629,7 +631,9 @@ def backtest_a_share(
                         exposures=previous_risk_cross, panel=panel
                     )
                     factor_risk.observe_return_session(
-                        risk_cross, closed_assets=view.closed_assets
+                        risk_cross,
+                        closed_assets=view.closed_assets,
+                        prepared=previous_exposures,
                     )
                 if previous_risk_cross is not None:
                     carried = previous_risk_cross.loc[
@@ -640,6 +644,9 @@ def backtest_a_share(
                         (current_cross, carried), ignore_index=True
                     )
                 previous_risk_cross = current_cross.copy(deep=True)
+                previous_exposures = factor_risk.prepare_exposure_session(
+                    current_cross, include_ineligible=True
+                )
                 calibration_start = alpha_calibration_start(
                     trading_sessions, as_of=decision_timestamp
                 )
@@ -824,7 +831,7 @@ def backtest_a_share(
                         benchmark_weights=benchmark_weights,
                         alpha=alpha,
                         factor_risk=factor_risk,
-                        current_cross=current_cross,
+                        current_cross=previous_exposures,
                         calibration_rows=calibration_rows,
                         calibration_intervals=calibration_intervals,
                         trading_sessions=trading_sessions,
@@ -1384,7 +1391,7 @@ def _enhanced_decision(
     benchmark_weights: pd.Series,
     alpha: pd.Series,
     factor_risk: FactorRiskState,
-    current_cross: pd.DataFrame,
+    current_cross: pd.DataFrame | FactorExposureSession,
     calibration_rows: list[dict[str, object]],
     calibration_intervals: pd.DataFrame,
     trading_sessions: pd.DatetimeIndex,

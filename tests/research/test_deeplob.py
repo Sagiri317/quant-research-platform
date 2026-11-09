@@ -189,6 +189,17 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 yield chunk
 
         monkeypatch.setattr(runner, "iter_dataset_chunks", measured_chunks)
+        built_predictions = []
+        predictor_type = type(result.prediction_model)
+        original_prediction_function = predictor_type.prediction_function
+
+        def measured_prediction_function(self, *, probabilities=False):
+            built_predictions.append(probabilities)
+            return original_prediction_function(self, probabilities=probabilities)
+
+        monkeypatch.setattr(
+            predictor_type, "prediction_function", measured_prediction_function
+        )
         output = predict(
             {
                 "model": str(fitted),
@@ -200,6 +211,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 "output": str(tmp_path / "predictions"),
             }
         )
+        assert built_predictions == [algorithm == "deeplob_classifier"]
         predictions, metadata = read_predictions(output)
         projection = ["timestamp", "asset_id", "prediction_score"]
         selected, _ = read_predictions(
@@ -259,6 +271,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                     "cutoff": "2018-02-16T08:00:00",
                     "selection_group": "quarterly",
                     "validation_axis": "single_asset_time_series",
+                    "sessions": ["2018-02-15", "2018-02-16"],
                     "output": str(tmp_path / "scores.json"),
                 }
             )
@@ -305,6 +318,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                         "cutoff": "2018-02-16T08:00:00",
                         "selection_group": "quarterly",
                         "validation_axis": "single_asset_time_series",
+                        "sessions": ["2018-02-15", "2018-02-16"],
                         "output": str(tmp_path / "invalid_scores.json"),
                     }
                 )
@@ -335,29 +349,28 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 ].tolist()
                 == [10] * 4
             )
-            evaluation = evaluate(
-                {
-                    "inputs": str(data),
-                    "predictions": {"direction": str(output)},
-                    "window": window,
-                    "cutoff": "2018-02-16T08:00:00",
-                    "evaluation": {
-                        "evaluation_id": "classification",
-                        "market_id": "a_share",
-                        "research_dataset_id": "book_test",
-                        "signals": [
-                            {
-                                "signal_id": "direction",
-                                "source_column": "direction",
-                                "source_kind": "prediction",
-                            }
-                        ],
-                        "label_columns": ["future_mid_return_3s"],
-                        "evaluation_axis": "single_asset_time_series",
-                    },
-                    "output": str(tmp_path / "evaluation"),
-                }
-            )
+            evaluation_config = {
+                "inputs": str(data),
+                "predictions": {"direction": str(output)},
+                "window": window,
+                "cutoff": "2018-02-16T08:00:00",
+                "evaluation": {
+                    "evaluation_id": "classification",
+                    "market_id": "a_share",
+                    "research_dataset_id": "book_test",
+                    "signals": [
+                        {
+                            "signal_id": "direction",
+                            "source_column": "direction",
+                            "source_kind": "prediction",
+                        }
+                    ],
+                    "label_columns": ["future_mid_return_3s"],
+                    "evaluation_axis": "single_asset_time_series",
+                },
+                "output": str(tmp_path / "evaluation"),
+            }
+            evaluation = evaluate(evaluation_config)
             metadata = parse_qrp_json_object(
                 (evaluation / "manifest.json").read_bytes()
             )["metadata"]
@@ -365,6 +378,28 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 "log_loss"
             ] == pytest.approx(metrics["validation_log_loss"])
             read_evaluation_outputs(evaluation)
+            common = evaluate(
+                {
+                    **evaluation_config,
+                    "sample_scope": "common",
+                    "evaluation": {
+                        **evaluation_config["evaluation"],
+                        "evaluation_axis": "cross_sectional",
+                    },
+                    "output": str(tmp_path / "common-classification"),
+                }
+            )
+            common_manifest, _ = read_evaluation_outputs(common)
+            common_metrics = common_manifest["metadata"]["classification_metrics"][
+                "direction"
+            ]
+            own_metrics = metadata["classification_metrics"]["direction"]
+            assert common_metrics["rows"] == own_metrics["rows"]
+            assert common_metrics["target_column"] == own_metrics["target_column"]
+            for name in ("class_threshold", *CLASSIFICATION_METRICS):
+                assert common_metrics[name] == pytest.approx(
+                    own_metrics[name], rel=1e-12, abs=1e-15
+                )
     finally:
         torch.set_num_threads(original_threads)
 

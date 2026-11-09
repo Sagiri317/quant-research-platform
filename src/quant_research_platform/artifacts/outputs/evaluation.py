@@ -232,6 +232,7 @@ def _evaluation_spec(metadata):
         label_columns=tuple(metadata["label_columns"]),
         label_availability_columns=metadata["label_availability_columns"],
         evaluation_axis=metadata["evaluation_axis"],
+        correlation_clock=metadata.get("correlation_clock", "observation"),
         filter_mode=metadata["filter_mode"],
         n_groups=metadata["evaluation_diagnostics"]["n_groups"],
     )

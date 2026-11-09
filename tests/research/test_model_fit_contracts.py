@@ -227,7 +227,7 @@ def test_estimator_mutation_cannot_change_shared_preprocessing():
     prepared = fitting._collect_training_frame(
         [frame], spec, fitting_cutoff="2020-01-02"
     )
-    original = pickle.dumps(prepared.preprocessing)
+    original = pickle.dumps((prepared.preprocessing, prepared.matrix))
     training = prepared.training.copy(deep=True)
 
     class MutatingEstimator:
@@ -241,7 +241,7 @@ def test_estimator_mutation_cannot_change_shared_preprocessing():
         fitting._fit_predictor(
             spec, prepared_training=prepared, estimator=MutatingEstimator()
         )
-    assert pickle.dumps(prepared.preprocessing) == original
+    assert pickle.dumps((prepared.preprocessing, prepared.matrix)) == original
     pd.testing.assert_frame_equal(prepared.training, training, check_exact=True)
 
 

@@ -57,6 +57,9 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 | `portfolio` | `kind=daily` 或 `hft`；股票与现金的非负动作归一化为目标权重 | 同库存任务，以原生账本的净值变化计奖 |
 
 执行短缺采用成交有符号金额减成交股数乘到达中价，再加真实费用；报告单位为 bps。
+原 `implementation_shortfall_bps` 继续只计已成交部分；终局另存未完成量、末次已观察中价、
+`opportunity_cost_bps` 和两者之和 `total_implementation_shortfall_bps`。未知终局观察保留未定义，
+不使用日频收盘价替代，不虚构成交。配置和同母单 maker/taker 对照见[高频执行说明](a-share-hft.md#被动委托信号与执行基准)。
 `unfinished_penalty_bps` 乘未完成比例后计入终局奖励，其他任务必须设为零。
 母单限额在账户执行处约束：有延迟、部分成交或等待动作时也不能反向买回或超额执行。
 该母单不改变其他股票的目标。
@@ -87,13 +90,145 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 [日频组合示例](../configs/research-learning/train-policy-portfolio.json)共用同一训练入口。
 固定资产顺序决定网络的观测和动作位置，股票池变化需重新设计训练输入和模型。
 
-`portfolio-statistics` 可直接读取 `backtest-policy` 的 `ledger/` 和
+`statistics-portfolio` 可直接读取 `backtest-policy` 的 `ledger/` 和
 `backtest-cost-model` 的输出目录。日频绩效、容量、Sharpe/CSCV 推断及显式基准、
 对照、市场暴露和行情分段比较使用原生账本，不要求普通选股组合的 `candidate` 配置。
 统计保留账本资本中的 `learned_policy`、`cost_aware_allocator` 身份，不从账户配置
 复制选股方法或 G/Q 选择事实。持仓归因和 G/Q 组合比较仍须有实际匹配的候选元数据，
 缺失时明确失败。高频账本按自身 `kind` 使用日终绩效口径，不与日频账本混合统计；
 学习账本也不因缺少 `candidate` 而被误判为高频。
+
+## ETF 动态库存基线
+
+`backtest-policy` 的 `strategy="etf_inventory"` 使用同一个 `TradingEnv`、高频账户、
+队列、成交与费用 owner，不建立子账户或第二个回测器。
+[动态 ETF 示例](../configs/research-learning/backtest-policy-etf-inventory.json)同时包含股票 ETF 与黄金 ETF。
+`episode.prediction.paths` 选择已保存的滚动向前预测；先训练/验证、之后预测，
+后续轮次可使用届时已成熟的历史样本，不额外要求独立最终留出。
+
+默认 `prediction.horizon_seconds=30`、`decision_interval_seconds=3`、
+`quote_visibility_delay_ms=1`，并与 PRED 原生目标定义、单位和时钟事实核对。
+仅接受未变换的小数未来中价收益，分类方向/概率分数不能冒充收益预测。
+策略不读取未来标签。PRED 的 timestamp 已是决策 T，不再加一次可见延迟；
+决策估值与成本盘口只取事件时刻不晚于 T−可见延迟的报价，订单仍需经过独立的
+`latency_ms`（默认 10ms）并在严格后续合格报价执行，不使用激活后的报价反推 T 的目标。
+预测缺行或缺值不产生新信号目标，不当作零收益；持仓保留，原单依原有效期和撤单规则推进，
+撤单确认前仍可能成交。完全没有预测的窗口也能保留实际账户与独立收盘恢复。
+
+每只 ETF 初始净资产默认 100 万元，`episode.capital_scale` 默认 1；
+总初始资本为 ETF 数量 × 100 万 × scale，**包括开盘底仓市值，不是额外赠送底仓**。
+`initial_inventory` 与 `maximum_inventory` 仍须明确给出股数；增加 scale 不自动改数量上限。
+实际成交受共享现金、库存/可卖量、买卖单位、盘口档位、参与率、部分成交及队列约束，
+资金更多不保证成交更多。股票 ETF 当日买入不可当日卖出，黄金 ETF 沿原 T+0 规则。
+
+每个有预测的决策事件重新计算目标 q。以实际库存 h、当日开盘底仓 b、最大库存 M、
+T 时可见中价 p 和未来收益预测 μ，比较以下透明效用：
+
+`p × μ × (q−b) − p × inventory_risk_bps/10000 × (q−b)²/(2M) − C(q−h) − E(b−q)`。
+
+`inventory_parameters.inventory_risk_bps` 默认 0，即不另加库存风险惩罚；例如显式设 10
+只是研究假设，不代表已校准或风险受控。候选包含实际库存、开盘底仓、活单完成后库存、
+预算边界，以及风险项为正时比例成本近似的四个二次驻点。再用候选实际交易量比较完整成本，
+不构造通用优化框架，也不声称含最低佣金时求得全局最优。活单未成交量只影响候选和可用预算，
+不能当成实际持仓；撤掉未成交买单不被误计成卖出。
+
+C 默认复用 `PreparedTradeCost.stock_components`，按候选的实际增减数量及 T 时可见盘口
+估计费用与不利价差，最低佣金不折成固定一手 bps。E 默认用同一可见状态估计回到底仓的成本，
+只是未来退出成本假设，不是未来实际费用。maker 不预先把可能捕获的价差当作保证收益。
+已有部分成交订单的最低佣金抵扣未进入候选估计，成本估计可偏保守；真实账本仍按原订单累计收费。
+可选 `trade_cost_bps` / `exit_cost_bps` 明确覆盖对应决策成本假设，实际成交费用始终只扣一次。
+成本与库存惩罚形成不交易区间，弱预测可能不动也可能恢复底仓，不写死一种行为。
+
+北京时间 14:50 起，账户独立尝试恢复**当日开盘底仓**，不依赖此时是否有预测，
+也不继续接受当天新的信号目标。T+1、资金或盘口不足时如实留下未完成及其账本事实。
+30 秒仅是预测期限，没有到期检查或强制反向。账本分别保存预测期、决策间隔、目标、在途量、
+实际成交时点与持仓轨迹，不把预测期限当作实际持有期。
+
+maker/taker 使用同一目标算法与预测输入；比较时使用相同的显式成本覆盖可冻结决策成本假设，
+或披露各自基于报价方式的成本估计。maker 增加原生 `passive` 和 `trades` 配置，
+两者使用相同参与率可作为对照，但不强行配平成交量，也不保证队列成交或收盘恢复完成。
+
+## 股票高频全市场组合
+
+`strategy="stock_portfolio"`、`episode.kind="hft"`、`task="portfolio"` 接入同一账户。
+[配置示例](../configs/research-learning/backtest-policy-stock-portfolio.json)默认使用低频
+`build_simple_target_weights` 的前 20% 等权选股；`portfolio_parameters.top_quantile`
+可调整分位，`construction="quantile_float_cap"` 使用同一低频市值加权实现。
+输入仍是共同决策 T 上的数值 PRED，默认每 3 秒、预测未来 30 秒；不把预测期限当持有期。
+初始净资产为 10 亿元 × `capital_scale`，包含已有持仓，单账户跨日持有且不恢复底仓。
+示例中的股票、数量上限和参与率只是可替换假设，不是全市场规模或成交能力结论。
+
+缺预测保留 NaN 目标与旧单。简单组合先保留缺预测持仓、尚未冻结的旧买单资金和
+T+1 不可卖部分，再分配剩余预算；数量上限截断后的剩余资金留现金。
+真实股数、订单现金冻结、盘口/队列容量、最低佣金、费用与 T+1 始终由原账户决定。
+独立 ST / 退整维护沿原账户执行，不依赖新的预测。
+没有指数权重时不构造替代 benchmark，也不称指数增强；既有低频指数增强入口不变。
+
+可显式选择 `construction="absolute_risk"`，`risk_limits` 使用 `AbsoluteRiskConfig`：
+单票、行业、风格、总波动率和换手上限均默认 `null`，表示未设置，不表示风险已受控。
+与相对风险优化复用同一个 SLSQP 核，不需要 benchmark 或日 ADV。
+输入可卖股数与 `maximum_inventory` 在求解内变成边界，不在求解后裁剪并假称仍满足风险。
+总波动率沿风险模型的年化单位，只作独立约束，不与 30 秒 alpha 直接相加。
+返回的总波动率不是 tracking error；未提供完整风险事实时诊断保持未定义，
+只有依赖缺失风险的策略计算受阻，已发布的 raw PRED 不会被抹除。
+默认决策成本复用原费用 owner 的比例费用及可见不利价差导数，**不含最低佣金**；
+`trade_cost_bps` 可显式替换该凸成本近似，真实账本仍按原规则扣费一次。
+
+市值权重和完整风险可通过可选 `portfolio_context` 源配置接入 Python 与 CLI：
+
+```json
+{
+  "portfolio_context": {
+    "inputs": {
+      "daily_risk": "data/daily_risk_pit",
+      "daily_returns": "data/daily_returns_pit"
+    },
+    "risk_exposure_input": {
+      "data_id": "daily_risk",
+      "available_at_column": "risk_available_at"
+    },
+    "daily_return_input": {"data_id": "daily_returns"},
+    "stock_pool": {
+      "stock_master": "data/stock_master_pit",
+      "status": "data/stock_status_pit",
+      "available_at_column": "published_at",
+      "trading_calendar": "data/trading_calendar"
+    }
+  }
+}
+```
+
+`stock_pool` 复用共同采样的同一配置与 owner。日收益源必须是完整研究市场，不能裁成持仓；
+其 timestamp 表示收益结束的日会话，listing_date 是该终点的上市生命，包含
+period_return、is_trading、实际区间起点 return_start_at 和真实成熟时刻 return_available_at。
+`daily_return_input` 可用 column、start_at_column、available_at_column 映射已有列；
+已有标签成熟列声明会直接复用，无需复制时间字段。不能把日日期午夜当收益已可知。
+缺失起点、成熟时刻或同生命证明时，只令相应收益不可用于拟合。
+
+每个历史起点使用共享 PIT 暴露和股票池资格，先冻结完整截面的预处理，再屏蔽未成熟或跨生命收益；
+收盘起点不要求处于连续竞价，但仍遵守真实交易日、ST/PT/退整和 IPO 资格。
+日历缺收益行仍推进该会话的年龄；明确休市不增加该证券的特质风险会话数。
+普通新日仅追加，过去收益晚到才重放模型当前保留的真实会话，复用已冻结的设计，
+不重放无关全历史、不拿日频方差缩放成 30 秒方差。模型定义继承风险源或显式 risk_model，保存到账本配置。
+原始前沿读取、标准化、WLS、协方差及特质风险继续分别复用现有 owner，没有第二套风险引擎。
+
+默认等权不打开这些输入；市值组合不打开日收益源。首次有需要的有效预测才建立 provider。
+若历史不足或所需风险事实未知，该次依赖风险的新目标为空，原账户、旧单及独立退出继续，
+不把未知风险填零，也不吞掉结构、数值或求解错误。
+
+Python 仍可用 `backtest_policy(config, portfolio_context=provider)` 注入已有实现；
+不可同时声明 native 源配置和另一个 provider。
+`provider(decision)` 返回 `as_of`、按 asset_id 索引的 `assets` DataFrame，
+以及可选 `factor_covariance`、`industry_columns`、`style_columns`。
+市值列为 `float_market_cap`，个股风险列为 `specific_variance`；
+可选 `trade_capacity_weight` 表示本次剩余容量，不能重复拿日 ADV 当作每 3 秒新容量。
+`as_of ≤ T` 仅检查快照时点，不能证明历史无前视：调用方须用
+`prepare_asof_risk_sessions` 的前一日且已发布、同生命周期暴露，沿完整日会话调用
+`FactorRiskState.observe_return_session`、`current_exposures`、`estimate`；不得以持仓小截面
+拟合全市场风险，也不得接事后 attribution 的未来端点。
+账本保存构造方式和配置，summary 保留最后一次优化目标的风险诊断。
+约束针对所求目标，不能保证部分成交或继续执行的旧单形成的实际持仓已满足；
+实际路径风险仍需按账本另行核验，不作零风险或已达标承诺。
 
 ## 自动因子搜索
 
@@ -159,6 +294,8 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 使用 `qrp agent` 启动或恢复量化研究会话。完整的配置、工具、交互、记忆、冻结评价和报告约定见 [Agent 文档](agent.md)；示例为 `configs/research-learning/agent.json`。
 
 ## 服务器隔离环境
+
+本节用于显式配置的容器 `python` 工具；默认 `qrp agent` 的 `terminal` 在宿主机执行，不受这些容器限制，见 [Agent 权限边界](agent.md#本地命令网络与复杂文件)。
 
 `Dockerfile.research` 使用 [conda-forge 的 Miniforge 镜像](https://github.com/conda-forge/miniforge-images)，
 以仓库 `environment.yml` 创建独立 Conda 环境。`.dockerignore` 仅放行源码、环境定义

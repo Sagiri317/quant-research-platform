@@ -175,3 +175,216 @@ def test_constant_projection_requires_two_eligible_values_and_keeps_null(eligibl
     actual = preprocess_risk_styles(cross, style_columns=("style",))
     expected = [0.0, 0.0, 0.0, np.nan] if sum(eligible) == 2 else [np.nan] * 4
     np.testing.assert_allclose(actual["style"], expected, equal_nan=True)
+
+
+def test_intraday_risk_reuses_unchanged_design_and_invalidates_real_dependencies(
+    monkeypatch,
+):
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.research.datasets.risk import (
+        prepare_asof_risk_sessions,
+    )
+
+    model = FactorRiskModel(("a", "b"), FactorRiskConfig(minimum_cross_section=15))
+    state = FactorRiskState(style_columns=model.style_columns, config=model.config)
+    first = pd.Timestamp("2024-01-02T01:30:00")
+    cross = _cross().assign(market_id="a_share", timestamp=first)
+    old = cross.assign(timestamp=pd.Timestamp("2023-12-29"), published=first)
+    newer = old.assign(
+        timestamp=pd.Timestamp("2024-01-01"), published=first + pd.Timedelta(seconds=6)
+    )
+    newer.loc[0, "a"] = 100.0
+    facts = pd.concat([old, newer], ignore_index=True)
+    cache = {}
+    svd = np.linalg.svd
+    calls = []
+
+    def observed_svd(*args, **kwargs):
+        calls.append(args[0].shape)
+        return svd(*args, **kwargs)
+
+    monkeypatch.setattr(np.linalg, "svd", observed_svd)
+    prepared = []
+    for seconds in (0, 3, 6):
+        at = first + pd.Timedelta(seconds=seconds)
+        frame = cross.assign(timestamp=at)
+        session = prepare_asof_risk_sessions(
+            frame, facts, model=model, available_at_column="published", cache=cache
+        )[at]
+        prepared.append(session)
+        response = frame.assign(asset_return=cross.asset_return + seconds * 0.01)
+        fitted = state.fit_return_session(response, prepared=session)
+        design = fitted.exposures.to_numpy()
+        root_weight = (
+            cross.set_index("asset_id")
+            .total_market_cap.reindex(fitted.asset_returns.index)
+            .to_numpy()
+            ** 0.25
+        )
+        expected = np.linalg.lstsq(
+            design * root_weight[:, None],
+            fitted.asset_returns.to_numpy() * root_weight,
+            rcond=None,
+        )[0]
+        np.testing.assert_allclose(
+            fitted.factor_returns, expected, rtol=1e-11, atol=1e-13
+        )
+    assert prepared[0] is prepared[1]
+    assert prepared[2] is not prepared[1]
+    assert len(calls) == 2
+    response.loc[0, "asset_return"] = np.nan
+    partial = state.fit_return_session(response, prepared=prepared[2])
+    assert len(calls) == 3
+    assert len(partial.asset_returns) == 23
+    # The prepared domain is unchanged by a response missing at its future endpoint.
+    assert len(prepared[2].frame) == 24
+    frame.loc[0, "listing_date"] = first.normalize()
+    changed_life = prepare_asof_risk_sessions(
+        frame, facts, model=model, available_at_column="published", cache=cache
+    )[at]
+    assert "asset_0" not in set(changed_life.frame.asset_id)
+
+
+def test_risk_fact_window_keeps_life_baselines_late_updates_and_latest_nulls(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.datasets import risk
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from tests.helpers.research_processed_inputs import assembly_source
+
+    # Observation dates and publication clocks are intentionally out of order.
+    rows = [
+        ("A", "01", "01", "01", 1.0),
+        ("A", "04", "04", "01", 4.0),
+        ("A", "02", "06 12:00", "01", 200.0),
+        ("A", "05", "06 12:00", "01", 5.0),
+        ("A", "06", "06 12:00", "01", 6.0),
+        ("B", "01", "01", "01", 1.0),
+        ("B", "04", "06 12:00", "01", 4.0),
+        ("B", "03", "08", "01", 3.0),
+        ("C", "01", "01", "01", 1.0),
+        ("C", "04", "04", "04", 44.0),
+        ("C", "05", "05", "04", np.nan),
+        ("D", "03", "03", "01", 3.0),
+        ("D", "05", None, "01", 5.0),
+    ]
+    frame = pd.DataFrame(
+        rows, columns=["asset_id", "timestamp", "published", "listing_date", "a"]
+    )
+    for column in ("timestamp", "published", "listing_date"):
+        frame[column] = pd.to_datetime(
+            "2024-01-" + frame[column], format="mixed"
+        ).dt.as_unit("ns")
+    frame = frame.assign(
+        market_id="a_share",
+        industry_standard_id="test",
+        industry_level1_code="A",
+        total_market_cap=100.0,
+    ).astype({"market_id": "string", "asset_id": "string"})
+    # Latest known observation wins, not latest publication of an older row.
+    expected = frame.iloc[[1, 3, 5, 6, 8, 10, 11]]
+    model = FactorRiskModel(("a",))
+    original = risk.iter_dataset_chunks
+    keys = ["asset_id", "listing_date", "timestamp"]
+    for order, batch_rows in ((frame, 2), (frame.iloc[::-1], 1000)):
+        root, _ = assembly_source(
+            tmp_path / str(batch_rows), order.reset_index(drop=True)
+        )
+        consumed = []
+
+        def measured(session, *, size=batch_rows, seen=consumed):
+            for chunk in original(session, batch_rows=size):
+                seen.extend(chunk.timestamp)
+                yield chunk
+
+        monkeypatch.setattr(risk, "iter_dataset_chunks", measured)
+        actual = risk.read_asof_risk_facts(
+            open_dataset_session(root),
+            model=model,
+            available_at_column="published",
+            time_window=TimeWindow("2024-01-06", "2024-01-06"),
+        )
+        pd.testing.assert_frame_equal(
+            actual.sort_values(keys).reset_index(drop=True),
+            expected.loc[:, actual.columns].sort_values(keys).reset_index(drop=True),
+        )
+        assert max(consumed) < pd.Timestamp("2024-01-06")
+        assert risk.read_asof_risk_facts(
+            open_dataset_session(root),
+            model=model,
+            available_at_column="published",
+            time_window=TimeWindow("2024-01-01", "2024-01-01"),
+        ).empty
+
+        # An observation published on its own date remains unavailable until
+        # the following date, including across a multi-day decision batch.
+        facts = risk.read_asof_risk_facts(
+            open_dataset_session(root),
+            model=model,
+            available_at_column="published",
+            time_window=TimeWindow("2024-01-06", "2024-01-07"),
+        )
+        identities = frame.iloc[[1, 5, 10, 11]][
+            ["market_id", "asset_id", "listing_date"]
+        ]
+        decisions = pd.concat(
+            [
+                identities.assign(timestamp=pd.Timestamp(at), eligible=True)
+                for at in ("2024-01-06 12:00", "2024-01-07 12:00")
+            ],
+            ignore_index=True,
+        )
+        prepared = risk.prepare_asof_risk_sessions(
+            decisions, facts, model=model, available_at_column="published"
+        )
+        for session, values in zip(
+            prepared.values(),
+            ([np.sqrt(1.5), 0.0, -np.sqrt(1.5)], np.array([5, -1, -4]) / np.sqrt(14)),
+            strict=True,
+        ):
+            styles = session.frame.set_index("asset_id").a
+            np.testing.assert_allclose(styles.loc[["A", "B", "D"]], values, atol=1e-14)
+            assert pd.isna(styles.loc["C"])
+
+
+def test_unknown_eligibility_only_excludes_dependent_risk_and_target_values():
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.research.features.transforms import (
+        a_share_feature_pipeline,
+    )
+    from quant_research_platform.research.labels.targets import a_share_model_target
+
+    model = FactorRiskModel(("a", "b"), FactorRiskConfig(minimum_cross_section=15))
+    cross = _cross().assign(
+        factor=np.cos(np.arange(24)),
+        forward_return_20d=np.cos(np.arange(24)) / 100,
+        forward_return_20d_available_at=pd.Timestamp("2024-01-05"),
+    )
+    cross["eligible"] = cross.eligible.astype("boolean")
+    cross.loc[23, "eligible"] = pd.NA
+    excluded = cross.fillna({"eligible": False})
+    state = FactorRiskState(style_columns=model.style_columns, config=model.config)
+    pd.testing.assert_frame_equal(
+        state.prepare_exposure_session(cross).frame,
+        state.prepare_exposure_session(excluded).frame,
+    )
+    target = a_share_model_target(cross, transform="risk_residual", risk_model=model)
+    expected = a_share_model_target(
+        excluded, transform="risk_residual", risk_model=model
+    )
+    pd.testing.assert_frame_equal(target, expected)
+    transformed = a_share_feature_pipeline(
+        cross,
+        factor_columns=("factor",),
+        recipe_id="a_share_canonical",
+        industry_neutralize=False,
+        size_neutralize=False,
+        risk_model=model,
+    )
+    pd.testing.assert_series_equal(transformed.factor, cross.factor)
+    pd.testing.assert_series_equal(transformed.eligible, cross.eligible)
+    assert transformed.feature_factor.iloc[:23].notna().all()
+    assert pd.isna(transformed.feature_factor.iloc[23])
+    assert pd.isna(target.model_target.iloc[23])

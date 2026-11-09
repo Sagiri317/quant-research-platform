@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 from quant_research_platform.contracts.experiments import (
     DEFAULT_ROOT_SEED,
     legal_training_rows,
@@ -36,15 +37,16 @@ from quant_research_platform.research.protocols.a_share import (
 )
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
+    _paired_mean_inference,
     _selected_analyses,
     _validate_bootstrap_configuration,
     cross_sectional_rank_ic,
+    daily_mean_frame,
     hac_mean,
     model_confidence_set,
     spa_reality_check,
     stationary_bootstrap_mean_ci,
     stepm_superior_models,
-    time_series_inference_summary,
 )
 from quant_research_platform.runtime.dataframes import (
     iter_complete_session_frames,
@@ -459,9 +461,12 @@ def build_a_share_statistics_tables(
                     )
     if not rank_records:
         raise ValueError("statistics_model_observations_empty")
-    rank_by_date = pd.DataFrame.from_records(rank_records)
     prediction_summaries = []
     if set(analyses) & {"prediction_hac", "prediction_bootstrap"}:
+        rank_by_date = daily_mean_frame(
+            pd.DataFrame.from_records(rank_records).set_index("timestamp"),
+            sessions=config.get("sessions"),
+        )
         summaries = (
             [(prediction_id, _PREDICTION_COLUMN)]
             if selections
@@ -500,20 +505,7 @@ def build_a_share_statistics_tables(
     if needs_losses:
         model_losses = pd.DataFrame.from_records(
             loss_records,
-            columns=(
-                "timestamp",
-                "sample_role",
-                "period_id",
-                "family_id",
-                "config_id",
-                "loss",
-                "observation_count",
-                "status",
-                "reason",
-                "common_date",
-                "common_observation_count",
-                "asset_coverage_id",
-            ),
+            columns=STATISTICS_TABLE_COLUMNS["model_losses.parquet"],
         )
     if needs_comparison:
         comparison_by_date = (
@@ -524,6 +516,13 @@ def build_a_share_statistics_tables(
             .rename(
                 columns={column: family for family, column in family_columns.items()}
             )
+        )
+        # Compare daily means on the same defined timestamp blocks as well as
+        # the same asset intersection; a constant prediction can undefine one IC.
+        common = np.isfinite(comparison_by_date).all(axis=1)
+        comparison_by_date = daily_mean_frame(
+            comparison_by_date.where(common, axis=0),
+            sessions=config.get("sessions"),
         )
         comparison, tests, robustness = _model_comparison(
             comparison_by_date,
@@ -713,35 +712,7 @@ def _paired_group_rankic(
     config,
     inference_blocker=None,
 ):
-    columns = (
-        "family_id",
-        "sample_role",
-        "status",
-        "reason",
-        "fdr_method",
-        "bootstrap_status",
-        "bootstrap_reason",
-        "observation_count",
-        "calendar_count",
-        "fdr_family_size",
-        "hac_lag",
-        "bootstrap_block_size",
-        "bootstrap_repetitions",
-        "bootstrap_seed",
-        "global_mean",
-        "quarterly_mean",
-        "mean_difference",
-        "standard_error",
-        "t_statistic",
-        "p_value",
-        "ci_lower",
-        "ci_upper",
-        "fdr_adjusted_p_value",
-        "fdr_alpha",
-        "confidence",
-        "bootstrap_lower",
-        "bootstrap_upper",
-    )
+    columns = STATISTICS_TABLE_COLUMNS["model_group_comparison.parquet"]
     if (
         selection_group == "global"
         or config["statistics"].get("group_comparison") is None
@@ -765,97 +736,52 @@ def _paired_group_rankic(
         quarterly_values = paired["quarterly"].unstack("family_id")
     if set(global_values.columns) != set(family_ids):
         raise ValueError("model_group_comparison_family_incomplete")
-    differences = quarterly_values - global_values
-    access = config["sample_role"]
-    fdr_method = (
-        None if _inference_blocker(config) is not None else declaration["fdr_method"]
+    paired = np.isfinite(global_values) & np.isfinite(quarterly_values)
+    global_values = daily_mean_frame(
+        global_values.where(paired), sessions=config.get("sessions")
     )
+    quarterly_values = daily_mean_frame(
+        quarterly_values.where(paired), sessions=config.get("sessions")
+    )
+    differences = quarterly_values - global_values
+    paired = np.isfinite(global_values) & np.isfinite(quarterly_values)
     blockers = (
         dict(inference_blocker)
         if isinstance(inference_blocker, Mapping)
         else dict.fromkeys(family_ids, inference_blocker)
     )
-    inferential = differences.copy()
     for family in family_ids:
-        if blockers.get(family) is not None:
-            inferential[family] = np.nan
-    inference = (
-        time_series_inference_summary(
-            inferential.set_axis(range(len(family_ids)), axis=1).reset_index(),
-            identity_column="timestamp",
-            max_lags=statistics["hac_lag"],
-            fdr_method=fdr_method,
-            fdr_alpha=declaration["alpha"],
-            fdr_family_size=len(family_ids),
-            confidence=declaration["confidence"],
-        )
-        .set_index("timestamp")
-        .set_axis(differences.columns)
-        if not differences.empty
-        and any(blockers.get(family) is None for family in family_ids)
-        else None
+        if not paired[family].any():
+            blockers[family] = "no_common_observations"
+    inference = _paired_mean_inference(
+        differences,
+        blockers=blockers,
+        max_lags=statistics["hac_lag"],
+        block_size=statistics["bootstrap_block"],
+        repetitions=statistics["bootstrap_repetitions"],
+        seed=declaration["seed"],
+        confidence=declaration["confidence"],
+        fdr_method=None
+        if _inference_blocker(config) is not None
+        else declaration["fdr_method"],
+        fdr_alpha=declaration["alpha"],
     )
     rows = []
     for family in family_ids:
-        blocker = blockers.get(family)
-        paired = np.isfinite(global_values[family]) & np.isfinite(
-            quarterly_values[family]
+        valid = paired[family]
+        values = differences.loc[valid, family]
+        rows.append(
+            {
+                **inference[family],
+                "family_id": family,
+                "sample_role": config["sample_role"],
+                "observation_count": len(values),
+                "calendar_count": len(differences),
+                "global_mean": float(global_values.loc[valid, family].mean()),
+                "quarterly_mean": float(quarterly_values.loc[valid, family].mean()),
+                "mean_difference": float(values.mean()) if len(values) else np.nan,
+            }
         )
-        values = differences.loc[paired, family].to_numpy(dtype="float64")
-        row = dict.fromkeys(columns, np.nan)
-        row.update(
-            family_id=family,
-            sample_role=access,
-            observation_count=len(values),
-            calendar_count=len(differences),
-            global_mean=float(global_values.loc[paired, family].mean()),
-            quarterly_mean=float(quarterly_values.loc[paired, family].mean()),
-            mean_difference=float(values.mean()) if len(values) else np.nan,
-            status="UNDEFINED",
-            reason=blocker if len(values) else "no_common_observations",
-            fdr_family_size=len(family_ids),
-            fdr_method=fdr_method or "NOT_APPLICABLE",
-            fdr_alpha=declaration["alpha"],
-            hac_lag=statistics["hac_lag"],
-            bootstrap_block_size=statistics["bootstrap_block"],
-            bootstrap_repetitions=statistics["bootstrap_repetitions"],
-            bootstrap_seed=declaration["seed"],
-            confidence=declaration["confidence"],
-            bootstrap_status="UNDEFINED",
-            bootstrap_reason=blocker if len(values) else "no_common_observations",
-        )
-        if inference is not None and blocker is None and len(values):
-            estimate = inference.loc[family]
-            for key in (
-                "status",
-                "reason",
-                "standard_error",
-                "t_statistic",
-                "p_value",
-                "ci_lower",
-                "ci_upper",
-                "fdr_adjusted_p_value",
-            ):
-                row[key] = estimate[key]
-            if len(values) != len(differences) or not np.isfinite(values).all():
-                row["bootstrap_reason"] = "incomplete_session_clock"
-            elif len(values) > statistics["bootstrap_block"]:
-                interval = stationary_bootstrap_mean_ci(
-                    values,
-                    block_size=statistics["bootstrap_block"],
-                    repetitions=statistics["bootstrap_repetitions"],
-                    seed=declaration["seed"],
-                    confidence=declaration["confidence"],
-                )
-                row.update(
-                    bootstrap_lower=interval.lower,
-                    bootstrap_upper=interval.upper,
-                    bootstrap_status="DEFINED",
-                    bootstrap_reason=None,
-                )
-            else:
-                row["bootstrap_reason"] = "bootstrap_block_exceeds_observations"
-        rows.append(row)
     return pd.DataFrame.from_records(rows, columns=columns)
 
 
@@ -1217,6 +1143,7 @@ def model_statistics(config):
         "root_seed",
         "comparison_model_id",
         "sample_role",
+        "sessions",
         "family_ids",
         "selection_group",
         "prediction_id",
@@ -1572,6 +1499,8 @@ def model_statistics(config):
             **_model_target_metadata(config, session.spec, window),
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
+            "correlation_clock": "trading_day",
+            "hac_lag_unit": "trading_session",
             "prediction_coverage": prediction_coverage,
             "selection_cutoffs": sorted(
                 {

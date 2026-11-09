@@ -11,7 +11,7 @@ from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.storage.datasets import write_dataset
 from tests.agents.support import ScriptedClient
 from tests.agents.test_research_tools import tool
-from tests.research.test_hft_portfolio import parameters, quotes
+from tests.helpers.high_frequency import parameters, quotes
 from tests.research.test_policy_learning import hft_episode
 
 

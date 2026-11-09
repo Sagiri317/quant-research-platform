@@ -13,82 +13,140 @@ from tests.correctness.test_direct_model_operations import data, fit_config, inp
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
-def test_sequence_cpu_fallback_roundtrip_causality_and_asset_isolation(
-    tmp_path, algorithm, monkeypatch
+@pytest.mark.parametrize("grouped", [False, True])
+def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
+    tmp_path, algorithm, grouped, monkeypatch
 ):
     import torch
+
+    from quant_research_platform.artifacts.explanations import read_explanation
+    from quant_research_platform.research.models.explanations import explain
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
     inputs = data(tmp_path)
-    original = pd.read_parquet(inputs)
-    hidden = original.timestamp.eq("2020-01-06") & original.asset_id.eq("a")
-    original.loc[hidden, "x"] = 40.0
-    original.loc[
-        hidden | (original.timestamp.eq("2020-01-08") & original.asset_id.eq("b")),
+    frame = pd.read_parquet(inputs)
+    episodes = ["X", "Y", "X", "X", "X", "X", "X", "Y", "X"]
+    frame["episode"] = frame.timestamp.dt.day.map(dict(enumerate(episodes, 1)))
+    hidden = frame.timestamp.eq("2020-01-05") & frame.asset_id.eq("a")
+    frame.loc[hidden, "x"] = 40.0
+    frame.loc[
+        hidden | (frame.timestamp.eq("2020-01-08") & frame.asset_id.eq("b")),
         "eligible",
     ] = False
-    original.to_parquet(inputs, index=False)
+    frame.loc[frame.timestamp.eq("2020-01-06"), "x"] = np.nan
+    frame.to_parquet(inputs, index=False, row_group_size=2)
+    spec = input_spec()
+    spec["column_roles"]["episode"] = "context"
     config = fit_config(tmp_path, inputs)
+    config["input_spec"] = spec
     config["model"].update(
         model_algorithm=algorithm,
-        hyperparameters={"hidden_size": 8, "epochs": 2, "sequence_length": 3},
+        hyperparameters={
+            "hidden_size": 4,
+            "epochs": 1,
+            "sequence_length": 4,
+            "sequence_group_columns": ["episode"] if grouped else [],
+        },
     )
+    config["validation"] = {
+        "windows": [{"start": "2020-01-04", "end": "2020-01-09"}],
+        "cutoff": "2020-01-09",
+    }
     fitted = fit(config)
     result, _ = load_model(fitted)
     model = result.prediction_model
-    frame = pd.read_parquet(inputs)
-    frame = frame.loc[frame.timestamp.ge("2020-01-04")].reset_index(drop=True)
-    expected = model.predict(frame)
-    changed = frame.copy()
+    assert result.metadata["resolved_hyperparameters"]["device"] == "cuda"
+
+    # Independent identities isolate contiguous episodes even when group values
+    # repeat. Default models instead skip empty rows and retain asset history.
+    reference = frame.copy()
+    if grouped:
+        segments = [0, 1, 2, 2, 2, 3, 4, 5, 6]
+        reference["asset_id"] += reference.timestamp.dt.day.map(
+            dict(enumerate(segments, 1))
+        ).astype(str)
+    expected = model.predict(reference)[frame.timestamp.ge("2020-01-04")]
+    future = frame.loc[frame.timestamp.ge("2020-01-04")].reset_index(drop=True)
+    np.testing.assert_allclose(
+        model.predict(future), expected, rtol=1e-6, atol=1e-6, equal_nan=True
+    )
+    unordered = future.iloc[::-1].assign(
+        timestamp=future.iloc[::-1].timestamp.astype(str)
+    )
+    np.testing.assert_allclose(
+        model.predict(unordered), expected[::-1], rtol=1e-6, atol=1e-6, equal_nan=True
+    )
+    assert model.predict(future.iloc[:0]).shape == (0,)
+    changed = future.copy()
     changed.loc[changed.timestamp.ge("2020-01-07"), "x"] += 100
-    before = frame.timestamp.lt("2020-01-07")
+    before = future.timestamp.lt("2020-01-07")
     np.testing.assert_allclose(
         model.predict(changed)[before], expected[before], rtol=1e-6, atol=1e-6
     )
-    changed = frame.copy()
+    changed = future.copy()
     changed.loc[changed.asset_id.eq("b"), "x"] += 100
-    other = frame.asset_id.ne("b")
+    other = future.asset_id.ne("b")
     np.testing.assert_allclose(
         model.predict(changed)[other], expected[other], rtol=1e-6, atol=1e-6
     )
-    stream = model.prediction_function()
-    streamed = np.concatenate(
-        [stream(part) for _, part in frame.groupby("timestamp", sort=True)]
-    )
-    np.testing.assert_allclose(streamed, expected, rtol=1e-6, atol=1e-6)
-    output = predict(
-        {
-            "model": str(fitted),
-            "inputs": str(inputs),
-            "output": str(tmp_path / "pred"),
-            "prediction_window": {"start": "2020-01-07", "end": "2020-01-09"},
-            "input_spec": input_spec(),
-        }
-    )
-    predictions, _ = read_predictions(output)
-    np.testing.assert_allclose(
-        predictions.prediction_score,
-        expected[~before & frame.eligible],
-        rtol=1e-6,
-        atol=1e-6,
-    )
-    assert result.metadata["resolved_hyperparameters"]["device"] == "cuda"
-    from quant_research_platform.artifacts.explanations import read_explanation
-    from quant_research_platform.research.models.explanations import explain
 
+    transformed_rows = []
+    transform = type(model.scaler).transform
+
+    def measured_transform(self, values):
+        transformed_rows.append(len(values))
+        return transform(self, values)
+
+    with monkeypatch.context() as measured:
+        measured.setattr(type(model.scaler), "transform", measured_transform)
+        streamed = model.prediction_function()
+        actual = np.concatenate(
+            [streamed(future.iloc[i : i + 1]) for i in range(len(future))]
+        )
+    np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6, equal_nan=True)
+    # Every new observed row is scaled once, plus the initial continuous tail.
+    assert sum(transformed_rows) == int(future.x.notna().sum()) + (3 if grouped else 9)
+    with pytest.raises(ValueError, match="sequence_prediction_time_not_increasing"):
+        streamed(future.iloc[-1:])
+
+    valid = future.x.notna() & future.eligible
+    curve = result.metadata["learning_curve"]
+    assert curve["sequence_lengths"]["max"] == (1 if grouped else 3)
+    assert curve["epochs"][-1]["validation_loss"] == pytest.approx(
+        np.mean((expected[valid] - future.loc[valid, "label"].to_numpy()) ** 2),
+        rel=1e-6,
+    )
+    window = {"start": "2020-01-05", "end": "2020-01-09"}
+    selected = valid & future.timestamp.ge(window["start"])
+    predictions, _ = read_predictions(
+        predict(
+            {
+                "model": str(fitted),
+                "inputs": str(inputs),
+                "input_spec": spec,
+                "output": str(tmp_path / "pred"),
+                "prediction_window": window,
+            }
+        )
+    )
+    pd.testing.assert_frame_equal(
+        predictions[["timestamp", "asset_id"]],
+        future.loc[selected, ["timestamp", "asset_id"]].reset_index(drop=True),
+        check_dtype=False,
+    )
+    np.testing.assert_allclose(
+        predictions.prediction_score, expected[selected], rtol=1e-6, atol=1e-6
+    )
     _, tables = read_explanation(
         explain(
             {
                 "model": str(fitted),
                 "inputs": str(inputs),
-                "input_spec": {
-                    **input_spec(),
-                    "column_units": {"label": "decimal_return"},
-                },
+                "input_spec": {**spec, "column_units": {"label": "decimal_return"}},
                 "output": str(tmp_path / "explanation"),
                 "methods": ["permutation"],
-                "window": {"start": "2020-01-07", "end": "2020-01-09"},
+                "window": window,
                 "sample_role": "validation",
                 "output_space": "model_output",
                 "selection": {"max_rows": 100, "max_dates": None},
@@ -102,13 +160,13 @@ def test_sequence_cpu_fallback_roundtrip_causality_and_asset_isolation(
             }
         )
     )
-    scored = frame.loc[~before & frame.eligible].copy()
-    scored["squared_error"] = (expected[~before & frame.eligible] - scored.label) ** 2
-    expected_mse = scored.groupby("timestamp").squared_error.mean().mean()
-    assert tables["permutation_summary"].baseline.iloc[0] == pytest.approx(
-        expected_mse, rel=1e-5
+    scored = future.loc[selected].copy()
+    scored["squared_error"] = (expected[selected] - scored.label) ** 2
+    summary = tables["permutation_summary"]
+    assert summary.baseline.iloc[0] == pytest.approx(
+        scored.groupby("timestamp").squared_error.mean().mean(), rel=1e-6
     )
-    assert tables["permutation_summary"].observation_count.iloc[0] == len(scored)
+    assert summary.observation_count.iloc[0] == len(scored)
 
 
 def test_xgboost_cpu_training_and_native_roundtrip(tmp_path):
@@ -127,7 +185,10 @@ def test_xgboost_cpu_training_and_native_roundtrip(tmp_path):
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
-def test_explicit_sequence_groups_and_historical_learning_curve(tmp_path, algorithm):
+@pytest.mark.parametrize("length", [1, 3])
+def test_explicit_sequence_groups_and_historical_learning_curve(
+    tmp_path, algorithm, length
+):
     inputs = data(tmp_path)
     frame = pd.read_parquet(inputs)
     frame["episode"] = (frame.timestamp.dt.day - 1) // 2
@@ -140,7 +201,7 @@ def test_explicit_sequence_groups_and_historical_learning_curve(tmp_path, algori
             "device": "cpu",
             "hidden_size": 4,
             "epochs": 2,
-            "sequence_length": 3,
+            "sequence_length": length,
             "sequence_group_columns": ["episode"],
         },
     )
@@ -154,7 +215,7 @@ def test_explicit_sequence_groups_and_historical_learning_curve(tmp_path, algori
     result, facts = load_model(fit(config))
     assert facts["validation"] == config["validation"]
     curve = result.metadata["learning_curve"]
-    assert curve["sequence_lengths"]["max"] == 2
+    assert curve["sequence_lengths"]["max"] == min(length, 2)
     assert result.prediction_model.scaler.mean_ == pytest.approx((2.0,))
     validation = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
     predicted = result.prediction_model.predict(validation)

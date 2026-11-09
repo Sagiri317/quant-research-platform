@@ -8,6 +8,91 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 from quant_research_platform.markets.prepare import _configured_spec
 
 
+def test_hft_default_examples_share_common_clock_and_keep_single_asset_paths():
+    import json
+    from datetime import datetime
+    from pathlib import Path
+
+    from quant_research_platform.contracts.models import _model_spec
+
+    root = Path(__file__).resolve().parents[2] / "configs"
+
+    def read(name):
+        return json.loads((root / name).read_text(encoding="utf-8"))
+
+    sampled = read("high-frequency/sample-hft-common.json")
+    assert sampled["stock_pool"]["available_at_column"] == "status_available_at"
+    assert set(sampled["stock_pool"]) == {
+        "stock_master",
+        "status",
+        "available_at_column",
+        "trading_calendar",
+    }
+    observed = read("high-frequency/sample-hft-observed.json")
+    assert "stock_pool" not in observed
+    assert observed["output"] != sampled["output"]
+    fitting, predicting, evaluating = (
+        read(name) for name in ("fit-hft.json", "predict-hft.json", "evaluate-hft.json")
+    )
+    assert sampled["interval_seconds"] == 3
+    assert sampled["quote_visibility_delay_ms"] == 1
+    assert sampled["max_quote_age_seconds"] == sampled["label_tolerance_seconds"] == 6
+    assert (
+        fitting["inputs"]
+        == predicting["inputs"]
+        == evaluating["inputs"]
+        == sampled["output"]
+    )
+    assert fitting["model"]["target_column"] == "future_mid_return_30s"
+    assert evaluating["evaluation"]["label_columns"] == ["future_mid_return_30s"]
+    assert predicting["model"] == fitting["output"]
+    assert list(evaluating["predictions"].values()) == [predicting["output"]]
+    assert evaluating["evaluation"]["evaluation_axis"] == "cross_sectional"
+    assert evaluating["sessions"]
+    legacy = {
+        verb: read(f"high-frequency/{verb}-hft-single-asset.json")
+        for verb in ("fit", "predict", "evaluate")
+    }
+    for prior in legacy.values():
+        inputs = prior["inputs"]
+        assert (inputs["path"] if isinstance(inputs, dict) else inputs) != sampled[
+            "output"
+        ]
+        assert prior["output"] not in {
+            fitting["output"],
+            predicting["output"],
+            evaluating["output"],
+        }
+    assert legacy["predict"]["model"] == legacy["fit"]["output"]
+    assert list(legacy["evaluate"]["predictions"].values()) == [
+        legacy["predict"]["output"]
+    ]
+    prior = legacy["evaluate"]
+    assert prior["inputs"]["row_filters"]
+    assert prior["evaluation"]["evaluation_axis"] == "single_asset_time_series"
+    assert prior["evaluation"]["correlation_clock"] == "observation"
+
+    stopping = read("high-frequency/fit-xgboost-early-stopping.json")
+    spec = _model_spec(stopping["model"])
+    assert stopping["inputs"] == sampled["output"]
+    assert stopping["output"] != fitting["output"]
+    assert spec.target_column == fitting["model"]["target_column"]
+    assert spec.hyperparameters["early_stopping_rounds"] > 0
+    fit_cutoff = datetime.fromisoformat(stopping["fit_cutoff"])
+    validation = stopping["validation"]
+    assert all(
+        datetime.fromisoformat(window["end"]) <= fit_cutoff
+        for window in stopping["fit_windows"]
+    )
+    assert all(
+        fit_cutoff
+        < datetime.fromisoformat(window["start"])
+        <= datetime.fromisoformat(window["end"])
+        <= datetime.fromisoformat(validation["cutoff"])
+        for window in validation["windows"]
+    )
+
+
 @pytest.mark.parametrize(
     "factor,sources",
     [

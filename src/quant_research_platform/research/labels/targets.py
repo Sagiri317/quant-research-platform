@@ -1,12 +1,14 @@
-"""Cross-sectional training targets from future returns and known exposures."""
+"""Cross-sectional targets and maturity from their actual return dependencies."""
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
@@ -14,21 +16,26 @@ from quant_research_platform.research.features.transforms import (
     _neutralize_cross_section,
     _winsorize,
 )
-from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.research.risk import FactorRiskState
 
 
 def a_share_model_target(
-    frame: pd.DataFrame, *, transform: str = "date_zscore", clip: str = "none"
-) -> pd.Series:
+    frame: pd.DataFrame,
+    *,
+    transform: str = "date_zscore",
+    clip: str = "none",
+    availability_column: str = "forward_return_20d_available_at",
+    risk_model: FactorRiskModel | None = None,
+    risk_sessions: dict | None = None,
+) -> pd.DataFrame:
     values = strict_finite_numeric_series(
         frame["forward_return_20d"],
         error="invalid_a_share_model_target_label",
         allow_null=True,
     ).astype("float64")
     eligible = strict_bool_series(
-        frame["eligible"], error="invalid_a_share_eligibility"
-    )
+        frame["eligible"], error="invalid_a_share_eligibility", allow_null=True
+    ).fillna(False)
     scoped = frame.loc[eligible].copy()
     scoped["forward_return_20d"] = values.loc[eligible]
     if transform == "industry_size_residual":
@@ -41,21 +48,14 @@ def a_share_model_target(
             _industry_group_codes(scoped).notna() & sizes.notna()
         ].copy()
     groups = scoped.groupby("timestamp", sort=False).indices
+    # Clipping can use returns whose rows are later excluded from risk regression.
+    dependencies = scoped.forward_return_20d.notna().reindex(
+        frame.index, fill_value=False
+    )
     if clip == "mad":
         scoped["forward_return_20d"] = _mad_winsorize(scoped.forward_return_20d, groups)
     elif clip == "quantile_1_99":
         scoped["forward_return_20d"] = _winsorize(scoped.forward_return_20d, groups)
-    if transform == "risk_residual":
-        state = FactorRiskState(style_columns=RISK_STYLE_COLUMNS)
-        target = pd.Series(np.nan, index=frame.index, dtype="float64")
-        for positions in groups.values():
-            cross = scoped.iloc[positions]
-            fit = state.fit_return_session(
-                cross.rename(columns={"forward_return_20d": "asset_return"})
-            )
-            if fit is not None:
-                target.loc[cross.index] = cross.asset_id.map(fit.residuals).to_numpy()
-        return target
     if transform == "industry_size_residual":
         scoped["industry_level1_code"] = _industry_group_codes(scoped)
         scoped = _neutralize_cross_section(
@@ -66,16 +66,51 @@ def a_share_model_target(
             rescale=False,
             time_groups=groups,
         )
+    risk_model = FactorRiskModel() if risk_model is None else risk_model
+    state = (
+        FactorRiskState(
+            style_columns=risk_model.style_columns, config=risk_model.config
+        )
+        if transform == "risk_residual"
+        else None
+    )
     target = pd.Series(np.nan, index=frame.index, dtype="float64")
     for positions in groups.values():
         group = scoped.forward_return_20d.iloc[positions]
-        valid = group.dropna()
-        if transform in {"raw", "industry_size_residual"}:
+        if state is not None:
+            cross = scoped.iloc[positions]
+            fit = state.fit_return_session(
+                cross.assign(asset_return=cross.forward_return_20d),
+                prepared=(risk_sessions or {}).get(
+                    pd.Timestamp(cross.timestamp.iloc[0])
+                ),
+            )
+            if fit is not None:
+                target.loc[cross.index] = cross.asset_id.map(fit.residuals).to_numpy()
+        elif transform in {"raw", "industry_size_residual"}:
             target.loc[group.index] = group
-        elif len(valid) >= 2:
+        elif group.notna().sum() >= 2:
             target.loc[group.index] = (
                 _stable_zscore(group)
                 if transform == "date_zscore"
                 else group.rank(method="average", pct=True)
             )
-    return target
+    if clip == "none":
+        dependencies = target.notna()
+    clocks = strict_timestamp_series(
+        frame[availability_column].where(dependencies),
+        error="invalid_model_target_label_availability",
+        allow_null=True,
+    )
+    if transform != "raw" or clip != "none":
+        unknown = (
+            (dependencies & clocks.isna())
+            .groupby(frame.timestamp, sort=False)
+            .transform("any")
+        )
+        clocks = (
+            clocks.groupby(frame.timestamp, sort=False)
+            .transform("max")
+            .where(target.notna() & ~unknown)
+        )
+    return pd.DataFrame({"model_target": target, "model_target_available_at": clocks})

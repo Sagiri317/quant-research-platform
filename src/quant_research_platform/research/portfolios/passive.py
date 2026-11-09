@@ -20,7 +20,12 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 
 
 def passive_parameters(value):
-    config = _strict_config(value, {"queue_model", "cancel_latency_ms"}, set())
+    config = _strict_config(
+        value, {"queue_model", "cancel_latency_ms"}, {"quote_level"}
+    )
+    level = config.get("quote_level", 1)
+    if type(level) is not int or not 1 <= level <= 10:
+        raise ValueError("passive_quote_level_invalid")
     if config["queue_model"] not in {"conservative", "probability"}:
         raise ValueError("passive_queue_model_invalid")
     config["cancel_latency_ms"] = strict_finite_float(
@@ -65,10 +70,10 @@ def observed_trades(quotes, trades):
         valid = (positions > 0) & (positions < len(book))
         rows = np.flatnonzero(valid)
         right, left = positions[valid], positions[valid] - 1
-        eligible = book.eligible.to_numpy(dtype=bool)
+        observed = np.isfinite(book.mid.to_numpy()) & (book.mid.to_numpy() > 0)
         segments = book.segment_id.to_numpy()
         rows = rows[
-            eligible[left] & eligible[right] & (segments[left] == segments[right])
+            observed[left] & observed[right] & (segments[left] == segments[right])
         ]
         selected.append(events.iloc[rows])
     result = pd.concat(selected, ignore_index=True) if selected else trades.iloc[:0]
@@ -128,7 +133,9 @@ class PassiveOrders:
         self.face_value_per_share = face_value_per_share
         self.orders = {}
         self.intents = {}
+        self.segments = {}
         self.counter = 0
+        self.last_trade = {}
 
     def _required_cash(
         self,
@@ -200,8 +207,12 @@ class PassiveOrders:
         return rows
 
     def trade(self, event):
-        order = self.orders.get(event.asset_id)
         at = int(event.timestamp.value)
+        identity = (at, int(event.source_row))
+        if identity <= self.last_trade.get(event.asset_id, (-1, -1)):
+            raise ValueError("passive_trade_event_reused_or_out_of_order")
+        self.last_trade[event.asset_id] = identity
+        order = self.orders.get(event.asset_id)
         if (
             order is None
             or at <= order.submitted_at
@@ -243,18 +254,52 @@ class PassiveOrders:
             costs,
         )
 
-    def quote(self, at, current, targets, signal_times, units, sellable, cash):
+    def request(self, at, targets, activation_times, *, segment_bound=True):
+        """Start cancellation at the decision clock, independently of quote latency."""
+        diagnostics = []
+        at_ns = int(at.value)
+        for asset, target in targets.items():
+            if (
+                asset not in self.intents
+                or target != self.intents[asset][0]
+                or not segment_bound
+            ):
+                self.intents[asset] = (
+                    float(target),
+                    at_ns,
+                    activation_times[asset],
+                    segment_bound,
+                )
+            order = self.orders.get(asset)
+            if order is not None and target != order.target and order.cancel_at is None:
+                order.cancel_at = at_ns + int(
+                    self.config["cancel_latency_ms"] * 1_000_000
+                )
+                diagnostics.append(
+                    PortfolioDiagnostic(
+                        asset, None, "passive_cancel_requested", text=order.order_id
+                    )
+                )
+                if order.cancel_at == at_ns:
+                    diagnostics.extend(self._remove(asset, "cancelled"))
+        return diagnostics
+
+    def quote(self, at, current, units, sellable, cash):
         diagnostics = []
         at_ns = int(at.value)
         free = cash - self.frozen_cash()
         for asset, row in current.iterrows():
+            observed = np.isfinite(row.mid) and row.mid > 0
             order = self.orders.get(asset)
-            if order is not None and (
-                not row.eligible or row.segment_id != order.segment
+            if not observed or (
+                asset in self.segments and row.segment_id != self.segments[asset]
             ):
+                if asset in self.intents and self.intents[asset][3]:
+                    self.intents.pop(asset)
+            self.segments[asset] = row.segment_id
+            if order is not None and (not observed or row.segment_id != order.segment):
                 free += self.reservation(order)
                 diagnostics.extend(self._remove(asset, "observation_gap"))
-                self.intents.pop(asset, None)
                 order = None
             if (
                 order is not None
@@ -290,42 +335,52 @@ class PassiveOrders:
                             - reduction * min(1.0, order.ahead / order.depth),
                         )
                     order.depth = depth
-            if asset in signal_times:
-                target = float(targets[asset])
-                self.intents[asset] = (target, signal_times[asset])
-                if (
-                    order is not None
-                    and target != order.target
-                    and order.cancel_at is None
-                ):
-                    order.cancel_at = at_ns + int(
-                        self.config["cancel_latency_ms"] * 1_000_000
-                    )
-                    diagnostics.append(
-                        PortfolioDiagnostic(
-                            asset, None, "passive_cancel_requested", text=order.order_id
-                        )
-                    )
-                    if order.cancel_at == at_ns:
-                        free += self.reservation(order)
-                        diagnostics.extend(self._remove(asset, "cancelled"))
-                        order = None
-            if order is not None or asset not in self.intents or not row.eligible:
+            if order is not None or asset not in self.intents or not observed:
                 continue
-            target, signal_at = self.intents[asset]
+            target, signal_at, activation_at, _ = self.intents[asset]
+            if activation_at is None or at_ns < activation_at or at_ns <= signal_at:
+                continue
             requested = target - units[asset]
             if not requested:
                 self.intents.pop(asset)
                 continue
             side = 1 if requested > 0 else -1
-            price = float(row.bid_px1 if side == 1 else row.ask_px1)
-            depth = float(row.bid_vol1 if side == 1 else row.ask_vol1)
+            if side == 1 and not bool(row.get("can_enter", True)):
+                diagnostics.append(
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "order_block_reason",
+                        text="stock_status_entry_blocked",
+                    )
+                )
+                continue
+            book_side = "bid" if side == 1 else "ask"
+            level = self.config.get("quote_level", 1)
+            prices = np.array(
+                [
+                    row.get(f"{book_side}_px{index}", np.nan)
+                    for index in range(1, level + 1)
+                ],
+                dtype="float64",
+            )
+            price = float(prices[-1])
+            depth = float(row.get(f"{book_side}_vol{level}", np.nan))
             if (
-                not np.isfinite(price)
-                or price <= 0
+                not np.isfinite(prices).all()
+                or (prices <= 0).any()
+                or (side * np.diff(prices) >= 0).any()
                 or not np.isfinite(depth)
                 or depth < 0
             ):
+                diagnostics.append(
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "order_block_reason",
+                        text="passive_depth_unavailable",
+                    )
+                )
                 continue
             minimum, increment, maximum = self.limits[asset]
             available = sellable[asset] if side == -1 else np.inf
@@ -391,6 +446,12 @@ class PassiveOrders:
                 (
                     PortfolioDiagnostic(
                         asset, None, "passive_order_submitted", text=order_id
+                    ),
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "passive_submitted_quantity",
+                        number=side * quantity,
                     ),
                     PortfolioDiagnostic(
                         asset,

@@ -8,7 +8,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.high_frequency import inventory_inputs
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.datasets.reading import materialize_dataset_session
-from tests.research.test_passive_execution import trade_input
+from tests.helpers.high_frequency import trade_input
 from tests.research.test_policy_learning import hft_episode
 
 

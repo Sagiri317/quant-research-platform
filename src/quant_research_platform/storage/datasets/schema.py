@@ -34,6 +34,7 @@ from quant_research_platform.contracts.json_codec import (
     qrp_json_object_snapshot,
     render_qrp_json_object,
 )
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.storage.datasets.paths import (
     parse_year_partition_label,
     timestamp_column_from_spec_payload,
@@ -89,6 +90,7 @@ _DATASET_SPEC_VARIANT_KEYS = (
     _DATASET_SPEC_INTERIM_KEYS,
     _DATASET_SPEC_PROCESSED_KEYS,
     _DATASET_SPEC_RESEARCH_KEYS,
+    _DATASET_SPEC_RESEARCH_KEYS | {"risk_model"},
 )
 _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
     {
@@ -803,6 +805,8 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 "key_coverage": dict(spec.key_coverage),
             }
         )
+        if spec.risk_model is not None:
+            payload["risk_model"] = spec.risk_model.to_dict()
     return payload
 
 
@@ -817,6 +821,11 @@ def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any
         "size_column": transform.size_column,
         "center": transform.center,
         "scale": transform.scale,
+        **(
+            {"risk_model": transform.risk_model.to_dict()}
+            if transform.risk_model is not None
+            else {}
+        ),
     }
 
 
@@ -971,6 +980,11 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             feature_transforms=tuple(feature_transforms),
             target_transform=spec.get("target_transform", "date_zscore"),
             target_clip=spec.get("target_clip", "none"),
+            risk_model=(
+                FactorRiskModel.from_mapping(spec["risk_model"])
+                if "risk_model" in spec
+                else None
+            ),
             label_columns=tuple(label_columns),
             filter_columns=tuple(filter_columns),
             eligibility_recipe=spec.get("eligibility_recipe"),
@@ -1273,7 +1287,7 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
         raise ValueError("dataset_feature_transforms_invalid")
     transforms = []
     for item in value:
-        if type(item) is not dict or set(item) != {
+        if type(item) is not dict or set(item) - {"risk_model"} != {
             "recipe_id",
             "source_columns",
             "output_groups",

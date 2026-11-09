@@ -10,6 +10,7 @@ from quant_research_platform.artifacts.outputs.evaluation_validation import (
     validate_evaluation_output_metadata_shape,
 )
 from quant_research_platform.artifacts.outputs.prediction_validation import (
+    PREDICTION_FACT_ALIASES,
     validate_prediction_output_metadata_shape,
 )
 from quant_research_platform.contracts.evaluations import (
@@ -107,6 +108,9 @@ def output_manifest_payload(
         "files": list(files),
     }
     validate_output_manifest(payload)
+    if definition_id == "prediction_outputs":
+        for name in PREDICTION_FACT_ALIASES:
+            payload["metadata"].pop(name)
     return payload
 
 
@@ -145,6 +149,11 @@ def evaluation_output_metadata(
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
         "evaluation_axis": spec.evaluation_axis,
+        **(
+            {"correlation_clock": spec.correlation_clock}
+            if spec.correlation_clock != "observation"
+            else {}
+        ),
         "signals": [
             {
                 "signal_id": signal.signal_id,

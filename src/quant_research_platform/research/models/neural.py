@@ -75,33 +75,41 @@ def _network(algorithm, width, parameters):
 
 
 def _ordered_context(frame, columns, context_columns=()):
+    """Order histories while preserving input row positions for prediction output."""
     context = frame.loc[
         :, list(dict.fromkeys(["asset_id", "timestamp", *columns, *context_columns]))
-    ].copy()
-    if context.asset_id.isna().any() or context.asset_id.map(type).ne(str).any():
+    ].reset_index(drop=True)
+    if any(type(asset) is not str for asset in context.asset_id):
         raise ValueError("sequence_asset_id_invalid")
     context["timestamp"] = pd.to_datetime(context.timestamp, errors="raise")
-    if context_columns and context.loc[:, context_columns].isna().any(axis=None):
+    if (
+        context_columns
+        and (
+            context.loc[:, context_columns].isna().any(axis=1)
+            & context.loc[:, columns].notna().any(axis=1)
+        ).any()
+    ):
         raise ValueError("sequence_context_missing")
     if (
         context.timestamp.isna().any()
         or context.duplicated(["asset_id", "timestamp"]).any()
     ):
         raise ValueError("sequence_keys_invalid")
-    return context.sort_values(["asset_id", "timestamp"], kind="stable").reset_index(
-        drop=True
-    )
+    return context.sort_values(["asset_id", "timestamp"], kind="stable")
 
 
-def _matrix(scaler, frame, columns, deep):
-    valid = (
+def _observed_rows(frame, columns, deep):
+    return (
         complete_book_rows(frame) if deep else ~frame.loc[:, columns].isna().all(axis=1)
-    )
+    ).to_numpy()
+
+
+def _matrix(scaler, frame, columns, valid):
     matrix = np.zeros((len(frame), len(scaler.columns)), dtype="float32")
     matrix[valid] = scaler.transform(frame.loc[valid, columns]).to_numpy(
         dtype="float32"
     )
-    return matrix, valid.to_numpy()
+    return matrix
 
 
 @dataclass
@@ -129,20 +137,52 @@ class SequencePredictor:
         columns = self.scaler.columns
         deep = self.algorithm in DEEPLOB_ALGORITHMS
         boundaries = sequence_context_columns(self.algorithm, self.parameters)
-        groups = [column for column in boundaries if column != "eligible"]
+        groups = boundaries
         classification = self.algorithm == "deeplob_classifier"
         length = self.parameters["sequence_length"]
         history = {}
-        seed = self.history.groupby("asset_id", sort=False)
-        seeds = {asset: frame for asset, frame in seed}
-        last_times = {}
-        segments = {}
+        previous = {
+            asset: block
+            for asset, block in self.history.groupby("asset_id", sort=False)
+        }
 
         def predict(frame):
             result = np.full((len(frame), 3) if probabilities else len(frame), np.nan)
-            work = frame.reset_index(drop=True)
-            _ordered_context(work, columns, boundaries)
-            matrix, valid = _matrix(self.scaler, work, columns, deep)
+            work = _ordered_context(frame, columns, boundaries)
+            if work.empty:
+                return result
+            parts, endpoints = [], []
+            offset = 0
+            assets = work.groupby("asset_id", sort=False)
+            for asset, block in assets:
+                first = block.timestamp.iloc[0]
+                prior = previous.get(asset)
+                if prior is None:
+                    prior = work.iloc[:0]
+                elif asset in history:
+                    if first <= prior.timestamp.iloc[-1]:
+                        raise ValueError("sequence_prediction_time_not_increasing")
+                else:
+                    prior = prior.loc[prior.timestamp.lt(first)]
+                previous[asset] = block.tail(1).copy()
+                # Each ordered asset history precedes its new rows.
+                parts.extend((prior, block))
+                offset += len(prior)
+                endpoints.extend(range(offset, offset + len(block)))
+                offset += len(block)
+            context = pd.concat(parts, ignore_index=True)
+            valid = _observed_rows(context, columns, deep)
+            starts = _sequence_starts(context, valid, groups, deep)
+            endpoints = np.asarray(endpoints)
+            matrix = _matrix(self.scaler, work, columns, valid[endpoints])
+            for asset, positions in assets.indices.items():
+                if asset not in history:
+                    first = endpoints[positions[0]]
+                    seed = slice(starts[first], first)
+                    initial = _matrix(
+                        self.scaler, context.iloc[seed], columns, valid[seed]
+                    )
+                    history[asset] = deque(initial[valid[seed]], maxlen=length)
             batches, indices = [], []
 
             def flush():
@@ -171,45 +211,15 @@ class SequencePredictor:
                 batches.clear()
                 indices.clear()
 
-            for i in work.sort_values(["timestamp", "asset_id"], kind="stable").index:
-                asset, timestamp = work.loc[i, ["asset_id", "timestamp"]]
-                timestamp = pd.Timestamp(timestamp)
-                if asset not in history:
-                    previous = seeds.get(asset)
-                    initial = []
-                    if previous is not None:
-                        previous = previous.loc[previous.timestamp.lt(timestamp)]
-                        if groups:
-                            previous = previous.loc[
-                                previous[groups].eq(work.loc[i, groups]).all(axis=1)
-                            ].reset_index(drop=True)
-                            invalid = ~_matrix(self.scaler, previous, columns, deep)[1]
-                            if invalid.any():
-                                previous = previous.iloc[
-                                    np.flatnonzero(invalid)[-1] + 1 :
-                                ]
-                        previous = (
-                            previous.tail(length - 1)
-                            if length > 1
-                            else previous.iloc[:0]
-                        )
-                        initial = list(_matrix(self.scaler, previous, columns, deep)[0])
-                    history[asset] = deque(initial, maxlen=length)
-                if asset in last_times and timestamp <= last_times[asset]:
-                    raise ValueError("sequence_prediction_time_not_increasing")
-                last_times[asset] = timestamp
-                if groups:
-                    segment = tuple(work.loc[i, groups])
-                    if asset in segments and segment != segments[asset]:
-                        history[asset].clear()
-                    segments[asset] = segment
-                if not valid[i]:
-                    if groups or deep:
-                        history[asset].clear()
+            for i, asset in enumerate(work.asset_id):
+                endpoint = endpoints[i]
+                if starts[endpoint] == endpoint:
+                    history[asset].clear()
+                if not valid[endpoint]:
                     continue
-                history[asset].append(matrix[i])
+                history[asset].append(matrix[i].copy())
                 batches.append(np.stack(history[asset]))
-                indices.append(i)
+                indices.append(work.index[i])
                 if len(batches) == self.parameters["batch_size"]:
                     flush()
             flush()
@@ -221,36 +231,34 @@ class SequencePredictor:
         return self.prediction_function()(frame)
 
 
+def _sequence_starts(context, valid, groups, deep):
+    """Start a new contiguous history on an asset/group change or required gap."""
+    keys = context[["asset_id", *groups]]
+    boundary = keys.ne(keys.shift()).any(axis=1).to_numpy()
+    if groups or deep:
+        boundary = boundary | ~valid | ~np.r_[False, valid[:-1]]
+    return np.maximum.accumulate(np.where(boundary, np.arange(len(context)), 0))
+
+
 def _sequence_arrays(prepared, spec, scaler):
     deep = spec.model_algorithm in DEEPLOB_ALGORITHMS
     boundaries = sequence_context_columns(spec.model_algorithm, spec.hyperparameters)
-    groups = [column for column in boundaries if column != "eligible"]
+    groups = boundaries
     context = _ordered_context(
-        prepared.sequence_context,
-        spec.input_columns,
-        boundaries,
+        prepared.sequence_context, spec.input_columns, boundaries
     )
-    matrix, valid = _matrix(scaler, context, spec.input_columns, deep)
-    keys = pd.MultiIndex.from_frame(context[["asset_id", "timestamp"]])
-    endpoints = keys.get_indexer(
-        pd.MultiIndex.from_frame(prepared.training[["asset_id", "timestamp"]])
+    valid = _observed_rows(context, spec.input_columns, deep)
+    if not (groups or deep):
+        context = context.loc[valid].reset_index(drop=True)
+        valid = valid[valid]
+    matrix = _matrix(scaler, context, spec.input_columns, valid)
+    keys = ["asset_id", "timestamp"]
+    endpoints = pd.MultiIndex.from_frame(context[keys]).get_indexer(
+        pd.MultiIndex.from_frame(prepared.training[keys])
     )
     if (endpoints < 0).any():
         raise ValueError("sequence_training_context_missing")
-    starts = context.groupby("asset_id", sort=False).indices
-    group_start = np.empty(len(context), dtype="int64")
-    for positions in starts.values():
-        group_start[positions] = positions[0]
-    if groups or deep:
-        group_keys = ["asset_id", *groups]
-        boundary = (
-            context[group_keys].ne(context[group_keys].shift()).any(axis=1).to_numpy()
-        )
-        boundary = boundary | ~valid | ~np.r_[False, valid[:-1]]
-        group_start = np.maximum.accumulate(
-            np.where(boundary, np.arange(len(context)), 0)
-        )
-    return context, matrix, endpoints, group_start
+    return context, matrix, endpoints, _sequence_starts(context, valid, groups, deep)
 
 
 def fit_sequence(prepared, spec, validation=None):
@@ -259,7 +267,7 @@ def fit_sequence(prepared, spec, validation=None):
 
     parameters = sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
     device = get_device(parameters["device"])
-    weights, scaler, _ = prepared.preprocessing
+    weights, scaler = prepared.preprocessing
     classification = spec.model_algorithm == "deeplob_classifier"
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
     target = prepared.training[spec.target_column].to_numpy(dtype="float64")
@@ -312,6 +320,8 @@ def fit_sequence(prepared, spec, validation=None):
         )
 
     curve = []
+    patience = parameters.get("early_stopping_rounds")
+    best_loss, best_iteration, best_state = np.inf, 0, None
     rng = np.random.default_rng(spec.random_seed)
     with torch.random.fork_rng():
         torch.manual_seed(spec.random_seed)
@@ -355,7 +365,22 @@ def fit_sequence(prepared, spec, validation=None):
                         errors = batch_errors(network, *validation_arrays, selected)
                         validation_sum += float(errors.sum().cpu())
                 point["validation_loss"] = validation_sum / len(v_actual) * scale**2
+            if point["validation_loss"] is not None and not np.isfinite(
+                point["validation_loss"]
+            ):
+                raise ValueError("model_validation_loss_nonfinite")
             curve.append(point)
+            if patience is not None:
+                if point["validation_loss"] < best_loss:
+                    best_loss, best_iteration = point["validation_loss"], epoch
+                    best_state = {
+                        name: value.detach().cpu().clone()
+                        for name, value in network.state_dict().items()
+                    }
+                elif epoch - best_iteration >= patience:
+                    break
+        if best_state is not None:
+            network.load_state_dict(best_state)
         state = {
             name: value.detach().cpu() for name, value in network.state_dict().items()
         }
@@ -370,14 +395,23 @@ def fit_sequence(prepared, spec, validation=None):
     lengths = np.minimum(
         endpoints - group_start[endpoints] + 1, parameters["sequence_length"]
     )
-    return predictor, {
-        "metric": "log_loss" if classification else "mse",
-        "training_loss_scope": "online_epoch_weighted",
-        "validation_loss_scope": "epoch_end_row_mean",
-        "epochs": curve,
-        "sequence_lengths": {
-            "min": int(lengths.min()),
-            "mean": float(lengths.mean()),
-            "max": int(lengths.max()),
+    stopping = (
+        {"best_iteration": best_iteration, "iterations": len(curve)}
+        if patience is not None
+        else None
+    )
+    return (
+        predictor,
+        {
+            "metric": "log_loss" if classification else "mse",
+            "training_loss_scope": "online_epoch_weighted",
+            "validation_loss_scope": "epoch_end_row_mean",
+            "epochs": curve,
+            "sequence_lengths": {
+                "min": int(lengths.min()),
+                "mean": float(lengths.mean()),
+                "max": int(lengths.max()),
+            },
         },
-    }
+        stopping,
+    )

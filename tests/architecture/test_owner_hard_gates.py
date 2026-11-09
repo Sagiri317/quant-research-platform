@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 from tests.helpers.import_graph import import_edges_under
@@ -36,20 +35,6 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(
         for module in factor_modules
     )
 
-    producer_path = (
-        SOURCE_ROOT
-        / "markets"
-        / "implementations"
-        / "a_share"
-        / "processed"
-        / "producer.py"
-    )
-    producer_tree = ast.parse(producer_path.read_text(encoding="utf-8"))
-    assert (
-        "quant_research_platform.markets.implementations.a_share.fundamentals.construct_ttm_events"
-        in _canonical_references(producer_tree)
-    )
-
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
     )
@@ -68,40 +53,35 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(
     )
 
 
-def test_pit_reference_check_accepts_owner_aliases_and_rejects_wrong_owner():
-    owner = "quant_research_platform.markets.implementations.a_share.fundamentals"
-    for source in (
-        f"from {owner} import construct_ttm_events as construct\nconstruct()",
-        "from quant_research_platform.markets.implementations.a_share "
-        "import fundamentals as facts\nfacts.construct_ttm_events()",
-        f"import {owner} as facts\nfacts.construct_ttm_events()",
-    ):
-        assert owner + ".construct_ttm_events" in _canonical_references(
-            ast.parse(source)
-        )
-    source = "from wrong_owner import construct_ttm_events\nconstruct_ttm_events()"
-    assert owner + ".construct_ttm_events" not in _canonical_references(
-        ast.parse(source)
+def test_financial_pit_owner_converts_quarterly_flows_to_ttm():
+    import pandas as pd
+
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
     )
+    from tests.helpers.a_share_sources import _synthetic_financial_frames
 
-
-def _canonical_references(tree):
-    bindings = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
-            for alias in node.names:
-                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                bindings[alias.asname or alias.name.split(".")[0]] = (
-                    alias.name if alias.asname else alias.name.split(".")[0]
-                )
-    references = set()
-    for node in ast.walk(tree):
-        parts = []
-        while isinstance(node, ast.Attribute):
-            parts.append(node.attr)
-            node = node.value
-        if isinstance(node, ast.Name) and node.id in bindings:
-            references.add(".".join((bindings[node.id], *reversed(parts))))
-    return references
+    source = _synthetic_financial_frames()
+    source["trading_calendar"] = pd.DataFrame(
+        {
+            "calendar_date": pd.bdate_range("2019-01-01", "2021-02-01"),
+            "source_market_type": 4,
+            "is_trading_day": True,
+        }
+    )
+    events = producer._financial_pit_events(
+        source,
+        required_sources=(
+            "financial_income",
+            "financial_first_disclosure",
+            "trading_calendar",
+        ),
+    )
+    quarter = events.loc[
+        events.asset_id.eq("000001")
+        & events.metric_id.eq("operating_revenue")
+        & events.report_period.eq(pd.Timestamp("2020-06-30"))
+    ]
+    # Current half-year + prior annual - prior half-year = 6 + 4 - 2.
+    assert quarter.value.tolist() == [8.0]
+    assert quarter.available_at.tolist() == [pd.Timestamp("2020-07-21")]

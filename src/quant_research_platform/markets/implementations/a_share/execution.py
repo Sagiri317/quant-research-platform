@@ -85,6 +85,15 @@ def round_stock_orders(requested, minimum, increment, *, sellable=None):
     return rounded
 
 
+def stock_order_split(quantities, minimum, maximum):
+    """Return full-order counts and the final legal middle/last quantities."""
+    full = np.maximum(0.0, np.ceil(quantities / maximum) - 1)
+    last = quantities - full * maximum
+    split = (full > 0) & (last < minimum)
+    middle = np.where(split, maximum + last - minimum, 0.0)
+    return full - split, middle, np.where(split, minimum, last)
+
+
 @dataclass(frozen=True, slots=True)
 class FeeRule:
     """One canonical effective-dated rule supplied by a reference source."""
@@ -374,12 +383,7 @@ class PreparedTradeCost:
             else None
         )
         values = list(self.components(notionals, adv20, face_value_notional=face))
-        full = np.maximum(0.0, np.ceil(quantities / maximum) - 1)
-        last = quantities - full * maximum
-        split = (full > 0) & (last < minimum)
-        middle = np.where(split, maximum + last - minimum, 0.0)
-        full = full - split
-        last = np.where(split, minimum, last)
+        full, middle, last = stock_order_split(quantities, minimum, maximum)
 
         def commission(units):
             return np.where(

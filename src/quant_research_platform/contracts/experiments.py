@@ -91,17 +91,14 @@ def legal_training_mask(
     if missing:
         raise ValueError("legal_training_columns_missing: " + ", ".join(missing))
     eligible = frame["eligible"]
-    if not pd.api.types.is_bool_dtype(eligible) or bool(eligible.isna().any()):
+    if not pd.api.types.is_bool_dtype(eligible):
         raise ValueError("invalid_training_eligibility")
-    keep = (
-        label_maturity_mask(
-            frame,
-            fitting_cutoff=fitting_cutoff,
-            availability_column=availability_column,
-            target_column=target_column,
-        )
-        & eligible
-    )
+    keep = label_maturity_mask(
+        frame,
+        fitting_cutoff=fitting_cutoff,
+        availability_column=availability_column,
+        target_column=target_column,
+    ) & eligible.fillna(False)
     for column in feature_columns:
         values = strict_finite_numeric_series(
             frame[column], error=f"invalid_training_value: {column}", allow_null=True

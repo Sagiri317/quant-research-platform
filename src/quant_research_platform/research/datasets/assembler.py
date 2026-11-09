@@ -17,6 +17,7 @@ from quant_research_platform.contracts.columns import (
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     DECISION_CONTEXT_COLUMNS,
     TimeWindow,
@@ -27,6 +28,11 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.datasets.risk import (
+    prepare_asof_risk_sessions,
+    read_asof_risk_facts,
+    risk_exposure_columns,
+)
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
 )
@@ -35,7 +41,7 @@ from quant_research_platform.research.filtering import (
     a_share_eligibility_columns,
 )
 from quant_research_platform.research.labels.targets import a_share_model_target
-from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+from quant_research_platform.research.risk import FactorRiskState
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
@@ -56,6 +62,7 @@ def _assemble_research_dataset_from_sessions(
     time_window: TimeWindow,
     input_sessions: Mapping[str, DatasetSession],
     metadata: Mapping[str, object] | None,
+    risk_exposure_input: Mapping | None = None,
 ) -> Path:
     artifact_root = require_artifact_root(output_root)
     metadata = dict(metadata or {})
@@ -87,6 +94,7 @@ def _assemble_research_dataset_from_sessions(
         sessions=input_sessions,
         time_window=time_window,
         diagnostics=diagnostics,
+        risk_exposure_input=risk_exposure_input,
     )
 
     write_dataset(
@@ -104,6 +112,7 @@ def _iter_joined_processed_chunks(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     diagnostics: dict | None = None,
+    risk_exposure_input: Mapping | None = None,
 ) -> Iterator[pd.DataFrame]:
     base_session = sessions[dataset_spec.base_input_data_id]
     physical_order = (
@@ -115,6 +124,18 @@ def _iter_joined_processed_chunks(
     if not closed:
         stop -= pd.Timedelta(1, "ns")
     pending = None
+    risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
+    risk_facts = (
+        read_asof_risk_facts(
+            sessions[risk_input_id],
+            model=dataset_spec.risk_model,
+            available_at_column=risk_exposure_input["available_at_column"],
+            time_window=time_window,
+        )
+        if risk_input_id is not None
+        else None
+    )
+    risk_cache = {}
     with closing_iterator(
         iter_complete_time_frames(
             iter_dataset_chunks(base_session), timestamp_column="timestamp"
@@ -122,7 +143,7 @@ def _iter_joined_processed_chunks(
     ) as chunks:
         auxiliary = {}
         for data_id in dataset_spec.input_data_ids:
-            if data_id == dataset_spec.base_input_data_id:
+            if data_id in {dataset_spec.base_input_data_id, risk_input_id}:
                 continue
             # Physical partitions may be asset-major. Read selected rows once,
             # then order their actual timestamps before slicing base domains.
@@ -155,6 +176,9 @@ def _iter_joined_processed_chunks(
                     input_frames=auxiliary_through(end),
                     base_frame=pending,
                     diagnostics=diagnostics,
+                    risk_exposure_input=risk_exposure_input,
+                    risk_facts=risk_facts,
+                    risk_cache=risk_cache,
                 )
                 yield chunk.sort_values(
                     list(physical_order), kind="mergesort", ignore_index=True
@@ -177,6 +201,9 @@ def _iter_joined_processed_chunks(
             input_frames=auxiliary_through(stop),
             base_frame=pending,
             diagnostics=diagnostics,
+            risk_exposure_input=risk_exposure_input,
+            risk_facts=risk_facts,
+            risk_cache=risk_cache,
         )
         yield chunk.sort_values(
             list(physical_order), kind="mergesort", ignore_index=True
@@ -189,8 +216,12 @@ def _join_processed_inputs(
     input_frames: Mapping[str, pd.DataFrame],
     base_frame: pd.DataFrame,
     diagnostics: dict | None = None,
+    risk_exposure_input: Mapping | None = None,
+    risk_facts: pd.DataFrame | None = None,
+    risk_cache: dict | None = None,
 ) -> pd.DataFrame:
     base = dataset_spec.base_input_data_id
+    risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
     assembled = base_frame.reset_index(drop=True)
     for frame in (base_frame, *input_frames.values()):
         if (
@@ -200,7 +231,7 @@ def _join_processed_inputs(
             raise ValueError("research_dataset_market_mismatch")
     base_keys = _scalar_keys(assembled, dataset_spec.primary_key)
     for input_data_id in dataset_spec.input_data_ids:
-        if input_data_id == base:
+        if input_data_id in {base, risk_input_id}:
             continue
         input_frame = input_frames[input_data_id]
         positions = _input_key_positions(
@@ -226,10 +257,23 @@ def _join_processed_inputs(
         else:
             payload = payload.iloc[positions]
         assembled = pd.concat([assembled, payload.reset_index(drop=True)], axis=1)
-    assembled = _add_a_share_semantic_columns(assembled, dataset_spec)
+    risk_sessions = {}
+    assembled = _add_a_share_semantic_columns(
+        assembled,
+        dataset_spec,
+        risk_sessions=risk_sessions,
+        risk_facts=risk_facts,
+        risk_cache=risk_cache,
+        risk_available_at=(
+            risk_exposure_input["available_at_column"] if risk_exposure_input else None
+        ),
+    )
     if dataset_spec.feature_transforms:
         assembled = apply_feature_transforms(
-            assembled, dataset_spec.feature_transforms, diagnostics=diagnostics
+            assembled,
+            dataset_spec.feature_transforms,
+            diagnostics=diagnostics,
+            risk_sessions=risk_sessions,
         )
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
@@ -280,7 +324,7 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
         columns.extend(transform.support_columns)
         columns.extend(transform.source_columns)
     generated = _generated_semantic_columns(spec)
-    if "eligible" in generated:
+    if "eligible" in generated and spec.eligibility_recipe is not None:
         columns.extend(
             a_share_eligibility_columns(
                 minimum_listing_sessions=spec.minimum_listing_sessions,
@@ -309,8 +353,8 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
                 (
                     "industry_standard_id",
                     "industry_level1_code",
-                    "total_market_cap",
-                    *RISK_STYLE_COLUMNS,
+                    spec.risk_model.config.weight_column,
+                    *spec.risk_model.style_columns,
                 )
             )
         columns.extend(
@@ -330,11 +374,12 @@ def _processed_input_columns(
     processed_spec: ProcessedDataSpec,
     *,
     existing_columns: tuple[str, ...],
+    extra_columns: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
     existing = set(existing_columns)
-    output_columns = set(_required_input_columns(dataset_spec)).difference(
-        _generated_semantic_columns(dataset_spec)
-    )
+    output_columns = set(
+        (*_required_input_columns(dataset_spec), *extra_columns)
+    ).difference(_generated_semantic_columns(dataset_spec))
     columns: list[str] = []
     for column in dataset_spec.primary_key:
         columns.append(column)
@@ -350,7 +395,10 @@ def _processed_input_columns(
 
 
 def _validate_research_input_specs(
-    dataset_spec: ResearchDatasetSpec, processed_specs: Mapping[str, ProcessedDataSpec]
+    dataset_spec: ResearchDatasetSpec,
+    processed_specs: Mapping[str, ProcessedDataSpec],
+    *,
+    provided_columns: tuple[str, ...] = (),
 ) -> None:
     for data_id, processed_spec in processed_specs.items():
         missing_key_columns = [
@@ -368,7 +416,9 @@ def _validate_research_input_specs(
         _validate_asset_time_key(
             processed_spec.primary_key, processed_spec.column_roles
         )
-    _require_research_required_columns_available(dataset_spec, processed_specs)
+    _require_research_required_columns_available(
+        dataset_spec, processed_specs, provided_columns=provided_columns
+    )
     role_by_column: dict[str, set[ColumnRole]] = {}
     kind_by_column: dict[str, set[ProcessedDataKind]] = {}
     for processed_spec in processed_specs.values():
@@ -467,7 +517,10 @@ def _require_columns_from_roles_or_kinds(
 
 
 def _require_research_required_columns_available(
-    dataset_spec: ResearchDatasetSpec, processed_specs: dict[str, ProcessedDataSpec]
+    dataset_spec: ResearchDatasetSpec,
+    processed_specs: dict[str, ProcessedDataSpec],
+    *,
+    provided_columns: tuple[str, ...] = (),
 ) -> None:
     available = {
         column
@@ -477,6 +530,7 @@ def _require_research_required_columns_available(
     missing = sorted(
         set(_required_input_columns(dataset_spec))
         .difference(available)
+        .difference(provided_columns)
         .difference(
             _generated_feature_columns(dataset_spec)
             + _generated_semantic_columns(dataset_spec)
@@ -509,6 +563,15 @@ def _generated_feature_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
     )
 
 
+def _unfiltered_hft_scope(spec: ResearchDatasetSpec) -> bool:
+    return (
+        spec.market_id == "a_share"
+        and spec.base_input_data_id == "hft_panel"
+        and spec.frequency == "tick"
+        and spec.eligibility_recipe is None
+    )
+
+
 def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
     if dataset_spec.market_id != MARKET_ID:
         return ()
@@ -516,7 +579,10 @@ def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str,
     if dataset_spec.feature_transforms or "model_target" in dataset_spec.label_columns:
         needed.add("eligible")
     generated = []
-    if dataset_spec.eligibility_recipe is not None and "eligible" in needed:
+    if "eligible" in needed and (
+        dataset_spec.eligibility_recipe is not None
+        or _unfiltered_hft_scope(dataset_spec)
+    ):
         generated.append("eligible")
     if "model_target" in dataset_spec.label_columns:
         generated.extend(("model_target", "model_target_available_at"))
@@ -524,13 +590,19 @@ def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str,
 
 
 def _add_a_share_semantic_columns(
-    frame: pd.DataFrame, dataset_spec: ResearchDatasetSpec
+    frame: pd.DataFrame,
+    dataset_spec: ResearchDatasetSpec,
+    *,
+    risk_sessions: dict | None = None,
+    risk_facts: pd.DataFrame | None = None,
+    risk_cache: dict | None = None,
+    risk_available_at: str | None = None,
 ) -> pd.DataFrame:
     generated = _generated_semantic_columns(dataset_spec)
-    if not generated:
-        return frame
-    result = frame.copy()
-    if "eligible" in generated:
+    result = frame.copy() if generated else frame
+    if "eligible" in generated and _unfiltered_hft_scope(dataset_spec):
+        result["eligible"] = True
+    elif "eligible" in generated:
         result["eligible"] = a_share_eligibility(
             result,
             dataset_spec.eligibility_recipe,
@@ -538,39 +610,49 @@ def _add_a_share_semantic_columns(
             exclude_st=dataset_spec.exclude_st,
             exclude_pt=dataset_spec.exclude_pt,
         )
+    if risk_sessions is not None and (
+        (
+            "model_target" in generated
+            and dataset_spec.target_transform == "risk_residual"
+        )
+        or any(
+            transform.risk_model is not None and "processed" in transform.output_groups
+            for transform in dataset_spec.feature_transforms
+        )
+    ):
+        model = dataset_spec.risk_model
+        if risk_facts is not None:
+            risk_sessions.update(
+                prepare_asof_risk_sessions(
+                    result,
+                    risk_facts,
+                    model=model,
+                    available_at_column=risk_available_at,
+                    cache=risk_cache,
+                )
+            )
+        else:
+            state = FactorRiskState(
+                style_columns=model.style_columns, config=model.config
+            )
+            for timestamp, cross in result.groupby("timestamp", sort=False):
+                risk_sessions[pd.Timestamp(timestamp)] = state.prepare_exposure_session(
+                    cross
+                )
     if "model_target" in generated:
         if "forward_return_20d" not in result.columns:
             raise ValueError("a_share_model_target_label_missing")
         maturity = dataset_spec.label_availability_columns.get("forward_return_20d")
         if maturity is None:
             raise ValueError("model_target_label_availability_required")
-        result["model_target"] = a_share_model_target(
+        result[["model_target", "model_target_available_at"]] = a_share_model_target(
             result,
             transform=dataset_spec.target_transform,
             clip=dataset_spec.target_clip,
+            availability_column=maturity,
+            risk_model=dataset_spec.risk_model,
+            risk_sessions=risk_sessions,
         )
-        participating = result.model_target.notna()
-        clocks = strict_timestamp_series(
-            result[maturity].where(participating),
-            error="invalid_model_target_label_availability",
-            allow_null=True,
-        )
-        if (
-            dataset_spec.target_transform == "raw"
-            and dataset_spec.target_clip == "none"
-        ):
-            result["model_target_available_at"] = clocks
-        else:
-            unknown = (
-                (participating & clocks.isna())
-                .groupby(result.timestamp, sort=False)
-                .transform("any")
-            )
-            result["model_target_available_at"] = (
-                clocks.groupby(result.timestamp, sort=False)
-                .transform("max")
-                .where(participating & ~unknown)
-            )
     return result
 
 
@@ -594,6 +676,8 @@ def assemble(config: Mapping) -> Path:
         "feature_groups",
         "target_transform",
         "target_clip",
+        "risk_model",
+        "risk_exposure_input",
         "base_input_data_id",
         "sparse_input_data_ids",
         "context_columns",
@@ -654,9 +738,26 @@ def assemble(config: Mapping) -> Path:
     )
     if type(base_input) is not str or base_input not in inputs:
         raise ValueError("assemble_base_input_invalid")
+    risk_exposure_input = config.get("risk_exposure_input")
+    if risk_exposure_input is not None and (
+        not isinstance(risk_exposure_input, Mapping)
+        or set(risk_exposure_input) != {"data_id", "available_at_column"}
+        or any(
+            type(value) is not str or not value
+            for value in risk_exposure_input.values()
+        )
+        or risk_exposure_input["data_id"] not in inputs
+        or risk_exposure_input["data_id"] == base_input
+        or risk_exposure_input["available_at_column"]
+        in {"timestamp", "asset_id", "market_id", "listing_date"}
+    ):
+        raise ValueError("assemble_risk_exposure_input_invalid")
+    risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
     sessions = {
         data_id: open_dataset_session(
-            **_dataset_input_options(value, time_window=window)
+            **_dataset_input_options(
+                value, time_window=None if data_id == risk_input_id else window
+            )
         )
         for data_id, value in inputs.items()
     }
@@ -680,21 +781,26 @@ def assemble(config: Mapping) -> Path:
             column_units=declared.get("column_units", {}),
             label_availability_columns=declared.get("label_availability_columns", {}),
         )
+    if risk_input_id is not None and actual_specs[risk_input_id].frequency != "1d":
+        raise ValueError("assemble_risk_exposure_frequency_invalid")
     selected_roles = {
         column: role
         for data_id, item in actual_specs.items()
+        if data_id != risk_input_id
         for column, role in item.column_roles.items()
         if column in sessions[data_id].logical_columns
     }
     selected_factors = {
         column
         for data_id, item in actual_specs.items()
+        if data_id != risk_input_id
         for column, role in item.column_roles.items()
         if role is ColumnRole.FACTOR and column in sessions[data_id].logical_columns
     }
     selected_labels = {
         column
         for data_id, item in actual_specs.items()
+        if data_id != risk_input_id
         for column, role in item.column_roles.items()
         if role is ColumnRole.LABEL and column in sessions[data_id].logical_columns
     }
@@ -860,6 +966,11 @@ def assemble(config: Mapping) -> Path:
         recipe = None
     elif recipe is None and not reused_features:
         raise ValueError("assemble_feature_groups_requires_recipe")
+    risk_model = (
+        FactorRiskModel.from_mapping(config["risk_model"])
+        if "risk_model" in config
+        else None
+    )
     options = config.get("feature_transform", {})
     if not isinstance(options, Mapping) or set(options) - {
         "clip",
@@ -868,12 +979,22 @@ def assemble(config: Mapping) -> Path:
         "size_column",
         "center",
         "scale",
+        "risk_neutralize",
     }:
         raise ValueError("assemble_feature_transform_invalid")
     if config["market_id"] != "a_share" and (recipe is not None or options):
         raise ValueError("assemble_feature_recipe_not_supported")
     if recipe is None and options:
         raise ValueError("assemble_feature_transform_requires_recipe")
+    options = dict(options)
+    risk_neutralize = options.pop("risk_neutralize", False)
+    if type(risk_neutralize) is not bool:
+        raise ValueError("assemble_feature_transform_invalid")
+    if risk_neutralize:
+        risk_model = risk_model or FactorRiskModel()
+        options["risk_model"] = risk_model
+        options.setdefault("industry_neutralize", False)
+        options.setdefault("size_neutralize", False)
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
         PRESERVE_AMPLITUDE_FACTORS,
     )
@@ -969,6 +1090,14 @@ def assemble(config: Mapping) -> Path:
         },
         **dict.fromkeys(context, ColumnRole.CONTEXT),
     }
+    if (
+        "eligible" in filters
+        and config["market_id"] == "a_share"
+        and base_input == "hft_panel"
+        and source.frequency == "tick"
+        and config.get("eligibility_recipe") is None
+    ):
+        output_roles["eligible"] = ColumnRole.UNIVERSE
     spec = ResearchDatasetSpec(
         data_id=config["dataset_id"],
         market_id=config["market_id"],
@@ -983,6 +1112,7 @@ def assemble(config: Mapping) -> Path:
         feature_transforms=transforms,
         target_transform=config.get("target_transform", "date_zscore"),
         target_clip=config.get("target_clip", "none"),
+        risk_model=risk_model,
         label_columns=labels,
         filter_columns=tuple(filters),
         context_columns=context,
@@ -1006,6 +1136,15 @@ def assemble(config: Mapping) -> Path:
     # Explicit input columns bound business candidates; dependency-only columns
     # can still support the declared calculation without leaking into output X.
     required_inputs = set(_required_input_columns(spec))
+    risk_columns = (
+        risk_exposure_columns(spec.risk_model)
+        if risk_input_id is not None and spec.risk_model is not None
+        else ()
+    )
+    if risk_input_id is not None and spec.risk_model is None:
+        raise ValueError("assemble_risk_exposure_model_required")
+    if risk_input_id is not None:
+        required_inputs.add("listing_date")
     # Explicit projections select the authority for shared dependencies. A dependency
     # omitted from every projection may be recovered only from a unique producer.
     producers = {}
@@ -1020,13 +1159,13 @@ def assemble(config: Mapping) -> Path:
         candidates = [
             data_id
             for data_id, session in sessions.items()
-            if column in session.logical_columns
+            if data_id != risk_input_id and column in session.logical_columns
         ]
         if not candidates and column not in business_columns:
             candidates = [
                 data_id
                 for data_id, item in actual_specs.items()
-                if column in item.required_columns
+                if data_id != risk_input_id and column in item.required_columns
             ]
         if len(candidates) > 1:
             raise ValueError("duplicate_research_output_columns: " + column)
@@ -1053,7 +1192,7 @@ def assemble(config: Mapping) -> Path:
                 if label in consumed and maturity in consumed
             },
         )
-    _validate_research_input_specs(spec, consumed_specs)
+    _validate_research_input_specs(spec, consumed_specs, provided_columns=risk_columns)
     units = {
         column: unit
         for item in consumed_specs.values()
@@ -1082,19 +1221,49 @@ def assemble(config: Mapping) -> Path:
     existing = ()
     projected = {}
     for data_id in _ordered_input_data_ids(spec):
-        columns = _processed_input_columns(
-            spec, consumed_specs[data_id], existing_columns=existing
-        )
+        if data_id == risk_input_id:
+            needed = {
+                *spec.primary_key,
+                "listing_date",
+                risk_exposure_input["available_at_column"],
+                *risk_columns,
+            }
+            columns = tuple(
+                column
+                for column in actual_specs[data_id].required_columns
+                if column in needed
+            )
+        else:
+            columns = _processed_input_columns(
+                spec,
+                consumed_specs[data_id],
+                existing_columns=existing,
+                extra_columns=("listing_date",) if risk_input_id is not None else (),
+            )
         projected[data_id] = sessions[data_id].projected_view(columns)
-        existing = tuple(dict.fromkeys((*existing, *columns)))
+        if data_id != risk_input_id:
+            existing = tuple(dict.fromkeys((*existing, *columns)))
     return _assemble_research_dataset_from_sessions(
         output_root=Path(config["output_root"]),
         spec=spec,
         time_window=window,
         input_sessions=projected,
+        risk_exposure_input=risk_exposure_input,
         metadata={
             "inputs": inputs,
-            "producer_diagnostics": {"reused_feature_transforms": feature_lineage},
+            "producer_diagnostics": {
+                "reused_feature_transforms": feature_lineage,
+                **(
+                    {
+                        "eligibility": {
+                            "mode": "unfiltered",
+                            "meaning": "no_stock_pool_filter",
+                        }
+                    }
+                    if _unfiltered_hft_scope(spec)
+                    else {}
+                ),
+            },
             "parameters": {
                 "base_input_data_id": base_input,
                 "input_data_ids": {
@@ -1113,6 +1282,16 @@ def assemble(config: Mapping) -> Path:
                 "feature_groups": groups,
                 "target_transform": spec.target_transform,
                 "target_clip": spec.target_clip,
+                **(
+                    {"risk_exposure_input": dict(risk_exposure_input)}
+                    if risk_exposure_input
+                    else {}
+                ),
+                **(
+                    {"risk_model": spec.risk_model.to_dict()}
+                    if spec.risk_model is not None
+                    else {}
+                ),
                 "eligibility_recipe": spec.eligibility_recipe,
                 "minimum_listing_sessions": spec.minimum_listing_sessions,
                 "exclude_st": spec.exclude_st,
@@ -1129,6 +1308,11 @@ def assemble(config: Mapping) -> Path:
                             "scale",
                         )
                     }
+                    | (
+                        {"risk_neutralize": True}
+                        if transforms[0].risk_model is not None
+                        else {}
+                    )
                     if transforms
                     else None
                 ),

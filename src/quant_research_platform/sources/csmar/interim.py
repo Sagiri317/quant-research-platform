@@ -281,6 +281,7 @@ SPECIAL_TREATMENT_CHANGE_COLUMNS = (
     "effective_date",
     "is_st",
     "is_pt",
+    "is_delisting",
 )
 CORPORATE_ACTION_COLUMNS = (
     "source_asset_id",
@@ -1025,6 +1026,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         known = supported & destination.isin(("A", "B", "C", "D"))
         result["is_st"] = destination.isin(("B", "D")).astype("boolean").where(known)
         result["is_pt"] = destination.eq("C").astype("boolean").where(known)
+        result["is_delisting"] = destination.eq("T").astype("boolean").where(supported)
         return (
             result.loc[:, SPECIAL_TREATMENT_CHANGE_COLUMNS]
             .sort_values(["source_asset_id", "timestamp"], kind="mergesort")

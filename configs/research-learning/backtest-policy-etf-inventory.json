@@ -1,0 +1,40 @@
+{
+  "strategy": "etf_inventory",
+  "output": "results/learning/etf-inventory-taker",
+  "episode": {
+    "kind": "hft",
+    "task": "inventory",
+    "asset_ids": ["510300", "518880"],
+    "feature_columns": ["prediction_score"],
+    "window": {"start": "2024-01-02", "end": "2024-03-29"},
+    "capital_scale": 1,
+    "prediction": {
+      "paths": ["results/etf/rolling-return-predictions"],
+      "horizon_seconds": 30,
+      "decision_interval_seconds": 3,
+      "quote_visibility_delay_ms": 1
+    },
+    "account": {
+      "panel": "data/processed/a_share/etf_hft_panel",
+      "fee_schedule": "data/processed/a_share/fee_schedule",
+      "daily_inputs": {
+        "panel": "data/processed/a_share/etf_panel_1d",
+        "calendar": "data/interim/csmar/trading_calendar",
+        "market_bars": "data/interim/csmar/etf_bars_1d",
+        "stock_master": "data/interim/csmar/etf_master",
+        "corporate_actions": "data/interim/csmar/corporate_actions",
+        "equity_events": "data/interim/reference/a_share_equity_events"
+      },
+      "parameters": {
+        "initial_inventory": {"510300": 100000, "518880": 100000},
+        "maximum_inventory": {"510300": 200000, "518880": 200000},
+        "participation_rate": 0.5,
+        "minimum_commission": 5,
+        "latency_ms": 10,
+        "taker_depth_levels": 1
+      }
+    },
+    "risk_aversion": 0,
+    "unfinished_penalty_bps": 0
+  }
+}

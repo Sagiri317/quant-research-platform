@@ -1,5 +1,6 @@
 """Continuous A-share inventory accounts on observed subsequent quotes."""
 
+from collections import deque
 from dataclasses import replace
 from datetime import time
 from math import fsum
@@ -36,6 +37,8 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
+    prepare_trade_cost,
+    stock_order_limits,
 )
 from quant_research_platform.markets.implementations.a_share.portfolio_sessions import (
     CORPORATE_ACTION_POLICY,
@@ -77,14 +80,15 @@ def _parameters(value, *, policy=False):
             "maximum_inventory",
             "buy_threshold",
             "sell_threshold",
-            "latency_ms",
             "participation_rate",
             "minimum_commission",
             "restore_at",
         }
         - ({"buy_threshold", "sell_threshold"} if policy else set()),
-        {"passive"} if policy else {"signal_processing", "passive"},
+        {"passive", "taker_depth_levels", "markout_ms", "latency_ms"}
+        | (set() if policy else {"signal_processing"}),
     )
+    params.setdefault("latency_ms", 10.0)
     for name in ("initial_inventory", "maximum_inventory"):
         values = params[name]
         if not isinstance(values, dict) or any(
@@ -109,12 +113,16 @@ def _parameters(value, *, policy=False):
         )
     if "passive" in params:
         params["passive"] = passive_parameters(params["passive"])
+    depth_levels = params.get("taker_depth_levels", 1)
+    if type(depth_levels) is not int or not 1 <= depth_levels <= 10:
+        raise ValueError("hft_taker_depth_levels_invalid")
     for name in set(params) - {
         "initial_inventory",
         "maximum_inventory",
         "restore_at",
         "signal_processing",
         "passive",
+        "taker_depth_levels",
     }:
         params[name] = strict_finite_float(params[name], error="hft_parameter_invalid")
     if (
@@ -123,6 +131,7 @@ def _parameters(value, *, policy=False):
         or params["latency_ms"] < 0
         or not 0 < params["participation_rate"] <= 1
         or params["minimum_commission"] < 0
+        or params.get("markout_ms", 1.0) <= 0
     ):
         raise ValueError("hft_parameter_invalid")
     restore = params["restore_at"]
@@ -137,6 +146,7 @@ def _parameters(value, *, policy=False):
 
 
 def _decisions(quotes, predictions, latency_ns):
+    """Map decision clocks, including off-quote clocks, to subsequent raw quotes."""
     result = {}
     signals = {
         asset: group for asset, group in predictions.groupby("asset_id", sort=False)
@@ -147,23 +157,49 @@ def _decisions(quotes, predictions, latency_ns):
         times = group.timestamp.to_numpy(dtype="datetime64[ns]").astype("int64")
         segments = group.segment_id.to_numpy()
         for row in signals[asset].sort_values("timestamp").itertuples(index=False):
+            if pd.isna(row.prediction_score):
+                continue
             signal_at = int(row.timestamp.value)
+            decision = np.searchsorted(times, signal_at, side="right") - 1
+            if decision < 0 or signal_at > times[-1]:
+                continue
             index = max(
                 np.searchsorted(times, signal_at + latency_ns),
                 np.searchsorted(times, signal_at, side="right"),
             )
-            decision = np.searchsorted(times, signal_at)
-            if (
-                index < len(times)
-                and decision < len(times)
-                and times[decision] == signal_at
-                and segments[index] == segments[decision]
-            ):
-                result[int(times[index]), asset] = (
-                    signal_at,
-                    float(row.prediction_score),
-                )
+            execution_at = (
+                int(times[index])
+                if index < len(times) and segments[index] == segments[decision]
+                else None
+            )
+            result[signal_at, asset] = (execution_at, float(row.prediction_score))
     return result
+
+
+def _stock_status_events(state, assets, start, end, *, closed):
+    """Project opening holdings and published changes without a quote-grid product."""
+    from quant_research_platform.markets.implementations.a_share.stock_pool import (
+        stock_status_rows,
+    )
+
+    if not len(assets):
+        return {}
+    source = state["status"]
+    selected = source.loc[
+        source.asset_id.isin(assets)
+        & source._known_at.gt(start)
+        & (source._known_at.le(end) if closed else source._known_at.lt(end)),
+        ["asset_id", "_known_at"],
+    ].rename(columns={"_known_at": "timestamp"})
+    points = pd.concat(
+        (pd.DataFrame({"asset_id": assets, "timestamp": start}), selected),
+        ignore_index=True,
+    ).drop_duplicates(["asset_id", "timestamp"])
+    rows = stock_status_rows(points, **state)
+    return {
+        int(at.value): frame.set_index("asset_id")
+        for at, frame in rows.groupby("timestamp", sort=False)
+    }
 
 
 def inventory_batches(
@@ -173,6 +209,10 @@ def inventory_batches(
     window,
     *,
     decision_columns=None,
+    prediction_decisions=False,
+    prediction_task="inventory",
+    quote_visibility_delay_ms=0,
+    stock_status=None,
     execution_order=None,
     trade_session=None,
 ):
@@ -181,6 +221,13 @@ def inventory_batches(
     Interactive callers receive PolicyDecision events after current-quote accounting
     and send share targets for strictly subsequent eligible quotes. Execution latency,
     lot sizes, liquidity, fees, and T+1 constraints remain active."""
+    status_state = None
+    if stock_status is not None:
+        from quant_research_platform.markets.implementations.a_share.stock_pool import (
+            load_stock_status,
+        )
+
+        status_state = load_stock_status(stock_status)
     lower, upper, closed = time_window_timestamp_interval(window)
     lower, upper = pd.Timestamp(lower), pd.Timestamp(upper)
     assets = pd.Index(sorted(params["maximum_inventory"]), name="asset_id")
@@ -195,6 +242,13 @@ def inventory_batches(
     previous = {}
     sequence = 0
     observed_quotes = 0
+    pending_markouts = {}
+    quote_segments = {}
+    markout_ns = (
+        max(1, int(params["markout_ms"] * 1_000_000))
+        if "markout_ms" in params
+        else None
+    )
     entitlements = EquityEntitlements()
     valuation_marks = ResearchValuationMarks()
     latency_ns = int(params["latency_ms"] * 1_000_000)
@@ -312,6 +366,16 @@ def inventory_batches(
             bought_today[asset] += quantity
         if execution_order is not None:
             remaining_order -= quantity
+        if markout_ns is not None:
+            pending_markouts.setdefault(asset, deque()).append(
+                (
+                    fill_id,
+                    notional / quantity,
+                    np.sign(quantity),
+                    int(at.value) + markout_ns,
+                    quote_segments.get(asset),
+                )
+            )
         trade = ExecutedTrade(
             fill_id, order_id, int(at.value), asset, quantity, notional
         )
@@ -362,9 +426,17 @@ def inventory_batches(
             ):
                 raise ValueError("hft_instrument_type_invalid")
             instrument_types.update(kinds.set_index("asset_id").instrument_type)
+        if prediction_decisions and not predictions.empty and not quotes.empty:
+            permitted = (
+                {"stock"}
+                if prediction_task == "portfolio"
+                else {"equity_etf", "gold_etf"}
+            )
+            if not instrument_types.isin(permitted).all():
+                raise ValueError("policy_prediction_instrument_mismatch")
         opening_marks = projected.open.reindex(units.index).astype("float64")
         observed = quotes.loc[
-            quotes.timestamp.le(start) & quotes.eligible & np.isfinite(quotes.mid)
+            quotes.timestamp.le(start) & np.isfinite(quotes.mid) & quotes.mid.gt(0)
         ].drop_duplicates("asset_id", keep="last")
         opening_marks.loc[observed.asset_id] = observed.mid.to_numpy()
         if cash is None:
@@ -424,7 +496,7 @@ def inventory_batches(
                 ),
             ),
         )
-        if decision_columns is None and not predictions.empty:
+        if (decision_columns is None or prediction_decisions) and not predictions.empty:
             if "signal_processing" in params:
                 predictions = process_prediction_signals(
                     predictions, quotes, params["signal_processing"]
@@ -438,29 +510,37 @@ def inventory_batches(
                 )
             ]
         interactive = decision_columns is not None
-        decisions = (
-            {}
-            if interactive or predictions.empty
-            else _decisions(quotes, predictions, latency_ns)
-        )
         destinations = (
-            {
-                (signal_at, asset): (execution_at, asset)
-                for (execution_at, asset), (signal_at, _) in _decisions(
-                    quotes,
-                    quotes[["timestamp", "asset_id"]].assign(prediction_score=0.0),
-                    latency_ns,
-                ).items()
-            }
-            if interactive
+            _decisions(
+                quotes,
+                quotes[["timestamp", "asset_id"]].assign(prediction_score=0.0)
+                if interactive and not prediction_decisions
+                else predictions.assign(
+                    prediction_score=predictions.prediction_score.fillna(0)
+                )
+                if prediction_decisions and not predictions.empty
+                else predictions,
+                latency_ns,
+            )
+            if (interactive and not prediction_decisions) or not predictions.empty
             else {}
         )
+        decisions = {
+            (execution_at, asset): (signal_at, score)
+            for (signal_at, asset), (execution_at, score) in destinations.items()
+            if execution_at is not None and not interactive
+        }
         if params["restore_at"] is None:
             restore_at = None
         else:
             restore_at = (
                 day + pd.Timedelta(params["restore_at"]) - pd.Timedelta(hours=8)
             )
+        visible_books = (
+            {asset: group for asset, group in quotes.groupby("asset_id", sort=False)}
+            if prediction_decisions
+            else {}
+        )
         quotes = quotes.loc[
             quotes.timestamp.ge(start)
             & (quotes.timestamp.le(upper) if closed else quotes.timestamp.lt(upper))
@@ -478,7 +558,9 @@ def inventory_batches(
             passive = PassiveOrders(
                 params["passive"],
                 projected.market_type.reindex(
-                    quotes.loc[quotes.eligible, "asset_id"].unique()
+                    quotes.loc[
+                        np.isfinite(quotes.mid) & quotes.mid.gt(0), "asset_id"
+                    ].unique()
                 ),
                 day.date(),
                 schedule,
@@ -487,27 +569,503 @@ def inventory_batches(
                 face_value_per_share=projected.get("face_value_per_share"),
                 instrument_types=instrument_types,
             )
+        requests = {}
+        if (passive is not None and not interactive) or prediction_decisions:
+            for (signal_at, asset), (execution_at, score) in destinations.items():
+                if restore_at is None or signal_at < restore_at.value:
+                    requests.setdefault(signal_at, {})[asset] = (execution_at, score)
+        if passive is not None and restore_at is not None and len(quotes):
+            if restore_at <= quotes.timestamp.max():
+                requests[restore_at.value] = {
+                    asset: (restore_at.value + latency_ns, None) for asset in assets
+                }
+        status_events = (
+            _stock_status_events(
+                status_state,
+                instrument_types.index[instrument_types.eq("stock")],
+                start,
+                min(closing, upper),
+                closed=closed or closing < upper,
+            )
+            if status_state is not None
+            else {}
+        )
+        for stamp in status_events:
+            requests.setdefault(stamp, {})
+        status_can_enter = pd.Series(True, index=units.index)
+        status_exit_at = {}
+
+        def status_target(
+            asset,
+            target,
+            *,
+            units=units,
+            status_can_enter=status_can_enter,
+            status_exit_at=status_exit_at,
+        ):
+            if asset in status_exit_at:
+                return 0.0
+            return (
+                min(target, units[asset])
+                if not status_can_enter.get(asset, True)
+                else target
+            )
+
+        request_iterator = iter(sorted(requests.items()))
+        next_request = next(request_iterator, None)
+        policy_costs, policy_limits = {}, {}
+        if prediction_decisions and destinations:
+            policy_markets, policy_minimum, _, policy_maximum = stock_order_limits(
+                projected.market_type.reindex(assets), day.date(), instrument_types
+            )
+            policy_limits = dict(
+                zip(
+                    assets,
+                    zip(policy_minimum, policy_maximum, strict=True),
+                    strict=True,
+                )
+            )
+            policy_costs = {
+                (asset, side): prepare_trade_cost(
+                    day.date(), market, side, schedule, assumptions
+                )
+                for asset, market in zip(assets, policy_markets, strict=True)
+                for side in ("buy", "sell")
+            }
+        prediction_rows = (
+            predictions.set_index(["timestamp", "asset_id"])
+            if prediction_decisions and not predictions.empty
+            else None
+        )
+
+        def request_targets(
+            stamp,
+            requests_at,
+            *,
+            opening_inventory=opening_inventory,
+            units=units,
+            passive=passive,
+            status_target=status_target,
+        ):
+            targets, activation_times = {}, {}
+            for asset, (execution_at, score) in requests_at.items():
+                targets[asset] = (
+                    min(opening_inventory[asset], params["maximum_inventory"][asset])
+                    if score is None
+                    else params["maximum_inventory"][asset]
+                    if score > params["buy_threshold"]
+                    else 0.0
+                    if score < params["sell_threshold"]
+                    else units[asset]
+                )
+                targets[asset] = status_target(asset, targets[asset])
+                activation_times[asset] = execution_at
+            return passive.request(
+                pd.Timestamp(stamp),
+                targets,
+                activation_times,
+                segment_bound=any(
+                    score is not None for _, score in requests_at.values()
+                ),
+            )
+
+        def apply_request(
+            stamp,
+            requested,
+            cash,
+            *,
+            restore_at=restore_at,
+            visible_books=visible_books,
+            policy_costs=policy_costs,
+            policy_limits=policy_limits,
+            projected=projected,
+            prediction_rows=prediction_rows,
+            passive=passive,
+            decisions=decisions,
+            units=units,
+            bought_today=bought_today,
+            opening_inventory=opening_inventory,
+            request_targets=request_targets,
+            status_events=status_events,
+            status_can_enter=status_can_enter,
+            status_exit_at=status_exit_at,
+            interactive=interactive,
+            status_target=status_target,
+        ):
+            at = pd.Timestamp(stamp)
+            status_diagnostics = []
+            for asset, state in status_events.get(stamp, pd.DataFrame()).iterrows():
+                known = state[["is_st", "is_pt", "is_delisting"]].notna().all()
+                exits = any(
+                    pd.notna(value) and bool(value)
+                    for value in (state.is_st, state.is_delisting)
+                )
+                can_enter = bool(
+                    known
+                    and not state.is_st
+                    and not state.is_pt
+                    and not state.is_delisting
+                )
+                status_can_enter[asset] = can_enter
+                if exits:
+                    status_exit_at.setdefault(asset, stamp)
+                else:
+                    status_exit_at.pop(asset, None)
+                reason = (
+                    "delisting_exit"
+                    if pd.notna(state.is_delisting) and state.is_delisting
+                    else "special_treatment_exit"
+                    if pd.notna(state.is_st) and state.is_st
+                    else "status_unknown"
+                    if not known
+                    else "pt_entry_blocked"
+                    if state.is_pt
+                    else "entry_allowed"
+                )
+                status_diagnostics.append(
+                    PortfolioDiagnostic(
+                        asset, None, "stock_status_control", text=reason
+                    )
+                )
+                if can_enter:
+                    continue
+                for key, (_, target) in tuple(decisions.items()):
+                    increasing = (
+                        target > units[asset]
+                        if interactive
+                        else target > params["buy_threshold"]
+                    )
+                    if key[1] == asset and (exits or increasing):
+                        del decisions[key]
+                if passive is not None:
+                    intent = passive.intents.get(asset)
+                    order = passive.orders.get(asset)
+                    target = (
+                        0.0
+                        if exits
+                        else min(
+                            units[asset],
+                            intent[0]
+                            if intent is not None
+                            else order.target
+                            if order is not None
+                            else units[asset],
+                        )
+                    )
+                    status_diagnostics.extend(
+                        passive.request(
+                            at,
+                            {asset: target},
+                            {asset: stamp + latency_ns},
+                            segment_bound=False,
+                        )
+                    )
+            if status_diagnostics:
+                yield emit(at, diagnostics=status_diagnostics)
+            if not requested:
+                return
+            if not prediction_decisions or (
+                restore_at is not None and at >= restore_at
+            ):
+                diagnostics = request_targets(stamp, requested)
+                if diagnostics:
+                    yield emit(at, diagnostics=diagnostics)
+                return
+            visible_at = at - pd.Timedelta(milliseconds=quote_visibility_delay_ms)
+            visible_marks = pd.Series(np.nan, index=assets)
+            estimated_costs = pd.Series(np.nan, index=assets)
+            decision_prices = {}
+            for asset, book in visible_books.items():
+                position = book.timestamp.searchsorted(visible_at, side="right") - 1
+                if position >= 0:
+                    row = book.iloc[position]
+                    visible_marks[asset] = row.mid
+                    if not np.isfinite(row.mid) or row.mid <= 0:
+                        continue
+                    costs = []
+                    for side in ("buy", "sell"):
+                        book_side = (
+                            ("bid" if side == "buy" else "ask")
+                            if passive is not None
+                            else ("ask" if side == "buy" else "bid")
+                        )
+                        level = (
+                            params["passive"].get("quote_level", 1)
+                            if passive is not None
+                            else 1
+                        )
+                        price = row.get(f"{book_side}_px{level}", np.nan)
+                        if not np.isfinite(price) or price <= 0:
+                            costs.append(np.nan)
+                            continue
+                        decision_prices[asset, side] = price
+                        fee = fsum(
+                            policy_costs[asset, side].order_components(
+                                price,
+                                0.0,
+                                price=price,
+                                face_value_per_share=projected.get(
+                                    "face_value_per_share", pd.Series(dtype=float)
+                                ).get(asset),
+                            )
+                        )
+                        spread = max(
+                            0, (price - row.mid) * (1 if side == "buy" else -1)
+                        )
+                        costs.append((fee + spread) / row.mid * 10000)
+                    estimated_costs[asset] = (
+                        max(costs) if np.isfinite(costs).all() else np.nan
+                    )
+
+            def estimate_trade_cost(asset, quantity):
+                if quantity == 0:
+                    return 0.0
+                side = "buy" if quantity > 0 else "sell"
+                price = decision_prices.get((asset, side), np.nan)
+                if not np.isfinite(price):
+                    return np.inf
+                count = abs(quantity)
+                minimum, maximum = policy_limits[asset]
+                fee = fsum(
+                    policy_costs[asset, side].stock_components(
+                        np.asarray(count),
+                        np.asarray(price),
+                        np.asarray(np.nan),
+                        np.asarray(minimum),
+                        np.asarray(maximum),
+                        params["minimum_commission"],
+                        face_value_per_share=projected.get(
+                            "face_value_per_share", pd.Series(dtype=float)
+                        ).get(asset),
+                    )
+                )
+                spread = max(
+                    0, (price - visible_marks[asset]) * (1 if quantity > 0 else -1)
+                )
+                return fee + count * spread
+
+            def estimate_trade_cost_gradient(asset, notional, side):
+                price = decision_prices.get((asset, side), np.nan)
+                mid = visible_marks[asset]
+                if not np.isfinite(price) or not np.isfinite(mid) or mid <= 0:
+                    raise ValueError("policy_decision_cost_unavailable")
+                ratio = price / mid
+                fee, gradient = policy_costs[asset, side].totals_and_gradients(
+                    np.asarray(notional * ratio),
+                    np.asarray(np.nan),
+                    prices=np.asarray(price),
+                    face_value_per_share=projected.get(
+                        "face_value_per_share", pd.Series(dtype=float)
+                    ).get(asset),
+                )
+                spread = max(0.0, (ratio - 1.0) * (1 if side == "buy" else -1))
+                return float(fee + notional * spread), float(gradient * ratio + spread)
+
+            if (units.reindex(assets).gt(0) & ~np.isfinite(visible_marks)).any():
+                yield emit(
+                    at,
+                    diagnostics=(
+                        PortfolioDiagnostic(
+                            PORTFOLIO_CASH_ASSET_ID,
+                            None,
+                            "policy_decision_unavailable",
+                            text="held_visible_mark_missing",
+                        ),
+                    ),
+                )
+                return
+            features = pd.DataFrame({"prediction_score": np.nan}, index=assets)
+            for asset in requested:
+                features.loc[asset, "prediction_score"] = prediction_rows.loc[
+                    (at, asset), "prediction_score"
+                ]
+            pending = pd.Series(0.0, index=assets)
+            pending_targets = pd.Series(np.nan, index=assets)
+            if passive is not None:
+                for asset, order in passive.orders.items():
+                    pending[asset] = order.side * order.remaining
+                for asset, intent in passive.intents.items():
+                    pending_targets[asset] = intent[0]
+            else:
+                for (execution_at, asset), (_signal_at, target) in sorted(
+                    decisions.items()
+                ):
+                    if execution_at > stamp:
+                        pending_targets[asset] = target
+                        pending[asset] = target - units[asset]
+            locked = pd.Series(entitlements.locked_quantities, dtype="float64").reindex(
+                units.index, fill_value=0.0
+            )
+            sellable = (units - locked - bought_today).clip(lower=0.0).reindex(assets)
+            if passive is not None:
+                sellable -= pd.Series(
+                    {asset: passive.frozen_shares(asset) for asset in assets}
+                )
+            free_cash = cash - (passive.frozen_cash() if passive is not None else 0)
+            target = yield PolicyDecision(
+                at,
+                features,
+                units.reindex(assets).copy(),
+                sellable,
+                visible_marks,
+                free_cash,
+                cash
+                + fsum((units.reindex(assets) * visible_marks).fillna(0))
+                + fsum(entitlements.receivables.values()),
+                opening_inventory.reindex(assets).copy(),
+                pending,
+                pending_targets,
+                estimated_costs,
+                estimate_trade_cost,
+                reserved_cash=passive.frozen_cash() if passive is not None else 0.0,
+                receivable_value=fsum(entitlements.receivables.values()),
+                estimate_trade_cost_gradient=estimate_trade_cost_gradient,
+            )
+            target = (
+                policy_target(
+                    target,
+                    assets,
+                    maximum=params["maximum_inventory"],
+                    allow_missing=True,
+                )
+                .where(features.prediction_score.notna())
+                .dropna()
+            )
+            for asset in target.index:
+                target[asset] = status_target(asset, target[asset])
+            diagnostics = []
+            for asset, quantity in target.items():
+                diagnostics.extend(
+                    (
+                        PortfolioDiagnostic(
+                            asset,
+                            None,
+                            "prediction_score",
+                            number=float(features.loc[asset, "prediction_score"]),
+                        ),
+                        PortfolioDiagnostic(
+                            asset, None, "inventory_target", number=float(quantity)
+                        ),
+                        PortfolioDiagnostic(
+                            asset,
+                            None,
+                            "inventory_pending_quantity",
+                            number=float(pending[asset]),
+                        ),
+                        PortfolioDiagnostic(
+                            asset,
+                            None,
+                            "inventory_opening_quantity",
+                            number=float(opening_inventory[asset]),
+                        ),
+                        *(
+                            [
+                                PortfolioDiagnostic(
+                                    asset,
+                                    None,
+                                    "inventory_estimated_trade_cost_bps",
+                                    number=float(estimated_costs[asset]),
+                                )
+                            ]
+                            if np.isfinite(estimated_costs[asset])
+                            else []
+                        ),
+                    )
+                )
+                destination = requested.get(asset, (None,))[0]
+                if passive is None and destination is not None:
+                    decisions[destination, asset] = (stamp, float(quantity))
+            if passive is not None:
+                diagnostics.extend(
+                    passive.request(
+                        at,
+                        target,
+                        {
+                            asset: requested.get(asset, (None,))[0]
+                            for asset in target.index
+                        },
+                    )
+                )
+            if diagnostics:
+                yield emit(at, diagnostics=diagnostics)
+
         for stamp, group in quotes.groupby("timestamp", sort=False):
             at = pd.Timestamp(stamp)
-            if passive is not None:
-                while next_trade is not None and next_trade.timestamp <= at:
-                    event = next_trade
-                    next_trade = next(event_iterator, None)
-                    fill = passive.trade(event)
-                    if fill is not None:
-                        trade, cashflows, diagnostic = settle(
-                            event.timestamp, event.asset_id, *fill
+            if passive is not None or prediction_decisions or status_events:
+                # Tied prints precede target requests and cancellation confirmation.
+                while (
+                    passive is not None
+                    and next_trade is not None
+                    and next_trade.timestamp <= at
+                ) or (next_request is not None and next_request[0] < at.value):
+                    if (
+                        passive is not None
+                        and next_trade is not None
+                        and next_trade.timestamp <= at
+                        and (
+                            next_request is None
+                            or next_trade.timestamp.value <= next_request[0]
                         )
-                        yield emit(
-                            event.timestamp,
-                            trades=(trade,),
-                            flows=cashflows,
-                            diagnostics=(diagnostic, *passive.diagnostics()),
-                        )
+                    ):
+                        event = next_trade
+                        next_trade = next(event_iterator, None)
+                        fill = passive.trade(event)
+                        if fill is not None:
+                            trade, cashflows, diagnostic = settle(
+                                event.timestamp, event.asset_id, *fill
+                            )
+                            yield emit(
+                                event.timestamp,
+                                trades=(trade,),
+                                flows=cashflows,
+                                diagnostics=(diagnostic, *passive.diagnostics()),
+                            )
+                    else:
+                        request_at, requested = next_request
+                        next_request = next(request_iterator, None)
+                        yield from apply_request(request_at, requested, cash)
             current = group.set_index("asset_id")
-            valid = current.eligible & np.isfinite(current.mid) & current.mid.gt(0)
+            current["can_enter"] = status_can_enter.reindex(current.index).fillna(False)
+            valid = np.isfinite(current.mid) & current.mid.gt(0)
             marks.loc[current.index[valid]] = current.loc[valid, "mid"]
             sources.update({asset: "observed_mid" for asset in current.index[valid]})
+            if markout_ns is not None:
+                for asset, row in current.iterrows():
+                    queue = pending_markouts.get(asset, ())
+                    while queue:
+                        fill_id, price, side, due, segment = queue[0]
+                        same_segment = valid[asset] and row.segment_id == segment
+                        observed = same_segment and np.isfinite(row.mid) and row.mid > 0
+                        if observed and at.value < due:
+                            break
+                        queue.popleft()
+                        if observed:
+                            diagnostics = (
+                                PortfolioDiagnostic(
+                                    asset,
+                                    fill_id,
+                                    "markout_bps",
+                                    number=float(side * (row.mid / price - 1) * 10000),
+                                ),
+                                PortfolioDiagnostic(
+                                    asset,
+                                    fill_id,
+                                    "markout_observed_at_ns",
+                                    text=str(at.value),
+                                ),
+                            )
+                        else:
+                            diagnostics = (
+                                PortfolioDiagnostic(
+                                    asset,
+                                    fill_id,
+                                    "markout_reason",
+                                    text="unobserved_segment",
+                                ),
+                            )
+                        # The ledger allows one diagnostic name per asset and batch.
+                        yield emit(at, diagnostics=diagnostics)
+                    quote_segments[asset] = row.segment_id
             targets = units.copy()
             signal_times = {}
             restoring = (
@@ -537,6 +1095,16 @@ def inventory_batches(
                     elif score < params["sell_threshold"]:
                         targets[asset] = 0.0
                     signal_times[asset] = signal_at
+                if asset in status_exit_at:
+                    requested_at = status_exit_at[asset]
+                    if (
+                        at.value > requested_at
+                        and at.value >= requested_at + latency_ns
+                    ):
+                        targets[asset] = 0.0
+                        signal_times[asset] = requested_at
+                elif not status_can_enter.get(asset, True):
+                    targets[asset] = min(targets[asset], units[asset])
             locked = pd.Series(entitlements.locked_quantities, dtype="float64").reindex(
                 units.index, fill_value=0.0
             )
@@ -548,11 +1116,25 @@ def inventory_batches(
             ]
             trades, flows = [], []
             if passive is not None:
-                diagnostics.extend(
-                    passive.quote(
-                        at, current, targets, signal_times, units, sellable, cash
-                    )
-                )
+                if execution_order is not None:
+                    asset = execution_order["asset_id"]
+                    if asset in passive.intents:
+                        target, signal_at, activation_at, segment_bound = (
+                            passive.intents[asset]
+                        )
+                        passive.intents[asset] = (
+                            float(
+                                np.clip(
+                                    target,
+                                    units[asset] + min(0, remaining_order),
+                                    units[asset] + max(0, remaining_order),
+                                )
+                            ),
+                            signal_at,
+                            activation_at,
+                            segment_bound,
+                        )
+                diagnostics.extend(passive.quote(at, current, units, sellable, cash))
                 diagnostics.extend(passive.diagnostics())
             elif targets.ne(units).any():
                 permissions = valid.reindex(units.index, fill_value=False)
@@ -571,7 +1153,8 @@ def inventory_batches(
                         "sell_capacity": current.bid_vol1.reindex(units.index)
                         * params["participation_rate"],
                         "adv": np.nan,
-                        "can_enter": permissions,
+                        "can_enter": permissions
+                        & status_can_enter.reindex(units.index).fillna(False),
                         "can_exit": permissions,
                     }
                 )
@@ -579,6 +1162,24 @@ def inventory_batches(
                     orders["face_value_per_share"] = (
                         projected.face_value_per_share.reindex(units.index)
                     )
+                depth = None
+                if params.get("taker_depth_levels", 1) > 1:
+                    depth = {}
+                    for asset in current.index[
+                        targets.reindex(current.index).ne(units.reindex(current.index))
+                    ]:
+                        row = current.loc[asset]
+                        side = "ask" if targets[asset] > units[asset] else "bid"
+                        depth[asset] = np.array(
+                            [
+                                (
+                                    row.get(f"{side}_px{level}", np.nan),
+                                    row.get(f"{side}_vol{level}", np.nan)
+                                    * params["participation_rate"],
+                                )
+                                for level in range(1, params["taker_depth_levels"] + 1)
+                            ]
+                        )
                 account = execute_stock_target(
                     orders,
                     cash=cash,
@@ -586,6 +1187,7 @@ def inventory_batches(
                     fee_schedule=schedule,
                     assumptions=assumptions,
                     receivable=fsum(entitlements.receivables.values()),
+                    depth=depth,
                 )
                 executed = account.asset_ledger
                 requests = executed.target_notional - executed.pre_trade_notional
@@ -599,7 +1201,25 @@ def inventory_batches(
                 )
                 for row in executed.itertuples(index=False):
                     quantity = int(row.executed_quantity)
-                    if row.reason:
+                    requested = float(targets[row.asset_id] - units[row.asset_id])
+                    if requested:
+                        diagnostics.extend(
+                            (
+                                PortfolioDiagnostic(
+                                    row.asset_id,
+                                    None,
+                                    "requested_quantity",
+                                    number=requested,
+                                ),
+                                PortfolioDiagnostic(
+                                    row.asset_id,
+                                    None,
+                                    "unfilled_quantity",
+                                    number=requested - quantity,
+                                ),
+                            )
+                        )
+                    if pd.notna(row.reason) and row.reason:
                         diagnostics.append(
                             PortfolioDiagnostic(
                                 row.asset_id,
@@ -648,8 +1268,21 @@ def inventory_batches(
                     )
                 )
             yield emit(at, trades=trades, flows=flows, diagnostics=diagnostics)
-            if interactive and any(
-                (int(at.value), asset) in destinations for asset in current.index
+            if (
+                (passive is not None or prediction_decisions or status_events)
+                and next_request is not None
+                and next_request[0] == at.value
+            ):
+                request_at, requested = next_request
+                next_request = next(request_iterator, None)
+                yield from apply_request(request_at, requested, cash)
+            if (
+                interactive
+                and not prediction_decisions
+                and any(
+                    destinations.get((int(at.value), asset), (None,))[0] is not None
+                    for asset in current.index
+                )
             ):
                 target = yield PolicyDecision(
                     at,
@@ -670,6 +1303,8 @@ def inventory_batches(
                 target = policy_target(
                     target, assets, maximum=params["maximum_inventory"]
                 )
+                for asset in target.index:
+                    target[asset] = status_target(asset, target[asset])
                 if execution_order is not None:
                     other_assets = assets.difference([execution_order["asset_id"]])
                     if (
@@ -679,9 +1314,43 @@ def inventory_batches(
                     ):
                         raise ValueError("policy_execution_off_mandate")
                 for asset in current.index:
-                    destination = destinations.get((int(at.value), asset))
-                    if destination is not None:
-                        decisions[destination] = (int(at.value), float(target[asset]))
+                    destination = destinations.get((int(at.value), asset), (None,))[0]
+                    if destination is not None and passive is None:
+                        decisions[destination, asset] = (
+                            int(at.value),
+                            float(target[asset]),
+                        )
+                if passive is not None:
+                    diagnostics = passive.request(
+                        at,
+                        target.reindex(current.index),
+                        {
+                            asset: destinations.get((int(at.value), asset), (None,))[0]
+                            for asset in current.index
+                        },
+                    )
+                    if diagnostics:
+                        yield emit(at, diagnostics=diagnostics)
+        if pending_markouts:
+            endpoint = pd.Timestamp(quotes.timestamp.max()) if len(quotes) else start
+            for asset, queue in pending_markouts.items():
+                while queue:
+                    fill_id, _, _, _, _ = queue.popleft()
+                    yield emit(
+                        endpoint,
+                        diagnostics=(
+                            PortfolioDiagnostic(
+                                asset,
+                                fill_id,
+                                "markout_reason",
+                                text="no_observed_markout",
+                            ),
+                        ),
+                    )
+        while next_request is not None:
+            request_at, requested = next_request
+            next_request = next(request_iterator, None)
+            yield from apply_request(request_at, requested, cash)
         if closing <= upper if closed else closing < upper:
             marks = projected.close.reindex(units.index).astype("float64")
             rights = entitlements.register(
@@ -695,6 +1364,27 @@ def inventory_batches(
             ]
             if passive is not None:
                 diagnostics.extend(passive.expire("day_expired"))
+            for asset in status_exit_at:
+                if units[asset] > 0:
+                    diagnostics.extend(
+                        (
+                            PortfolioDiagnostic(
+                                asset,
+                                None,
+                                "stock_status_exit_pending_quantity",
+                                number=float(units[asset]),
+                            ),
+                            PortfolioDiagnostic(
+                                asset,
+                                None,
+                                "stock_status_exit_unfinished",
+                                text="same_day_or_corporate_lock"
+                                if bought_today[asset] > 0
+                                or entitlements.locked_quantities.get(asset, 0) > 0
+                                else "liquidity_or_execution_window",
+                            ),
+                        )
+                    )
             diagnostics.extend(
                 PortfolioDiagnostic(
                     asset,
@@ -727,24 +1417,57 @@ def inventory_batches(
         raise ValueError("hft_backtest_empty")
 
 
-def statistics_tables(ledgers, *, window, config):
+def statistics_tables(ledgers, *, window, config, metadata=None):
     """Reduce quote transitions to trading-day endpoints before annualization."""
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
     from quant_research_platform.markets.implementations.a_share.calendar import (
         unified_trading_sessions,
     )
 
-    if config.get("analyses", ["performance"]) != ["performance"]:
-        raise ValueError("hft_statistics_requires_performance_analysis")
-    calendar_path = config.get("inputs", {}).get("calendar")
+    analyses = config.get("analyses", ["performance"])
+    if set(analyses) - {"performance", "attribution"}:
+        raise ValueError("hft_statistics_analysis_invalid")
+    attribution = "attribution" in analyses
+    risk_inputs = _inventory_risk_inputs(config, window) if attribution else None
+    inputs = config.get("inputs", {})
+    calendar_path = inputs.get("calendar", inputs.get("daily", {}).get("calendar"))
     calendar = (
         pd.DatetimeIndex(unified_trading_sessions(read_dataset(Path(calendar_path))))
         if calendar_path is not None
         else None
     )
-    daily, summaries = [], []
+    daily, summaries, attribution_tables = [], [], {}
+    risk_cache = {}
     for candidate_id, ledger in ledgers.items():
-        selected, economic = inventory_daily_economics(ledger)
+        if attribution:
+            from quant_research_platform.research.portfolios.attribution import (
+                inventory_risk_attribution,
+            )
+            from quant_research_platform.runtime.dataframes import (
+                iter_complete_session_frames,
+            )
+            from quant_research_platform.storage.datasets.reading import (
+                iter_dataset_chunks,
+            )
+
+            observations, model, facts, available_at = risk_inputs
+            selected, economic, parts = inventory_risk_attribution(
+                ledger,
+                model=model,
+                observations=iter_complete_session_frames(
+                    iter_dataset_chunks(observations), timestamp_column="timestamp"
+                ),
+                risk_facts=facts,
+                available_at_column=available_at,
+                daily_views=_daily_market_views(config["inputs"]["daily"], window)
+                if "daily" in config["inputs"]
+                else (),
+                risk_cache=risk_cache,
+            )
+            for name, frame in parts.items():
+                attribution_tables.setdefault(name, []).append(frame)
+        else:
+            selected, economic = inventory_daily_economics(ledger)
         selected["candidate_id"] = candidate_id
         if selected.empty or not selected.entry_at.lt(selected.end_at).all():
             raise ValueError("hft_statistics_empty_interval")
@@ -788,36 +1511,178 @@ def statistics_tables(ledgers, *, window, config):
                 selected.end_at.iloc[:-1].to_numpy(),
             )
         )
-        summaries.extend(
-            performance_rows(
-                selected,
-                capital=ledger.capital,
-                economic=economic,
-                daily_complete=complete,
-                sample_role=config["sample_role"],
+        if "performance" in analyses:
+            summaries.extend(
+                performance_rows(
+                    selected,
+                    capital=ledger.capital,
+                    economic=economic,
+                    daily_complete=complete,
+                    sample_role=config["sample_role"],
+                )
             )
-        )
         daily.append(
             selected.reindex(
                 columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
             )
         )
-    return {
+    tables = {
         "portfolio_daily": pd.concat(daily, ignore_index=True),
-        "portfolio_performance": pd.DataFrame(summaries),
+        "portfolio_performance": pd.DataFrame(summaries).reindex(
+            columns=STATISTICS_TABLE_COLUMNS["portfolio_performance.parquet"]
+        ),
     }
+    for name, frames in attribution_tables.items():
+        tables[name] = pd.concat(frames, ignore_index=True).reindex(
+            columns=STATISTICS_TABLE_COLUMNS[name + ".parquet"]
+        )
+    if attribution:
+        tables["holding_factor_returns"] = tables[
+            "holding_factor_returns"
+        ].drop_duplicates(["attribution_group", "entry_at", "end_at", "factor_id"])
+        if metadata is not None:
+            metadata.update(
+                risk_model=model.to_dict(),
+                attribution_clock="inventory_intervals",
+                attribution_scope="absolute_inventory_price_intervals_and_native_account_economics",
+            )
+    return tables
 
 
-def inventory_inputs(config, window, *, prediction_paths=(), decision_columns=None):
+def _inventory_risk_inputs(config, window):
+    """Read one explicit full-market source, never a holdings-filtered risk fit."""
+    from quant_research_platform.contracts.risk import FactorRiskConfig, FactorRiskModel
+    from quant_research_platform.research.datasets.risk import (
+        read_asof_risk_facts,
+        risk_exposure_columns,
+    )
+
+    inputs = config["inputs"]
+    declaration = _strict_config(
+        config.get("risk_exposure_input", {}), {"data_id", "available_at_column"}, set()
+    )
+    data_id, available_at = declaration["data_id"], declaration["available_at_column"]
+    if (
+        type(data_id) is not str
+        or type(available_at) is not str
+        or not available_at
+        or data_id in {"observations", "daily", "calendar"}
+        or data_id not in inputs
+        or available_at in {"timestamp", "asset_id", "market_id", "listing_date"}
+        or "observations" not in inputs
+    ):
+        raise ValueError("hft_risk_inputs_invalid")
+    observations = open_dataset_session(
+        **_dataset_input_options(inputs["observations"], time_window=window)
+    )
+    declared = observations.spec.get("risk_model")
+    model = FactorRiskModel.from_mapping(
+        config.get("risk_model", declared or {"config": config.get("risk", {})})
+    )
+    if (
+        declared is not None
+        and model != FactorRiskModel.from_mapping(declared)
+        or "risk" in config
+        and model.config != FactorRiskConfig(**config["risk"])
+    ):
+        raise ValueError("portfolio_attribution_risk_model_conflict")
+    facts = open_dataset_session(**_dataset_input_options(inputs[data_id]))
+    if (
+        observations.spec.get("market_id") != "a_share"
+        or observations.spec["frequency"] != "tick"
+        or facts.spec.get("market_id") != "a_share"
+        or facts.spec["frequency"] != "1d"
+    ):
+        raise ValueError("hft_risk_inputs_invalid")
+    observation_columns = {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "listing_date",
+        "eligible",
+        "mid",
+        "quote_timestamp",
+    }
+    if observations.spec["column_roles"].get("eligible") not in {"universe", "mask"}:
+        # A raw book-completeness flag does not define the research universe.
+        observation_columns.remove("eligible")
+    fact_columns = {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "listing_date",
+        available_at,
+        *risk_exposure_columns(model),
+    }
+    observations = observations.projected_view(
+        tuple(
+            column
+            for column in observations.logical_columns
+            if column in observation_columns
+        )
+    )
+    facts = facts.projected_view(
+        tuple(column for column in facts.logical_columns if column in fact_columns)
+    )
+    return (
+        observations,
+        model,
+        read_asof_risk_facts(
+            facts,
+            model=model,
+            available_at_column=available_at,
+            time_window=window,
+        ),
+        available_at,
+    )
+
+
+def _daily_market_views(daily, window):
+    """Reuse native daily identity, corporate actions and valuation projections."""
+    daily = _strict_config(
+        daily,
+        {"panel", "calendar", "market_bars", "stock_master", "corporate_actions"},
+        {"equity_events"},
+    )
+    calendar = read_dataset(Path(daily["calendar"]))
+    daily_window = TimeWindow(
+        pd.Timestamp(calendar.calendar_date.min()).date(),
+        pd.Timestamp(window.end).date(),
+    )
+    return iter_portfolio_sessions(
+        market_bars_root=daily["market_bars"],
+        stock_master_root=daily["stock_master"],
+        panel_root=daily["panel"],
+        panel_columns=(
+            "asset_id",
+            "listing_date",
+            "timestamp",
+            "open",
+            "close",
+            "amount",
+            "market_type",
+            "is_trading",
+        ),
+        calendar=calendar,
+        time_window=daily_window,
+        corporate_actions_root=daily["corporate_actions"],
+        equity_events_root=daily.get("equity_events"),
+    )
+
+
+def inventory_inputs(
+    config,
+    window,
+    *,
+    prediction_paths=(),
+    decision_columns=None,
+    prediction_validator=None,
+):
     """Open the same explicit market inputs for training and native backtests."""
 
     from quant_research_platform.research.protocols.a_share_hft import PANEL_COLUMNS
 
-    daily = _strict_config(
-        config["daily_inputs"],
-        {"panel", "calendar", "market_bars", "stock_master", "corporate_actions"},
-        {"equity_events"},
-    )
+    daily = config["daily_inputs"]
     start, end = pd.Timestamp(window.start).date(), pd.Timestamp(window.end).date()
     asset_filter = (
         ("asset_id", "in", tuple(config["parameters"]["maximum_inventory"])),
@@ -870,27 +1735,7 @@ def inventory_inputs(config, window, *, prediction_paths=(), decision_columns=No
         fee_frame,
         content_identity=canonical_json_hash(fee_frame.to_json(date_format="iso")),
     )
-    calendar = read_dataset(Path(daily["calendar"]))
-    daily_window = TimeWindow(pd.Timestamp(calendar.calendar_date.min()).date(), end)
-    daily_sessions = iter_portfolio_sessions(
-        market_bars_root=daily["market_bars"],
-        stock_master_root=daily["stock_master"],
-        panel_root=daily["panel"],
-        panel_columns=(
-            "asset_id",
-            "listing_date",
-            "timestamp",
-            "open",
-            "close",
-            "amount",
-            "market_type",
-            "is_trading",
-        ),
-        calendar=calendar,
-        time_window=daily_window,
-        corporate_actions_root=daily["corporate_actions"],
-        equity_events_root=daily.get("equity_events"),
-    )
+    daily_sessions = _daily_market_views(daily, window)
     prediction_frames = []
     for path in prediction_paths:
         frame, facts = read_predictions(
@@ -900,6 +1745,8 @@ def inventory_inputs(config, window, *, prediction_paths=(), decision_columns=No
         )
         if facts["model_facts"]["market_id"] != "a_share":
             raise ValueError("hft_prediction_market_mismatch")
+        if prediction_validator is not None:
+            prediction_validator(facts)
         prediction_frames.append(
             frame.loc[frame.asset_id.isin(config["parameters"]["maximum_inventory"])]
         )
@@ -944,7 +1791,7 @@ def backtest(config):
             "parameters",
             "output",
         },
-        {"trades"},
+        {"trades", "stock_status"},
     )
     params = _parameters(config["parameters"])
     window = TimeWindow(**config["window"])
@@ -957,7 +1804,12 @@ def backtest(config):
     def produce(emit):
         with closing_iterator(sessions) as inputs:
             for batch in inventory_batches(
-                inputs, schedule, params, window, trade_session=trade_session
+                inputs,
+                schedule,
+                params,
+                window,
+                trade_session=trade_session,
+                stock_status=config.get("stock_status"),
             ):
                 emit(batch)
 
@@ -980,11 +1832,18 @@ def backtest(config):
                 "observed_depth_passive_queue_no_market_feedback_or_receive_clock"
                 if "passive" in params
                 else (
-                    "strictly_subsequent_observed_top_of_book_no_queue_or_receive_clock"
+                    "strictly_subsequent_observed_depth_no_queue_or_receive_clock"
+                    if params.get("taker_depth_levels", 1) > 1
+                    else (
+                        "strictly_subsequent_observed_top_of_book_no_queue_or_receive_clock"
+                    )
                 )
             ),
             "corporate_action_policy": CORPORATE_ACTION_POLICY,
             "fee_schedule_identity": schedule.content_identity,
+            "stock_status_controls": "published_lifecycle_status"
+            if "stock_status" in config
+            else "not_configured",
         },
         produce=produce,
     )

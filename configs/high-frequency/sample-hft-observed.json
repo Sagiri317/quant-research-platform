@@ -1,0 +1,13 @@
+{
+  "inputs": "data/research/a_share/a_share_hft",
+  "output": "data/research/a_share/hft_observed_3s",
+  "dataset_id": "hft_observed_3s",
+  "time_window": {
+    "start": "2018-02-14",
+    "end": "2018-02-14"
+  },
+  "interval_seconds": 3,
+  "quote_visibility_delay_ms": 1,
+  "max_quote_age_seconds": 6,
+  "label_tolerance_seconds": 6
+}

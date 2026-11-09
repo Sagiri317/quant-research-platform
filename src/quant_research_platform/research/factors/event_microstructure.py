@@ -310,7 +310,6 @@ def compute_event_factors(panel, orders, trades, *, columns, config):
             ],
             axis=1,
         )
-        aligned.loc[~work.eligible] = np.nan
         output.append(
             pd.concat([work.loc[:, protocol.KEY], aligned.loc[:, columns]], axis=1)
         )

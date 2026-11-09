@@ -99,14 +99,24 @@ def test_native_reference_prediction_keys_must_be_unique(paired_sources, tmp_pat
         model_statistics(config)
 
 
+@pytest.mark.parametrize("kind", ["model", "portfolio"])
 @pytest.mark.parametrize("hac_lag,block", [(20, 1), (0, 4)])
-def test_model_paired_inference_methods_are_independent(hac_lag, block):
+def test_paired_inference_preserves_method_and_sample_preconditions(
+    kind, hac_lag, block
+):
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _group_portfolio_comparison,
+    )
+    from quant_research_platform.research.statistics import stationary_bootstrap_mean_ci
+
+    dates = pd.date_range("2024-01-01", periods=4)
     values = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024-01-01", periods=4),
+            "timestamp": dates,
             "family_id": "one",
-            "global": [0.1, 0.2, 0.3, 0.4],
-            "quarterly": [0.3, 0.1, 0.5, 0.2],
+            "global": [0.001, 0.002, 0.003, 0.004],
+            "quarterly": [0.003, 0.001, 0.005, 0.002],
         }
     )
     config = {
@@ -116,6 +126,8 @@ def test_model_paired_inference_methods_are_independent(hac_lag, block):
             "bootstrap_block": block,
             "bootstrap_repetitions": 99,
             "group_comparison": {
+                "portfolio_ids": ["one"],
+                "primary_portfolio_id": "one",
                 "fdr_method": "BY",
                 "alpha": 0.05,
                 "seed": 42,
@@ -123,17 +135,81 @@ def test_model_paired_inference_methods_are_independent(hac_lag, block):
             },
         },
     }
-    row = _paired_group_rankic(
-        values, selection_group="quarterly", family_ids=("one",), config=config
-    ).iloc[0]
+
+    def compare(*, daily_complete=True):
+        if kind == "model":
+            result = _paired_group_rankic(
+                values,
+                selection_group="quarterly",
+                family_ids=("one",),
+                config=config,
+            )
+        else:
+            result = _group_portfolio_comparison(
+                pd.DataFrame(
+                    {
+                        "global_one": values["global"].to_numpy(),
+                        "quarterly_one": values.quarterly.to_numpy(),
+                    },
+                    index=pd.MultiIndex.from_arrays(
+                        [dates, dates + pd.Timedelta(days=1)],
+                        names=["entry_at", "end_at"],
+                    ),
+                ),
+                config,
+                daily_complete=daily_complete,
+            )
+        assert (
+            tuple(result.columns)
+            == STATISTICS_TABLE_COLUMNS[f"{kind}_group_comparison.parquet"]
+        )
+        return result.iloc[0]
+
+    row = compare()
+    assert row.observation_count == 4
     assert row.status == ("UNDEFINED" if hac_lag == 20 else "DEFINED")
     assert row.bootstrap_status == ("DEFINED" if block == 1 else "UNDEFINED")
+    if block == 1:
+        expected = stationary_bootstrap_mean_ci(
+            values.quarterly - values["global"],
+            block_size=block,
+            repetitions=99,
+            seed=42,
+            confidence=0.95,
+        )
+        assert row.bootstrap_lower == pytest.approx(expected.lower)
+        assert row.bootstrap_upper == pytest.approx(expected.upper)
+        assert row.reason == "hac_lag_exceeds_observations"
+    else:
+        assert row.bootstrap_reason == "bootstrap_block_exceeds_observations"
+
+    if kind == "portfolio":
+        unavailable = compare(daily_complete=False)
+        assert unavailable.mean_difference == row.mean_difference
+        assert (
+            unavailable.reason
+            == unavailable.bootstrap_reason
+            == "incomplete_daily_axis"
+        )
+        assert pd.isna(unavailable.t_statistic) and pd.isna(unavailable.bootstrap_lower)
+
     values.loc[1, "global"] = np.nan
-    missing = _paired_group_rankic(
-        values, selection_group="quarterly", family_ids=("one",), config=config
-    ).iloc[0]
+    missing = compare()
     assert missing.status == missing.bootstrap_status == "UNDEFINED"
-    assert missing.reason == missing.bootstrap_reason == "incomplete_session_clock"
+    assert (
+        missing.reason
+        == missing.bootstrap_reason
+        == ("incomplete_session_clock" if kind == "model" else "nonpositive_start_nav")
+    )
+    assert missing.observation_count == (3 if kind == "model" else 4)
+    assert missing.mean_difference == pytest.approx((0.002 + 0.002 - 0.002) / 3)
+    if kind == "model":
+        assert missing.calendar_count == 4
+        values = values.iloc[:0]
+        empty = compare()
+        assert empty.observation_count == empty.calendar_count == 0
+        assert empty.reason == empty.bootstrap_reason == "no_common_observations"
+        assert pd.isna(empty.mean_difference)
 
 
 def _portfolio_pair(tmp_path, *, change=None, base_changes=None):
@@ -382,72 +458,6 @@ def test_undefined_cash_comparison_still_rejects_invalid_configuration(
     ):
         portfolio_statistics(config)
     assert not (tmp_path / "statistics").exists()
-
-
-@pytest.mark.parametrize(
-    "hac_lag,block,status,bootstrap_status",
-    [(20, 1, "UNDEFINED", "DEFINED"), (0, 4, "DEFINED", "UNDEFINED")],
-)
-def test_portfolio_group_inference_methods_have_independent_preconditions(
-    hac_lag, block, status, bootstrap_status
-):
-    from quant_research_platform.research.portfolios.diagnostics import (
-        _group_portfolio_comparison,
-    )
-    from quant_research_platform.research.statistics import stationary_bootstrap_mean_ci
-
-    index = pd.MultiIndex.from_arrays(
-        [
-            pd.date_range("2024-01-01", periods=4),
-            pd.date_range("2024-01-02", periods=4),
-        ],
-        names=["entry_at", "end_at"],
-    )
-    matrix = pd.DataFrame(
-        {
-            "global_p": [0.001, 0.002, 0.003, 0.004],
-            "quarterly_p": [0.003, 0.001, 0.005, 0.002],
-        },
-        index=index,
-    )
-    config = {
-        "sample_role": "exploratory",
-        "statistics": {
-            "hac_lag": hac_lag,
-            "bootstrap_block": block,
-            "bootstrap_repetitions": 99,
-            "group_comparison": {
-                "portfolio_ids": ["p"],
-                "primary_portfolio_id": "p",
-                "fdr_method": "BY",
-                "alpha": 0.05,
-                "seed": 42,
-                "confidence": 0.95,
-            },
-        },
-    }
-    row = _group_portfolio_comparison(matrix, config, daily_complete=True).iloc[0]
-    unavailable = _group_portfolio_comparison(
-        matrix, config, daily_complete=False
-    ).iloc[0]
-    assert unavailable.mean_difference == row.mean_difference
-    assert unavailable.reason == unavailable.bootstrap_reason == "incomplete_daily_axis"
-    assert pd.isna(unavailable.t_statistic) and pd.isna(unavailable.bootstrap_lower)
-    assert row.status == status
-    assert row.bootstrap_status == bootstrap_status
-    if bootstrap_status == "DEFINED":
-        expected = stationary_bootstrap_mean_ci(
-            matrix.quarterly_p - matrix.global_p,
-            block_size=block,
-            repetitions=99,
-            seed=42,
-            confidence=0.95,
-        )
-        assert row.bootstrap_lower == pytest.approx(expected.lower)
-        assert row.bootstrap_upper == pytest.approx(expected.upper)
-        assert row.reason == "hac_lag_exceeds_observations"
-    else:
-        assert row.bootstrap_reason == "bootstrap_block_exceeds_observations"
 
 
 @pytest.mark.parametrize(

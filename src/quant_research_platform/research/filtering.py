@@ -45,14 +45,12 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
     if column not in frame.columns:
         raise ValueError(f"missing_filter_columns: {column}")
     series = frame[column]
-    if bool(series.isna().any()):
-        raise ValueError(f"null_filter_column_values: {column}")
     if is_bool_dtype(series):
-        return series.eq(True)
+        return series.fillna(False)
     if is_integer_dtype(series):
-        invalid = ~series.isin((0, 1))
+        invalid = ~series.dropna().isin((0, 1))
         if not bool(invalid.any()):
-            return series.eq(1)
+            return series.eq(1).fillna(False)
     raise ValueError(f"invalid_filter_column_dtype: {column}")
 
 
@@ -100,6 +98,7 @@ def a_share_eligibility(
     minimum_listing_sessions: int = 252,
     exclude_st: bool = True,
     exclude_pt: bool = True,
+    preserve_unknown: bool = False,
 ) -> pd.Series:
     """Derive research membership without imposing factor or execution validity.
 
@@ -156,4 +155,4 @@ def a_share_eligibility(
                 raise ValueError(f"a_share_eligibility_facts_missing: {column}")
             values = frame[column].astype("string").str.strip()
             eligible &= values.notna() & values.ne("")
-    return eligible.fillna(False).astype(bool)
+    return eligible if preserve_unknown else eligible.fillna(False).astype(bool)

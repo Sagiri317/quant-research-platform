@@ -17,8 +17,7 @@ from quant_research_platform.research.signals.processing import (
     process_prediction_signals,
     signal_processing_parameters,
 )
-from tests.helpers.high_frequency import daily_view
-from tests.research.test_hft_portfolio import parameters, quotes, schedule
+from tests.helpers.high_frequency import daily_view, parameters, quotes, schedule
 from tests.research.test_policy_learning import hft_episode
 
 
@@ -134,13 +133,19 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path):
         "temporary_impact": 1.0,
     }
     summaries = {}
-    for strategy in ("twap", "almgren_chriss", "signal_ac"):
+    for strategy in ("twap", "vwap", "almgren_chriss", "signal_ac"):
         config = {
             "episode": episode,
             "strategy": strategy,
             "output": str(tmp_path / strategy),
         }
-        if strategy != "twap":
+        if strategy == "vwap":
+            config["volume_curve"] = {
+                "as_of": params["as_of"],
+                "fractions": [0.0, 0.5, 1.0],
+                "cumulative_volume": [0.0, 0.5, 1.0],
+            }
+        if strategy in {"almgren_chriss", "signal_ac"}:
             config["execution_parameters"] = dict(params)
         if strategy == "signal_ac":
             config["execution_parameters"].update(signal_column="mid", signal_gain=0.1)
@@ -148,7 +153,7 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path):
         summaries[strategy] = parse_qrp_json_object(
             (output / "summary.json").read_bytes()
         )
-    assert summaries["almgren_chriss"] == summaries["twap"]
+    assert summaries["vwap"] == summaries["almgren_chriss"] == summaries["twap"]
     assert summaries["twap"]["completion_rate"] == 0.5
     assert summaries["signal_ac"]["completion_rate"] < 0.5
     with pytest.raises(ValueError, match="not_historical"):
@@ -160,3 +165,34 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path):
                 "output": str(tmp_path / "invalid"),
             }
         )
+
+
+@pytest.mark.parametrize("strategy", ["vwap", "almgren_chriss"])
+@pytest.mark.parametrize(
+    "as_of", ["NaT", None, "2024-01-02T01:30:00", "2024-01-01T00:00:00Z"]
+)
+def test_execution_schedules_reject_unproved_history_before_writing(
+    tmp_path, strategy, as_of
+):
+    episode = hft_episode(tmp_path / "inputs")
+    config = {
+        "episode": episode,
+        "strategy": strategy,
+        "output": str(tmp_path / "invalid"),
+    }
+    if strategy == "vwap":
+        config["volume_curve"] = {
+            "as_of": as_of,
+            "fractions": [0.0, 1.0],
+            "cumulative_volume": [0.0, 1.0],
+        }
+    else:
+        config["execution_parameters"] = {
+            "as_of": as_of,
+            "risk_aversion": 0.0,
+            "price_volatility": 1.0,
+            "temporary_impact": 1.0,
+        }
+    with pytest.raises(ValueError, match="not_historical"):
+        backtest_policy(config)
+    assert not (tmp_path / "invalid").exists()

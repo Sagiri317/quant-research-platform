@@ -28,6 +28,44 @@ from quant_research_platform.contracts.validation import (
 )
 
 
+def common_correlation_mask(frame: pd.DataFrame, *, groups) -> pd.DataFrame:
+    """Keep each correlation only on blocks defined for every declared candidate."""
+    return (
+        frame[["ic", "rankic"]]
+        .notna()
+        .groupby([frame[column] for column in groups], sort=False, dropna=False)
+        .transform("all")
+    )
+
+
+def daily_mean_frame(frame: pd.DataFrame, *, sessions=None) -> pd.DataFrame:
+    """Reduce timestamp-indexed numeric estimates within each trading session.
+
+    Missing sessions remain NaN. Only legacy midnight observations may omit the
+    explicit session axis; intraday observations cannot establish missing days.
+    """
+    from quant_research_platform.contracts.evaluations import evaluation_sessions
+
+    timestamps = pd.DatetimeIndex(frame.index)
+    if timestamps.hasnans or not timestamps.is_unique or timestamps.tz is not None:
+        raise ValueError("statistics_timestamp_axis_invalid")
+    days = timestamps.normalize()
+    if sessions is None:
+        if not timestamps.equals(days):
+            raise ValueError("statistics_sessions_required")
+        sessions = days.sort_values()
+    else:
+        sessions = evaluation_sessions(sessions)
+    if not days.isin(sessions).all():
+        raise ValueError("statistics_input_session_not_declared")
+    return (
+        frame.groupby(days, sort=False)
+        .mean()
+        .reindex(sessions)
+        .rename_axis("timestamp")
+    )
+
+
 @dataclass(frozen=True)
 class AlignedCandidateMatrix:
     values: np.ndarray
@@ -963,6 +1001,80 @@ def time_series_inference_summary(
         )
     result = pd.DataFrame(rows)
     return _apply_fdr(result, fdr_method, fdr_alpha, family_size)
+
+
+def _paired_mean_inference(
+    differences,
+    *,
+    blockers,
+    max_lags,
+    block_size,
+    repetitions,
+    seed,
+    confidence,
+    fdr_method,
+    fdr_alpha,
+):
+    """Infer paired differences without dropping dates or blocked hypotheses."""
+    inferential = differences.copy()
+    for candidate in differences:
+        if blockers.get(candidate) is not None:
+            inferential[candidate] = np.nan
+    inference = (
+        time_series_inference_summary(
+            inferential.set_axis(range(len(differences.columns)), axis=1).reset_index(
+                names="timestamp"
+            ),
+            identity_column="timestamp",
+            max_lags=max_lags,
+            fdr_method=fdr_method,
+            fdr_alpha=fdr_alpha,
+            confidence=confidence,
+        )
+        .set_index("timestamp")
+        .set_axis(differences.columns)
+        .drop(columns=["observation_count", "mean"])
+    )
+    rows = {}
+    for candidate in differences:
+        row = inference.loc[candidate].to_dict()
+        row.update(
+            hac_lag=max_lags,
+            fdr_family_size=len(differences.columns),
+            fdr_method=fdr_method or "NOT_APPLICABLE",
+            fdr_alpha=fdr_alpha,
+            confidence=confidence,
+            bootstrap_block_size=block_size,
+            bootstrap_repetitions=repetitions,
+            bootstrap_seed=seed,
+            bootstrap_status="UNDEFINED",
+            bootstrap_lower=np.nan,
+            bootstrap_upper=np.nan,
+        )
+        values = differences[candidate].to_numpy(dtype="float64")
+        reason = blockers.get(candidate)
+        if reason is not None:
+            row.update(status="UNDEFINED", reason=reason)
+        elif not np.isfinite(values).all():
+            reason = "incomplete_session_clock"
+        elif len(values) > block_size:
+            interval = stationary_bootstrap_mean_ci(
+                values,
+                block_size=block_size,
+                repetitions=repetitions,
+                seed=seed,
+                confidence=confidence,
+            )
+            row.update(
+                bootstrap_status="DEFINED",
+                bootstrap_lower=interval.lower,
+                bootstrap_upper=interval.upper,
+            )
+        else:
+            reason = "bootstrap_block_exceeds_observations"
+        row["bootstrap_reason"] = reason
+        rows[candidate] = row
+    return rows
 
 
 def _apply_fdr(result, fdr_method, fdr_alpha, family_size):

@@ -10,9 +10,11 @@ from dataclasses import asdict, replace
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import (
@@ -42,13 +44,12 @@ from quant_research_platform.research.risk import (
     FactorRiskState,
 )
 from quant_research_platform.research.statistics import (
+    _paired_mean_inference,
     _return_sharpes,
     _validate_bootstrap_configuration,
     _validate_cscv_slice_count,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
-    stationary_bootstrap_mean_ci,
-    time_series_inference_summary,
 )
 
 _PORTFOLIO_ANALYSES = (
@@ -288,9 +289,10 @@ def iter_holding_factor_inputs(
                 entry = prices[1].set_index("asset_id").adj_open
                 endpoint = prices[2].set_index("asset_id").adj_open
                 if reason is None:
-                    holding_cross = risk.prepare_exposures(
+                    prepared = risk.prepare_exposure_session(
                         cross, include_ineligible=True
                     )
+                    holding_cross = prepared.frame
                     decision_exposure_assets = frozenset(holding_cross.asset_id)
                     life_keys = ["asset_id", "listing_date"]
                     real_pairs = pd.MultiIndex.from_frame(
@@ -316,6 +318,7 @@ def iter_holding_factor_inputs(
                             holding_cross,
                             require_complete=True,
                             project_ineligible=True,
+                            prepared=prepared,
                         )
                     except ValueError as error:
                         if str(error) != "holding_returns_incomplete":
@@ -359,6 +362,40 @@ def iter_holding_factor_inputs(
             panel_window.pop(interval.decision_at, None)
             if benchmark is not None and stamp(benchmark) == interval.decision_at:
                 benchmark = next(benchmarks, None)
+
+
+def _portfolio_risk_models(ledgers, candidates, config):
+    """Inherit realized risk definitions; never silently overwrite ledger facts."""
+    declared = (
+        FactorRiskModel.from_mapping(config["risk_model"])
+        if "risk_model" in config
+        else None
+    )
+    legacy = FactorRiskConfig(**config["risk"]) if "risk" in config else None
+    result = {}
+    for candidate in candidates:
+        metadata = ledgers[candidate.candidate_id].metadata
+        if "risk_model" in metadata:
+            model = FactorRiskModel.from_mapping(metadata["risk_model"])
+        elif "risk_config" in metadata:
+            model = FactorRiskModel(
+                candidate.risk_style_columns,
+                FactorRiskConfig(**metadata["risk_config"]),
+            )
+        else:
+            model = declared or FactorRiskModel(
+                candidate.risk_style_columns, legacy or FactorRiskConfig()
+            )
+        if (
+            model.style_columns != candidate.risk_style_columns
+            or declared is not None
+            and model != declared
+            or legacy is not None
+            and model.config != legacy
+        ):
+            raise ValueError("portfolio_attribution_risk_model_conflict")
+        result[candidate.candidate_id] = model
+    return result
 
 
 def build_portfolio_statistics_tables(
@@ -516,29 +553,32 @@ def build_portfolio_statistics_tables(
     )
     if "attribution" in analyses and calendar is None:
         raise ValueError("portfolio_statistics_attribution_calendar_required")
-    holding_inputs = (
-        {
-            styles: iter_holding_factor_inputs(
-                iter_portfolio_sessions=iter_portfolio_sessions,
-                inputs=inputs,
-                calendar=calendar,
-                time_window=time_window,
-                unified_trading_sessions=unified_trading_sessions,
-                style_columns=styles,
-                risk_config=FactorRiskConfig(**config["risk"]),
-                benchmark_required=any(
-                    candidate.benchmark_id is not None
-                    for candidate in candidates
-                    if candidate.risk_style_columns == styles
-                ),
-            )
-            for styles in dict.fromkeys(
-                candidate.risk_style_columns for candidate in candidates
-            )
-        }
+    risk_models = (
+        _portfolio_risk_models(ledgers, candidates, config)
         if "attribution" in analyses
         else {}
     )
+    if comparison_metadata is not None and risk_models:
+        comparison_metadata["risk_models"] = {
+            candidate_id: model.to_dict() for candidate_id, model in risk_models.items()
+        }
+    holding_inputs = {
+        model: iter_holding_factor_inputs(
+            iter_portfolio_sessions=iter_portfolio_sessions,
+            inputs=inputs,
+            calendar=calendar,
+            time_window=time_window,
+            unified_trading_sessions=unified_trading_sessions,
+            style_columns=model.style_columns,
+            risk_config=model.config,
+            benchmark_required=any(
+                candidate.benchmark_id is not None
+                for candidate in candidates
+                if risk_models[candidate.candidate_id] == model
+            ),
+        )
+        for model in dict.fromkeys(risk_models.values())
+    }
     return _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
@@ -548,6 +588,7 @@ def build_portfolio_statistics_tables(
         calendar=calendar,
         unified_trading_sessions=unified_trading_sessions,
         holding_inputs=holding_inputs,
+        risk_models=risk_models,
         comparison_metadata=comparison_metadata,
     )
 
@@ -563,9 +604,9 @@ def _portfolio_statistics_tables(
     unified_trading_sessions,
     holding_inputs,
     comparison_metadata=None,
+    risk_models=None,
 ):
     """Project the protocol-selected ledgers into interval-aligned diagnostics."""
-    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 
     analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
     benchmark_requested = bool({"attribution"} & set(analyses))
@@ -670,7 +711,11 @@ def _portfolio_statistics_tables(
                 if holding_input.fitted is not None:
                     factor_rows.extend(
                         dict(
-                            attribution_group=canonical_json_hash(list(styles)),
+                            attribution_group=canonical_json_hash(
+                                styles.to_dict()
+                                if isinstance(styles, FactorRiskModel)
+                                else list(styles)
+                            ),
                             decision_at=holding_input.decision_at,
                             entry_at=holding_input.entry_at,
                             end_at=holding_input.end_at,
@@ -685,7 +730,11 @@ def _portfolio_statistics_tables(
             ):
                 if "attribution" in analyses:
                     candidate = by_id[candidate_id]
-                    holding_input = interval_inputs[candidate.risk_style_columns]
+                    holding_input = interval_inputs[
+                        risk_models[candidate_id]
+                        if risk_models is not None
+                        else candidate.risk_style_columns
+                    ]
                 previous_end, previous_nav = previous[candidate_id]
                 economic_totals[candidate_id].consume(batch)
                 if (row["entry_at"], row["end_at"]) != (
@@ -808,7 +857,8 @@ def _portfolio_statistics_tables(
                                 end_at=row["end_at"],
                                 component_id=component,
                                 component_type="detail"
-                                if component
+                                if component.startswith("factor:")
+                                or component
                                 in {
                                     "stock_residual_difference",
                                     "benchmark_replication_gap",
@@ -1029,7 +1079,9 @@ def _portfolio_statistics_tables(
     paired_comparison = (
         _group_portfolio_comparison(matrix, config, daily_complete=daily_complete)
         if "group_comparison" in analyses
-        else pd.DataFrame(columns=_PORTFOLIO_COMPARISON_COLUMNS)
+        else pd.DataFrame(
+            columns=STATISTICS_TABLE_COLUMNS["portfolio_group_comparison.parquet"]
+        )
     )
     for index, pair in paired_comparison.iterrows():
         if pair.reason == "nonpositive_start_nav":
@@ -1157,16 +1209,7 @@ def _portfolio_statistics_tables(
             )
     capacity = pd.DataFrame(
         capacity_rows,
-        columns=(
-            "candidate_id",
-            "decision_timestamp",
-            "entry_at",
-            "participation",
-            "capacity",
-            "bottleneck_asset_id",
-            "status",
-            "reason",
-        ),
+        columns=STATISTICS_TABLE_COLUMNS["portfolio_capacity.parquet"],
     )
     capacity_groups = capacity.groupby(
         ["candidate_id", "participation"], sort=False
@@ -1238,25 +1281,11 @@ def _portfolio_statistics_tables(
         "portfolio_robustness": pd.DataFrame(robustness_rows),
         "portfolio_exposures": pd.DataFrame(
             exposure_rows,
-            columns=(
-                "candidate_id",
-                "decision_at",
-                "entry_at",
-                "factor_id",
-                "value",
-            ),
+            columns=STATISTICS_TABLE_COLUMNS["portfolio_exposures.parquet"],
         ),
         "holding_factor_returns": pd.DataFrame(
             factor_rows,
-            columns=(
-                "attribution_group",
-                "decision_at",
-                "entry_at",
-                "end_at",
-                "factor_id",
-                "value",
-                "observation_count",
-            ),
+            columns=STATISTICS_TABLE_COLUMNS["holding_factor_returns.parquet"],
         ),
     }
 
@@ -1303,176 +1332,76 @@ def _portfolio_statistics_tables(
     return result
 
 
-_PORTFOLIO_COMPARISON_COLUMNS = (
-    "portfolio_id",
-    "comparison_role",
-    "sample_role",
-    "status",
-    "reason",
-    "bootstrap_status",
-    "bootstrap_reason",
-    "fdr_method",
-    "global_terminal_wealth_reason",
-    "quarterly_terminal_wealth_reason",
-    "observation_count",
-    "hac_lag",
-    "bootstrap_block_size",
-    "bootstrap_repetitions",
-    "bootstrap_seed",
-    "fdr_family_size",
-    "global_mean",
-    "quarterly_mean",
-    "mean_difference",
-    "global_terminal_wealth",
-    "quarterly_terminal_wealth",
-    "standard_error",
-    "t_statistic",
-    "p_value",
-    "ci_lower",
-    "ci_upper",
-    "bootstrap_lower",
-    "bootstrap_upper",
-    "confidence",
-    "fdr_alpha",
-    "fdr_adjusted_p_value",
-)
-
-
 def _group_portfolio_comparison(matrix, config, *, daily_complete):
     """Keep paired descriptions; infer only on a caller-verified daily grid."""
+    columns = STATISTICS_TABLE_COLUMNS["portfolio_group_comparison.parquet"]
     statistics = config["statistics"]
     declaration = statistics.get("group_comparison")
     if declaration is None:
-        return pd.DataFrame(columns=_PORTFOLIO_COMPARISON_COLUMNS)
+        return pd.DataFrame(columns=columns)
     candidate_ids = declaration["portfolio_ids"]
-    columns = [
+    expected = [
         f"{group}_{candidate}"
         for candidate in candidate_ids
         for group in ("global", "quarterly")
     ]
     if (
-        set(columns) != set(matrix.columns)
+        set(expected) != set(matrix.columns)
         or np.isinf(matrix.to_numpy(dtype="float64")).any()
     ):
         raise ValueError("portfolio_group_comparison_coverage_invalid")
     differences = pd.DataFrame(
         {
-            "timestamp": matrix.index.get_level_values("end_at"),
-            **{
-                index: (
-                    matrix[f"quarterly_{candidate}"] - matrix[f"global_{candidate}"]
-                ).to_numpy()
-                for index, candidate in enumerate(candidate_ids)
-            },
-        }
+            candidate: (
+                matrix[f"quarterly_{candidate}"] - matrix[f"global_{candidate}"]
+            ).to_numpy()
+            for candidate in candidate_ids
+        },
+        index=matrix.index.get_level_values("end_at"),
     )
-    access = config["sample_role"]
-    fdr_method = (
-        None if _inference_blocker(config) is not None else declaration["fdr_method"]
-    )
-    undefined_pairs = {
-        index for index in range(len(candidate_ids)) if differences[index].isna().any()
-    }
-    inference_differences = differences.copy()
-    for index in undefined_pairs:
-        inference_differences[index] = np.nan
-    inference = (
-        time_series_inference_summary(
-            inference_differences,
-            identity_column="timestamp",
-            max_lags=statistics["hac_lag"],
-            fdr_method=fdr_method,
-            fdr_alpha=declaration["alpha"],
-            fdr_family_size=len(candidate_ids),
-            confidence=declaration["confidence"],
-        )
-        .set_index("timestamp")
-        .set_axis(candidate_ids)
-        if daily_complete
-        else None
+    inference = _paired_mean_inference(
+        differences,
+        blockers={
+            candidate: "incomplete_daily_axis"
+            if not daily_complete
+            else "nonpositive_start_nav"
+            if differences[candidate].isna().any()
+            else None
+            for candidate in candidate_ids
+        },
+        max_lags=statistics["hac_lag"],
+        block_size=statistics["bootstrap_block"],
+        repetitions=statistics["bootstrap_repetitions"],
+        seed=declaration["seed"],
+        confidence=declaration["confidence"],
+        fdr_method=None
+        if _inference_blocker(config) is not None
+        else declaration["fdr_method"],
+        fdr_alpha=declaration["alpha"],
     )
     rows = []
-    for index, candidate in enumerate(candidate_ids):
-        values = differences[index].to_numpy(dtype="float64")
+    for candidate in candidate_ids:
         pair = matrix[[f"global_{candidate}", f"quarterly_{candidate}"]]
         paired = np.isfinite(pair).all(axis=1)
         pair = pair.loc[paired]
-        row = {
-            "portfolio_id": candidate,
-            "comparison_role": "primary"
-            if candidate == declaration["primary_portfolio_id"]
-            else "secondary",
-            "sample_role": access,
-            "observation_count": len(values),
-            "global_mean": float(pair.iloc[:, 0].mean()),
-            "quarterly_mean": float(pair.iloc[:, 1].mean()),
-            "mean_difference": float(values[paired].mean()) if paired.any() else np.nan,
-            "hac_lag": statistics["hac_lag"],
-            "bootstrap_block_size": statistics["bootstrap_block"],
-            "bootstrap_repetitions": statistics["bootstrap_repetitions"],
-            "bootstrap_seed": declaration["seed"],
-            "confidence": declaration["confidence"],
-            "fdr_family_size": len(candidate_ids),
-            "fdr_method": fdr_method or "NOT_APPLICABLE",
-            "fdr_alpha": declaration["alpha"],
-            **dict.fromkeys(
-                (
-                    "standard_error",
-                    "t_statistic",
-                    "p_value",
-                    "ci_lower",
-                    "ci_upper",
-                    "fdr_adjusted_p_value",
-                    "bootstrap_lower",
-                    "bootstrap_upper",
-                ),
-                np.nan,
-            ),
-            "status": "UNDEFINED",
-            "reason": None,
-            "bootstrap_status": "UNDEFINED",
-            "bootstrap_reason": None,
-        }
-        if not daily_complete:
-            row["reason"] = row["bootstrap_reason"] = "incomplete_daily_axis"
-        elif index in undefined_pairs:
-            row["reason"] = row["bootstrap_reason"] = "nonpositive_start_nav"
-        else:
-            estimate = inference.loc[candidate]
-            for key in (
-                "status",
-                "reason",
-                "standard_error",
-                "t_statistic",
-                "p_value",
-                "ci_lower",
-                "ci_upper",
-                "fdr_adjusted_p_value",
-            ):
-                row[key] = estimate[key]
-            if not np.isfinite(values).all():
-                row["bootstrap_reason"] = "incomplete_session_clock"
-            elif len(values) > statistics["bootstrap_block"]:
-                interval = stationary_bootstrap_mean_ci(
-                    values,
-                    block_size=statistics["bootstrap_block"],
-                    repetitions=statistics["bootstrap_repetitions"],
-                    seed=declaration["seed"],
-                    confidence=declaration["confidence"],
-                )
-                row.update(
-                    bootstrap_lower=interval.lower,
-                    bootstrap_upper=interval.upper,
-                    bootstrap_status="DEFINED",
-                    bootstrap_reason=None,
-                )
-            else:
-                row["bootstrap_reason"] = "bootstrap_block_exceeds_observations"
-        rows.append(row)
-    return pd.DataFrame.from_records(
-        rows,
-        columns=_PORTFOLIO_COMPARISON_COLUMNS,
-    )
+        values = differences[candidate].to_numpy(dtype="float64")
+        rows.append(
+            {
+                **inference[candidate],
+                "portfolio_id": candidate,
+                "comparison_role": "primary"
+                if candidate == declaration["primary_portfolio_id"]
+                else "secondary",
+                "sample_role": config["sample_role"],
+                "observation_count": len(values),
+                "global_mean": float(pair.iloc[:, 0].mean()),
+                "quarterly_mean": float(pair.iloc[:, 1].mean()),
+                "mean_difference": float(values[paired].mean())
+                if paired.any()
+                else np.nan,
+            }
+        )
+    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 def portfolio_statistics(config):
@@ -1505,6 +1434,8 @@ def portfolio_statistics(config):
         "inputs",
         "benchmark_total_return_indices",
         "risk",
+        "risk_model",
+        "risk_exposure_input",
         "adv_sensitivities",
         "statistics",
         "analyses",
@@ -1519,7 +1450,7 @@ def portfolio_statistics(config):
     }
     analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
     if "attribution" in analyses:
-        required.update(("inputs", "risk", "benchmark_total_return_indices"))
+        required.add("inputs")
     if "capacity" in analyses:
         required.add("adv_sensitivities")
     if "cscv" in analyses:
@@ -1637,7 +1568,9 @@ def portfolio_statistics(config):
             statistics_tables,
         )
 
-        tables = statistics_tables(ledgers, window=window, config=config)
+        tables = statistics_tables(
+            ledgers, window=window, config=config, metadata=comparison_metadata
+        )
         comparison_metadata.update(
             observation_clock="trading_day_close",
             cash_observation="end_of_day",
@@ -1645,6 +1578,10 @@ def portfolio_statistics(config):
             annualization="complete_trading_days_only",
         )
     else:
+        if "attribution" in analyses and "benchmark_total_return_indices" not in config:
+            raise ValueError("portfolio_statistics_config_invalid")
+        if "risk_exposure_input" in config:
+            raise ValueError("portfolio_statistics_config_invalid")
         tables = build_portfolio_statistics_tables(
             ledgers=ledgers,
             candidates=tuple(candidates),
@@ -1663,7 +1600,7 @@ def portfolio_statistics(config):
     if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"
         metadata["formal_selection_qualification"] = "not_established"
-    if "attribution" in analyses:
+    if "attribution" in analyses and "risk" in config:
         metadata["risk"] = asdict(FactorRiskConfig(**config["risk"]))
     metadata.update(comparison_metadata)
     metadata["analyses"] = list(analyses)

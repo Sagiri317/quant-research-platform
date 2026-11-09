@@ -1,6 +1,7 @@
 """Connect policy decisions to existing daily and quote accounting engines."""
 
 from contextlib import contextmanager
+from functools import partial
 
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
@@ -34,7 +35,7 @@ def _episode(value):
             "risk_aversion",
             "unfinished_penalty_bps",
         },
-        {"order"},
+        {"order", "prediction", "capital_scale"},
     )
     assets, columns = tuple(config["asset_ids"]), tuple(config["feature_columns"])
     _validate_column_tuple(assets, "policy_assets")
@@ -65,6 +66,47 @@ def _episode(value):
         raise ValueError("policy_order_unused")
     elif config["unfinished_penalty_bps"] != 0:
         raise ValueError("policy_unfinished_penalty_unused")
+    if "prediction" in config:
+        from quant_research_platform.research.policies.inventory_policy import (
+            prediction_parameters,
+        )
+
+        if (
+            config["kind"] != "hft"
+            or config["task"] not in {"inventory", "portfolio"}
+            or columns != ("prediction_score",)
+        ):
+            raise ValueError("inventory_prediction_episode_invalid")
+        config["prediction"] = prediction_parameters(config["prediction"])
+        scale = strict_finite_float(
+            config.get("capital_scale", 1), error="inventory_capital_scale_invalid"
+        )
+        if scale <= 0:
+            raise ValueError("inventory_capital_scale_invalid")
+        config["capital_scale"] = scale
+        account = {
+            **config["account"],
+            "parameters": dict(config["account"]["parameters"]),
+        }
+        parameters = account["parameters"]
+        capital = (
+            1_000_000.0 * len(assets)
+            if config["task"] == "inventory"
+            else 1_000_000_000.0
+        ) * scale
+        if parameters.setdefault("initial_capital", capital) != capital:
+            raise ValueError("inventory_capital_scale_mismatch")
+        if config["task"] == "inventory":
+            if parameters.setdefault("restore_at", "14:50:00") not in {
+                "14:50",
+                "14:50:00",
+            }:
+                raise ValueError("inventory_restore_clock_must_be_1450")
+        elif parameters.setdefault("restore_at", None) is not None:
+            raise ValueError("stock_portfolio_restoration_unused")
+        config["account"] = account
+    elif "capital_scale" in config:
+        raise ValueError("inventory_capital_scale_unused")
     return config
 
 
@@ -84,16 +126,30 @@ def _stream(episode):
         )
 
         account = _strict_config(
-            account, {"panel", "fee_schedule", "daily_inputs", "parameters"}, {"trades"}
+            account,
+            {"panel", "fee_schedule", "daily_inputs", "parameters"},
+            {"trades", "stock_status"},
         )
+        prediction = episode.get("prediction")
         params = _parameters(account["parameters"], policy=True)
-        if (
-            set(params["maximum_inventory"]) != set(episode["asset_ids"])
-            or params["restore_at"] is not None
+        if set(params["maximum_inventory"]) != set(episode["asset_ids"]) or (
+            params["restore_at"] is not None and prediction is None
         ):
             raise ValueError("policy_inventory_or_restoration_conflict")
+        from quant_research_platform.research.policies.inventory_policy import (
+            validate_inventory_prediction,
+        )
+
         sessions, schedule, trade_session = inventory_inputs(
-            account, window, decision_columns=columns
+            account,
+            window,
+            decision_columns=() if prediction is not None else columns,
+            prediction_paths=prediction["paths"] if prediction is not None else (),
+            prediction_validator=partial(
+                validate_inventory_prediction, parameters=prediction
+            )
+            if prediction is not None
+            else None,
         )
         with (
             closing_iterator(sessions) as inputs,
@@ -104,8 +160,14 @@ def _stream(episode):
                     params,
                     window,
                     decision_columns=columns,
+                    prediction_decisions=prediction is not None,
+                    prediction_task=episode["task"],
+                    quote_visibility_delay_ms=prediction["quote_visibility_delay_ms"]
+                    if prediction is not None
+                    else 0,
                     execution_order=episode.get("order"),
                     trade_session=trade_session,
+                    stock_status=account.get("stock_status"),
                 )
             ) as stream,
         ):

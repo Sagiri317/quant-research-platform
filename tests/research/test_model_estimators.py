@@ -23,6 +23,7 @@ def _spec(algorithm):
     "algorithm,class_name",
     [
         ("lasso_regression", "Lasso"),
+        ("ridge_regression", "Ridge"),
         ("xgboost_regressor", "XGBRegressor"),
     ],
 )

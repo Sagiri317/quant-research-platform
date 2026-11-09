@@ -35,10 +35,15 @@ from quant_research_platform.research.portfolios.diagnostics import portfolio_st
 from quant_research_platform.research.portfolios.high_frequency import inventory_batches
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.benchmark_references import reference_input
-from tests.helpers.high_frequency import daily_view, write_daily_inputs
+from tests.helpers.high_frequency import (
+    daily_view,
+    parameters,
+    quotes,
+    schedule,
+    write_daily_inputs,
+)
 from tests.helpers.portfolio_inputs import _interim_specs, closed_market_inputs
 from tests.helpers.research_specs import make_demo_research_dataset_spec
-from tests.research.test_hft_portfolio import parameters, quotes, schedule
 from tests.research.test_optional_statistics import _cash_ledger
 
 
@@ -607,5 +612,55 @@ def test_hft_observation_rejects_nonquote_context(tmp_path):
     try:
         with pytest.raises(ValueError, match="feature_role_required"):
             env.reset(seed=1)
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("action", [0.0, 1.0])
+def test_execution_opportunity_cost_uses_last_observed_quote_not_daily_close(
+    tmp_path, action
+):
+    episode = hft_episode(tmp_path / "inputs")
+    panel = read_dataset(tmp_path / "inputs" / "quotes")
+    panel.loc[2, ["mid", "bid_px1", "ask_px1"]] = [8.0, 7.99, 8.01]
+    roles = dict.fromkeys(panel.columns, "context")
+    roles.update(timestamp="timestamp", asset_id="key", eligible="mask")
+    write_dataset(
+        tmp_path / "observed",
+        panel,
+        spec=ProcessedDataSpec(
+            data_id="hft_panel",
+            market_id="a_share",
+            kind="panel",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=(),
+            column_roles=roles,
+        ),
+    )
+    episode["account"]["panel"] = str(tmp_path / "observed")
+    episode["window"]["end"] = "2024-01-02T07:00:00"
+    env = TradingEnv([episode])
+    try:
+        _, initial = env.reset(seed=1)
+        assert initial["opportunity_cost_bps"] is None
+        assert initial["opportunity_cost_reason"] == "episode_in_progress"
+        done = False
+        while not done:
+            _, _, done, _, info = env.step([action])
+        assert info["arrival_price"] == 10.0
+        assert info["terminal_observed_mark"] == 8.0
+        assert info["unfilled_quantity"] == (100.0 if action == 0 else 0.0)
+        assert info["opportunity_cost_bps"] == pytest.approx(
+            2000.0 if action == 0 else 0.0
+        )
+        assert info["total_implementation_shortfall_bps"] == pytest.approx(
+            info["implementation_shortfall_bps"] + info["opportunity_cost_bps"]
+        )
+        assert info["unfilled_reason"] == (
+            "execution_window_ended" if action == 0 else None
+        )
+        assert info["opportunity_cost_reason"] is None
     finally:
         env.close()

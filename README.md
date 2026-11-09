@@ -79,7 +79,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 未选择的统计分析不会读取其专用输入；模型解释等严格接口也会拒绝用不到的选项。
 候选顺序可能决定同分时的选择，输入列顺序则决定模型接收特征的排列，不能自行排序或去重。
 
-监督预测模型包括 OLS、LASSO、XGBoost、LSTM、Transformer，以及 DeepLOB 收益回归和三分类；支持 GPU 的模型在 CUDA 不可用时使用 CPU，也可显式选择 CPU。
+监督预测模型包括 OLS、Ridge、LASSO、XGBoost、LSTM、Transformer，以及 DeepLOB 收益回归和三分类；支持 GPU 的模型在 CUDA 不可用时使用 CPU，也可显式选择 CPU。
 策略学习的 PPO、公式搜索和成本感知网络采用相同的设备回退约定。
 高频数据接入、因子、标签、T+1 库存账户与使用限制见 [A 股高频](docs/a-share-hft.md)。
 

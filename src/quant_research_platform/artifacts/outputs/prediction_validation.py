@@ -20,18 +20,18 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 
+PREDICTION_FACT_ALIASES = ("model_id", "family_id", "label_unit")
+
 
 def validate_prediction_output_metadata_shape(metadata):
+    """Validate either persisted shape and restore the public metadata view."""
     required = {
         "model",
         "inputs",
-        "model_id",
-        "family_id",
         "prediction_window",
         "effective_prediction_end",
         "sample_role",
         "prediction_rows",
-        "label_unit",
         "model_metadata",
         "model_facts",
         "input_spec",
@@ -40,7 +40,7 @@ def validate_prediction_output_metadata_shape(metadata):
     if (
         type(metadata) is not dict
         or not required <= set(metadata)
-        or set(metadata) - required - {"asset_ids"}
+        or set(metadata) - required - {"asset_ids", *PREDICTION_FACT_ALIASES}
     ):
         raise ValueError("invalid_prediction_metadata")
     assets = metadata.get("asset_ids")
@@ -51,8 +51,8 @@ def validate_prediction_output_metadata_shape(metadata):
         or any(type(item) is not str or not item for item in assets)
     ):
         raise ValueError("prediction_asset_ids_invalid")
-    for name in ("model", "model_id", "family_id", "label_unit"):
-        if type(metadata[name]) is not str or not metadata[name]:
+    for name in ("model", *PREDICTION_FACT_ALIASES):
+        if name in metadata and (type(metadata[name]) is not str or not metadata[name]):
             raise ValueError("invalid_prediction_metadata")
     from quant_research_platform.storage.datasets.reading import _dataset_input_options
 
@@ -84,19 +84,23 @@ def validate_prediction_output_metadata_shape(metadata):
     facts = metadata["model_facts"]
     model = metadata["model_metadata"]
     _validate_prediction_training_facts(facts, model)
-    if (
-        metadata["model_id"] != facts["model"]["model_id"]
-        or metadata["family_id"] != facts["family_id"]
-        or metadata["label_unit"] != facts["label_unit"]
+    aliases = {
+        "model_id": facts["model"]["model_id"],
+        "family_id": facts["family_id"],
+        "label_unit": facts["label_unit"],
+    }
+    if any(
+        name in metadata and metadata[name] != value for name, value in aliases.items()
     ):
         raise ValueError("prediction_model_facts_mismatch")
     _validate_model_prediction_window(facts, window)
+    metadata.update(aliases)
     return metadata
 
 
 def _validate_prediction_training_facts(facts, realized):
     """Check self-contained score evidence without fitting-state metadata."""
-    if type(facts) is not dict or set(facts) - {"target_definition"} != {
+    if type(facts) is not dict or set(facts) - {"target_definition", "validation"} != {
         "family_id",
         "asset_ids",
         "market_id",
@@ -116,6 +120,8 @@ def _validate_prediction_training_facts(facts, realized):
         "label_availability_column",
         "label_available_max",
     }
+    if type(realized) is dict and "early_stopping" in realized:
+        fields.add("early_stopping")
     if type(realized) is dict and "training_target_mean" in realized:
         fields.add("training_target_mean")
         if type(realized["training_target_mean"]) not in {

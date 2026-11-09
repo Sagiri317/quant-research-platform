@@ -146,7 +146,7 @@ def test_scaling_independent_of_missingness_and_all_missing_columns():
             _spec("xgboost_regressor", scaling),
             fitting_cutoff="2024-01-03",
         )
-        matrix = native.preprocessing[2]
+        matrix = native.matrix
         assert matrix.z.isna().all()
         assert matrix.columns.tolist() == ["x", "z"]
         with pytest.raises(ValueError, match="model_training_feature_all_missing"):

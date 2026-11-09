@@ -7,15 +7,22 @@ from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.validation import strict_finite_float
 
 
+def validate_execution_as_of(value, *, start, error):
+    """Require an observed UTC-naive calibration time strictly before execution."""
+    as_of = pd.Timestamp(value)
+    if pd.isna(as_of) or as_of.tz is not None or as_of >= start:
+        raise ValueError(error)
+
+
 def execution_schedule_parameters(value, *, signal, start, feature_columns):
     names = {"risk_aversion", "price_volatility", "temporary_impact"}
     params = _strict_config(
         value,
         {"as_of", *names} | ({"signal_column", "signal_gain"} if signal else set()),
     )
-    as_of = pd.Timestamp(params["as_of"])
-    if pd.isna(as_of) or as_of.tz is not None or as_of >= start:
-        raise ValueError("execution_parameters_not_historical")
+    validate_execution_as_of(
+        params["as_of"], start=start, error="execution_parameters_not_historical"
+    )
     for name in names | ({"signal_gain"} if signal else set()):
         params[name] = strict_finite_float(
             params[name], error="execution_schedule_parameter_invalid"

@@ -16,6 +16,7 @@ from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
 )
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     PredictionWindow,
     TimeWindow,
@@ -81,6 +82,7 @@ def backtest(config: Mapping) -> Path:
     }
     optional = {
         "risk_config",
+        "risk_model",
         "optimizer_config",
         "calibration",
         "sample_role",
@@ -109,7 +111,14 @@ def backtest(config: Mapping) -> Path:
         selection = read_selection(Path(config["selection"]))
     if selection_mode == "retrospective" and selection is None:
         raise ValueError("portfolio_retrospective_selection_required")
+    declared_risk = (
+        FactorRiskModel.from_mapping(config["risk_model"])
+        if "risk_model" in config
+        else None
+    )
     candidate_values = dict(config["candidate"])
+    if declared_risk is not None:
+        candidate_values.setdefault("risk_style_columns", declared_risk.style_columns)
     if "risk_style_columns" in candidate_values:
         candidate_values["risk_style_columns"] = tuple(
             candidate_values["risk_style_columns"]
@@ -146,10 +155,24 @@ def backtest(config: Mapping) -> Path:
         raise ValueError("portfolio_enhanced_inputs_invalid")
     if not enhanced and (
         "risk_config" in config
+        or "risk_model" in config
         or "optimizer_config" in config
         or "calibration" in config
     ):
         raise ValueError("portfolio_unused_configuration")
+    risk_model = None
+    if enhanced:
+        risk_model = declared_risk or FactorRiskModel(
+            candidate.risk_style_columns,
+            FactorRiskConfig(**config.get("risk_config", {})),
+        )
+        if risk_model.style_columns != candidate.risk_style_columns or (
+            declared_risk is not None
+            and "risk_config" in config
+            and risk_model.config != FactorRiskConfig(**config["risk_config"])
+        ):
+            raise ValueError("portfolio_risk_model_conflict")
+    inherited_risk = False
     assumptions_values = dict(config["assumptions"])
     assumptions_values["adv_sensitivities"] = tuple(
         assumptions_values["adv_sensitivities"]
@@ -177,6 +200,18 @@ def backtest(config: Mapping) -> Path:
             path, expected_definition_id="prediction_outputs"
         )[0]["metadata"]
         facts = metadata["model_facts"]
+        target_definition = facts.get("target_definition") or {}
+        if enhanced and target_definition.get("target_transform") == "risk_residual":
+            label_risk = FactorRiskModel.from_mapping(
+                target_definition.get("risk_model", {})
+            )
+            if declared_risk is not None or "risk_config" in config or inherited_risk:
+                if risk_model != label_risk:
+                    raise ValueError("portfolio_label_risk_model_conflict")
+            elif candidate.risk_style_columns != label_risk.style_columns:
+                raise ValueError("portfolio_label_risk_model_conflict")
+            risk_model = label_risk
+            inherited_risk = True
         window = TimeWindow(**item["window"])
         lower, upper, closed = time_window_timestamp_interval(window)
         if any(
@@ -272,9 +307,7 @@ def backtest(config: Mapping) -> Path:
             rebalance_schedule=candidate.rebalance_schedule,
         )
     final = []
-    risk_config = (
-        FactorRiskConfig(**config.get("risk_config", {})) if enhanced else None
-    )
+    risk_config = risk_model.config if enhanced else None
     optimizer_config = (
         OptimizerConfig(**config.get("optimizer_config", {})) if enhanced else None
     )
@@ -305,6 +338,7 @@ def backtest(config: Mapping) -> Path:
         **(
             {
                 "risk_config": asdict(risk_config),
+                "risk_model": risk_model.to_dict(),
                 "optimizer_config": asdict(optimizer_config),
             }
             if enhanced

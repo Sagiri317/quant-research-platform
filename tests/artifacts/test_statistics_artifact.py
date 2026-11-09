@@ -25,6 +25,9 @@ def tables(request):
         hac_lag=20,
         family_id="family",
         factor_id="factor",
+        comparison_factor_id="peer",
+        year=2023,
+        mean_absolute=0.2,
         prediction_id="prediction",
         period_id="2023Q1",
         selection_group="global",
@@ -107,6 +110,8 @@ def tables(request):
         result["model_group_comparison"] = pa.Table.from_pylist(
             [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
         ).to_pandas()
+    if "factor_correlation" in result:
+        result["factor_correlation"]["statistic"] = "pearson"
     if "factor_stratified_diagnostics" in result:
         new = result["factor_stratified_diagnostics"]
         result["factor_stratified_diagnostics"] = pd.concat(
@@ -1202,4 +1207,93 @@ def test_paired_group_fdr_methods_reach_native_artifact(
             ),
             check_dtype=False,
             check_exact=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "tables,member,column,value,error",
+    [
+        (
+            "factor",
+            "factor_annual_diagnostics",
+            "year",
+            2024,
+            "statistics_table_window_mismatch",
+        ),
+        (
+            "factor",
+            "factor_correlation",
+            "mean_absolute",
+            0.1,
+            "statistics_factor_correlation_invalid",
+        ),
+        (
+            "factor",
+            "factor_correlation",
+            "statistic",
+            "rankic",
+            "statistics_factor_correlation_invalid",
+        ),
+    ],
+    indirect=["tables"],
+)
+def test_factor_comparison_artifacts_reject_inconsistent_summary_facts(
+    tmp_path, tables, metadata, member, column, value, error
+):
+    tables[member].loc[0, column] = value
+    _assert_rejected_at_write_and_read(
+        tmp_path, tables, metadata, member + ".parquet", error=error
+    )
+
+
+def test_inventory_attribution_clock_keeps_actual_interval_endpoints(tmp_path):
+    entry = pd.Timestamp("2024-01-02T01:30:00")
+    frame = pd.DataFrame(
+        [
+            dict(
+                attribution_group="a" * 64,
+                decision_at=entry,
+                entry_at=entry,
+                end_at=entry + pd.Timedelta(seconds=seconds),
+                factor_id="industry_one",
+                value=0.01,
+                observation_count=128,
+            )
+            for seconds in (3, 6)
+        ],
+        columns=statistics.STATISTICS_TABLE_COLUMNS["holding_factor_returns.parquet"],
+    )
+    metadata = {
+        "window": {"start": "2024-01-02", "end": "2024-01-02"},
+        "sample_role": "exploratory",
+    }
+    with pytest.raises(ValueError, match="statistics_holding_interval_invalid"):
+        statistics.write_statistics_artifact(
+            tmp_path / "daily-clock",
+            metadata=metadata,
+            tables={"holding_factor_returns": frame},
+            table_group="portfolio",
+        )
+    metadata["attribution_clock"] = "inventory_intervals"
+    root = statistics.write_statistics_artifact(
+        tmp_path / "inventory-clock",
+        metadata=metadata,
+        tables={"holding_factor_returns": frame},
+        table_group="portfolio",
+    )
+    with statistics.read_statistics_artifact(root).table(
+        "holding_factor_returns.parquet"
+    ) as actual:
+        assert len(actual) == 2
+        assert actual.end_at.tolist() == frame.end_at.tolist()
+    with pytest.raises(ValueError, match="statistics_holding_interval_invalid"):
+        statistics.write_statistics_artifact(
+            tmp_path / "future-design",
+            metadata=metadata,
+            tables={
+                "holding_factor_returns": frame.assign(
+                    decision_at=entry + pd.Timedelta(nanoseconds=1)
+                )
+            },
+            table_group="portfolio",
         )

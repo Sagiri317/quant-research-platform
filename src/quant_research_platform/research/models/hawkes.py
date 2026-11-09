@@ -191,7 +191,6 @@ def fit_hawkes(config):
             "timestamp",
             "session_date",
             "segment_id",
-            "eligible",
         ],
         "hft_trades": ["asset_id", "timestamp", "source_row", "event_kind", "side"],
     }
@@ -221,7 +220,7 @@ def fit_hawkes(config):
         }
         panel = data["hft_panel"]
         for quotes, selected in observed_segments(panel, trades=data["hft_trades"]):
-            if not quotes.eligible.all() or len(quotes) < 2:
+            if len(quotes) < 2:
                 continue
             start, end = quotes.timestamp.iloc[0], quotes.timestamp.iloc[-1]
             trades = selected["trades"]

@@ -1,0 +1,62 @@
+{
+  "strategy": "stock_portfolio",
+  "output": "results/learning/stock-portfolio-taker",
+  "episode": {
+    "kind": "hft",
+    "task": "portfolio",
+    "asset_ids": [
+      "000001",
+      "600000"
+    ],
+    "feature_columns": [
+      "prediction_score"
+    ],
+    "window": {
+      "start": "2024-01-02",
+      "end": "2024-03-29"
+    },
+    "capital_scale": 1,
+    "prediction": {
+      "paths": [
+        "results/stock/rolling-return-predictions"
+      ],
+      "horizon_seconds": 30,
+      "decision_interval_seconds": 3,
+      "quote_visibility_delay_ms": 1
+    },
+    "account": {
+      "panel": "data/processed/a_share/hft_panel",
+      "fee_schedule": "data/processed/a_share/fee_schedule",
+      "daily_inputs": {
+        "panel": "data/processed/a_share/market_panel_1d",
+        "calendar": "data/interim/csmar/trading_calendar",
+        "market_bars": "data/interim/csmar/market_bars_1d",
+        "stock_master": "data/interim/csmar/stock_master",
+        "corporate_actions": "data/interim/csmar/corporate_actions",
+        "equity_events": "data/interim/reference/a_share_equity_events"
+      },
+      "parameters": {
+        "initial_inventory": {},
+        "maximum_inventory": {
+          "000001": 10000000,
+          "600000": 10000000
+        },
+        "participation_rate": 0.5,
+        "minimum_commission": 5,
+        "latency_ms": 10,
+        "taker_depth_levels": 1
+      },
+      "stock_status": {
+        "stock_master": "data/processed/a_share/stock_master_pit",
+        "status": "data/processed/a_share/stock_status_pit",
+        "available_at_column": "status_available_at"
+      }
+    },
+    "risk_aversion": 0,
+    "unfinished_penalty_bps": 0
+  },
+  "portfolio_parameters": {
+    "construction": "quantile_equal_weight",
+    "top_quantile": 0.2
+  }
+}

@@ -989,8 +989,10 @@ class PortfolioCandidateSpec:
 class ExecutionAssumptions:
     """Stock execution parameters and explicit broker minimum commission.
 
-    Statutory commission, stamp duty, and transfer fees are supplied by the
-    market fee schedule; they are deliberately not duplicated here.
+    The market fee schedule supplies the explicit account broker commission
+    assumption and statutory stamp duty and transfer fees. Only the broker
+    minimum commission is set here; exchange fees embedded in commission are
+    not charged again.
     """
 
     initial_nav: float

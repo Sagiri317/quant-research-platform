@@ -27,6 +27,7 @@ from quant_research_platform.contracts.json_codec import (
     _json_native_object,
     canonical_identity_bytes,
 )
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     PredictionWindow,
     TimeWindow,
@@ -52,6 +53,7 @@ class _ModelAlgorithmFacts:
 _MODEL_ALGORITHM_FACTS = {
     "linear_regression": _ModelAlgorithmFacts(),
     "lasso_regression": _ModelAlgorithmFacts("sklearn"),
+    "ridge_regression": _ModelAlgorithmFacts("sklearn"),
     "xgboost_regressor": _ModelAlgorithmFacts("xgboost", parallel=True),
     "lstm_regressor": _ModelAlgorithmFacts("torch", sequence=True),
     "transformer_regressor": _ModelAlgorithmFacts("torch", sequence=True),
@@ -77,7 +79,7 @@ def sequence_context_columns(algorithm, parameters=None):
         "sequence_group_columns",
         ("session_date", "segment_id") if algorithm in DEEPLOB_ALGORITHMS else (),
     )
-    return (*groups, *(("eligible",) if algorithm in DEEPLOB_ALGORITHMS else ()))
+    return tuple(groups)
 
 
 def model_context_window(facts, window):
@@ -148,7 +150,9 @@ def sequence_parameters(algorithm, parameters):
         if "class_threshold" not in parameters:
             raise ValueError("classification_threshold_required")
         defaults["class_threshold"] = parameters["class_threshold"]
-    if set(parameters) - (set(defaults) | {"sequence_group_columns"}):
+    if set(parameters) - (
+        set(defaults) | {"sequence_group_columns", "early_stopping_rounds"}
+    ):
         raise ValueError("sequence_parameters_unknown")
     defaults.update(parameters)
     groups = defaults.get("sequence_group_columns", ())
@@ -336,6 +340,23 @@ class ModelSpec:
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
+        if "early_stopping_rounds" in hyperparameters:
+            patience = hyperparameters["early_stopping_rounds"]
+            if (
+                self.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}
+                or patience is not None
+                and (type(patience) is not int or patience < 1)
+            ):
+                raise ValueError("early_stopping_rounds_invalid")
+            if (
+                patience is not None
+                and self.model_algorithm == "xgboost_regressor"
+                and (
+                    hyperparameters.get("booster", "gbtree") not in {"gbtree", "dart"}
+                    or hyperparameters.get("callbacks") is not None
+                )
+            ):
+                raise ValueError("early_stopping_booster_or_callbacks_invalid")
         if (
             self.model_algorithm in _PARALLEL_MODEL_ALGORITHMS
             and "n_jobs" in hyperparameters
@@ -348,6 +369,7 @@ class ModelSpec:
             scaling = self.model_algorithm in {
                 "linear_regression",
                 "lasso_regression",
+                "ridge_regression",
                 *SEQUENCE_ALGORITHMS,
             }
         if type(scaling) is not bool:
@@ -401,6 +423,48 @@ class ModelSpec:
     @property
     def input_columns(self) -> tuple[str, ...]:
         return (*self.input_factor_columns, *self.input_feature_columns)
+
+
+def _validate_early_stopping(value):
+    fields = {
+        "best_iteration",
+        "iterations",
+        "validation_rows",
+        "validation_start",
+        "validation_end",
+        "label_available_max",
+        "validation_cutoff",
+    }
+    if type(value) is not dict or set(value) != fields:
+        raise ValueError("invalid_model_early_stopping")
+    if any(
+        type(value[key]) is not int
+        for key in ("best_iteration", "iterations", "validation_rows")
+    ) or not (
+        0 <= value["best_iteration"] < value["iterations"]
+        and value["validation_rows"] > 0
+    ):
+        raise ValueError("invalid_model_early_stopping")
+    clocks = strict_timestamp_series(
+        pd.Series(
+            [
+                value[key]
+                for key in (
+                    "validation_start",
+                    "validation_end",
+                    "label_available_max",
+                    "validation_cutoff",
+                )
+            ]
+        ),
+        error="invalid_model_validation_maturity",
+    )
+    if not (
+        clocks.iloc[0] <= clocks.iloc[1] <= clocks.iloc[3]
+        and clocks.iloc[1] <= clocks.iloc[2] <= clocks.iloc[3]
+    ):
+        raise ValueError("invalid_model_validation_maturity")
+    return clocks
 
 
 def validate_model_metadata_core(value: object) -> dict[str, object]:
@@ -460,9 +524,13 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
         "feature_importance_status",
         "training_target_mean",
         "learning_curve",
+        "early_stopping",
     }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
+    stopping = metadata.get("early_stopping")
+    if stopping is not None:
+        _validate_early_stopping(stopping)
     if "learning_curve" in metadata:
         curve = metadata["learning_curve"]
         if (
@@ -482,7 +550,13 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
         parameters = sequence_parameters(
             metadata["model_algorithm"], metadata["hyperparameters"]
         )
-        if type(points) is not list or len(points) != parameters["epochs"]:
+        if type(points) is not list or not (
+            len(points) == parameters["epochs"]
+            if parameters.get("early_stopping_rounds") is None
+            else stopping is not None
+            and 1 <= len(points) <= parameters["epochs"]
+            and stopping["iterations"] == len(points)
+        ):
             raise ValueError("invalid_learning_curve")
         for epoch, point in enumerate(points, 1):
             if (
@@ -493,10 +567,14 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
                 raise ValueError("invalid_learning_curve")
             for name in ("training_loss", "validation_loss"):
                 loss = point[name]
-                if loss is None and name == "validation_loss":
+                if loss is None and name == "validation_loss" and stopping is None:
                     continue
                 if type(loss) not in (int, float) or not np.isfinite(loss) or loss < 0:
                     raise ValueError("invalid_learning_curve")
+        if stopping is not None and stopping["best_iteration"] != min(
+            range(len(points)), key=lambda i: points[i]["validation_loss"]
+        ):
+            raise ValueError("invalid_learning_curve")
     if "training_target_mean" in metadata and (
         type(metadata["training_target_mean"]) not in {int, float}
         or not np.isfinite(metadata["training_target_mean"])
@@ -528,6 +606,10 @@ def validate_model_metadata_core(value: object) -> dict[str, object]:
         )
     ):
         raise ValueError("invalid_model_metadata")
+    if (stopping is not None) != (
+        metadata["hyperparameters"].get("early_stopping_rounds") is not None
+    ):
+        raise ValueError("invalid_model_early_stopping")
     for key in (
         "input_factor_columns",
         "input_feature_columns",
@@ -1046,6 +1128,32 @@ def _target_definition(declared, target, manifest=None):
         "target_transform": transform,
         "target_clip": clip,
         "label_semantics": None if semantics is None else dict(semantics),
+        **(
+            {
+                "risk_model": FactorRiskModel.from_mapping(
+                    declared.get("risk_model", {})
+                ).to_dict()
+            }
+            if transform == "risk_residual"
+            else {}
+        ),
+    }
+
+
+def _comparable_target_definition(definition):
+    if definition is None or definition.get("target_transform") != "risk_residual":
+        return definition
+    model = FactorRiskModel.from_mapping(definition.get("risk_model", {}))
+    # Covariance windows do not change the cross-sectional label regression.
+    return {
+        **definition,
+        "risk_model": {
+            "style_columns": list(model.style_columns),
+            "config": {
+                name: getattr(model.config, name)
+                for name in ("weight_column", "weighting", "minimum_cross_section")
+            },
+        },
     }
 
 
@@ -1070,8 +1178,10 @@ def _prediction_target_reason(
 ):
     """Compare the economic target independently of the model output scale."""
     trained_target = model_target or facts["model"]["target_column"]
-    trained = facts.get("target_definition")
-    evaluated = _target_definition(declared, target, manifest)
+    trained = _comparable_target_definition(facts.get("target_definition"))
+    evaluated = _comparable_target_definition(
+        _target_definition(declared, target, manifest)
+    )
     if trained_target != target and (trained is None or trained != evaluated):
         return "prediction_target_mismatch"
     unit = declared.get("column_units", {}).get(target, target_unit)
@@ -1096,7 +1206,7 @@ def _validate_target_definition(definition, target):
         return
     if (
         type(definition) is not dict
-        or set(definition)
+        or set(definition) - {"risk_model"}
         != {"source_label", "target_transform", "target_clip", "label_semantics"}
         or definition["source_label"]
         != ("forward_return_20d" if target == "model_target" else target)
@@ -1122,6 +1232,10 @@ def _validate_target_definition(definition, target):
         and type(definition["label_semantics"]) is not dict
     ):
         raise ValueError("model_target_definition_invalid")
+    if "risk_model" in definition:
+        if definition["target_transform"] != "risk_residual":
+            raise ValueError("model_target_definition_invalid")
+        FactorRiskModel.from_mapping(definition["risk_model"])
     canonical_identity_bytes(definition)
 
 
@@ -1153,6 +1267,29 @@ def validate_model_fit_facts(facts, metadata):
 
     if not all(any(contains(window, bound) for window in windows) for bound in bounds):
         raise ValueError("model_training_window_outside_declared_fit")
+    enabled = facts["candidate_parameters"].get("early_stopping_rounds") is not None
+    stopping = metadata.get("early_stopping")
+    if enabled != (stopping is not None):
+        raise ValueError("invalid_model_early_stopping")
+    if stopping is not None:
+        clocks = _validate_early_stopping(stopping)
+        validation = facts.get("validation")
+        if type(validation) is not dict or set(validation) != {"windows", "cutoff"}:
+            raise ValueError("model_validation_facts_required")
+        validation_cutoff = strict_timestamp_series(
+            pd.Series([validation["cutoff"]]), error="invalid_validation_cutoff"
+        ).iloc[0]
+        validation_windows = _fit_windows(validation["windows"], validation_cutoff)
+        if (
+            clocks.iloc[3] != validation_cutoff
+            or cutoff >= pd.Timestamp(validation_windows[0].start)
+            or cutoff >= clocks.iloc[0]
+            or not all(
+                any(contains(window, bound) for window in validation_windows)
+                for bound in clocks.iloc[:2]
+            )
+        ):
+            raise ValueError("model_validation_training_overlap")
     decision = facts.get("selection_cutoff")
     if (
         decision is not None
@@ -1168,6 +1305,15 @@ def _validate_model_prediction_window(facts, window):
     """Require predictions to follow the actual fitting decision."""
     if pd.Timestamp(window.start) <= pd.Timestamp(facts["fit_cutoff"]):
         raise ValueError("prediction_must_follow_fit_cutoff")
+    if facts["candidate_parameters"].get("early_stopping_rounds") is not None:
+        validation = facts.get("validation")
+        if not isinstance(validation, Mapping) or "cutoff" not in validation:
+            raise ValueError("model_validation_facts_required")
+        cutoff = strict_timestamp_series(
+            pd.Series([validation["cutoff"]]), error="invalid_validation_cutoff"
+        ).iloc[0]
+        if pd.Timestamp(window.start) <= cutoff:
+            raise ValueError("prediction_must_follow_validation_cutoff")
 
 
 def validate_model_input_roles(

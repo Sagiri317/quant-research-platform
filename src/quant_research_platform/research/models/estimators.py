@@ -18,6 +18,7 @@ from quant_research_platform.contracts.models import (
 
 _MODEL_ESTIMATOR_CLASSES = {
     "lasso_regression": ("sklearn.linear_model", "Lasso"),
+    "ridge_regression": ("sklearn.linear_model", "Ridge"),
     "xgboost_regressor": ("xgboost", "XGBRegressor"),
 }
 

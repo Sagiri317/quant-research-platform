@@ -181,8 +181,6 @@ def _roles(columns, *, factors=(), labels=()):
         if name in BOOK_COLUMNS
         else "label"
         if name in labels
-        else "universe"
-        if name == "eligible"
         else "context"
         for name in columns
     }
@@ -297,7 +295,14 @@ def research_dataset_catalog():
     labels = label_catalog().list()
     label_columns = tuple(item.output_column for item in labels)
     maturity = {item.output_column: item.available_at_column for item in labels}
-    context = ("session_date", "exchange", "segment_id", "mid", *maturity.values())
+    context = (
+        "session_date",
+        "exchange",
+        "instrument_type",
+        "segment_id",
+        "mid",
+        *maturity.values(),
+    )
     columns = (*KEY, *DEFAULT_FACTORS, *label_columns, "eligible", *context)
     return ResearchDatasetCatalog(
         (
@@ -313,9 +318,10 @@ def research_dataset_catalog():
                 context_columns=context,
                 frequency="tick",
                 grain="research_row",
-                column_roles=_roles(
-                    columns, factors=FACTOR_INPUTS, labels=label_columns
-                ),
+                column_roles={
+                    **_roles(columns, factors=FACTOR_INPUTS, labels=label_columns),
+                    "eligible": "universe",
+                },
                 primary_key=KEY,
                 partition_columns=("year",),
             ),

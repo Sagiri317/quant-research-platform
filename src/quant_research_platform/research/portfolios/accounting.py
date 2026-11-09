@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from math import floor, fsum, ulp
@@ -34,6 +35,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
     round_stock_orders,
     stock_order_limits,
+    stock_order_split,
 )
 
 
@@ -730,12 +732,15 @@ def execute_stock_target(
     assumptions: ExecutionAssumptions,
     receivable: float = 0.0,
     unquoted_assets: frozenset[str] = frozenset(),
+    depth: Mapping[str, np.ndarray] | None = None,
 ) -> ExecutionAccounting:
     """Execute share targets sell-first, with lot rules, T+1 locks and one cash pool.
 
     The indexed frame contains quantity, target_quantity, sellable_quantity,
     market_type, mark_price, buy_price, sell_price, buy_capacity, sell_capacity,
     adv, can_enter and can_exit. Capacities are shares; adv is currency turnover.
+    Optional depth supplies ordered (price, share capacity) levels for each active
+    asset; the same event budget is walked once after lot and cash sizing.
     """
     if (
         type(execution_date) is not date
@@ -783,6 +788,50 @@ def execute_stock_target(
     prices = np.where(desired_values > 0, frame.buy_price, frame.sell_price)
     permissions = frame.can_enter.where(desired_values > 0, frame.can_exit)
     capacities = np.where(desired_values > 0, frame.buy_capacity, frame.sell_capacity)
+    ladders = {}
+    if depth is not None:
+        if not isinstance(depth, Mapping) or set(depth) - set(frame.index):
+            raise ValueError("execution_depth_invalid")
+        for asset, raw in depth.items():
+            index = frame.index.get_loc(asset)
+            if not desired_values[index]:
+                continue
+            book = np.asarray(raw, dtype="float64")
+            if (
+                book.ndim != 2
+                or book.shape[1] != 2
+                or np.isinf(book).any()
+                or (book < 0).any()
+            ):
+                raise ValueError("execution_depth_invalid")
+            known = np.isfinite(book).all(axis=1) & (book[:, 0] > 0)
+            if not known.all():
+                book = book[: np.flatnonzero(~known)[0]]
+            if (
+                len(book)
+                and (np.diff(book[:, 0]) * np.sign(desired_values[index]) <= 0).any()
+            ):
+                raise ValueError("execution_depth_price_order_invalid")
+            prices[index] = book[0, 0] if len(book) else np.nan
+            book = book[book[:, 1] > 0]
+            shares = np.r_[0.0, np.cumsum(book[:, 1])]
+            notionals = np.r_[0.0, np.cumsum(book[:, 0] * book[:, 1])]
+            if not np.isfinite(shares).all() or not np.isfinite(notionals).all():
+                raise ValueError("execution_depth_invalid")
+            capacities[index] = shares[-1]
+            ladders[index] = (shares, notionals)
+
+    def execution_prices(units):
+        if not ladders:
+            return prices
+        result = prices.copy()
+        for index, (shares, notionals) in ladders.items():
+            if units[index] > 0:
+                result[index] = (
+                    np.interp(units[index], shares, notionals) / units[index]
+                )
+        return result
+
     requested = np.abs(desired_values)
     active = requested > 0
     unknown = (
@@ -838,12 +887,13 @@ def execute_stock_target(
 
     def trade_costs(units, side):
         result = np.zeros_like(costs)
+        execution_quotes = execution_prices(units)
         for market, market_mask in market_masks.items():
             mask = market_mask & (units > 0)
             if mask.any():
                 result[:, mask] = prepared[market, side].stock_components(
                     units[mask],
-                    prices[mask],
+                    execution_quotes[mask],
                     adv[mask],
                     minimum[mask],
                     maximum[mask],
@@ -854,11 +904,38 @@ def execute_stock_target(
                         else None
                     ),
                 )
-        return result
+        for index, (shares, notionals) in ladders.items():
+            if units[index] <= 0 or units[index] <= maximum[index]:
+                continue
+            full, middle, last = stock_order_split(
+                units[index], minimum[index], maximum[index]
+            )
+            chunks = np.r_[np.full(int(full), maximum[index]), middle, last]
+            chunks = chunks[chunks > 0]
+            ends = np.r_[0.0, np.cumsum(chunks)]
+            chunk_prices = np.diff(np.interp(ends, shares, notionals)) / chunks
+            count = len(chunks)
+            # Minimum commission applies to actual legal child orders, not book levels.
+            result[0, index] = np.sum(
+                prepared[markets[index], side].stock_components(
+                    chunks,
+                    chunk_prices,
+                    np.full(count, adv[index]),
+                    np.full(count, minimum[index]),
+                    np.full(count, maximum[index]),
+                    assumptions.minimum_commission,
+                    face_value_per_share=(
+                        np.full(count, frame.iloc[index].face_value_per_share)
+                        if "face_value_per_share" in frame
+                        else None
+                    ),
+                )[0]
+            )
+        return result, execution_quotes
 
     sells = np.where(selling, candidates, 0.0)
-    sale_costs = trade_costs(sells, "sell")
-    proceeds = sells * np.where(sells > 0, prices, 0.0) - sale_costs.sum(axis=0)
+    sale_costs, sale_prices = trade_costs(sells, "sell")
+    proceeds = sells * np.where(sells > 0, sale_prices, 0.0) - sale_costs.sum(axis=0)
     cash_after_sells = cash
     # Fund fee-heavy odd-lot exits from available cash and other completed sales.
     for index in np.argsort(-proceeds, kind="stable"):
@@ -871,7 +948,11 @@ def execute_stock_target(
         costs[:, index] = sale_costs[:, index]
         cash_after_sells = fsum((cash_after_sells, proceeds[index]))
     cash_after_sells = fsum(
-        (cash, *(-quantity * np.where(quantity != 0, prices, 0.0)), *(-costs.ravel()))
+        (
+            cash,
+            *(-quantity * np.where(quantity != 0, sale_prices, 0.0)),
+            *(-costs.ravel()),
+        )
     )
     buys = np.where(~selling, candidates, 0.0)
 
@@ -881,11 +962,11 @@ def execute_stock_target(
         units[mask] = round_stock_orders(
             buys[mask] * scale, minimum[mask], increment[mask]
         )
-        values = trade_costs(units, "buy")
-        spend = fsum((*(units * np.where(units > 0, prices, 0.0)), *values.ravel()))
-        return units, values, spend
+        values, buy_prices = trade_costs(units, "buy")
+        spend = fsum((*(units * np.where(units > 0, buy_prices, 0.0)), *values.ravel()))
+        return units, values, spend, buy_prices
 
-    bought, buy_costs, spend = scaled_buys(1.0)
+    bought, buy_costs, spend, buy_prices = scaled_buys(1.0)
     if spend > cash_after_sells:
         low, high = 0.0, 1.0
         while True:
@@ -896,7 +977,7 @@ def execute_stock_target(
                 low = middle
             else:
                 high = middle
-        bought, buy_costs, spend = scaled_buys(low)
+        bought, buy_costs, spend, buy_prices = scaled_buys(low)
     cash_limited = bought < buys
     reasons[cash_limited] = np.where(
         reasons[cash_limited] == "adv_capacity",
@@ -906,7 +987,8 @@ def execute_stock_target(
     quantity += bought
     costs += buy_costs
     executed = quantity.astype("int64")
-    notionals = quantity * np.where(quantity != 0, prices, 0.0)
+    fill_prices = np.where(selling, sale_prices, buy_prices)
+    notionals = quantity * np.where(quantity != 0, fill_prices, 0.0)
     post_cash = fsum((cash, *(-notionals), *(-costs.ravel())))
     if post_cash < 0:
         tolerance = portfolio_notional_tolerance(cash_after_sells)

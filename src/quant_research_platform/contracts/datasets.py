@@ -10,6 +10,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
+from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -34,10 +35,29 @@ class ResearchDatasetSpec(DataSpec):
     exclude_pt: bool = True
     target_transform: str = "date_zscore"
     target_clip: str = "none"
+    risk_model: FactorRiskModel | None = None
     key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         super().__post_init__()
+        feature_risks = (
+            tuple(
+                transform.risk_model
+                for transform in self.feature_transforms
+                if isinstance(transform, FeatureTransformSpec)
+                and transform.risk_model is not None
+            )
+            if type(self.feature_transforms) is tuple
+            else ()
+        )
+        if self.risk_model is None and feature_risks:
+            object.__setattr__(self, "risk_model", feature_risks[0])
+        if self.risk_model is None and self.target_transform == "risk_residual":
+            object.__setattr__(self, "risk_model", FactorRiskModel())
+        if any(model != self.risk_model for model in feature_risks):
+            raise ValueError("research_risk_model_conflict")
+        if self.risk_model is not None and type(self.risk_model) is not FactorRiskModel:
+            raise ValueError("research_risk_model_invalid")
         if type(self.target_transform) is not str or self.target_transform not in {
             "date_zscore",
             "raw",
