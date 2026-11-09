@@ -1096,6 +1096,9 @@ def test_trend_efficiency_normal_price_path_persists_finite_ratio(tmp_path):
             for key, value in base.column_roles.items()
             if key in calculated.columns
         },
+        column_units={
+            key: unit for key, unit in base.column_units.items() if key in calculated
+        },
     )
     from tests.helpers.paths import StorageLayout
 
@@ -1176,6 +1179,9 @@ def test_amplitude_normal_ranges_persist(tmp_path, single_large_range):
             key: value
             for key, value in base.column_roles.items()
             if key in output.columns
+        },
+        column_units={
+            key: unit for key, unit in base.column_units.items() if key in output
         },
     )
     root = StorageLayout(tmp_path).processed_data_root(
@@ -1351,6 +1357,9 @@ def test_coefficient_of_variation_keeps_ordinary_units_and_native_ratio(
         base,
         column_roles={
             name: role for name, role in base.column_roles.items() if name in result
+        },
+        column_units={
+            name: unit for name, unit in base.column_units.items() if name in result
         },
     )
     from tests.helpers.paths import StorageLayout
@@ -1587,13 +1596,17 @@ def test_vector_window_owners_keep_domains_and_native_roundtrip(tmp_path, case):
     for name, width in zip(names, (20, 60, 20, 20, 126), strict=True):
         assert actual[name].iloc[: width - 1].isna().all()
     actual.insert(0, "market_id", "a_share")
+    base = scientific_catalogs().processed.get("price_volume_facts")
     spec = replace(
-        scientific_catalogs().processed.get("price_volume_facts"),
+        base,
         column_roles={
             "market_id": "key",
             "asset_id": "key",
             "timestamp": "timestamp",
             **dict.fromkeys(names, "factor"),
+        },
+        column_units={
+            name: unit for name, unit in base.column_units.items() if name in actual
         },
     )
     write_dataset(tmp_path / "native", actual, spec=spec)

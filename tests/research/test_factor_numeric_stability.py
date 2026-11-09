@@ -34,6 +34,9 @@ def _produce_factors(root, data_id, inputs, columns, window):
             column_roles={
                 name: role for name, role in base.column_roles.items() if name in frame
             },
+            column_units={
+                name: unit for name, unit in base.column_units.items() if name in frame
+            },
         )
         path = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         write_dataset(path, frame.loc[:, spec.required_columns], spec=spec)
@@ -44,6 +47,11 @@ def _produce_factors(root, data_id, inputs, columns, window):
         column_roles={
             name: role
             for name, role in base.column_roles.items()
+            if name in (*base.primary_key, *columns)
+        },
+        column_units={
+            name: unit
+            for name, unit in base.column_units.items()
             if name in (*base.primary_key, *columns)
         },
     )

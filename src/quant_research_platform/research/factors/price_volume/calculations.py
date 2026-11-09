@@ -674,6 +674,8 @@ def _calculate_amount_profile(values):
 
 
 def _calculate_level_values(values, factor, start, stop):
+    if "_break_retest_" in factor:
+        return _calculate_retest_values(values, factor, start, stop)
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
     width = windows[0]
     output = np.full(stop - start, np.nan)
@@ -731,6 +733,16 @@ def _calculate_level_values(values, factor, start, stop):
             result = current / level - 1
         elif factor.startswith("resistance_distance_"):
             result = current / level - 1
+        elif factor.startswith(("support_rejection_", "resistance_rejection_")):
+            extreme = extremes[:, -1] * current / close[:, -1]
+            if side == "low":
+                touch = (extreme >= level) & (extreme <= 1.01 * level)
+                result = np.where(touch, (current - extreme) / level, 0)
+                result[extreme > current] = np.nan
+            else:
+                touch = (extreme >= 0.99 * level) & (extreme <= level)
+                result = np.where(touch, (extreme - current) / level, 0)
+                result[extreme < current] = np.nan
         elif factor == "failed_up_breakout_20d":
             result = np.where(
                 current <= level,
@@ -744,6 +756,65 @@ def _calculate_level_values(values, factor, start, stop):
                 0,
             )
     output[first - start :][valid] = result
+    return output
+
+
+def _calculate_retest_values(values, factor, start, stop):
+    """Freeze each observed breakout's level instead of moving it with the range."""
+    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    width = windows[0]
+    output = np.full(stop - start, np.nan)
+    first = max(start, width - 1)
+    if first >= stop:
+        return output
+    matrices = {
+        name: sliding_window_view(values[name][first - width + 1 : stop], width)
+        for name in names
+    }
+    upward = factor.startswith("up_")
+    reference_side, touch_side = ("high", "low") if upward else ("low", "high")
+    prices, close = matrices["adj_close"], matrices["close"]
+    prices = np.where(np.isfinite(prices) & (prices > 0), prices, np.nan)
+    close = np.where(np.isfinite(close) & (close > 0), close, np.nan)
+    reference = matrices[reference_side][:, :-2] * prices[:, :-2] / close[:, :-2]
+    reference = np.where(np.isfinite(reference) & (reference > 0), reference, np.nan)
+    touch = matrices[touch_side][:, -1] * prices[:, -1] / close[:, -1]
+    touch_known = (
+        np.isfinite(touch)
+        & (touch > 0)
+        & ((touch <= prices[:, -1]) if upward else (touch >= prices[:, -1]))
+    )
+    result = np.zeros(len(prices))
+    window = width - 6
+    for lag in range(5, 0, -1):
+        event = width - 1 - lag
+        past = reference[:, event - window : event]
+        known = np.isfinite(past)
+        level = np.where(known, past, -np.inf if upward else np.inf)
+        level = level.max(axis=1) if upward else level.min(axis=1)
+        event_known = np.isfinite(prices[:, event])
+        did_not_break = event_known & (
+            (prices[:, event] <= level) if upward else (prices[:, event] >= level)
+        )
+        complete = known.all(axis=1) & event_known
+        path = prices[:, event:]
+        crossed_back = (
+            (path < level[:, None]) if upward else (path > level[:, None])
+        ).any(axis=1)
+        result[~complete & ~did_not_break & ~crossed_back] = np.nan
+        path_known = np.isfinite(path).all(axis=1)
+        held = (
+            (path >= level[:, None]).all(axis=1)
+            if upward
+            else (path <= level[:, None]).all(axis=1)
+        )
+        broke = complete & ~did_not_break
+        result[broke & ~path_known & ~crossed_back] = np.nan
+        touched = (touch >= 0.99 * level) & (touch <= 1.01 * level)
+        move = (prices[:, -1] - touch) if upward else (touch - prices[:, -1])
+        score = np.where(touch_known, np.where(touched, move / level, 0), np.nan)
+        result = np.where(broke & held, score, result)
+    output[first - start :] = result
     return output
 
 

@@ -1712,6 +1712,11 @@ def test_native_lifecycle_history_does_not_join_relisting(
                     for k, v in spec.column_roles.items()
                     if k in ("market_id", "asset_id", "timestamp", "reversal_1d")
                 },
+                column_units={
+                    name: unit
+                    for name, unit in spec.column_units.items()
+                    if name in ("market_id", "asset_id", "timestamp", "reversal_1d")
+                },
             )
         root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
         with producer.produce_a_share_processed_data(

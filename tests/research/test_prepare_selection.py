@@ -20,7 +20,13 @@ def _input(root, name, frame, *, native):
     catalog = processed_catalog()
     spec = catalog.get(name)
     roles = {column: spec.column_roles.get(column, "context") for column in frame}
-    spec = replace(spec, column_roles=roles)
+    spec = replace(
+        spec,
+        column_roles=roles,
+        column_units={
+            name: unit for name, unit in spec.column_units.items() if name in roles
+        },
+    )
     if native:
         path = root / name
         write_dataset(path, frame, spec=spec)

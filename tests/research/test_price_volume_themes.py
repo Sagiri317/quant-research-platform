@@ -140,7 +140,8 @@ def test_theme_catalog_windows_future_slices_and_listing_lives():
     names = tuple(PRICE_VOLUME_THEME_DESCRIPTIONS)
     definitions = tuple(d for d in factor_catalog().list() if d.output_column in names)
     assert len(definitions) == len(names)
-    assert factor_lookback_bars(definitions) == 252
+    # A breakout up to five sessions ago needs its own 252-session prior range.
+    assert factor_lookback_bars(definitions) == 252 + 5
     assert all(
         d.timing_semantics == "same_session_close_available_at_next_session"
         for d in definitions

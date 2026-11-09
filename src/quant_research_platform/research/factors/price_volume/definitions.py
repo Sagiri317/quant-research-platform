@@ -197,11 +197,19 @@ for _window in (20, 60, 252):
         "resistance_distance": (
             "current adjusted close/prior-window maximum adjusted high-1"
         ),
+        "support_rejection": (
+            "(current adjusted close-current adjusted low)/prior support when "
+            "current low is in [support,1.01*support], otherwise zero"
+        ),
+        "resistance_rejection": (
+            "(current adjusted high-current adjusted close)/prior resistance when "
+            "current high is in [0.99*resistance,resistance], otherwise zero"
+        ),
     }.items():
         _factor = f"{_name}_{_window}d"
         _fields = (
-            ("adj_close", "low" if _name == "support_distance" else "high", "close")
-            if _name in {"support_distance", "resistance_distance"}
+            ("adj_close", "low" if _name.startswith("support_") else "high", "close")
+            if _name.startswith(("support_", "resistance_"))
             else ("adj_close",)
         )
         _PRICE_VOLUME_INPUT_WINDOWS[_factor] = (_fields, (_window + 1,))
@@ -232,6 +240,21 @@ for _name, _description in {
         "after the close and released next session, never at the initial breach. "
         "Adjusted high/low use the same bar's adj_close/close."
     )
+for _window in (20, 60, 252):
+    for _side in ("up", "down"):
+        _name = f"{_side}_break_retest_5_{_window}d"
+        _PRICE_VOLUME_INPUT_WINDOWS[_name] = (
+            ("adj_close", "high", "low", "close"),
+            (_window + 6,),
+        )
+        PRICE_VOLUME_LEVEL_DESCRIPTIONS[_name] = (
+            f"QRP candidate: most recent still-held {_side} close breakout in the "
+            f"preceding five sessions; freeze its preceding-{_window} adjusted "
+            "high/low reference. All later closes must remain on the breakout side. "
+            "Current low/high must touch within 1% of that frozen level; output "
+            "current close-to-touch recovery/rejection divided by that level, else "
+            "zero. No candidate is zero; incomplete required history is undefined."
+        )
 PRICE_VOLUME_THEME_DESCRIPTIONS.update(PRICE_VOLUME_LEVEL_DESCRIPTIONS)
 
 PRICE_VOLUME_PROFILE_DESCRIPTIONS = {

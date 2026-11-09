@@ -53,6 +53,9 @@ def _save(root, name, frame, *, per_row=False):
         column_roles={
             column: spec.column_roles.get(column, "context") for column in frame
         },
+        column_units={
+            name: unit for name, unit in spec.column_units.items() if name in frame
+        },
     )
     path = root / name
     write_dataset(
