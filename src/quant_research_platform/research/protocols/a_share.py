@@ -96,10 +96,14 @@ def factor_catalog() -> FactorCatalog:
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
         factor_definitions,
     )
+    from quant_research_platform.research.factors.market_structure import (
+        factor_definitions as market_structure_definitions,
+    )
 
     return FactorCatalog(
         (
             *factor_definitions(),
+            *market_structure_definitions(),
             *price_volume_factor_definitions(
                 market_id=market_ids.MARKET_ID,
                 required_input_data_id=market_ids.PRICE_VOLUME_DATA_ID,
@@ -194,6 +198,19 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
             exit_rule="entry_plus_horizon_market_sessions_real_adjusted_open",
         )
         for horizon in LABEL_HORIZONS
+    ) + (
+        LabelDefinition(
+            label_id="next_session_intraday_return",
+            market_id=market_ids.MARKET_ID,
+            family="next_intraday_return",
+            input_columns=("adj_open", "adj_close", "filling_flag", "is_trading"),
+            output_column="next_session_intraday_return",
+            label_timing="signal_close_to_next_session_open_to_close",
+            horizon=1,
+            lookahead=1,
+            entry_rule="next_market_session_real_adjusted_open",
+            exit_rule="same_entry_session_real_adjusted_close",
+        ),
     )
 
 

@@ -1,6 +1,6 @@
 # 全球宏观流动性
 
-宏观源、因子和股票研究输入分别准备。`fetch-macro` 只下载原始响应；`prepare-source` 只规范化源数据；`prepare` 才计算决策面板或因子。各操作都写新目录，不自动训练、回测或更新历史研究产物。当前数据条件、研究假说与验证边界统一见[美国流动性与 A 股研究](../reports/美国流动性与A股研究.md)。
+宏观源、因子和股票研究输入分别准备。数据下载和文档提取在仓库外完成；`prepare-source` 规范化结构化 raw；`prepare` 计算决策面板或因子。各操作都写新目录，不自动训练、回测或更新历史研究产物。当前数据条件、研究假说与验证边界统一见[美国流动性与 A 股研究](../reports/美国流动性与A股研究.md)。
 
 ## 来源、版本和时间
 
@@ -84,12 +84,11 @@ VIX 扩展沿用上述变换，并增加：
 
 ## 操作顺序
 
-[配置目录](../configs/macro-liquidity/)提供获取、源规范化、盘前决策、因子准备和组装示例。路径和窗口由调用者替换；示例不表示对应数据已具备完整 PIT 覆盖。
+[配置目录](../configs/macro-liquidity/)提供源规范化、盘前决策、因子准备和组装示例。获取工具独立于仓库，交付 raw 与来源清单后再调用这些操作。路径和窗口由调用者替换；示例不表示对应数据已具备完整 PIT 覆盖。
 
 示例终点为 2026-10-31；实际下载可请求更晚，但月度和季度观测仍有发布滞后。样例 A 股输入路径本身不会因此自动补齐到 2026 年；真实研究前需由调用者准备对应股票面板、历史行业和完整交易日历。纯宏观状态在股票间相同：大盘时间序列分析每个时点只计一个观测，不能把广播到几千只股票的值当成几千份独立宏观样本，也不适合直接用逐日股票截面 RankIC 评价。
 
 ```text
-qrp fetch-macro --config configs/macro-liquidity/fetch.json
 qrp prepare-source --config configs/macro-liquidity/prepare-source.json
 qrp prepare --config configs/macro-liquidity/decision-panel.json
 qrp prepare --config configs/macro-liquidity/factors.json

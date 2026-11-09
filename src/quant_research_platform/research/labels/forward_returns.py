@@ -23,6 +23,7 @@ def add_forward_return_labels(
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
     sessions: Sequence[object],
+    include_next_intraday: bool = False,
 ) -> pd.DataFrame:
     """Add fixed-session real-open returns independently of execution permissions.
 
@@ -33,7 +34,13 @@ def add_forward_return_labels(
     represented as a UTC-naive instant, without changing the opening endpoints.
     """
 
-    horizons = _validate_horizons(horizons)
+    if type(include_next_intraday) is not bool:
+        raise ValueError("invalid_intraday_label_selection")
+    horizons = (
+        ()
+        if include_next_intraday and isinstance(horizons, tuple) and not horizons
+        else _validate_horizons(horizons)
+    )
     validated = _validate_label_input_frame(
         frame,
         asset_column=asset_column,
@@ -41,6 +48,8 @@ def add_forward_return_labels(
         execution_price_column=execution_price_column,
     )
     axis = _session_axis(sessions)
+    if include_next_intraday and "adj_close" not in validated:
+        raise ValueError("missing_intraday_close")
     return _forward_return_labels(
         validated,
         axis,
@@ -48,6 +57,7 @@ def add_forward_return_labels(
         asset_column=asset_column,
         date_column=date_column,
         execution_price_column=execution_price_column,
+        include_next_intraday=include_next_intraday,
     )
 
 
@@ -59,6 +69,7 @@ def _forward_return_labels(
     asset_column="asset_id",
     date_column="timestamp",
     execution_price_column="adj_open",
+    include_next_intraday=False,
 ):
     """Calculate endpoints after the caller validates keys and the session axis."""
     result = validated.sort_values([asset_column, date_column], kind="mergesort")
@@ -82,7 +93,11 @@ def _forward_return_labels(
     entry_positions, entry_rows = entry_positions[present], entry_rows[present]
     entry_prices = prices[entry_rows]
     positive = np.isfinite(entry_prices) & (entry_prices > 0) & real_quote[entry_rows]
-    entry_positions, entry_prices = entry_positions[positive], entry_prices[positive]
+    entry_positions, entry_prices, entry_rows = (
+        entry_positions[positive],
+        entry_prices[positive],
+        entry_rows[positive],
+    )
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
         available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -112,6 +127,24 @@ def _forward_return_labels(
         label_column = forward_return_label_column(horizon)
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available
+    if include_next_intraday:
+        closing = strict_finite_numeric_series(
+            result.adj_close, error="invalid_intraday_close", allow_null=True
+        ).to_numpy(dtype="float64", na_value=np.nan)
+        labels = np.full(len(result), np.nan)
+        available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
+        exit_prices = closing[entry_rows]
+        valid = np.isfinite(exit_prices) & (exit_prices > 0)
+        values = exit_prices[valid] / entry_prices[valid] - 1
+        positions_valid = entry_positions[valid]
+        finite = np.isfinite(values)
+        positions_valid = positions_valid[finite]
+        labels[positions_valid] = values[finite]
+        available[positions_valid] = _a_share_session_event(
+            axis.take(positions[positions_valid] + 1), hour=15
+        )
+        result["next_session_intraday_return"] = labels
+        result["next_session_intraday_return_available_at"] = available
     return result.reset_index(drop=True)
 
 

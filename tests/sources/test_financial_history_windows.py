@@ -3,7 +3,6 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
-from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.a_share_sources import (
@@ -11,7 +10,7 @@ from tests.helpers.a_share_sources import (
     _synthetic_interim_frames,
     _write_inputs,
 )
-from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.choice_raw import SDK, choice_session, response, write_css
 from tests.helpers.paths import StorageLayout
 
 

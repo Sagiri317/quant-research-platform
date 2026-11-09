@@ -31,6 +31,9 @@ from quant_research_platform.research.factors.expectations.definitions import (
 from quant_research_platform.research.factors.fundamental.definitions import (
     FUNDAMENTAL_FACTORS,
 )
+from quant_research_platform.research.factors.market_structure import (
+    DESCRIPTIONS as MARKET_STRUCTURE_FACTORS,
+)
 from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
     PRICE_VOLUME_PATH_FACTORS,
@@ -242,6 +245,14 @@ def processed_catalog() -> ProcessedDataCatalog:
                 factor_columns=tuple(RESIDUAL_FACTOR_WINDOWS),
             ),
             _spec(
+                "market_structure_factors",
+                ProcessedDataKind.FACTOR,
+                (*PLATFORM_ASSET_TIME_KEY, *MARKET_STRUCTURE_FACTORS),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar",),
+                factor_columns=tuple(MARKET_STRUCTURE_FACTORS),
+            ),
+            _spec(
                 "expectations_factors",
                 ProcessedDataKind.FACTOR,
                 (*PLATFORM_ASSET_TIME_KEY, *ALL_EXPECTATIONS_FACTORS),
@@ -256,6 +267,18 @@ def processed_catalog() -> ProcessedDataCatalog:
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 source_input_data_ids=("trading_calendar",),
                 label_columns=forward_label_columns(),
+            ),
+            _spec(
+                "session_return_labels",
+                ProcessedDataKind.LABEL,
+                (
+                    *PLATFORM_ASSET_TIME_KEY,
+                    "next_session_intraday_return",
+                    "next_session_intraday_return_available_at",
+                ),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar",),
+                label_columns=("next_session_intraday_return",),
             ),
             on_id_decomposition_spec(),
             _spec(
@@ -298,6 +321,10 @@ def _spec(
         for horizon in LABEL_HORIZONS
         if forward_return_label_column(horizon) in label_columns
     }
+    if "next_session_intraday_return" in label_columns:
+        availability["next_session_intraday_return"] = (
+            "next_session_intraday_return_available_at"
+        )
     units = {column: "decimal_return" for column in availability}
     if data_id == "risk_residual_factors":
         units.update({column: "decimal_return" for column in factor_columns})

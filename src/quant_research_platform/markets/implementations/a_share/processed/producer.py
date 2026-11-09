@@ -182,7 +182,8 @@ def produce_a_share_processed_data(
                 "has_legal_fundamental_pit",
             }
             if any(
-                definition.family in {"price_volume", "market_model", "risk_residual"}
+                definition.family
+                in {"price_volume", "market_model", "risk_residual", "market_structure"}
                 for definition in factor_definitions
             ):
                 requested.add("listing_date")
@@ -418,6 +419,9 @@ def _processed_frames(
     market_model = any(
         definition.family == "market_model" for definition in definitions
     )
+    full_cross_section = market_model or any(
+        definition.family == "market_structure" for definition in definitions
+    )
     lookahead = (
         label_engine.label_lookahead_bars(
             tuple(
@@ -452,7 +456,7 @@ def _processed_frames(
                 )
         # Independent asset calculations need only selected assets' clocks.
         # Market-model completeness instead needs the full declared membership.
-        if not market_model:
+        if not full_cross_section:
             panel_axis = replace(
                 panel_axis,
                 parquet_filters=(
@@ -473,7 +477,7 @@ def _processed_frames(
             panel_end=panel_end,
             # Past members and suspended return carry belong to the market state.
             time_window=_preceding_input_window(time_window)
-            if market_model
+            if full_cross_section
             else time_window,
             lookback=lookback,
             lookahead=lookahead,

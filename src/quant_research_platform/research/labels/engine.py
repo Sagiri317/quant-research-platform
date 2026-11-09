@@ -23,11 +23,16 @@ def calculate_labels_for_panel(
     if not requested:
         return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
     families = tuple(dict.fromkeys(definition.family for definition in requested))
-    if families != ("forward_return",):
+    if set(families) - {"forward_return", "next_intraday_return"}:
         raise ValueError("unknown_label_family")
     result = add_forward_return_labels(
         panel_frame.loc[:, list(label_panel_input_columns(requested))],
-        horizons=tuple(definition.horizon for definition in requested),
+        horizons=tuple(
+            definition.horizon
+            for definition in requested
+            if definition.family == "forward_return"
+        ),
+        include_next_intraday="next_intraday_return" in families,
         asset_column="asset_id",
         date_column="timestamp",
         execution_price_column="adj_open",

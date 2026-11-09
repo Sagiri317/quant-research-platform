@@ -858,14 +858,13 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
 
     from quant_research_platform.sources.choice import interim as choice_interim
     from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
-    from quant_research_platform.sources.choice.raw_exports import choice_session
     from quant_research_platform.sources.csmar import interim as csmar_interim
     from quant_research_platform.storage.identity import (
         filesystem_mkdir,
         filesystem_walk,
         filesystem_write_text,
     )
-    from tests.helpers.choice_raw import SDK, response, write_css
+    from tests.helpers.choice_raw import SDK, choice_session, response, write_css
 
     dates = pd.DatetimeIndex(["2019-01-30", "2019-01-31", "2019-02-01"])
     codes = ("000001.SZ", "000002.SZ", "000003.SZ")

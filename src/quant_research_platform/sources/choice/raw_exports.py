@@ -1,34 +1,25 @@
-"""Serial official Choice requests and immutable, reversible raw CSV intake."""
+"""Read structured Choice snapshots and their original request metadata."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-import threading
 from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any
-from uuid import uuid4
 
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import evidence_text_unsafe_reason
-from quant_research_platform.storage.identity import (
-    filesystem_exists,
-)
 from quant_research_platform.storage.manifests import (
     read_manifest,
     read_qrp_json_file,
 )
 from quant_research_platform.storage.raw_snapshots import (
     iter_csv_snapshot,
-    write_csv_snapshot,
 )
 
-_SESSION_LOCK = threading.Lock()
 _PREFIX = ("__choice_key", "__choice_date_index")
 _RESPONSE_FIELDS = (
     "ErrorCode",
@@ -128,103 +119,6 @@ class ChoiceRequest:
         }
 
 
-@contextmanager
-def choice_session(sdk: Any) -> Iterator[ChoiceRawSession]:
-    """Use the caller's locally loaded SDK; never persist login material."""
-    if not _SESSION_LOCK.acquire(blocking=False):
-        raise RuntimeError("choice_session_busy")
-    try:
-        started = sdk.start(
-            "RecordLoginInfo=0,ForceLogin=0,HTTPTimeout=15",
-            logcallback=lambda _message: 1,
-        )
-        if started.ErrorCode != 0:
-            raise RuntimeError(f"choice_login_failed:{started.ErrorCode}")
-        session = ChoiceRawSession(sdk)
-        primary = None
-        try:
-            yield session
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            session.active = False
-            try:
-                stopped = sdk.stop()
-                if stopped.ErrorCode != 0:
-                    raise RuntimeError(f"choice_logout_failed:{stopped.ErrorCode}")
-            except BaseException as cleanup:
-                if primary is None:
-                    raise
-                primary.add_note(f"choice logout also failed: {type(cleanup).__name__}")
-    finally:
-        _SESSION_LOCK.release()
-
-
-class ChoiceRawSession:
-    def __init__(self, sdk: Any) -> None:
-        self.sdk = sdk
-        self.active = True
-        self._request_lock = threading.Lock()
-
-    def fetch(self, output_root: Path, request: ChoiceRequest) -> Path:
-        payload = request.payload()
-        identity = request.identity()
-        root = Path(output_root)
-        if not self.active:
-            raise RuntimeError("choice_session_closed")
-        if not self._request_lock.acquire(blocking=False):
-            raise RuntimeError("choice_request_busy")
-        try:
-            # SDK has no streaming response: caller sizes each request beforehand.
-            if filesystem_exists(root):
-                raise FileExistsError("choice_output_already_exists")
-            response = response_metadata = metadata = None
-            response = getattr(self.sdk, request.endpoint)(*request.arguments)
-            response_metadata = {
-                name: getattr(response, name) for name in _RESPONSE_FIELDS
-            }
-            _validate_response_metadata(response_metadata)
-            metadata = {
-                "request": payload,
-                "response": response_metadata,
-                "collected_at": datetime.now(UTC).isoformat(),
-                "status": "COMPLETE" if response.ErrorCode == 0 else "FAILED",
-                "scope": _empty_scope(),
-                "units": "provider_native_no_conversion",
-                "types": "JSON_cell_types; SDK_null=None; bytes_hex_for_char",
-                "data_container": type(response.Data).__name__,
-            }
-            target = (
-                root
-                if response.ErrorCode == 0
-                else root.parent / "failed" / identity / uuid4().hex
-            )
-
-            def observed_rows() -> Iterator[tuple[object, ...]]:
-                for row in _response_rows(request.endpoint, response):
-                    _observe_scope(
-                        metadata["scope"],
-                        response.Indicators,
-                        row[2:],
-                        request.cutoff,
-                    )
-                    yield row
-
-            write_csv_snapshot(
-                target,
-                columns=(*_PREFIX, *response.Indicators),
-                rows=observed_rows(),
-                metadata=metadata,
-            )
-            if response.ErrorCode != 0:
-                raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
-            return root
-
-        finally:
-            self._request_lock.release()
-
-
 def read_choice_response(
     root: Path,
     request: ChoiceRequest,
@@ -296,51 +190,6 @@ def _validate_response_metadata(value: dict[str, object]) -> None:
         name in _PREFIX for name in indicators
     ):
         raise ValueError("choice_response_indicators_invalid")
-
-
-def _response_rows(endpoint: str, response: Any) -> Iterator[tuple[object, ...]]:
-    width, dates = len(response.Indicators), len(response.Dates)
-    if endpoint == "ctr":
-        if type(response.Data) is not dict:
-            raise ValueError("choice_ctr_shape_invalid")
-        for count, (key, values) in enumerate(response.Data.items()):
-            if type(key) is not str or type(values) is not list or len(values) != width:
-                raise ValueError("choice_ctr_shape_invalid")
-            if key != str(count):
-                raise ValueError("choice_saved_ctr_key_invalid")
-            yield (key, None, *values)
-    elif endpoint == "css":
-        if type(response.Data) is not dict or list(response.Data) != response.Codes:
-            raise ValueError("choice_css_shape_invalid")
-        for code, values in response.Data.items():
-            if type(values) is not list or len(values) != width * dates:
-                raise ValueError("choice_css_shape_invalid")
-            for index in range(dates):
-                yield (
-                    code,
-                    index,
-                    *(values[field * dates + index] for field in range(width)),
-                )
-    else:
-        if (
-            type(response.Data) is not list
-            or len(response.Data) != len(response.Codes) * width * dates
-        ):
-            # Official errors leave Data={} before the rank resolver runs.
-            if response.ErrorCode != 0 and response.Data == {}:
-                return
-            raise ValueError("choice_sector_shape_invalid")
-        for code_index, code in enumerate(response.Codes):
-            for index in range(dates):
-                start = code_index * width * dates
-                yield (
-                    code,
-                    index,
-                    *(
-                        response.Data[start + field * dates + index]
-                        for field in range(width)
-                    ),
-                )
 
 
 def _empty_scope() -> dict[str, object]:

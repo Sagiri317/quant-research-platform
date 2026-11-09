@@ -16,7 +16,6 @@ from quant_research_platform.sources.choice import interim
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import (
     ChoiceRequest,
-    choice_session,
 )
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
@@ -29,7 +28,7 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.choice_raw import SDK, choice_session, response, write_css
 from tests.helpers.paths import StorageLayout
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)

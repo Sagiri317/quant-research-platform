@@ -39,6 +39,26 @@ def test_empty_stock_master_preserves_only_real_observations():
     assert actual.listing_age_trading_days.isna().all()
 
 
+def test_prelisting_status_is_not_shadowed_by_a_synthetic_unknown_life():
+    dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    stocks = source["stock_master"].copy()
+    stocks.loc[stocks.source_asset_id.eq("000001"), "listing_date"] = dates[2]
+    stocks.loc[stocks.source_asset_id.eq("000001"), "delisting_date"] = dates[4]
+    panel = panels.compute_market_panel(
+        source["market_bars_1d"],
+        **panels._prepare_market_panel_inputs(
+            stocks=panels._canonical_stock_master(stocks),
+            market_cap=source["market_cap"],
+            trading_calendar=source["trading_calendar"],
+        ),
+    )
+    known = panel.loc[panel.asset_id.eq("000001")]
+    assert known.timestamp.tolist() == dates[2:5].tolist()
+    assert not known.delisting_date_unresolved.any()
+    assert known.delisting_date.eq(dates[4]).all()
+
+
 def test_later_unknown_delisting_is_a_local_barrier_without_rewriting_history():
     dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
     source = _synthetic_interim_frames(dates)

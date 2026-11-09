@@ -8,7 +8,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.sources.choice import interim as choice
-from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.csmar import interim as csmar
 from quant_research_platform.sources.csmar import raw_schemas
 from quant_research_platform.sources.reference import a_share_fees
@@ -17,7 +16,7 @@ from quant_research_platform.storage import identity, manifests, raw_snapshots
 from quant_research_platform.storage.datasets.reading import read_dataset
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from tests.helpers.a_share_raw import write_industry_reference_fixture
-from tests.helpers.choice_raw import SDK, response
+from tests.helpers.choice_raw import SDK, choice_session, response
 from tests.helpers.paths import StorageLayout
 from tests.sources.reference.test_equity_events import write_equity_source
 from tests.sources.reference.test_interim import (

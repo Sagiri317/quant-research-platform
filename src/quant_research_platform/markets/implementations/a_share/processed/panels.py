@@ -439,9 +439,12 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
     right = stocks.loc[stocks.asset_id.isin(panel.asset_id)]
     # Listing is a life fact; a later status cannot erase or backfill it.
     lives = right.drop_duplicates(["asset_id", "listing_date"], keep="first").loc[
-        :, ["asset_id", "listing_date"]
+        :, ["asset_id", "listing_date", "stock_effective_date"]
     ]
-    lives = lives.loc[lives.listing_date.notna()].copy()
+    # An earlier observed announcement already describes this life at listing.
+    lives = lives.loc[
+        lives.listing_date.notna() & lives.stock_effective_date.gt(lives.listing_date)
+    ].copy()
     lives["delisting_date"] = pd.NaT
     lives["delisting_date_unresolved"] = True
     lives["stock_effective_date"] = lives.listing_date

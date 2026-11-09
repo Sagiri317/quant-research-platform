@@ -24,8 +24,11 @@ from quant_research_platform.contracts.validation import (
 
 from .definitions import (
     _PRICE_VOLUME_INPUT_WINDOWS,
+    PRICE_VOLUME_LEVEL_DESCRIPTIONS,
     PRICE_VOLUME_LIBRARY,
     PRICE_VOLUME_PARTIAL_STATISTICS,
+    PRICE_VOLUME_PROFILE_DESCRIPTIONS,
+    PRICE_VOLUME_THEME_DESCRIPTIONS,
 )
 
 
@@ -154,6 +157,14 @@ def _calculate_values(
     min_fresh_fraction: float = 0.75,
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    if factor in PRICE_VOLUME_PROFILE_DESCRIPTIONS:
+        if "amount_profile_60d" not in sums:
+            sums["amount_profile_60d"] = _calculate_amount_profile(values)
+        return sums["amount_profile_60d"][factor][start:stop].copy()
+    if factor in PRICE_VOLUME_LEVEL_DESCRIPTIONS:
+        return _calculate_level_values(values, factor, start, stop)
+    if factor in PRICE_VOLUME_THEME_DESCRIPTIONS:
+        return _calculate_theme_values(values, factor, start, stop)
     if factor.startswith(("alpha101_", "alpha191_", "qlib_")):
         return _calculate_published_values(values, factor, start, stop)
     if fresh is None:
@@ -412,6 +423,303 @@ def _calculate_values(
         result = np.mean(current <= 0.0, axis=1)
     else:
         raise ValueError("price_volume_calculation_missing")
+    output[first - start :][valid] = result
+    return output
+
+
+def _calculate_theme_values(values, factor, start, stop):
+    """Compute the declared candidates on complete causal own-market windows."""
+    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    size = windows[0]
+    output = np.full(stop - start, np.nan)
+    first = max(start, size - 1)
+    if first >= stop:
+        return output
+    widths = {name: (size, 0) for name in names}
+    position_interaction = factor.startswith(
+        ("low_position_turnover_", "high_position_turnover_")
+    )
+    if position_interaction:
+        widths = {
+            "adj_close": (size - 1, 1),
+            "turnover": (21, 0),
+            "period_return": (21, 0),
+        }
+    elif "adj_open" in names:
+        widths["adj_open"] = (1, 0)
+        if factor != "intraday_return":
+            widths["adj_close"] = (2, 0)
+    matrices = {
+        name: sliding_window_view(
+            values[name][first - width + 1 - lag : stop - lag], width
+        )
+        for name, (width, lag) in widths.items()
+    }
+    valid = np.ones(stop - first, dtype=bool)
+    for name, matrix in matrices.items():
+        required = (
+            matrix[:, -1:]
+            if name == "period_return" and factor == "drawdown_rebound_20d"
+            else matrix
+        )
+        valid &= np.isfinite(required).all(axis=1)
+        if name in {"adj_close", "adj_open"}:
+            valid &= (required > 0).all(axis=1)
+        elif name == "turnover":
+            valid &= (required >= 0).all(axis=1)
+    selected = {name: matrix[valid] for name, matrix in matrices.items()}
+    if not valid.any():
+        return output
+
+    if "adj_open" in names:
+        opening = selected["adj_open"][:, -1]
+        closing = selected["adj_close"][:, -1]
+        intraday = closing / opening - 1
+        if factor == "intraday_return":
+            result = intraday
+        else:
+            gap = opening / selected["adj_close"][:, -2] - 1
+            if factor == "opening_gap":
+                result = gap
+            elif factor == "down_gap_recovery":
+                result = np.maximum(-gap, 0) * intraday
+            else:
+                result = np.maximum(gap, 0) * -intraday
+    elif factor.startswith("price_position_") or position_interaction:
+        prices = selected["adj_close"]
+        low, high = prices.min(axis=1), prices.max(axis=1)
+        result = np.divide(
+            prices[:, -1] - low,
+            high - low,
+            out=np.full(len(low), np.nan),
+            where=high > low,
+        )
+        if position_interaction:
+            turnover, returns = selected["turnover"], selected["period_return"]
+            baseline = turnover[:, :-1].mean(axis=1)
+            activity = np.divide(
+                turnover[:, -1],
+                baseline,
+                out=np.full(len(low), np.nan),
+                where=baseline > 0,
+            )
+            scale = _sample_standard_deviation(returns[:, :-1])
+            shock = np.divide(
+                returns[:, -1] - returns[:, :-1].mean(axis=1),
+                scale,
+                out=np.full(len(low), np.nan),
+                where=scale > 0,
+            )
+            if factor.startswith("low_position_"):
+                result = (
+                    (1 - result) * np.maximum(activity - 1, 0) * np.maximum(shock, 0)
+                )
+            else:
+                result = result * np.maximum(activity - 1, 0) * np.maximum(-shock, 0)
+    elif factor == "relative_turnover_20d":
+        turnover = selected["turnover"]
+        baseline = turnover[:, :-1].mean(axis=1)
+        result = np.divide(
+            turnover[:, -1],
+            baseline,
+            out=np.full(len(baseline), np.nan),
+            where=baseline > 0,
+        )
+    elif factor == "return_shock_1_20":
+        returns = selected["period_return"]
+        scale = _sample_standard_deviation(returns[:, :-1])
+        result = np.divide(
+            returns[:, -1] - returns[:, :-1].mean(axis=1),
+            scale,
+            out=np.full(len(scale), np.nan),
+            where=scale > 0,
+        )
+    elif "compression" in factor:
+        returns = selected["period_return"]
+        long = _sample_standard_deviation(returns)
+        short = _sample_standard_deviation(returns[:, -20:])
+        ratio = np.divide(short, long, out=np.full(len(long), np.nan), where=long > 0)
+        result = ratio
+        if factor == "compression_trend_20_60":
+            path = np.abs(returns[:, -20:]).sum(axis=1)
+            trend = np.divide(
+                returns[:, -20:].sum(axis=1),
+                path,
+                out=np.full(len(path), np.nan),
+                where=path > 0,
+            )
+            result = np.maximum(1 - ratio, 0) * trend
+    elif factor == "breakout_efficiency_20d":
+        prices = selected["adj_close"]
+        prior, current = prices[:, :-1], prices[:, -1]
+        distance = np.maximum(current - prior.max(axis=1), 0) - np.maximum(
+            prior.min(axis=1) - current, 0
+        )
+        path = np.abs(np.diff(prices, axis=1)).sum(axis=1)
+        result = np.divide(
+            distance, path, out=np.full(len(path), np.nan), where=path > 0
+        )
+    elif factor == "price_impact_efficiency_20d":
+        prices = selected["adj_close"]
+        turnover = selected["turnover"][:, -20:].sum(axis=1)
+        result = np.divide(
+            prices[:, -1] / prices[:, 0] - 1,
+            turnover,
+            out=np.full(len(turnover), np.nan),
+            where=turnover > 0,
+        )
+    else:
+        turnover = selected["turnover"]
+        baseline = turnover[:, :-1].mean(axis=1)
+        shock = np.divide(
+            turnover[:, -1],
+            baseline,
+            out=np.full(len(baseline), np.nan),
+            where=baseline > 0,
+        )
+        if factor == "turnover_absorption_20d":
+            returns = selected["period_return"]
+            average = np.abs(returns[:, :-1]).mean(axis=1)
+            impact = np.divide(
+                np.abs(returns[:, -1]),
+                average,
+                out=np.full(len(average), np.nan),
+                where=average > 0,
+            )
+            result = shock * (1 - impact)
+        else:
+            prices = selected["adj_close"]
+            result = (
+                np.maximum(1 - prices[:, -1] / prices[:, :-1].max(axis=1), 0) * shock
+            )
+            if factor == "drawdown_rebound_20d":
+                result *= selected["period_return"][:, -1]
+    output[first - start :][valid] = result
+    return output
+
+
+def _calculate_amount_profile(values):
+    """Allocate daily amount once, then share rolling histograms across outputs."""
+    price, close = values["adj_close"], values["close"]
+    high, low, amount = values["high"], values["low"], values["amount"]
+    output = {
+        name: np.full(len(price), np.nan) for name in PRICE_VOLUME_PROFILE_DESCRIPTIONS
+    }
+    valid = (
+        np.isfinite(price)
+        & (price > 0)
+        & np.isfinite(close)
+        & (close > 0)
+        & np.isfinite(high)
+        & np.isfinite(low)
+        & (low > 0)
+        & (high >= low)
+        & np.isfinite(amount)
+        & (amount >= 0)
+    )
+    if len(price) < 61 or not valid.any():
+        return output
+    adjustment = price[valid] / close[valid]
+    lower, upper = low[valid] * adjustment, high[valid] * adjustment
+    step = np.log(1.02)
+    bins = np.arange(
+        np.floor(np.log(lower.min()) / step), np.floor(np.log(upper.max()) / step) + 1
+    )
+    edges = np.exp(np.r_[bins, bins[-1] + 1] * step)
+    overlap = np.maximum(
+        np.minimum(upper[:, None], edges[1:]) - np.maximum(lower[:, None], edges[:-1]),
+        0,
+    )
+    width = upper - lower
+    allocation = np.divide(
+        overlap, width[:, None], out=np.zeros_like(overlap), where=width[:, None] > 0
+    )
+    flat = width == 0
+    indices = np.floor(np.log(lower[flat]) / step).astype(int) - int(bins[0])
+    allocation[np.flatnonzero(flat), indices] = 1
+    contributions = np.zeros((len(price), len(bins)))
+    contributions[valid] = allocation * amount[valid, None]
+    profiles = (
+        pd.DataFrame(contributions)
+        .rolling(60, min_periods=60)
+        .sum()
+        .shift(1)
+        .to_numpy()
+    )
+    complete = pd.Series(valid.astype(int)).rolling(60).sum().shift(1).eq(60).to_numpy()
+    totals = profiles.sum(axis=1)
+    usable = complete & np.isfinite(price) & (price > 0) & (totals > 0)
+    if not usable.any():
+        return output
+    profile = profiles[usable]
+    total = totals[usable]
+    node = np.exp((bins[np.argmax(profile, axis=1)] + 0.5) * step)
+    output["traded_amount_node_distance_60d"][usable] = np.log(price[usable] / node)
+    output["traded_amount_concentration_60d"][usable] = profile.max(axis=1) / total
+    above = np.clip((edges[1:] - price[usable, None]) / np.diff(edges), 0, 1)
+    output["traded_amount_above_price_60d"][usable] = (profile * above).sum(
+        axis=1
+    ) / total
+    return output
+
+
+def _calculate_level_values(values, factor, start, stop):
+    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    width = windows[0]
+    output = np.full(stop - start, np.nan)
+    first = max(start, width - 1)
+    if first >= stop:
+        return output
+    matrices = {
+        name: sliding_window_view(values[name][first - width + 1 : stop], width)
+        for name in names
+    }
+    valid = np.logical_and.reduce(
+        [
+            (np.isfinite(matrix) & (matrix > 0)).all(axis=1)
+            for matrix in matrices.values()
+        ]
+    )
+    if not valid.any():
+        return output
+    prices = matrices["adj_close"][valid]
+    prior, current = prices[:, :-1], prices[:, -1]
+    peak = prior.max(axis=1)
+    if factor.startswith("peak_drawdown_"):
+        result = np.maximum(1 - current / peak, 0)
+    elif factor.startswith(("peak_age_", "up_leg_retracement_")):
+        peak_index = prior.shape[1] - 1 - prior[:, ::-1].argmax(axis=1)
+        if factor.startswith("peak_age_"):
+            result = prior.shape[1] - peak_index
+        else:
+            before_peak = np.arange(prior.shape[1])[None, :] < peak_index[:, None]
+            low = np.where(before_peak, prior, np.inf).min(axis=1)
+            result = np.divide(
+                peak - current,
+                peak - low,
+                out=np.full(len(peak), np.nan),
+                where=np.isfinite(low) & (peak > low),
+            )
+    else:
+        adjustment = prices / matrices["close"][valid]
+        high, low = (
+            matrices["high"][valid] * adjustment,
+            matrices["low"][valid] * adjustment,
+        )
+        support, resistance = low[:, :-1].min(axis=1), high[:, :-1].max(axis=1)
+        if factor.startswith("support_distance_"):
+            result = current / support - 1
+        elif factor.startswith("resistance_distance_"):
+            result = current / resistance - 1
+        elif factor == "failed_up_breakout_20d":
+            result = np.where(
+                current <= resistance, np.maximum(high[:, -1] / resistance - 1, 0), 0
+            )
+        else:
+            result = np.where(
+                current >= support, np.maximum(1 - low[:, -1] / support, 0), 0
+            )
+        result = np.where((high >= low).all(axis=1), result, np.nan)
     output[first - start :][valid] = result
     return output
 

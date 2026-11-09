@@ -66,14 +66,6 @@ def prepare_source(config: Config) -> None:
     )
 
 
-@app.command("fetch-macro")
-def fetch_macro(config: Config) -> None:
-    """Download public macro histories and vintages to a new raw directory."""
-    from quant_research_platform.sources.macro.download import fetch_macro
-
-    _echo_result(fetch_macro(read_qrp_json_file(config)[1]))
-
-
 @app.command("prepare")
 def prepare(config: Config) -> None:
     """Prepare one market table from explicit inputs."""

@@ -720,10 +720,9 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
     import errno
 
     from quant_research_platform.sources.choice import interim as choice
-    from quant_research_platform.sources.choice.raw_exports import choice_session
     from quant_research_platform.sources.csmar import interim as csmar
     from quant_research_platform.sources.reference import interim as reference
-    from tests.helpers.choice_raw import SDK, response, write_css
+    from tests.helpers.choice_raw import SDK, choice_session, response, write_css
     from tests.helpers.paths import StorageLayout
     from tests.sources.reference.test_interim import _write_reference_root
 
@@ -860,37 +859,23 @@ def test_public_parquet_footer_preserves_system_io(
     assert opened and all(handle.closed for handle in opened)
 
 
-@pytest.mark.parametrize("operation", ["csv_records", "choice_logout"])
-def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
+def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch):
+    from quant_research_platform.sources.csmar import raw_schemas
+
     path = tmp_path / "member.csv"
     identity.filesystem_write_bytes(path, b"value\n1\n")
+    original = raw_schemas._CsvRecords.close
+
+    def close_then_fail(records):
+        original(records)
+        raise OSError("close_failed")
+
+    monkeypatch.setattr(raw_schemas._CsvRecords, "close", close_then_fail)
     try:
         raise RuntimeError("handled_outer")
     except RuntimeError as outer:
-        if operation == "csv_records":
-            from quant_research_platform.sources.csmar import raw_schemas
-
-            original = raw_schemas._CsvRecords.close
-
-            def close_then_fail(records):
-                original(records)
-                raise OSError("close_failed")
-
-            monkeypatch.setattr(raw_schemas._CsvRecords, "close", close_then_fail)
-            records = raw_schemas.iter_export_csv_records(path)
-            assert next(records) == ["value"]
-            with pytest.raises(OSError, match="close_failed"):
-                records.close()
-        elif operation == "choice_logout":
-            from quant_research_platform.sources.choice.raw_exports import (
-                choice_session,
-            )
-            from tests.helpers.choice_raw import SDK, response
-
-            sdk = SDK(response())
-            sdk.stop_error = 17
-            with pytest.raises(RuntimeError, match="choice_logout_failed:17"):
-                with choice_session(sdk) as session:
-                    assert session.active
-            assert sdk.stops == 1 and not session.active
+        records = raw_schemas.iter_export_csv_records(path)
+        assert next(records) == ["value"]
+        with pytest.raises(OSError, match="close_failed"):
+            records.close()
         assert not getattr(outer, "__notes__", [])

@@ -25,6 +25,7 @@ def prepare_source(config: Mapping):
             "instruments",
             "revision",
             "release_csv",
+            "manifests",
         }
     ):
         raise ValueError("source_prepare_fields_invalid")
@@ -69,6 +70,10 @@ def prepare_source(config: Mapping):
         from quant_research_platform.sources.macro.interim import (
             materialize_interim_data,
         )
+    elif source == "public_research":
+        from quant_research_platform.sources.public_research.interim import (
+            materialize_interim_data,
+        )
     else:
         raise ValueError("source_prepare_source_invalid")
     if "chunksize" in config and source != "csmar":
@@ -81,6 +86,12 @@ def prepare_source(config: Mapping):
         or not config["release_csv"]
     ):
         raise ValueError("source_prepare_release_csv_invalid")
+    if "manifests" in config and (
+        source != "public_research"
+        or type(config["manifests"]) is not list
+        or any(type(value) is not str or not value for value in config["manifests"])
+    ):
+        raise ValueError("source_prepare_manifests_invalid")
     for key in ("fee_csv", "fee_sidecar"):
         if key in config and (
             source != "reference" or type(config[key]) is not str or not config[key]
@@ -97,6 +108,7 @@ def prepare_source(config: Mapping):
             "instruments",
             "revision",
             "release_csv",
+            "manifests",
         )
         if key in config
     }

@@ -4,11 +4,9 @@ import io
 import json
 import zipfile
 
-import httpx
 import pandas as pd
 import pytest
 
-from quant_research_platform.sources.macro.download import fetch_macro
 from quant_research_platform.sources.macro.interim import (
     _normalize_response,
     date_end_available,
@@ -22,7 +20,6 @@ from quant_research_platform.sources.macro.publication import (
     estimated_release_at,
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
-from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
 
 def _vintage_zip():
@@ -77,66 +74,6 @@ def test_policy_surprise_keeps_units_and_declares_historical_snapshot_assumption
     assert result.timestamp.iloc[0] == pd.Timestamp("2023-12-13T23:00:00Z")
     assert result.availability_basis.iloc[0] == "inferred_snapshot_release"
     assert result.published_at.isna().all()
-
-
-def test_public_download_and_native_source_roundtrip(tmp_path, monkeypatch):
-    requests = []
-
-    def respond(request):
-        requests.append(request)
-        if request.method == "GET":
-            return httpx.Response(
-                200,
-                text=(
-                    '<input id="form_obs_start_date" value="2002-12-18">'
-                    '<input id="form_obs_end_date" value="2026-11-04">'
-                    '<select id="form_selected_vintage_dates">'
-                    '<option value="2014-01-02">2014-01-02</option>'
-                    '<option value="2014-02-06">2014-02-06</option></select>'
-                ),
-            )
-        return httpx.Response(200, content=_vintage_zip())
-
-    client = httpx.Client
-    monkeypatch.setattr(
-        httpx,
-        "Client",
-        lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs),
-    )
-    raw, output = tmp_path / "raw", tmp_path / "interim"
-    fetch_macro(
-        {
-            "raw_root": str(raw),
-            "start_date": "2010-01-01",
-            "end_date": "2025-12-31",
-            "series_ids": ["us_fed_assets", "cn_dr007"],
-            "workers": 2,
-        }
-    )
-    manifest = json.loads((raw / "download.json").read_text(encoding="utf-8"))
-    assert manifest["sources"]["us_fed_assets"]["status"] == "downloaded"
-    assert manifest["sources"]["release_csv"]["status"] == "unavailable"
-    assert len(requests) == 2
-    assert b"form%5Bfile_type%5D=1" in requests[1].content
-    result = materialize_interim_data(
-        raw_root=raw, output_roots={"macro_observations": output}
-    )
-    assert result.skipped == ("cn_dr007",)
-    frame = read_dataset(output)
-    assert len(frame) == 3
-    assert frame.value.isna().sum() == 1
-    assert set(frame.value.dropna()) == {100, 110}
-    assert frame.timestamp.min() == pd.Timestamp("2014-01-02T22:30:00")
-    with pytest.raises(OutputAlreadyExistsError):
-        fetch_macro(
-            {
-                "raw_root": str(raw),
-                "start_date": "2010-01-01",
-                "end_date": "2025-12-31",
-                "series_ids": ["us_fed_assets"],
-                "workers": 1,
-            }
-        )
 
 
 def test_explicit_original_release_timestamp_and_timezone_requirement(tmp_path):
@@ -277,7 +214,7 @@ def test_source_priority_is_per_observation_and_keeps_selected_revisions():
     assert sorted(actual.value.tolist()) == [1.0, 2.0, 3.0, 4.0]
 
 
-def test_official_shibor_and_chinabond_parsers_preserve_curve_and_nulls():
+def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls():
     record = {"retrieved_at": "2026-11-05T00:00Z", "url": "https://example.org/"}
     shibor = _normalize_response(
         json.dumps(
@@ -327,114 +264,7 @@ def test_official_shibor_and_chinabond_parsers_preserve_curve_and_nulls():
             "3",
         ],
     ]
-    payload = (
-        "<table>"
-        + "".join(
-            "<tr>" + "".join("<td>" + v + "</td>" for v in row) + "</tr>"
-            for row in rows
-        )
-        + "</table>"
-    ).encode()
+    payload = pd.DataFrame(rows[1:], columns=rows[0]).to_csv(index=False).encode()
     names = ["cn_treasury_1y", "cn_treasury_3y", "cn_treasury_10y", "cn_credit_aaa_3y"]
     actual = _normalize_response(payload, names, record)
     assert [float(f.value.iloc[0]) for f in actual] == [2.1, 2.3, 2.7, 3.4]
-
-
-def test_hkma_recorded_api_failure_preserves_valid_pages_and_other_sources(
-    tmp_path, monkeypatch
-):
-    def respond(request):
-        if request.url.host == "api.hkma.gov.hk":
-            if request.url.params["from"] == "2014-01-01":
-                return httpx.Response(
-                    200,
-                    json={
-                        "header": {"success": True},
-                        "result": {
-                            "records": [
-                                {"end_of_date": "2014-01-02", "hibor_overnight": 0.1}
-                            ]
-                        },
-                    },
-                )
-            return httpx.Response(200, json={"header": {"success": False}})
-        if request.method == "GET":
-            return httpx.Response(
-                200,
-                text=(
-                    '<input id="form_obs_start_date" value="2002-12-18">'
-                    '<input id="form_obs_end_date" value="2026-11-04">'
-                    '<select id="form_selected_vintage_dates">'
-                    '<option value="2014-01-02">2014-01-02</option></select>'
-                ),
-            )
-        return httpx.Response(200, content=_vintage_zip())
-
-    client = httpx.Client
-    monkeypatch.setattr(
-        httpx,
-        "Client",
-        lambda **kw: client(transport=httpx.MockTransport(respond), **kw),
-    )
-    raw, output = tmp_path / "raw", tmp_path / "output"
-    fetch_macro(
-        {
-            "raw_root": str(raw),
-            "start_date": "2014-01-01",
-            "end_date": "2015-12-31",
-            "series_ids": ["hk_hibor_on", "us_fed_assets"],
-            "workers": 1,
-        }
-    )
-    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
-    result = read_dataset(output)
-    assert set(result.series_id) == {"hk_hibor_on", "us_fed_assets"}
-    assert result.loc[result.series_id.eq("hk_hibor_on"), "value"].tolist() == [0.1]
-    from quant_research_platform.storage.datasets import inspect_dataset
-
-    assert inspect_dataset(output).manifest["producer_diagnostics"]["incomplete"] == [
-        "hk_hibor_on"
-    ]
-
-
-def test_cboe_download_parse_roundtrip_retains_null_and_uses_exchange_date(
-    tmp_path, monkeypatch
-):
-    def respond(request):
-        if "VIX9D" in request.url.path:
-            return httpx.Response(
-                200, text="DATE,OPEN,HIGH,LOW,CLOSE\n11/11/2024,1,3,1,2\n"
-            )
-        return httpx.Response(200, text="DATE,VVIX\n03/08/2024,80\n03/11/2024,.\n")
-
-    client = httpx.Client
-    monkeypatch.setattr(
-        httpx,
-        "Client",
-        lambda **kw: client(transport=httpx.MockTransport(respond), **kw),
-    )
-    raw, output = tmp_path / "raw", tmp_path / "output"
-    fetch_macro(
-        {
-            "raw_root": str(raw),
-            "start_date": "2024-01-01",
-            "end_date": "2024-12-31",
-            "series_ids": ["us_vvix", "us_vix9d"],
-            "workers": 1,
-        }
-    )
-    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
-    frame = read_dataset(output).sort_values(["series_id", "observation_date"])
-    vvix = frame.loc[frame.series_id.eq("us_vvix")]
-    assert vvix.value.iloc[0] == 80
-    assert pd.isna(vvix.value.iloc[1])
-    assert vvix.timestamp.tolist() == [
-        pd.Timestamp("2024-03-08T23:00"),
-        pd.Timestamp("2024-03-11T22:00"),
-    ]
-    # Veterans Day is a federal holiday but an observed equity-options session.
-    vix9d = frame.loc[frame.series_id.eq("us_vix9d")].iloc[0]
-    assert vix9d.value == 2
-    assert vix9d.timestamp == pd.Timestamp("2024-11-11T23:00")
-    assert frame.published_at.isna().all()
-    assert frame.availability_basis.eq("inferred_snapshot_release").all()

@@ -145,9 +145,20 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             )
         ]
     if source == "chinabond":
-        from quant_research_platform.sources.macro.chinabond import yield_table
-
-        data = yield_table(payload)
+        data = pd.read_csv(io.BytesIO(payload), na_values=["--"])
+        if tuple(data.columns) != (
+            "曲线名称",
+            "日期",
+            "3月",
+            "6月",
+            "1年",
+            "3年",
+            "5年",
+            "7年",
+            "10年",
+            "30年",
+        ):
+            raise ValueError("chinabond_structured_columns_invalid")
         frames = []
         for name in names:
             curve = (

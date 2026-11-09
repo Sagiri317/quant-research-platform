@@ -92,15 +92,108 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
         for column in ("observed_trade_volume", "observed_signed_trade_volume"):
             values[f"{column}_30s"] = _trailing_sum(work[column], work.timestamp, 30)
         values["book_ofi_30s"] = _trailing_sum(ofi, work.timestamp, 30)
-        if set(columns) - set(protocol.DEFAULT_FACTORS):
+        if (
+            set(columns)
+            - set(protocol.DEFAULT_FACTORS)
+            - protocol.INTRADAY_THEME_FACTORS.keys()
+        ):
             extended = _book_features(work, ofi_halflife_seconds)
             values = pd.concat([values, extended], axis=1)
+        if protocol.INTRADAY_THEME_FACTORS.keys() & set(columns):
+            values = pd.concat([values, _intraday_themes(work, values)], axis=1)
         output.append(values)
     return (
         pd.concat(output, ignore_index=True)
         .loc[:, (*protocol.KEY, *columns)]
         .sort_values(["timestamp", "asset_id"], kind="stable")
     )
+
+
+def _intraday_themes(work, base):
+    """Transfer price-path and absorption hypotheses without changing the clock."""
+    times = pd.DatetimeIndex(work.timestamp)
+    mid = pd.Series(work.mid.to_numpy(), index=times)
+    elapsed = (times - times[0]).total_seconds()
+    previous = mid.rolling("300s", closed="left")
+    complete = mid.isna().astype(int).rolling("300s", closed="left").sum().eq(0) & (
+        elapsed >= 300
+    )
+    high, low = previous.max().where(complete), previous.min().where(complete)
+    result = pd.DataFrame(index=times)
+    result["price_position_300s"] = (mid - low) / (high - low).where(high > low)
+    result["peak_drawdown_300s"] = (1 - mid / high).clip(lower=0)
+    result["support_distance_300s"] = mid / low - 1
+    result["resistance_distance_300s"] = mid / high - 1
+    log_returns = np.log(work.mid).diff()
+    variance = _trailing_sum(log_returns**2, work.timestamp, 300)
+    short_variance = _trailing_sum(log_returns**2, work.timestamp, 30)
+    compression = np.sqrt(
+        np.divide(
+            10 * short_variance,
+            variance,
+            out=np.full(len(mid), np.nan),
+            where=variance > 0,
+        )
+    )
+    result["volatility_compression_30_300s"] = compression
+    path = _trailing_sum(log_returns.abs(), work.timestamp, 300)
+    trend = _trailing_sum(log_returns, work.timestamp, 300)
+    result["signed_trend_efficiency_300s"] = np.divide(
+        trend, path, out=np.full(len(mid), np.nan), where=path > 0
+    )
+    volume = base.observed_trade_volume_30s.to_numpy()
+    long_volume = _trailing_sum(work.observed_trade_volume, work.timestamp, 300)
+    result["trade_activity_ratio_30_300s"] = np.divide(
+        10 * volume, long_volume, out=np.full(len(mid), np.nan), where=long_volume > 0
+    )
+    imbalance = np.divide(
+        base.observed_signed_trade_volume_30s.to_numpy(),
+        volume,
+        out=np.full(len(mid), np.nan),
+        where=volume > 0,
+    )
+    impact = np.divide(
+        np.abs(base.return_30s.to_numpy()),
+        np.sqrt(variance / 10),
+        out=np.full(len(mid), np.nan),
+        where=variance > 0,
+    )
+    result["flow_absorption_30s"] = imbalance * (1 - impact)
+    result["drawdown_sell_pressure_300s"] = result.peak_drawdown_300s * np.maximum(
+        -imbalance, 0
+    )
+    depth = (work.bid_vol1 + work.ask_vol1).to_numpy()
+    result["compression_order_flow_300s"] = np.maximum(1 - compression, 0) * np.divide(
+        base.book_ofi_30s.to_numpy(),
+        depth,
+        out=np.full(len(mid), np.nan),
+        where=depth > 0,
+    )
+    indices = (
+        times.to_numpy().searchsorted(
+            times.to_numpy() - np.timedelta64(30, "s"), side="right"
+        )
+        - 1
+    )
+    past = np.maximum(indices, 0)
+    reference_high, reference_low = high.to_numpy()[past], low.to_numpy()[past]
+    recent_high, recent_low = mid.rolling("30s").max(), mid.rolling("30s").min()
+    recent_known = mid.isna().astype(int).rolling("30s").sum().eq(0)
+    for name, extreme, level, returned in (
+        ("failed_high_break_300s", recent_high, reference_high, mid <= reference_high),
+        ("failed_low_break_300s", recent_low, reference_low, mid >= reference_low),
+    ):
+        excess = (
+            extreme / level - 1
+            if name.startswith("failed_high")
+            else 1 - extreme / level
+        )
+        result[name] = (
+            excess.clip(lower=0)
+            .where(returned, 0)
+            .where(np.isfinite(level) & (indices >= 0) & recent_known & mid.notna())
+        )
+    return result.reset_index(drop=True)
 
 
 def _book_features(work, halflife):

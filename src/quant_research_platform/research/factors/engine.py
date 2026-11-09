@@ -40,6 +40,18 @@ def calculate_factors_for_panel(
         ]
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families == ("market_structure",):
+        from .market_structure import calculate
+
+        return _with_keys(
+            output_source,
+            calculate(
+                panel_frame,
+                factor_columns=tuple(d.output_column for d in requested),
+                history_keys=history_keys,
+            ),
+            output_columns=tuple(d.output_column for d in requested),
+        )
     if families == ("risk_residual",):
         from quant_research_platform.research.protocols.a_share import (
             RISK_STYLE_COLUMNS,

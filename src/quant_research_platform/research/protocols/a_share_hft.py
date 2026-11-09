@@ -94,6 +94,74 @@ FACTOR_INPUTS.update(
         "depth_slope_difference": BOOK_COLUMNS,
     }
 )
+INTRADAY_THEME_FACTORS = {
+    **dict.fromkeys(
+        (
+            "price_position_300s",
+            "peak_drawdown_300s",
+            "support_distance_300s",
+            "resistance_distance_300s",
+            "volatility_compression_30_300s",
+            "signed_trend_efficiency_300s",
+            "failed_high_break_300s",
+            "failed_low_break_300s",
+        ),
+        ("mid",),
+    ),
+    "trade_activity_ratio_30_300s": ("observed_trade_volume",),
+    "flow_absorption_30s": (
+        "mid",
+        "observed_trade_volume",
+        "observed_signed_trade_volume",
+    ),
+    "drawdown_sell_pressure_300s": (
+        "mid",
+        "observed_trade_volume",
+        "observed_signed_trade_volume",
+    ),
+    "compression_order_flow_300s": (
+        "mid",
+        "bid_px1",
+        "ask_px1",
+        "bid_vol1",
+        "ask_vol1",
+    ),
+}
+FACTOR_INPUTS.update(INTRADAY_THEME_FACTORS)
+
+INTRADAY_THEME_DESCRIPTIONS = {
+    "price_position_300s": (
+        "(mid-prior300s low)/(prior300s high-low); flat range undefined"
+    ),
+    "peak_drawdown_300s": "max(1-mid/prior300s high,0)",
+    "support_distance_300s": "mid/prior300s low-1",
+    "resistance_distance_300s": "mid/prior300s high-1",
+    "volatility_compression_30_300s": (
+        "sqrt(10*sum(log-return squared,30s)/sum(log-return squared,300s))"
+    ),
+    "signed_trend_efficiency_300s": "sum(log-return,300s)/sum(abs(log-return),300s)",
+    "trade_activity_ratio_30_300s": (
+        "10*recorded trade volume30s/recorded trade volume300s"
+    ),
+    "flow_absorption_30s": (
+        "signed trade-volume imbalance30s*"
+        "(1-abs(return30s)/sqrt(realized variance300s/10))"
+    ),
+    "drawdown_sell_pressure_300s": (
+        "peak_drawdown300s*max(-signed trade-volume imbalance30s,0)"
+    ),
+    "compression_order_flow_300s": (
+        "max(1-volatility compression,0)*OFI30s/current best-level depth"
+    ),
+    "failed_high_break_300s": (
+        "positive recent30s maximum excess over the prior300s high known at t-30s, "
+        "only if current mid returned below that level"
+    ),
+    "failed_low_break_300s": (
+        "positive recent30s minimum shortfall below the prior300s low known at t-30s, "
+        "only if current mid returned above that level"
+    ),
+}
 EVENT_FACTORS = {
     "trade_interval_seconds": "seconds",
     "trade_interval_mean_seconds": "seconds",
@@ -140,6 +208,7 @@ def factor_catalog():
             if name in EVENT_FACTORS
             else "hft_panel",
             timing_semantics="observed_at_or_before_vendor_quote_time_same_segment",
+            description=INTRADAY_THEME_DESCRIPTIONS.get(name, ""),
         )
         for name, inputs in {
             **FACTOR_INPUTS,

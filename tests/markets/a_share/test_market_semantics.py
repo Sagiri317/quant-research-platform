@@ -1977,8 +1977,12 @@ def test_native_forward_returns_declare_units_and_actual_maturity_columns():
         research_dataset_specs,
     )
 
-    spec = catalog.processed_catalog().get(FORWARD_RETURNS_DATA_ID)
     for definition in label_definitions():
+        spec = catalog.processed_catalog().get(
+            "session_return_labels"
+            if definition.family == "next_intraday_return"
+            else FORWARD_RETURNS_DATA_ID
+        )
         assert spec.column_roles[definition.output_column] is ColumnRole.LABEL
         assert spec.column_roles[definition.available_at_column] is ColumnRole.CONTEXT
         assert spec.column_units[definition.output_column] == "decimal_return"
@@ -1987,7 +1991,10 @@ def test_native_forward_returns_declare_units_and_actual_maturity_columns():
             == definition.available_at_column
         )
     for dataset in research_dataset_specs():
-        assert len(dataset.label_columns) == len(label_definitions()) + 1
+        assert (
+            len(dataset.label_columns)
+            == sum(d.family == "forward_return" for d in label_definitions()) + 1
+        )
         for label, clock in dataset.label_availability_columns.items():
             assert label in dataset.label_columns
             assert clock in dataset.context_columns

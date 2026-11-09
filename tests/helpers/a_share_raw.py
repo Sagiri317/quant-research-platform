@@ -15,7 +15,6 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
-from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
 from quant_research_platform.sources.reference.a_share_fees import (
     A_SHARE_FEE_CSV_NAME,
@@ -29,7 +28,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.choice_raw import SDK, choice_session, response, write_css
 from tests.helpers.paths import StorageLayout
 
 

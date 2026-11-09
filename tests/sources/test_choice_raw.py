@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 import math
 from dataclasses import replace
@@ -11,27 +10,15 @@ import pytest
 
 from quant_research_platform.sources.choice.raw_exports import (
     ChoiceRequest,
-    choice_session,
     read_choice_response,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_glob,
-    filesystem_iterdir,
-    filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
 )
-from quant_research_platform.storage.manifests import read_manifest
-from tests.helpers.choice_raw import SDK
+from tests.helpers.choice_raw import SDK, choice_session
 from tests.helpers.choice_raw import response as _response
 from tests.helpers.paths import StorageLayout
-
-
-def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
-    return {
-        path.name: Path(native_filesystem_path(path)).read_bytes()
-        for path in filesystem_iterdir(root)
-    }
 
 
 def _request(endpoint: str = "ctr") -> ChoiceRequest:
@@ -52,111 +39,23 @@ def _request(endpoint: str = "ctr") -> ChoiceRequest:
 
 
 @pytest.mark.parametrize("endpoint", ["ctr", "css", "sector"])
-def test_official_shapes_roundtrip_and_exact_reuse(
-    tmp_path: Path, endpoint: str, monkeypatch
-) -> None:
+def test_structured_response_shapes_roundtrip(tmp_path, endpoint):
     request = _request(endpoint)
-    if endpoint == "ctr":
-        response = _response(
-            Indicators=["SECUCODE", "NOTICEDATE", "QKMZ", "HKMZ"],
-            Data={
-                "0": ["600000.SH", "2026/1/2", None, 0.0],
-                "1": ["600000.SH", "2025/12/31", "", '含,逗号\n与引号"'],
-            },
-        )
-    else:
-        flat = [1, -0.0, ["2025/1/1", "2026/1/2", None], "2025/3/1"]
-        response = _response(
-            Codes=["600000.SH"],
-            Indicators=["CASH", "ITEMVALUECHANGEDATE"],
-            Dates=["2025/1/1", "2025/1/2"],
-            Data={"600000.SH": flat} if endpoint == "css" else flat,
-        )
-    sdk = SDK(response)
-    layout = StorageLayout(tmp_path)
-    with choice_session(sdk) as session:
-        root = session.fetch(
-            layout.raw_source_root("choice") / request.endpoint / request.identity(),
-            request,
-        )
-        assert root.is_relative_to(tmp_path / "data/raw/choice")
-        original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
-        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
-            session.fetch(
-                layout.raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        assert sdk.calls == 1
-        from quant_research_platform.sources.choice import raw_exports
-
-        scope_calls = []
-        observe_scope = raw_exports._observe_scope
-
-        def counted_scope(*args):
-            scope_calls.append(1)
-            return observe_scope(*args)
-
-        monkeypatch.setattr(raw_exports, "_observe_scope", counted_scope)
-        restored = read_choice_response(root, request)
-        assert restored == vars(response)
-        assert not scope_calls
-        assert read_choice_response(root, request, verify_bytes=True) == restored
-        assert len(scope_calls) == 2
-        actual = copy.deepcopy(restored)
-        assert actual == vars(response)
-        assert (
-            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
-        )
-    assert sdk.stops == 1
-    metadata = read_manifest(root / "response.metadata.json")
-    assert metadata["columns"][2:] == response.Indicators
-    assert metadata["metadata"]["scope"]["after_cutoff_count"] == 1
-    assert metadata["metadata"]["scope"]["research_cutoff_applied"] is False
-    assert metadata["metadata"]["response"]["Codes"] == response.Codes
-
-
-def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path: Path):
-    request = ChoiceRequest(
-        "ctr",
-        (
-            "BalanceStatementSHSZ",
-            "REPORTDATE,STR_ISLISTINGREPORT,FIRSTNOTICEDATE",
-            "SecuCode=600000.SH,ReportDate=2024-12-31,ReportType=1",
-        ),
-        "official-sdk-test",
-        date(2025, 12, 31),
+    cells = [1, None, "", 0.0]
+    values = _response(
+        Codes=["600000.SH"],
+        Indicators=["CASH", "ITEMVALUECHANGEDATE"],
+        Dates=["2025/1/1", "2025/1/2"],
+        Data={"0": cells[:2], "1": cells[2:]}
+        if endpoint == "ctr"
+        else {"600000.SH": cells}
+        if endpoint == "css"
+        else cells,
     )
-    sdk = SDK(
-        _response(
-            Indicators=["REPORTDATE", "STR_ISLISTINGREPORT", "FIRSTNOTICEDATE"],
-            Data={"0": ["2024-12-31", 0, "2025-04-15"]},
-        )
-    )
-    with choice_session(sdk) as session:
-        root = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / request.endpoint
-            / request.identity(),
-            request,
-        )
-        before = _immediate_file_bytes(root)
-        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        assert sdk.calls == 1 and sdk.last_arguments == request.arguments
-        restored = read_choice_response(root, request)
-        assert restored == vars(sdk.response)
-        metadata = read_manifest(root / "response.metadata.json")["metadata"]
-        assert metadata["request"]["arguments"] == list(request.arguments)
-        assert metadata["scope"]["research_cutoff_applied"] is False
-        assert before == _immediate_file_bytes(root)
-    assert sdk.stops == 1
+    with choice_session(SDK(values)) as fixture:
+        root = fixture.fetch(tmp_path / "structured", request)
+    assert read_choice_response(root, request) == vars(values)
+    assert read_choice_response(root, request, verify_bytes=True) == vars(values)
 
 
 def test_sdk_null_empty_nonfinite_and_bytes_are_distinct(tmp_path: Path) -> None:
@@ -180,173 +79,6 @@ def test_sdk_null_empty_nonfinite_and_bytes_are_distinct(tmp_path: Path) -> None
         ]
         assert math.isnan(restored[5]) and restored[6] == float("inf")
         assert restored[7] == b"x"
-
-
-@pytest.mark.parametrize("corruption", ["value", "request", "column", "count", "scope"])
-def test_corrupt_completed_response_refuses_reuse_without_overwriting(
-    tmp_path: Path, corruption: str
-) -> None:
-    sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [12]}))
-    request = _request()
-    with choice_session(sdk) as session:
-        root = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / request.endpoint
-            / request.identity(),
-            request,
-        )
-        sidecar = root / "response.metadata.json"
-        metadata = json.loads(
-            Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
-        )
-        if corruption == "value":
-            csv = root / "response.csv"
-            filesystem_write_bytes(
-                csv,
-                Path(native_filesystem_path(csv)).read_bytes().replace(b"12", b"13"),
-            )
-        elif corruption == "request":
-            metadata["metadata"]["request"]["sdk_version"] = "different-sdk"
-        elif corruption == "column":
-            metadata["columns"][-1] = "DIFFERENT"
-        elif corruption == "count":
-            metadata["row_count"] = 2
-        else:
-            metadata["metadata"]["scope"]["after_cutoff_count"] = 1
-        if corruption != "value":
-            filesystem_write_text(sidecar, json.dumps(metadata), encoding="utf-8")
-        before = _immediate_file_bytes(root)
-        with pytest.raises(FileExistsError):
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        with pytest.raises(ValueError):
-            read_choice_response(root, request, verify_bytes=True)
-            pytest.fail("corrupt raw passed explicit byte auditing")
-        if corruption in {"value", "scope"}:
-            assert read_choice_response(root, request)["Data"]["0"] == [
-                13 if corruption == "value" else 12
-            ]
-        assert sdk.calls == 1
-        assert before == _immediate_file_bytes(root)
-
-
-def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) -> None:
-    request = _request()
-    sdk = SDK(_response(ErrorCode=10001001, ErrorMsg="transport failed"))
-    with choice_session(sdk) as session:
-        with pytest.raises(RuntimeError, match="choice_query_failed:10001001"):
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        failures = list(
-            filesystem_glob(
-                tmp_path / "data/raw/choice/ctr/failed", "**/response.metadata.json"
-            )
-        )
-        assert len(failures) == 1
-        assert read_manifest(failures[0])["metadata"]["status"] == "FAILED"
-        sdk.response = _response()
-        root = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / request.endpoint
-            / request.identity(),
-            request,
-        )
-        assert "failed" not in root.parts
-        assert read_manifest(root / "response.metadata.json")["row_count"] == 0
-        assert (
-            read_manifest(root / "response.metadata.json")["metadata"]["response"][
-                "Indicators"
-            ]
-            == []
-        )
-        response = read_choice_response(root, request)
-        assert response["Data"] == {}
-        with pytest.raises(FileExistsError):
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        assert sdk.calls == 2
-
-
-def test_invalid_shape_preserves_old_good_and_long_cell_is_accepted(
-    tmp_path: Path,
-) -> None:
-    request = _request()
-    sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
-    with choice_session(sdk) as session:
-        root = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / request.endpoint
-            / request.identity(),
-            request,
-        )
-        original = Path(native_filesystem_path(root / "response.csv")).read_bytes()
-        different = replace(request, sdk_version="other-sdk")
-        sdk.response = _response(Indicators=["QKMZ"], Data={"0": [1, 2]})
-        with pytest.raises(ValueError):
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / different.endpoint
-                / different.identity(),
-                different,
-            )
-        assert (
-            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
-        )
-        assert len(list(filesystem_iterdir(root.parent))) == 1
-        values = ["x" * (1024 * 1024 + 1)]
-        sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
-        published = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / different.endpoint
-            / different.identity(),
-            different,
-        )
-        assert read_choice_response(published, different)["Data"]["0"] == values
-        assert (
-            Path(native_filesystem_path(root / "response.csv")).read_bytes() == original
-        )
-
-
-def test_atomic_failure_preserves_primary_and_session_exclusivity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import quant_research_platform.storage.atomic as atomic
-
-    sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
-    sdk.stop_error = 123
-    primary = KeyboardInterrupt("test_primary")
-
-    def fail_publish(*args: object) -> None:
-        raise primary
-
-    monkeypatch.setattr(atomic, "publish_no_replace", fail_publish)
-    with pytest.raises(KeyboardInterrupt) as caught:
-        with choice_session(sdk) as session:
-            with pytest.raises(RuntimeError, match="choice_session_busy"):
-                with choice_session(sdk):
-                    pass
-            session.fetch(
-                StorageLayout(tmp_path).raw_source_root("choice")
-                / _request().endpoint
-                / _request().identity(),
-                _request(),
-            )
-    assert caught.value is primary
-    assert any("choice logout" in note for note in primary.__notes__)
-    assert sdk.stops == 1
-    assert not list(filesystem_glob(tmp_path, "**/response.csv"))
 
 
 @pytest.mark.parametrize(
@@ -376,75 +108,6 @@ def test_long_legal_request_has_stable_identity() -> None:
     assert len(request.arguments[0]) > 65536
     assert request.payload()["arguments"] == list(request.arguments)
     assert request.identity() == replace(request).identity()
-
-
-@pytest.mark.parametrize("metadata", (0, None, "bad", []))
-def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
-    tmp_path, metadata
-):
-    from quant_research_platform.storage.identity import filesystem_unlink
-
-    sdk = SDK(_response())
-    request = _request()
-    layout = StorageLayout(tmp_path)
-    with choice_session(sdk) as session:
-        root = session.fetch(
-            layout.raw_source_root("choice") / request.endpoint / request.identity(),
-            request,
-        )
-        path = root / "response.metadata.json"
-        original = Path(native_filesystem_path(path)).read_bytes()
-        manifest = json.loads(original)
-        manifest["metadata"] = metadata
-        filesystem_unlink(path)
-        filesystem_write_text(path, json.dumps(manifest), encoding="utf-8")
-        corrupt = Path(native_filesystem_path(path)).read_bytes()
-        with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
-            read_choice_response(root, request)
-            pytest.fail("invalid metadata admitted")
-        with pytest.raises(FileExistsError, match="choice_output_already_exists"):
-            session.fetch(
-                layout.raw_source_root("choice")
-                / request.endpoint
-                / request.identity(),
-                request,
-            )
-        assert sdk.calls == 1
-        assert Path(native_filesystem_path(path)).read_bytes() == corrupt
-
-
-def test_documented_index_weight_request_preserves_index_and_date(tmp_path):
-    request = ChoiceRequest(
-        "ctr",
-        (
-            "INDEXTODAYWEIGHT",
-            "INDEXCODE,SECUCODE,TRADEDATE,WEIGHT",
-            "IndexCode=000905.SH,EndDate=2023-12-29",
-        ),
-        "official-sdk-test",
-        date(2025, 12, 31),
-    )
-    response = _response(
-        Indicators=["INDEXCODE", "SECUCODE", "TRADEDATE", "WEIGHT"],
-        Data={"0": ["000905.SH", "600000.SH", "2023-12-29", 0.5]},
-    )
-    with choice_session(SDK(response)) as session:
-        root = session.fetch(
-            StorageLayout(tmp_path).raw_source_root("choice")
-            / request.endpoint
-            / request.identity(),
-            request,
-        )
-        assert read_choice_response(root, request) == vars(response)
-    with pytest.raises(ValueError, match="choice_request_after_cutoff"):
-        replace(
-            request,
-            arguments=(
-                request.arguments[0],
-                request.arguments[1],
-                "IndexCode=000905.SH,EndDate=2026-01-01",
-            ),
-        ).payload()
 
 
 @pytest.mark.parametrize(

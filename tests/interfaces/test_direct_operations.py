@@ -11,7 +11,6 @@ from quant_research_platform.interfaces.cli import commands
 
 CONFIG_OPERATIONS = (
     ("prepare-source", "sources.prepare", "prepare_source"),
-    ("fetch-macro", "sources.macro.download", "fetch_macro"),
     ("prepare", "markets.prepare", "prepare"),
     ("assemble", "research.datasets.assembler", "assemble"),
     ("fit", "research.models.production", "fit"),
@@ -188,14 +187,17 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
 
 
 def test_inspect_prediction_uses_native_manifest_without_reading_scores(tmp_path):
+    import json
+
     from quant_research_platform.interfaces.queries import inspect
     from tests.helpers.output_frames import native_bundle
 
-    root, _, metadata = native_bundle(tmp_path)
+    root, _, _ = native_bundle(tmp_path)
+    native = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     (root / "prediction.parquet").write_bytes(b"unselected damaged member")
     (root / "prediction.json").write_text("not a native metadata member")
-    assert inspect(root)["metadata"] == metadata
-    assert inspect(root / "manifest.json")["metadata"] == metadata
+    assert inspect(root) == native
+    assert inspect(root / "manifest.json") == native
     with pytest.raises(ValueError, match="inspection_requires_native_json_metadata"):
         inspect(root / "prediction.json")
 

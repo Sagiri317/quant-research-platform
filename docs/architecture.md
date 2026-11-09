@@ -18,7 +18,6 @@
 公开 Python 函数放在负责该项计算的模块中。命令行接口（CLI）只负责严格解析 JSON，再调用同一个函数。
 
 - `sources.prepare.prepare_source(config)`：指定原始源与新规范表位置
-- `sources.macro.download.fetch_macro(config)`：获取显式宏观历史与版本，独立记录来源失败
 - `markets.prepare.prepare(config)`：指定已准备表或原生源，生成一个市场数据表
 - `research.datasets.assembler.assemble(config)`：明确表、因子、标签和 feature_recipe
 - `research.features.book_normalization.normalize_book(config)` 使用显式交易日轴及历史回看长度，保存因果标准化盘口与每日参数
@@ -60,6 +59,7 @@ CLI 用非零退出码区分非法请求（2）、执行失败（1）和必需�
 ## 数据与计算的职责划分
 
 来源模块统一处理格式、列投影、单位和来源记录。
+下载、SDK取数及网页／图片／PDF提取在仓库外完成，仓库来源模块仅接收结构化raw。
 读取模块解码所选文件与列；计算模块检查公式、信息可用时点、标签成熟、采样与配对范围。
 通用数据写入入口检查外部输入的结构和跨批次主键，再原子发布。
 评估引擎生成的表与汇总直接保存，写入器不重算计数或重复校验已生成的科学结果；
