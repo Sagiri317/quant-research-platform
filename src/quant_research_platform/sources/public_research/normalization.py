@@ -65,6 +65,24 @@ DATASETS = {
         "lending_sell_quantity": "shares_or_fund_units",
     },
     "public_fund_shares": {"shares_outstanding": "fund_units"},
+    "public_etf_pcf_baskets": {
+        "fund_code": "identifier",
+        "valuation_date": "date",
+        "creation_unit_fund_shares": "fund_units",
+        "nav_cny": "CNY_per_fund_unit",
+        "nav_per_creation_unit_cny": "CNY",
+        "cash_component_cny": "CNY",
+        "estimated_cash_component_cny": "CNY",
+    },
+    "public_etf_pcf_components": {
+        "fund_code": "identifier",
+        "component_code": "identifier",
+        "component_kind": "text",
+        "component_quantity": "reported_units",
+        "component_quantity_unit": "text",
+        "creation_unit_fund_shares": "fund_units",
+        "cash_substitution_flag_as_provided": "text",
+    },
     "public_futures_daily": {
         "product": "identifier",
         "open": "index_points",
@@ -119,11 +137,16 @@ DATASETS = {
 SOURCES = {
     "public_finra_margin": {"finra_margin"},
     "public_option_put_call": {"cboe_put_call_extracted"},
-    "public_fund_holdings": {"chinaamc_extracted_holdings"},
+    "public_fund_holdings": {
+        "chinaamc_extracted_holdings",
+        "cn_fund_report_holdings_extracted",
+    },
     "public_13f_holdings": {"sec_13f"},
     "public_nport_holdings": {"sec_nport"},
     "public_margin_balances": {"sse_margin", "szse_margin"},
     "public_fund_shares": {"sse_etf_shares", "szse_etf_shares"},
+    "public_etf_pcf_baskets": {"etf_pcf_baskets_extracted"},
+    "public_etf_pcf_components": {"etf_pcf_components_extracted"},
     "public_futures_daily": {"cffex_daily"},
     "public_cftc_positions": {"cftc_tff"},
     "public_finra_short_volume": {"finra_short_volume"},
@@ -137,6 +160,8 @@ def accepts(data_id, record):
     if record["source"] not in SOURCES[data_id]:
         return False
     path = record["path"]
+    if record["source"].startswith("etf_pcf_"):
+        return path.endswith(".csv")
     if record["source"].startswith("yahoo_"):
         return path.endswith(".csv")
     if data_id in {"public_13f_holdings", "public_nport_holdings"}:
@@ -185,7 +210,36 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
-    if source == "finra_margin":
+    if source.startswith("etf_pcf_"):
+        frame = pd.read_csv(path, dtype="str")
+        mapping = {
+            "trading_date": "timestamp",
+            **{name: name for name in DATASETS[data_id]},
+            **{
+                name: name
+                for name in (
+                    "source_url",
+                    "source_sha256",
+                    "retrieved_at",
+                    "publication_date",
+                    "published_at",
+                )
+            },
+        }
+        result = _rename(frame, mapping)
+        result["asset_id"] = result.fund_code
+        if data_id == "public_etf_pcf_components":
+            result["asset_id"] += ":" + result.component_code
+        result["_clock_source"] = result.fund_code.map(
+            {
+                "510300": "sse_huatai_pcf",
+                "510500": "sse_southern_pcf",
+                "159915": "szse_efunds_pcf",
+                "518880": "sse_huaan_pcf",
+            }
+        )
+        yield result
+    elif source == "finra_margin":
         frame = pd.read_excel(path, dtype="str")
         result = _rename(
             frame,
@@ -221,7 +275,7 @@ def normalize(data_id, path, record):
         _numbers(result, ("put_call_ratio",))
         result["asset_id"] = result.ratio_name
         yield result
-    elif source == "chinaamc_extracted_holdings":
+    elif source in {"chinaamc_extracted_holdings", "cn_fund_report_holdings_extracted"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"])
         result = _rename(
             frame,
@@ -491,6 +545,8 @@ def _sec(path, source):
             )
             member = "INFOTABLE.tsv"
         else:
+            if not submission.SUB_TYPE.isin(("NPORT-P", "NPORT-P/A")).all():
+                raise ValueError("nport_public_filing_type_required")
             funds = pd.read_csv(
                 archive.open("FUND_REPORTED_INFO.tsv"),
                 sep="\t",

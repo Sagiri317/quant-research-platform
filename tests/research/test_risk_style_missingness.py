@@ -32,6 +32,74 @@ def test_constant_style_preserves_missingness_and_minimum_count(values, expected
     np.testing.assert_allclose(actual["style"], expected, equal_nan=True)
 
 
+@pytest.mark.parametrize(
+    "separation,signal,response_kind",
+    [
+        (1e-5, 0, "level"),
+        (1e-5, 0, "difference"),
+        (1e-5, 2**-30, "level"),
+        (1.0, 2**-40, "level"),
+    ],
+)
+def test_neutralization_preserves_resolvable_orthogonal_signal(
+    separation, signal, response_kind
+):
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.research.features.transforms import (
+        a_share_feature_pipeline,
+    )
+
+    axis = np.arange(128)
+    x, u, v = (2 * ((axis >> bit) & 1) - 1 for bit in range(3))
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"A{i}" for i in axis],
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "industry_standard_id": "test",
+            "industry_level1_code": "A",
+            "total_market_cap": 1.0,
+            "x": x,
+            "z": x + separation * u,
+            "target": x + signal * v,
+        }
+    )
+    model = FactorRiskModel(style_columns=("x", "z"))
+    state = FactorRiskState(style_columns=model.style_columns)
+    prepared = state.prepare_exposure_session(frame)
+    if response_kind == "difference":
+        frame["target"] = prepared.frame.z.to_numpy() - prepared.frame.x.to_numpy()
+    for scale in (1.0, 1e-9):
+        work = frame.assign(target=frame.target * scale)
+        result = a_share_feature_pipeline(
+            work,
+            factor_columns=("target",),
+            clip="none",
+            industry_neutralize=False,
+            size_neutralize=False,
+            risk_model=model,
+            risk_sessions={frame.timestamp.iloc[0]: prepared},
+        )
+        if signal == 0:
+            assert result.feature_target.isna().all()
+        else:
+            # The three bit vectors and the intercept are mutually orthogonal.
+            np.testing.assert_allclose(
+                result.feature_target, v, rtol=0, atol=32 * np.finfo(float).eps / signal
+            )
+            fitted = state.fit_return_session(
+                work.assign(asset_return=work.target), prepared=prepared
+            )
+            assert fitted is not None
+            np.testing.assert_allclose(
+                fitted.residuals.reindex(work.asset_id),
+                signal * scale * v,
+                rtol=0,
+                atol=32 * np.finfo(float).eps * scale,
+            )
+
+
 def test_style_fit_domains_are_independent_by_column_and_day():
     frame = pd.DataFrame(
         {

@@ -422,27 +422,20 @@ def write_a_share_raw_fixture(
             )
 
 
-def write_industry_reference_fixture(raw_root, *, observations, document_suffix=".pdf"):
+def write_industry_reference_fixture(raw_root, *, observations):
     """Write reviewed-source-shaped snapshots for the real reference reader."""
     root = Path(raw_root) / "reference/a_share_industry_snapshots"
     filesystem_mkdir(root, parents=True, exist_ok=True)
     files = {}
     snapshots = []
     for identifier, standard, observed, published, rows in observations:
-        document_name = identifier + document_suffix
-        page_name = identifier + ".html"
         candidate_name = identifier + ".json"
-        filesystem_write_text(
-            root / document_name, "synthetic public source", encoding="utf-8"
-        )
-        filesystem_write_text(
-            root / page_name, "<html>" + published + "</html>", encoding="utf-8"
-        )
+        host = "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
+        source_url = "https://" + host + "/synthetic.pdf"
+        document_hash = hashlib.sha256(b"synthetic public source").hexdigest()
         candidate = {
-            "source": document_name,
-            "source_sha256": hashlib.sha256(
-                Path(native_filesystem_path(root / document_name)).read_bytes()
-            ).hexdigest(),
+            "source": source_url,
+            "source_sha256": document_hash,
             "records": rows,
         }
         filesystem_write_text(
@@ -450,25 +443,26 @@ def write_industry_reference_fixture(raw_root, *, observations, document_suffix=
             json.dumps(candidate, ensure_ascii=False),
             encoding="utf-8",
         )
-        for name in (document_name, page_name, candidate_name):
-            files[name] = hashlib.sha256(
-                Path(native_filesystem_path(root / name)).read_bytes()
-            ).hexdigest()
-        host = "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
+        files[candidate_name] = hashlib.sha256(
+            Path(native_filesystem_path(root / candidate_name)).read_bytes()
+        ).hexdigest()
         snapshots.append(
             {
                 "snapshot_id": identifier,
                 "industry_standard_id": standard,
                 "observation_date": observed,
                 "publication_date": published,
-                "source_url": "https://" + host + "/synthetic.html",
+                "source_url": source_url,
                 "candidate_file": candidate_name,
-                "document_file": document_name,
-                "page_file": page_name,
+                "document_sha256": document_hash,
+                "publication_evidence_url": "https://" + host + "/synthetic.html",
+                "publication_evidence_sha256": hashlib.sha256(
+                    published.encode()
+                ).hexdigest(),
             }
         )
     metadata = {
-        "schema_id": "a_share_industry_snapshots/0.1",
+        "schema_id": "a_share_industry_snapshots/1",
         "files": files,
         "snapshots": snapshots,
     }

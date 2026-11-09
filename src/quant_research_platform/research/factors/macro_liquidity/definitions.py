@@ -159,6 +159,15 @@ BETA_VARIABLES = (
     "us_vix",
     "us_vvix",
     "us_skew",
+    "us_real_treasury_10y",
+)
+MATCHED_SHOCK_VARIABLES = (
+    "us_vix",
+    "us_vvix",
+    "us_skew",
+    "us_broad_dollar",
+    "us_real_treasury_10y",
+    "us_net_liquidity",
 )
 
 
@@ -209,6 +218,8 @@ def recipes():
     for variable in BETA_VARIABLES:
         for kind in ("beta", "partial_beta"):
             output[f"ml_{variable}_{kind}"] = ("beta", variable, kind)
+    for variable in MATCHED_SHOCK_VARIABLES:
+        output[f"ml_{variable}_shock_x_own_beta"] = ("matched_beta", variable)
     return output
 
 
@@ -219,6 +230,13 @@ PRESERVE_AMPLITUDE_FACTORS = frozenset(
 
 
 def _description(recipe):
+    if recipe[0] == "matched_beta":
+        return (
+            f"Latest known {recipe[1]} observation change times the stock's own "
+            "rolling sensitivity to changes in that same variable, estimated only "
+            "from mature past A-share returns and contemporaneously known releases. "
+            "Preserve shock amplitude; not an A-share market-beta substitution."
+        )
     if recipe[0] == "series" and recipe[1] in PUBLIC_SERIES:
         table, identity, fields, _unit, _frequency, _transforms = PUBLIC_SERIES[
             recipe[1]
@@ -260,6 +278,8 @@ def factor_definitions():
 
 def factor_unit(name):
     recipe = RECIPES[name]
+    if recipe[0] == "matched_beta":
+        return "decimal_return"
     if recipe[0] == "series":
         _, variable, transform = recipe
         unit = VARIABLES[variable][0]

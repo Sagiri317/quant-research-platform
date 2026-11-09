@@ -22,7 +22,6 @@ def write_equity_source(raw_root, *, events=None):
     document = (
         b"Synthetic official evidence. CNY per share; ordinary holder share quantities."
     )
-    (root / "evidence.txt").write_bytes(document)
     event = {
         "event_id": "quote-1",
         "asset_id": "000001",
@@ -38,12 +37,11 @@ def write_equity_source(raw_root, *, events=None):
         "successor_listing_date": None,
         "successor_shares_per_old_share": None,
         "source_url": "https://www.sse.com.cn/synthetic-equity-evidence",
-        "document_file": "evidence.txt",
+        "document_sha256": hashlib.sha256(document).hexdigest(),
         "source_locator": "page:1",
     }
     metadata = {
-        "schema_id": "a_share_equity_events",
-        "files": {"evidence.txt": hashlib.sha256(document).hexdigest()},
+        "schema_id": "a_share_equity_events/1",
         "events": [event] if events is None else events(event),
     }
     (root / "metadata.json").write_text(json.dumps(metadata))
@@ -79,6 +77,9 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
         ]
 
     write_equity_source(raw, events=events)
+    assert {path.name for path in (raw / "a_share_equity_events").iterdir()} == {
+        "metadata.json"
+    }
     identity = prepared_source_evidence(interim, raw, "a_share_equity_events")
     result = interim.materialize_interim_data(
         output_roots={
@@ -105,7 +106,7 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     "damage",
     [
         "amount",
-        "document",
+        "document_hash_missing",
         "hash",
         "future_publication",
         "currency",
@@ -133,10 +134,10 @@ def test_equity_evidence_invalid_never_publishes_over_old_good(tmp_path, damage)
     event = metadata["events"][0]
     if damage == "amount":
         event["amount_per_share"] = None
-    elif damage == "document":
-        event["document_file"] = "missing.txt"
+    elif damage == "document_hash_missing":
+        event["document_sha256"] = None
     elif damage == "hash":
-        (root / "evidence.txt").write_bytes(b"replaced")
+        event["document_sha256"] = "invalid"
     elif damage == "future_publication":
         event["publication_date"] = "2027-01-01"
     elif damage == "currency":
@@ -380,7 +381,7 @@ def test_equity_window_selects_before_business_interpretation(
     pd.testing.assert_frame_equal(baseline, read_dataset(selected))
 
 
-@pytest.mark.parametrize("damage", ["date", "member", "hash"])
+@pytest.mark.parametrize("damage", ["date", "missing_hash", "hash"])
 def test_equity_window_preserves_selection_dates_and_source_integrity(tmp_path, damage):
     raw = tmp_path / "raw"
     root = write_equity_source(
@@ -390,10 +391,10 @@ def test_equity_window_preserves_selection_dates_and_source_integrity(tmp_path, 
     metadata = json.loads(path.read_text())
     if damage == "date":
         metadata["events"][0]["publication_date"] = "unknown"
-    elif damage == "member":
-        metadata["events"][0]["document_file"] = "missing.txt"
+    elif damage == "missing_hash":
+        del metadata["events"][0]["document_sha256"]
     else:
-        metadata["files"]["evidence.txt"] = "0" * 64
+        metadata["events"][0]["document_sha256"] = "invalid"
     path.write_text(json.dumps(metadata))
     output = tmp_path / "selected"
     with pytest.raises(ValueError, match="equity_event"):
@@ -524,11 +525,10 @@ def test_future_event_attachment_does_not_change_prior_session_event_proof(tmp_p
         event_id="future",
         effective_date="2023-01-10",
         publication_date="2023-01-09",
-        document_file="future.txt",
+        document_sha256=hashlib.sha256(
+            b"Synthetic future fact and unit evidence."
+        ).hexdigest(),
     )
-    attachment = b"Synthetic future fact and unit evidence."
-    (source / "future.txt").write_bytes(attachment)
-    metadata["files"]["future.txt"] = hashlib.sha256(attachment).hexdigest()
     metadata["events"].append(future)
     path.write_text(json.dumps(metadata))
     root = tmp_path / "future_rights"

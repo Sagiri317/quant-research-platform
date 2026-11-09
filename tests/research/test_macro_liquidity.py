@@ -300,6 +300,65 @@ def test_macro_beta_counts_actual_market_sessions_and_keeps_unknown_clocks():
     )
 
 
+@pytest.mark.parametrize("variable", ["us_vix", "us_real_treasury_10y"])
+def test_matched_shock_uses_own_mature_beta_and_level_units(variable):
+    sessions = pd.bdate_range("2024-01-02", periods=9)
+    levels = 2 + np.arange(len(sessions), dtype=float) ** 2 / 100
+    observations = _observations(
+        [
+            (variable, day, day, value)
+            for day, value in zip(sessions, levels, strict=True)
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "market_type": 1,
+            "timestamp": sessions + pd.Timedelta(hours=8),
+            "signal_session": sessions,
+            "listing_date": sessions[0],
+            "return_available_at": sessions + pd.Timedelta(hours=7),
+            "period_return": np.r_[np.nan, 2 * np.diff(levels)],
+        }
+    )
+    dates = pd.date_range(sessions[0], sessions[-1])
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.isin(sessions),
+        }
+    )
+    name = f"ml_{variable}_shock_x_own_beta"
+    columns = [name, f"ml_{variable}_level"]
+    config = {"beta_window": 4, "beta_min_observations": 3, "beta_min_changes": 3}
+    actual = calculate_macro_factors(
+        observations, panel, columns=columns, config=config, calendar=calendar
+    )
+    # y=2*delta(level) has intercept zero and slope two, including percent rates.
+    np.testing.assert_allclose(actual[name].iloc[3:], 2 * np.diff(levels)[2:])
+    assert actual[name].iloc[:3].isna().all()
+    unavailable = calculate_macro_factors(
+        observations, panel, columns=columns, config=config
+    )
+    assert unavailable[name].isna().all()
+    np.testing.assert_allclose(unavailable[f"ml_{variable}_level"], levels)
+    future = _observations(
+        [(variable, sessions[-1], sessions[-1] + pd.Timedelta(hours=9), 100)]
+    )
+    pd.testing.assert_frame_equal(
+        actual,
+        calculate_macro_factors(
+            pd.concat([observations, future]),
+            panel,
+            columns=columns,
+            config=config,
+            calendar=calendar,
+        ),
+    )
+
+
 @pytest.mark.parametrize("window,minimum", [(4, 3), (6, 2)])
 def test_macro_beta_unknown_calendar_does_not_compress_windows_or_block_levels(
     window, minimum

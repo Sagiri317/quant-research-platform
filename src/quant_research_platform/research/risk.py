@@ -509,33 +509,51 @@ def _weighted_fit(
     """Solve WLS, reusing only the most recent identical observed design."""
     root_weights = np.sqrt(weights / weights.max())
     if cache is None:
-        coefficients, _, rank, _ = np.linalg.lstsq(
-            design * root_weights[:, None], returns * root_weights, rcond=None
+        cache = {}
+    if (
+        "design" not in cache
+        or not np.array_equal(cache["design"], design)
+        or not np.array_equal(cache["root_weights"], root_weights)
+    ):
+        u, singular, vh = np.linalg.svd(
+            design * root_weights[:, None], full_matrices=False
         )
-        if rank != design.shape[1]:
-            return None
+        cutoff = np.finfo(float).eps * max(design.shape) * singular[0]
+        cache.clear()
+        cache.update(
+            design=design,
+            root_weights=root_weights,
+            basis=u if np.all(singular > cutoff) else None,
+            absolute_basis=np.abs(u),
+            coefficient_basis=vh.T / singular if np.all(singular > cutoff) else None,
+        )
+    if cache["basis"] is None:
+        return None
+    u, absolute_u = cache["basis"], cache["absolute_basis"]
+    response = returns * root_weights
+    coordinates = u.T @ response
+    coefficients = cache["coefficient_basis"] @ coordinates
+    fitted = u @ coordinates
+    residuals = response - fitted
+    # Propagate dot-product roundoff; a fixed business threshold erases real signals.
+    eps = np.finfo(float).eps
+    n, p = u.shape
+    gamma_n, gamma_p = n * eps / (1 - n * eps), p * eps / (1 - p * eps)
+    tolerance = (
+        gamma_n * (absolute_u @ (absolute_u.T @ np.abs(response)))
+        + gamma_p * (absolute_u @ np.abs(coordinates))
+        + eps * (np.abs(response) + np.abs(fitted))
+    )
+    # A small difference of design columns can expose SVD subspace roundoff.
+    equation_fit = (design @ coefficients) * root_weights
+    equation_bound = gamma_p * (
+        np.abs(design) @ np.abs(coefficients)
+    ) * root_weights + eps * (np.abs(response) + 2 * np.abs(equation_fit))
+    if np.all(np.abs(response - equation_fit) <= equation_bound):
+        residuals[:] = 0.0
     else:
-        if (
-            "design" not in cache
-            or not np.array_equal(cache["design"], design)
-            or not np.array_equal(cache["root_weights"], root_weights)
-        ):
-            u, singular, vh = np.linalg.svd(
-                design * root_weights[:, None], full_matrices=False
-            )
-            cutoff = np.finfo(float).eps * max(design.shape) * singular[0]
-            projection = (vh.T / singular) @ u.T if np.all(singular > cutoff) else None
-            cache.clear()
-            cache.update(
-                design=design, root_weights=root_weights, projection=projection
-            )
-        if cache["projection"] is None:
-            return None
-        coefficients = cache["projection"] @ (returns * root_weights)
-    residuals = returns - design @ coefficients
-    # An exactly explained ordinary return should not create specific risk.
-    tolerance = 1e-12 * float(np.max(np.abs(returns)))
-    residuals[np.abs(residuals) <= tolerance] = 0.0
+        residuals[np.abs(residuals) <= tolerance] = 0.0
+    residuals /= root_weights
     return coefficients, residuals
 
 

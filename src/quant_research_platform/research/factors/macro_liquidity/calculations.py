@@ -237,6 +237,10 @@ def required_factors(columns, config):
             needed.add("ml_" + recipe[1])
         elif recipe[0] == "beta":
             needed.add("ml_" + recipe[1] + "_level")
+        elif recipe[0] == "matched_beta":
+            needed.update(
+                f"ml_{recipe[1]}_{suffix}" for suffix in ("beta", "level", "change")
+            )
     if "ml_us_cn_pressure_difference" in needed:
         needed.update(("ml_us_funding_pressure", "ml_cn_funding_pressure"))
     for name, components in config["pressure_components"].items():
@@ -394,7 +398,11 @@ def calculate_macro_factors(
                 if "eligible" in work:
                     value = value.where(work.eligible)
             output[column] = output["ml_" + state] * value
-    beta_columns = [name for name in columns if RECIPES[name][0] == "beta"]
+    beta_columns = [
+        name
+        for name in sorted(required_factors(columns, config))
+        if RECIPES[name][0] == "beta"
+    ]
     output[beta_columns] = np.nan
     if (
         beta_columns
@@ -489,4 +497,14 @@ def calculate_macro_factors(
                         .reindex(signals)
                         .to_numpy()
                     )
+    for name in columns:
+        recipe = RECIPES[name]
+        if recipe[0] == "matched_beta":
+            # Rate changes are displayed in bp; beta uses the level's percent unit.
+            scale = 100 if VARIABLES[recipe[1]][0] == "percent" else 1
+            output[name] = (
+                output[f"ml_{recipe[1]}_change"]
+                / scale
+                * output[f"ml_{recipe[1]}_beta"]
+            )
     return output.loc[:, ["market_id", "asset_id", "timestamp", *columns]]

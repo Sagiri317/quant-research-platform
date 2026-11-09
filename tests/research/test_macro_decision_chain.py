@@ -243,10 +243,15 @@ def test_decision_clock_rejects_information_after_opening_price_formation():
 
 
 @pytest.mark.parametrize(
-    "missing_column", [None, "listing_date", "period_return", "trading_calendar"]
+    "variable,missing_column",
+    [
+        ("us_nfci", missing)
+        for missing in (None, "listing_date", "period_return", "trading_calendar")
+    ]
+    + [("us_vix", None), ("us_vix", "trading_calendar")],
 )
 def test_native_macro_beta_resets_listing_history_without_blocking_levels(
-    tmp_path, missing_column
+    tmp_path, variable, missing_column
 ):
     sessions = pd.bdate_range("2024-01-02", periods=17)
     levels = np.arange(16, dtype=float) ** 2
@@ -292,11 +297,11 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
     )
     releases = pd.DataFrame(
         {
-            "series_id": "us_nfci",
+            "series_id": variable,
             "observation_date": sessions[:-1],
             "value": levels,
             "unit": "index",
-            "frequency": "W",
+            "frequency": "W" if variable == "us_nfci" else "D",
             "source_id": "synthetic",
             "source_series": "NFCI",
             "source_timezone": "UTC",
@@ -354,7 +359,12 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
                 "start": str(sessions[1].date()),
                 "end": str(sessions[-1].date()),
             },
-            "factor_columns": ["ml_us_nfci_level", "ml_us_nfci_beta"],
+            "factor_columns": [
+                f"ml_{variable}_level",
+                f"ml_{variable}_beta"
+                if variable == "us_nfci"
+                else f"ml_{variable}_shock_x_own_beta",
+            ],
             "parameters": {
                 "beta_window": 4,
                 "beta_min_observations": 3,
@@ -369,11 +379,20 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
     ]
     assert missing == ([] if missing_column is None else [missing_column])
     # Preopen levels include the new midnight release; return betas stop at close.
-    np.testing.assert_allclose(actual.ml_us_nfci_level, np.r_[levels[1:], levels[-1]])
+    np.testing.assert_allclose(
+        actual[f"ml_{variable}_level"], np.r_[levels[1:], levels[-1]]
+    )
     expected = np.full(16, np.nan)
     if missing_column is None:
         expected[[3, 4, 8, 13, 14, 15]] = 2
-    np.testing.assert_allclose(actual.ml_us_nfci_beta, expected, equal_nan=True)
+    column = (
+        f"ml_{variable}_beta"
+        if variable == "us_nfci"
+        else f"ml_{variable}_shock_x_own_beta"
+    )
+    if variable != "us_nfci":
+        expected *= np.r_[np.diff(levels), np.diff(levels)[-1]]
+    np.testing.assert_allclose(actual[column], expected, equal_nan=True)
 
 
 def test_macro_factor_prepare_rejects_conflicting_panel_market(tmp_path):

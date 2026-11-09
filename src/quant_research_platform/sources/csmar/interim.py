@@ -677,7 +677,7 @@ def _normalize_mapped_frame(
             # BSE's after-hours chapter was expressly deferred on July 6.
             market_type.eq(64) & dates.le(pd.Timestamp("2026-07-06"))
         )
-        not_applicable = known_applicability & (~active_board | filling.isin((1, 2)))
+        not_applicable = (known_applicability & ~active_board) | filling.isin((1, 2))
         for column in ("after_hours_volume", "after_hours_amount"):
             values = result[column]
             result[column] = values.mask(

@@ -139,7 +139,8 @@ def materialize_interim_data(
                         frame["source_url"] = record["url"]
                     if "source_sha256" not in frame:
                         frame["source_sha256"] = digest
-                    frame["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
+                    if "retrieved_at" not in frame:
+                        frame["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
                     if "publication_date" not in frame:
                         frame["publication_date"] = pd.NaT
                     publication_dates = frame.publication_date
@@ -170,7 +171,9 @@ def materialize_interim_data(
                     frame["available_at"] = frame.published_at.fillna(dated_release)
                     frame["availability_basis"] = "unknown_historical_release"
                     frame.loc[frame.publication_date.notna(), "availability_basis"] = (
-                        "publication_date_upper_bound"
+                        "public_nport_filing_date_rule_upper_bound"
+                        if data_id == "public_nport_holdings"
+                        else "publication_date_upper_bound"
                     )
                     frame.loc[frame.published_at.notna(), "availability_basis"] = (
                         "publication_timestamp"
@@ -180,7 +183,10 @@ def materialize_interim_data(
                     )
                     if clocks is not None:
                         keys = pd.MultiIndex.from_arrays(
-                            [frame.source, frame.timestamp.dt.normalize()]
+                            [
+                                frame.get("_clock_source", frame.source),
+                                frame.timestamp.dt.normalize(),
+                            ]
                         )
                         clock = clocks.reindex(keys).set_axis(frame.index)
                         actual = frame.published_at.isna() & clock.published_at.notna()
@@ -288,7 +294,9 @@ def materialize_interim_data(
 def _source_timezone(source):
     return (
         "Asia/Shanghai"
-        if source.startswith(("chinaamc", "sse_", "szse_", "cffex"))
+        if source.startswith(
+            ("chinaamc", "cn_fund_", "sse_", "szse_", "cffex", "etf_pcf_")
+        )
         else "America/New_York"
     )
 

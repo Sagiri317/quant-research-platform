@@ -37,7 +37,6 @@ from quant_research_platform.sources.reference.a_share_fees import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
-    _hash_file_content,
     filesystem_exists,
     filesystem_is_dir,
     filesystem_is_file,
@@ -284,7 +283,7 @@ def _industry_source(reference_root):
     raw, metadata = read_qrp_json_file(path)
     if (
         set(metadata) != {"schema_id", "files", "snapshots"}
-        or metadata["schema_id"] != "a_share_industry_snapshots/0.1"
+        or metadata["schema_id"] != "a_share_industry_snapshots/1"
         or type(metadata["files"]) is not dict
         or not metadata["files"]
         or type(metadata["snapshots"]) is not list
@@ -296,23 +295,22 @@ def _industry_source(reference_root):
         for snapshot in metadata["snapshots"]
         if type(snapshot) is dict and type(snapshot.get("candidate_file")) is str
     }
+    if set(metadata["files"]) != candidates:
+        raise ValueError("industry_snapshot_member_invalid")
     members = {}
     for name, expected_hash in metadata["files"].items():
         if (
-            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None
+            type(name) is not str
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json", name) is None
             or name == _INDUSTRY_MANIFEST_NAME
             or type(expected_hash) is not str
             or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
         ):
             raise ValueError("industry_snapshot_member_invalid")
         member = require_unaliased_path(root / name, error="invalid_dataset_part_files")
-        if name in candidates:
-            candidate_raw, candidate = read_qrp_json_file(member)
-            digest = hashlib.sha256(candidate_raw).hexdigest()
-            members[name] = candidate
-        else:
-            digest = _hash_file_content(member)
-            members[name] = None
+        candidate_raw, candidate = read_qrp_json_file(member)
+        digest = hashlib.sha256(candidate_raw).hexdigest()
+        members[name] = candidate
         if digest != expected_hash:
             raise ValueError("industry_snapshot_member_hash_mismatch")
     seen = set()
@@ -324,8 +322,9 @@ def _industry_source(reference_root):
             "publication_date",
             "source_url",
             "candidate_file",
-            "document_file",
-            "page_file",
+            "document_sha256",
+            "publication_evidence_url",
+            "publication_evidence_sha256",
         }:
             raise ValueError("industry_snapshot_metadata_invalid")
         standard = snapshot["industry_standard_id"]
@@ -343,21 +342,25 @@ def _industry_source(reference_root):
         published = _snapshot_date(snapshot["publication_date"])
         if observed > published:
             raise ValueError("industry_snapshot_publication_invalid")
-        if type(snapshot["source_url"]) is not str:
-            raise ValueError("industry_snapshot_source_invalid")
-        url = urlsplit(snapshot["source_url"])
         expected_host = (
             "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
         )
-        if url.scheme != "https" or url.netloc != expected_host or not url.path:
-            raise ValueError("industry_snapshot_source_invalid")
-        for key in ("candidate_file", "document_file", "page_file"):
-            name = snapshot[key]
-            if type(name) is not str or name not in members:
+        for key in ("source_url", "publication_evidence_url"):
+            if type(snapshot[key]) is not str:
+                raise ValueError("industry_snapshot_source_invalid")
+            url = urlsplit(snapshot[key])
+            if url.scheme != "https" or url.netloc != expected_host or not url.path:
+                raise ValueError("industry_snapshot_source_invalid")
+        for key in ("document_sha256", "publication_evidence_sha256"):
+            if (
+                type(snapshot[key]) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", snapshot[key]) is None
+            ):
                 raise ValueError("industry_snapshot_member_invalid")
-        if not snapshot["candidate_file"].endswith(".json") or not snapshot[
-            "page_file"
-        ].endswith(".html"):
+        if (
+            type(snapshot["candidate_file"]) is not str
+            or snapshot["candidate_file"] not in members
+        ):
             raise ValueError("industry_snapshot_member_invalid")
     source_identity = canonical_json_hash(
         {
@@ -382,9 +385,8 @@ def _industry_frame(metadata, members, *, end_date=None):
         candidate = members[snapshot["candidate_file"]]
         if (
             set(candidate) != {"source", "source_sha256", "records"}
-            or candidate["source"] != snapshot["document_file"]
-            or candidate["source_sha256"]
-            != metadata["files"][snapshot["document_file"]]
+            or candidate["source"] != snapshot["source_url"]
+            or candidate["source_sha256"] != snapshot["document_sha256"]
             or type(candidate["records"]) is not list
             or not candidate["records"]
         ):
@@ -480,28 +482,12 @@ def _equity_source(reference_root, *, end_date=None):
     path = root / "metadata.json"
     raw, metadata = read_qrp_json_file(path)
     if (
-        set(metadata) != {"schema_id", "files", "events"}
-        or metadata["schema_id"] != "a_share_equity_events"
-        or type(metadata["files"]) is not dict
-        or not metadata["files"]
+        set(metadata) != {"schema_id", "events"}
+        or metadata["schema_id"] != "a_share_equity_events/1"
         or type(metadata["events"]) is not list
         or not metadata["events"]
     ):
         raise ValueError("equity_event_metadata_invalid")
-    members = {}
-    for name, digest in metadata["files"].items():
-        if (
-            type(name) is not str
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) is None
-            or name == "metadata.json"
-            or type(digest) is not str
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-        ):
-            raise ValueError("equity_event_member_invalid")
-        member = require_unaliased_path(root / name, error="invalid_dataset_part_files")
-        if _hash_file_content(member) != digest:
-            raise ValueError("equity_event_member_hash_mismatch")
-        members[name] = member
     rows, seen = [], set()
     keys = {
         "event_id",
@@ -518,7 +504,7 @@ def _equity_source(reference_root, *, end_date=None):
         "successor_listing_date",
         "successor_shares_per_old_share",
         "source_url",
-        "document_file",
+        "document_sha256",
         "source_locator",
     }
 
@@ -535,9 +521,11 @@ def _equity_source(reference_root, *, end_date=None):
     for event in metadata["events"]:
         if type(event) is not dict or set(event) != keys:
             raise ValueError("equity_event_row_invalid")
-        for key in ("document_file",):
-            if type(event[key]) is not str or event[key] not in members:
-                raise ValueError("equity_event_member_invalid")
+        if (
+            type(event["document_sha256"]) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", event["document_sha256"]) is None
+        ):
+            raise ValueError("equity_event_document_hash_invalid")
         try:
             effective = pd.Timestamp(_snapshot_date(event["effective_date"]))
             published = pd.Timestamp(_snapshot_date(event["publication_date"]))
@@ -638,14 +626,7 @@ def _equity_source(reference_root, *, end_date=None):
             ratio = shares
         elif any(event[key] is not None for key in successor_keys):
             raise ValueError("equity_event_kind_fields_invalid")
-        evidence = canonical_json_hash(
-            {
-                "event": event,
-                "files": {
-                    name: metadata["files"][name] for name in (event["document_file"],)
-                },
-            }
-        )
+        evidence = canonical_json_hash(event)
         rows.append(
             (
                 event["asset_id"],
@@ -692,7 +673,5 @@ def _equity_source(reference_root, *, end_date=None):
     frame = frame.sort_values(
         ["timestamp", "source_asset_id", "event_id"], kind="mergesort"
     ).reset_index(drop=True)
-    identity = canonical_json_hash(
-        {"metadata_sha256": hashlib.sha256(raw).hexdigest(), "files": metadata["files"]}
-    )
+    identity = hashlib.sha256(raw).hexdigest()
     return frame, identity

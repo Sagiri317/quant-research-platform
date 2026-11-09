@@ -294,6 +294,9 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
         "traversal",
         "non_mapping_record",
         "publication_before_observation",
+        "bad_document_hash",
+        "unstructured_member",
+        "candidate_provenance_mismatch",
     ],
 )
 def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
@@ -306,13 +309,20 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         Path(native_filesystem_path(root / "metadata.json")).read_text(encoding="utf-8")
     )
     if failure == "missing_member":
-        metadata["snapshots"][0]["document_file"] = "missing.pdf"
+        metadata["snapshots"][0]["candidate_file"] = "missing.json"
     elif failure == "bad_hash":
-        metadata["files"]["snapshot.pdf"] = "0" * 64
+        metadata["files"]["snapshot.json"] = "0" * 64
     elif failure == "traversal":
-        metadata["files"]["../snapshot.pdf"] = metadata["files"].pop("snapshot.pdf")
+        metadata["files"]["../snapshot.json"] = metadata["files"].pop("snapshot.json")
+        metadata["snapshots"][0]["candidate_file"] = "../snapshot.json"
     elif failure == "publication_before_observation":
         metadata["snapshots"][0]["publication_date"] = "2019-12-01"
+    elif failure == "bad_document_hash":
+        metadata["snapshots"][0]["document_sha256"] = "invalid"
+    elif failure == "unstructured_member":
+        metadata["files"]["snapshot.pdf"] = "0" * 64
+    elif failure == "candidate_provenance_mismatch":
+        metadata["snapshots"][0]["document_sha256"] = "0" * 64
     elif failure == "non_mapping_record":
         candidate = json.loads(
             Path(native_filesystem_path(root / "snapshot.json")).read_text(
@@ -345,9 +355,8 @@ def test_industry_reference_preserves_table_row_locator(tmp_path):
 
     observations = _industry_observations()
     observations[0][4][0]["source_locator"] = "table:2;row:7"
-    root = write_industry_reference_fixture(
-        tmp_path / "raw", observations=observations, document_suffix=".docx"
-    )
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    assert {path.suffix for path in root.iterdir()} == {".json"}
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     layout = StorageLayout(tmp_path)
     interim.materialize_interim_data(

@@ -340,7 +340,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             <= declared
         ):
             raise ValueError("macro_factors_require_explicit_decision_panel")
-        beta = any(RECIPES[name][0] == "beta" for name in columns)
+        beta = any(RECIPES[name][0] == "beta" for name in needed)
         required = set(PLATFORM_ASSET_TIME_KEY) | {"eligible"}
         required.update(
             RECIPES[name][2]
