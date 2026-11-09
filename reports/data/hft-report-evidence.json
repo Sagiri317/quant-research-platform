@@ -1,0 +1,81 @@
+{
+  "as_of": "2026-11-09",
+  "research_status": "partial",
+  "server_checked_at_utc": "2026-11-09T01:13:34.658038+00:00",
+  "server_research_processes": 0,
+  "remote_local_matching_files": 19,
+  "accounts": 972,
+  "benchmark_accounts": 20,
+  "missing_deeplob_historical_validation": 8,
+  "completed_stability_tasks": 12,
+  "capital": 1000000.0,
+  "windows": [
+    {
+      "id": "w1",
+      "start": "2023-10-13",
+      "end": "2023-12-07",
+      "sessions": 40,
+      "window_number": 1
+    },
+    {
+      "id": "w2",
+      "start": "2023-12-25",
+      "end": "2024-02-27",
+      "sessions": 40,
+      "window_number": 2
+    },
+    {
+      "id": "w3",
+      "start": "2024-03-07",
+      "end": "2024-05-08",
+      "sessions": 40,
+      "window_number": 3
+    },
+    {
+      "id": "continuous",
+      "start": "2024-07-08",
+      "end": "2024-08-30",
+      "sessions": 40,
+      "window_number": 4
+    },
+    {
+      "id": "w4",
+      "start": "2024-09-02",
+      "end": "2024-11-05",
+      "sessions": 40,
+      "window_number": 5
+    }
+  ],
+  "retrain_sessions": 5,
+  "main_fixed_prediction": {
+    "ic": 0.3325876630378624,
+    "rank_ic": 0.3444278807924108
+  },
+  "fixed_main_execution": [
+    {
+      "execution": "active",
+      "accounts": 16,
+      "return_pct": 5.001745030312502,
+      "increment_pp": 1.4284169053125035
+    },
+    {
+      "execution": "passive",
+      "accounts": 16,
+      "return_pct": 7.589645653028808,
+      "increment_pp": 4.016317528028759
+    }
+  ],
+  "source_sha256": {
+    ".run/weekend-etf/etf-combined-v1/protocol.json": "df4484bb3958f0162ecda4a60787f014bafddb22444147a6b4bafa1003812545",
+    ".run/weekend-etf/etf-combined-v1/summary/accounts.csv": "5397021f704a50c03d775f284cd27db886dadb9dd7e64ba272d9c5b6e521fc06",
+    ".run/weekend-etf/etf-combined-v1/summary/account_inference.csv": "c7748f9fe0aab30957502fc3238c65b93b16736fbbb7e1c7c1faeb14783000ad",
+    ".run/weekend-etf/etf-combined-v1/summary/prediction_inference.csv": "562bd705c779b1f085bd7479fa88bd657f3482d80da4df22575184904778dfb4"
+  },
+  "window_numbering": {
+    "w1": 1,
+    "w2": 2,
+    "w3": 3,
+    "continuous": 4,
+    "w4": 5
+  }
+}

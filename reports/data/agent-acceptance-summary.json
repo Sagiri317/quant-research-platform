@@ -1,0 +1,84 @@
+{
+  "native_chain_synthetic": {
+    "status": "completed",
+    "phase": "reporting",
+    "usage": {
+      "requests": 10,
+      "input_tokens": 31748,
+      "output_tokens": 3116,
+      "usage_missing": 0,
+      "elapsed_seconds": 81.20104349999747,
+      "experiments": 15
+    },
+    "experiment_count": 15,
+    "experiment_statuses": [
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed",
+      "completed"
+    ],
+    "report_sha256": "4c06c9f7335173558e5090c9d9d6d61304e9d4906f1a2c95f54eeb9b44264c13"
+  },
+  "daily_report_review": {
+    "status": "completed",
+    "phase": "development",
+    "usage": {
+      "requests": 6,
+      "input_tokens": 47744,
+      "output_tokens": 4018,
+      "usage_missing": 0,
+      "elapsed_seconds": 52.973888500011526,
+      "experiments": 0
+    },
+    "experiment_count": 0,
+    "experiment_statuses": [],
+    "report_sha256": "63df5622c15701ad907c08e9d5b01c84cee9e24bd10c09204b72fc8f6f6e3698"
+  },
+  "iterative_mining_synthetic": {
+    "status": "completed",
+    "phase": "discussion",
+    "usage": {
+      "requests": 13,
+      "input_tokens": 159412,
+      "output_tokens": 6676,
+      "usage_missing": 0,
+      "elapsed_seconds": 86.44242009997834,
+      "experiments": 3
+    },
+    "experiment_count": 3,
+    "experiment_statuses": [
+      "completed",
+      "completed",
+      "completed"
+    ],
+    "report_sha256": "32c55f8ec985b8dbfab94ccdef71288b8fc0b031c87e9d5cc0187e9f94cb8d54"
+  },
+  "structured_action_and_image": {
+    "status": "completed",
+    "phase": "discussion",
+    "usage": {
+      "requests": 4,
+      "input_tokens": 14888,
+      "output_tokens": 547,
+      "usage_missing": 0,
+      "elapsed_seconds": 13.918843199964613,
+      "experiments": 1
+    },
+    "experiment_count": 1,
+    "experiment_statuses": [
+      "completed"
+    ],
+    "report_sha256": "e3c671a454026ab1dfd00caf8d92ab6db410d92f96d562aeedbf93101b0ab1f4"
+  }
+}

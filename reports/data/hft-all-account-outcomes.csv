@@ -1,0 +1,6 @@
+window,accounts,positive,negative,defined,positive_significant,zero,window_number
+w1,80,25,51,76,0,4,1
+w2,80,34,38,72,0,8,2
+w3,80,30,46,76,0,4,3
+continuous,4,0,4,4,0,0,4
+w4,80,57,19,76,0,4,5
