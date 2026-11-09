@@ -112,13 +112,58 @@ def test_lifecycle_and_unrelated_fields_do_not_gate_buy_activity():
     assert selected.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
 
 
+def test_conservative_lag_uses_the_report_sessions_denominator_and_current_stress():
+    decisions, observations, sessions = inputs()
+    preceding = decisions.iloc[[0]].assign(
+        timestamp=sessions[5] + pd.Timedelta(hours=1),
+        signal_session=sessions[4],
+        amount=100.0,
+        float_market_cap=500.0,
+    )
+    full = pd.concat([preceding, decisions], ignore_index=True)
+    result = calculate(
+        full,
+        observations,
+        sessions=sessions,
+        observation_lag_sessions=1,
+    ).iloc[-2:]
+    assert result.financing_buy_intensity.tolist() == pytest.approx([0.2, 0.2])
+    assert result.financing_balance_to_float_cap.tolist() == pytest.approx([0.18, 0.18])
+    assert result.financing_balance_change_1d.tolist() == pytest.approx(
+        [90 / 80 - 1] * 2
+    )
+    assert result.leveraged_liquidity_pressure.tolist() == pytest.approx([0.036, 0.036])
+    # Missing old denominators leave the independently known balance change valid.
+    missing_history = calculate(
+        decisions,
+        observations,
+        sessions=sessions,
+        observation_lag_sessions=1,
+    )
+    assert missing_history.financing_buy_intensity.isna().all()
+    assert missing_history.financing_balance_change_1d.notna().all()
+
+
+@pytest.mark.parametrize("decision_unit,source_unit", [("us", "ns"), ("ns", "us")])
+def test_mixed_pandas_datetime_resolutions_preserve_the_disclosure_join(
+    decision_unit, source_unit
+):
+    decisions, observations, sessions = inputs()
+    for name in ("timestamp", "signal_session", "listing_date"):
+        decisions[name] = decisions[name].dt.as_unit(decision_unit)
+    for name in ("timestamp", "available_at"):
+        observations[name] = observations[name].dt.as_unit(source_unit)
+    result = calculate(decisions, observations, sessions=sessions.as_unit("us"))
+    assert result.financing_balance_change_5d.tolist() == pytest.approx([1.0, 1.0])
+
+
 def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
     from quant_research_platform.contracts.data import ProcessedDataSpec
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.sources.public_research.interim import interim_catalog
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
 
-    decisions, observations, _ = inputs()
+    decisions, observations, sessions = inputs()
     decisions["execution_session"] = pd.Timestamp("2024-01-10")
     decisions["return_available_at"] = decisions.signal_session + pd.Timedelta(
         hours=7, minutes=30
@@ -167,10 +212,65 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
             "data_id": "financing_factors",
             "inputs": {"decision_panel": str(path), "public_margin_balances": str(raw)},
             "factor_columns": ["financing_buy_intensity"],
+            "parameters": {"observation_lag_sessions": 0},
             "time_window": {"start": "2024-01-10", "end": "2024-01-10"},
             "output_root": str(tmp_path / "factors"),
         }
     )
     assert read_dataset(result).financing_buy_intensity.tolist() == pytest.approx(
         [0.1, 0.1]
+    )
+    from quant_research_platform.sources.csmar.interim import interim_catalog as csmar
+
+    preceding = decisions.iloc[[0]].assign(
+        timestamp=sessions[5] + pd.Timedelta(hours=1),
+        signal_session=sessions[4],
+        execution_session=sessions[5],
+        return_available_at=sessions[4] + pd.Timedelta(hours=7, minutes=30),
+        amount=100.0,
+        float_market_cap=500.0,
+    )
+    historical = tmp_path / "historical_decisions"
+    write_dataset(
+        historical,
+        pd.concat([preceding, decisions], ignore_index=True),
+        spec=ProcessedDataSpec(
+            data_id="decision_panel",
+            market_id="a_share",
+            kind="panel",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=("market_id", "asset_id", "timestamp"),
+            partition_columns=("year",),
+            column_roles=roles,
+        ),
+    )
+    calendar_path = tmp_path / "calendar"
+    calendar = pd.DataFrame(
+        {
+            "timestamp": sessions,
+            "calendar_date": sessions,
+            "source_market_type": 4,
+            "is_trading_day": True,
+            "source_day_of_week": sessions.dayofweek + 1,
+            "source_state": "open",
+        }
+    )
+    write_dataset(calendar_path, calendar, spec=csmar().get("trading_calendar"))
+    lagged = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "financing_factors",
+            "inputs": {
+                "decision_panel": str(historical),
+                "public_margin_balances": str(raw),
+                "trading_calendar": str(calendar_path),
+            },
+            "factor_columns": ["financing_buy_intensity"],
+            "time_window": {"start": "2024-01-10", "end": "2024-01-10"},
+            "output_root": str(tmp_path / "lagged_factors"),
+        }
+    )
+    assert read_dataset(lagged).financing_buy_intensity.tolist() == pytest.approx(
+        [0.2, 0.2]
     )

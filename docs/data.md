@@ -416,7 +416,7 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
 MSE 使用标签单位的模型输出，不重复缩放；排序指标与头部选择保持各自定义。
 训练从实际使用的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
-普通标签记录源列本身、不追加变换；`model_target` 记录 `forward_return_20d` 及实际 `target_transform`/`target_clip`。
+普通标签记录源列本身、不追加变换；`model_target`记录显式`target_label_column`（默认`forward_return_20d`）及实际`target_transform`／`target_clip`。
 不绑定路径、data ID、hash 或整份 spec，不在后来从训练源回读补造历史事实。
 score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入已有单位，两者仍须一致。该声明保存在评分/选择记录中，不从训练单位猜测评价单位。
 只有目标定义和两侧明确单位相同，才计算 MSE 和 OOS R²；`model_target` 的 raw/none 与同源原始标签可比较。
@@ -485,8 +485,9 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。规则文件哈希进入原生
 元数据。原有实际发布时间优先，已有不可变产物不原地修改，应写新输出路径。
 
-`financing_factors`消费结构化`public_margin_balances`和`decision_panel`；可选
-`trading_calendar`仅用于精确1／5交易日变化。可用列和公式由融资因子owner声明，
+`financing_factors`消费结构化`public_margin_balances`和`decision_panel`；默认
+`observation_lag_sessions=1`并要求`trading_calendar`定位观察日及1／5日变化。
+显式设0时，日历仅用于1／5日变化，不限制无日历时的余额及买入强度。可用列和公式由融资因子owner声明，
 个股量价字段与因子单位由日频目录从其owner派生，拼装及存储继承这些单位。
 
 模型统计的科学样本仍按精确证券时点键、合格性和标签成熟时点配对。请求范围内没有对应标签行的预测数量记录在统计元数据 `prediction_coverage`；这些记录不参与计算，也不阻断其他有效配对。重复或非法键仍在输入边界拒绝。

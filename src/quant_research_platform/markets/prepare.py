@@ -157,6 +157,7 @@ def _configured_spec(spec, config):
         "price_volume_facts": {"min_fresh_fraction"},
         "market_model_factors": {"min_fresh_fraction"},
         "risk_residual_factors": {"min_fresh_fraction"},
+        "financing_factors": {"observation_lag_sessions"},
         "hft_panel": {"max_gap_seconds"},
         "hft_factors": {"ofi_halflife_seconds"},
         "hft_event_factors": {
@@ -170,6 +171,12 @@ def _configured_spec(spec, config):
     }.get(spec.data_id, set())
     if set(parameters) - dynamic:
         raise ValueError("data_operation_parameter_not_consumed")
+    if spec.data_id == "financing_factors":
+        lag = parameters.get("observation_lag_sessions", 1)
+        if type(lag) is not int or lag not in (0, 1):
+            raise ValueError("financing_observation_lag_invalid")
+        if lag == 0:
+            spec = replace(spec, optional_source_input_data_ids=("trading_calendar",))
     if "min_fresh_fraction" in parameters and (
         type(parameters["min_fresh_fraction"]) not in (int, float)
         or not 0 < parameters["min_fresh_fraction"] <= 1

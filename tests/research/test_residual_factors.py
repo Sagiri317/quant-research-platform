@@ -11,6 +11,7 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 from quant_research_platform.markets.prepare import prepare
 from quant_research_platform.research.factors.residual import (
     RESIDUAL_FACTOR_WINDOWS,
+    _residual_drawdown,
     calculate_residual_factors,
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
@@ -82,6 +83,9 @@ def test_residual_windows_use_prior_exposures_and_actual_lifecycle():
         )
         if "reversal" in column:
             expected *= -1
+        if "drawdown" in column:
+            # Each synthetic residual path is monotone with its asset's sign.
+            expected = np.maximum(-signs * amplitude[-window:].sum(), 0)
         np.testing.assert_allclose(last[column], expected, rtol=1e-11, atol=1e-13)
     future = panel.copy()
     future.loc[future.timestamp >= dates[65], list(RISK_STYLE_COLUMNS)] = np.nan
@@ -108,6 +112,16 @@ def test_residual_windows_use_prior_exposures_and_actual_lifecycle():
     )
 
 
+def test_additive_residual_drawdown_has_a_zero_origin_and_no_gap_compression():
+    values = np.array([0.01, 0.02, -0.01, -0.03, np.nan, 0.01, 0.02, 0.03])
+    actual = _residual_drawdown(values, 4)
+    assert np.isnan(actual[:3]).all()
+    # Additive path 1%,3%,2%,-1% has a 4pp current residual drawdown.
+    np.testing.assert_allclose(actual[3], 0.04, rtol=1e-14, atol=1e-16)
+    assert np.isnan(actual[4:]).all()
+    assert np.isnan(_residual_drawdown(values[:2], 4)).all()
+
+
 def test_residual_factors_prepare_and_native_read_keep_window_and_units(tmp_path):
     panel, dates, _, _ = _panel()
     catalog = processed_catalog()
@@ -116,7 +130,13 @@ def test_residual_factors_prepare_and_native_read_keep_window_and_units(tmp_path
         spec = catalog.get(name)
         columns = [column for column in spec.required_columns if column in panel]
         spec = replace(
-            spec, column_roles={column: spec.column_roles[column] for column in columns}
+            spec,
+            column_roles={column: spec.column_roles[column] for column in columns},
+            column_units={
+                column: unit
+                for column, unit in spec.column_units.items()
+                if column in columns
+            },
         )
         root = tmp_path / name
         write_dataset(root, panel[columns], spec=spec)

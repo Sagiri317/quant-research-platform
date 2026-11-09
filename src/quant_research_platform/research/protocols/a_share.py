@@ -172,10 +172,17 @@ def factor_catalog() -> FactorCatalog:
                     lookback_window=window,
                     required_windows=(window,),
                     description=(
-                        "Return residuals using prior industry and style exposures."
+                        "Current drawdown from the peak of a complete additive "
+                        "daily residual path, including its initial zero; units "
+                        "are accumulated decimal residual returns, not compounded "
+                        "investable wealth. Prior industry and style exposures."
+                        if "drawdown" in column
+                        else "Return residuals using prior industry/style exposures."
                     ),
                     timing_semantics="same_session_close_available_at_next_session",
-                    null_policy="full_window_with_minimum_fresh_fraction",
+                    null_policy="complete_residual_path"
+                    if "drawdown" in column
+                    else "full_window_with_minimum_fresh_fraction",
                 )
                 for column, window in RESIDUAL_FACTOR_WINDOWS.items()
             ),

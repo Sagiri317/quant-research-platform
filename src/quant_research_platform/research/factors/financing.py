@@ -46,6 +46,10 @@ RECIPES = {
         "pressure, not proof of forced liquidation.",
     ),
 }
+BALANCE_CHANGE_WINDOWS = {
+    "financing_balance_change_1d": 1,
+    "financing_balance_change_5d": 5,
+}
 
 
 def decision_columns(columns):
@@ -66,6 +70,9 @@ def factor_definitions():
             input_columns=(recipe[0], "available_at", *decision_columns((name,))),
             output_column=name,
             required_input_data_id="financing_factors",
+            required_windows=(BALANCE_CHANGE_WINDOWS[name],)
+            if name in BALANCE_CHANGE_WINDOWS
+            else (),
             description=recipe[2],
             timing_semantics="publication_available_before_explicit_decision",
             null_policy="per_field_and_exact_observation_session; no_stale_fill",
@@ -74,7 +81,14 @@ def factor_definitions():
     )
 
 
-def calculate(decisions, observations, *, factor_columns=None, sessions=None):
+def calculate(
+    decisions,
+    observations,
+    *,
+    factor_columns=None,
+    sessions=None,
+    observation_lag_sessions=0,
+):
     """Match each report field/version to the known daily signal session.
 
     Decisions use UTC instants and retain signal_session/listing_date. A missing
@@ -82,6 +96,11 @@ def calculate(decisions, observations, *, factor_columns=None, sessions=None):
     observations come from the declared market calendar, never compressed rows.
     """
     columns = tuple(RECIPES if factor_columns is None else factor_columns)
+    if type(observation_lag_sessions) is not int or observation_lag_sessions not in (
+        0,
+        1,
+    ):
+        raise ValueError("financing_observation_lag_invalid")
     if not set(columns) <= RECIPES.keys():
         raise ValueError("unknown_financing_factor")
     required = {"market_id", "asset_id", "timestamp", *decision_columns(columns)}
@@ -90,17 +109,57 @@ def calculate(decisions, observations, *, factor_columns=None, sessions=None):
     frame = decisions.loc[:, list(required)].reset_index(drop=True).copy()
     if frame.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("financing_decision_key_duplicate")
-    cutoffs = pd.to_datetime(frame.timestamp, utc=True).dt.tz_localize(None)
-    dates = pd.to_datetime(frame.signal_session).dt.normalize()
-    listed = pd.to_datetime(frame.listing_date).dt.normalize()
+    cutoffs = (
+        pd.to_datetime(frame.timestamp, utc=True)
+        .astype("datetime64[ns, UTC]")
+        .dt.tz_localize(None)
+    )
+    dates = pd.to_datetime(frame.signal_session).astype("datetime64[ns]").dt.normalize()
+    listed = pd.to_datetime(frame.listing_date).astype("datetime64[ns]").dt.normalize()
+    axis = (
+        None
+        if sessions is None
+        else pd.DatetimeIndex(sessions).as_unit("ns").sort_values().unique()
+    )
+
+    def observation_dates(lag):
+        if not lag:
+            return dates
+        target = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+        if axis is not None:
+            positions = axis.get_indexer(dates)
+            valid = positions >= lag
+            target.loc[valid] = axis.take(positions[valid] - lag)
+        return target
+
+    base_dates = observation_dates(observation_lag_sessions)
+    denominators = tuple(
+        dict.fromkeys(RECIPES[name][1] for name in columns if RECIPES[name][1])
+    )
+    historical = None
+    if observation_lag_sessions and denominators:
+        reference = frame.assign(signal_session=dates, listing_date=listed).groupby(
+            ["asset_id", "signal_session", "listing_date"],
+            sort=False,
+        )[list(denominators)]
+        historical = (
+            reference.first()
+            .where(reference.nunique().le(1))
+            .reindex(pd.MultiIndex.from_arrays([frame.asset_id, base_dates, listed]))
+            .set_axis(frame.index)
+        )
     fields = tuple(dict.fromkeys(RECIPES[name][0] for name in columns))
     facts = observations.loc[
         :, ["asset_id", "timestamp", "available_at", *fields]
     ].copy()
-    facts["_obs"] = pd.to_datetime(facts.pop("timestamp")).dt.normalize()
-    facts["_clock"] = pd.to_datetime(
-        facts.pop("available_at"), utc=True
-    ).dt.tz_localize(None)
+    facts["_obs"] = (
+        pd.to_datetime(facts.pop("timestamp")).astype("datetime64[ns]").dt.normalize()
+    )
+    facts["_clock"] = (
+        pd.to_datetime(facts.pop("available_at"), utc=True)
+        .astype("datetime64[ns, UTC]")
+        .dt.tz_localize(None)
+    )
     facts = facts.loc[facts._clock.notna() & facts._obs.notna()]
     # Completed daily reports cannot be used before the local after-hours close.
     closing = facts._obs + pd.Timedelta(hours=7, minutes=30)
@@ -121,14 +180,7 @@ def calculate(decisions, observations, *, factor_columns=None, sessions=None):
     def known(field, lag=0):
         if (field, lag) in cache:
             return cache[field, lag]
-        target = dates.copy()
-        if lag:
-            target[:] = pd.NaT
-            if sessions is not None:
-                axis = pd.DatetimeIndex(sessions).sort_values().unique()
-                positions = axis.get_indexer(dates)
-                valid = positions >= lag
-                target.loc[valid] = axis.take(positions[valid] - lag)
+        target = observation_dates(lag + observation_lag_sessions)
         valid = target.notna() & listed.notna() & target.ge(listed)
         left = (
             pd.DataFrame(
@@ -165,13 +217,15 @@ def calculate(decisions, observations, *, factor_columns=None, sessions=None):
         field, denominator, _ = RECIPES[name]
         if denominator:
             divisor = strict_finite_numeric_series(
-                frame[denominator],
+                historical[denominator]
+                if historical is not None
+                else frame[denominator],
                 error=f"financing_input_invalid:{denominator}",
                 allow_null=True,
             )
             result = known(field) / divisor.where(divisor.gt(0))
         else:
-            lag = 1 if name.endswith("_1d") else 5
+            lag = BALANCE_CHANGE_WINDOWS[name]
             baseline = known(field, lag)
             result = known(field) / baseline.where(baseline.gt(0)) - 1
         if name == "leveraged_liquidity_pressure":
