@@ -36,7 +36,7 @@ def _flow(quotes, events, kind):
         return total, signed
     times = quotes.timestamp.to_numpy(dtype="datetime64[ns]")
     event_times = events.timestamp.to_numpy(dtype="datetime64[ns]")
-    selected = events.event_kind.eq(kind).to_numpy()
+    selected = events.event_kind.isin((kind, "unknown")).to_numpy()
     bins = np.searchsorted(times, event_times[selected], side="left")
     selected_events = events.loc[selected]
     within = (bins > 0) & (bins < len(quotes))
@@ -45,7 +45,10 @@ def _flow(quotes, events, kind):
     sides = selected_events.side.map({"buy": 1.0, "sell": -1.0}).to_numpy(
         dtype="float64"
     )[within]
-    counts = np.bincount(bins, weights=np.isnan(quantities), minlength=len(quotes))
+    unknown_kind = selected_events.event_kind.eq("unknown").to_numpy()[within]
+    counts = np.bincount(
+        bins, weights=np.isnan(quantities) | unknown_kind, minlength=len(quotes)
+    )
     unknown_side = np.bincount(bins, weights=np.isnan(sides), minlength=len(quotes))
     amount = np.bincount(bins, weights=np.nan_to_num(quantities), minlength=len(quotes))
     direction = np.bincount(

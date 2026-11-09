@@ -85,11 +85,16 @@ def test_same_timestamp_pre_jump_intensity_and_prefix_invariance():
         )
 
 
-def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unknown_kind", [False, True])
+def test_fit_save_prepare_and_assemble_only_after_cutoff(
+    tmp_path, monkeypatch, unknown_kind
+):
     panels, all_trades = [], []
     for day in (20180214, 20180215):
         raw = raw_events("hft_trades")
         raw["trade_code"], raw["bs_flag"], raw["date"] = "T", ["B", "S", "B", "S"], day
+        if unknown_kind and day == 20180214:
+            raw.loc[raw.index[-1], "trade_code"] = "?"
         trades = normalize(raw, "hft_trades", INSTRUMENTS)
         orders = normalize(
             raw_events("hft_orders").assign(date=day), "hft_orders", INSTRUMENTS
@@ -158,14 +163,20 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, monkeypatch):
         theta,
         [
             (
-                np.array([0.0, 2.0, 5.0, 10.0]),
-                np.array([[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]),
-                12.0,
+                np.array([0.0, 2.0, 5.0] if unknown_kind else [0.0, 2.0, 5.0, 10.0]),
+                np.array(
+                    [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0]]
+                    if unknown_kind
+                    else [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]
+                ),
+                9.0 if unknown_kind else 12.0,
             )
         ],
     )
     facts = json.loads((model / "model.json").read_text())
     assert facts["negative_log_likelihood"] == pytest.approx(expected_loss)
+    assert facts["unknown_kind_events"] == int(unknown_kind)
+    assert facts["unknown_kind_truncated_segments"] == int(unknown_kind)
     window = {"start": "2018-02-15T01:30:00", "end": "2018-02-15T01:30:13"}
     config = {
         "market_id": "a_share",

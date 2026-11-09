@@ -3,6 +3,7 @@
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.level2 import (
+    first_unknown_event_time,
     observed_segments,
 )
 from quant_research_platform.research.models.hawkes import intensities, trade_events
@@ -27,6 +28,10 @@ def compute_hawkes_factors(panel, trades, model):
                 "hawkes_excitation_fraction": 1 - params[0].sum() / total,
             }
         )
+        # Pre-jump intensity at a tied event time still uses the known prefix.
+        factors.loc[
+            quotes.timestamp.gt(first_unknown_event_time(selected["trades"]))
+        ] = float("nan")
         frame = pd.concat([quotes.loc[:, KEY], factors], axis=1)
         output.append(frame.loc[frame.timestamp.gt(cutoff)])
     return pd.concat(output, ignore_index=True).sort_values(

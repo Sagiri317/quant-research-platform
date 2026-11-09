@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.markets.implementations.a_share.level2 import (
+    first_unknown_event_time,
     iter_level2_events,
     observed_segments,
     order_reference,
@@ -57,15 +58,21 @@ def _at_quotes(values, event_times, quote_times):
 
 def trade_statistics(trades, config):
     work = (
-        trades.loc[trades.event_kind.eq("trade")]
+        trades.loc[trades.event_kind.isin(("trade", "unknown"))]
         .sort_values(["timestamp", "source_row"], kind="stable")
         .reset_index(drop=True)
     )
     window, history = config["event_window"], config["history_window"]
-    side = work.side.map({"buy": 1.0, "sell": -1.0})
-    volume = work.volume.where(work.volume.gt(0))
+    known = work.event_kind.eq("trade")
+    side = work.side.map({"buy": 1.0, "sell": -1.0}).where(known)
+    volume = work.volume.where(work.volume.gt(0) & known)
+    price = work.price.where(known)
     signed = side * volume
-    interval = work.timestamp.diff().dt.total_seconds()
+    interval = (
+        work.timestamp.diff()
+        .dt.total_seconds()
+        .where(known & known.shift(fill_value=False))
+    )
     mean = interval.rolling(window, min_periods=window).mean()
     elapsed = (work.timestamp - work.timestamp.shift(window - 1)).dt.total_seconds()
     result = pd.DataFrame(
@@ -76,7 +83,9 @@ def trade_statistics(trades, config):
                 ddof=1
             )
             / mean.where(mean.gt(0)),
-            "trade_intensity": (window - 1) / elapsed.where(elapsed.gt(0)),
+            "trade_intensity": ((window - 1) / elapsed.where(elapsed.gt(0))).where(
+                known.rolling(window).sum().eq(window)
+            ),
             "trade_activity_ratio": interval.shift(1)
             .rolling(history, min_periods=history)
             .mean()
@@ -85,9 +94,7 @@ def trade_statistics(trades, config):
                 window, min_periods=window
             ).sum()
             / volume.rolling(window, min_periods=window).sum(),
-            "trade_interval_return_interaction": (
-                work.price / work.price.shift(window - 1) - 1
-            )
+            "trade_interval_return_interaction": (price / price.shift(window - 1) - 1)
             * mean,
         }
     )
@@ -135,6 +142,7 @@ def trade_statistics(trades, config):
         )
     else:
         result["trade_volume_flow_imbalance"] = pd.Series(dtype=float)
+    result.loc[~known] = np.nan
     return work.timestamp, result
 
 
@@ -250,7 +258,9 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
                 np.mean(matched) if matched else np.nan,
             )
         )
-    return pd.DataFrame(output, columns=names)
+    result = pd.DataFrame(output, columns=names)
+    result.loc[quotes.timestamp.ge(first_unknown_event_time(orders, trades))] = np.nan
+    return result
 
 
 def compute_event_factors(
@@ -261,19 +271,23 @@ def compute_event_factors(
     for work, selected in observed_segments(panel, orders=orders, trades=trades):
         event_times, values = trade_statistics(selected["trades"], config)
         aligned = _at_quotes(values, event_times, work.timestamp)
-        additions = selected["orders"].loc[selected["orders"].event_kind.eq("order")]
-        cancel_source = (
-            selected["orders"] if work.exchange.iloc[0] == "SSE" else selected["trades"]
+        additions = selected["orders"]
+        cancellations = (
+            selected["trades"].loc[
+                selected["trades"].event_kind.isin(("cancel", "unknown"))
+            ]
+            if work.exchange.iloc[0] == "SZSE"
+            else selected["trades"].iloc[:0]
         )
-        cancellations = cancel_source.loc[cancel_source.event_kind.eq("cancel")]
         messages = (
             pd.concat(
                 [
                     additions[["timestamp", "source_row", "volume"]].assign(
-                        cancel=False, stream_priority=1
+                        cancel=additions.event_kind.map({"order": 0.0, "cancel": 1.0}),
+                        stream_priority=1,
                     ),
                     cancellations[["timestamp", "source_row", "volume"]].assign(
-                        cancel=True,
+                        cancel=cancellations.event_kind.map({"cancel": 1.0}),
                         stream_priority=1 if work.exchange.iloc[0] == "SSE" else 0,
                     ),
                 ]
@@ -283,10 +297,16 @@ def compute_event_factors(
         )
         n = config["event_window"]
         cancel_volume = (
-            messages.volume.where(messages.cancel, 0).rolling(n, min_periods=n).sum()
+            messages.volume.where(messages.cancel.eq(1), 0)
+            .where(messages.cancel.notna())
+            .rolling(n, min_periods=n)
+            .sum()
         )
         order_volume = (
-            messages.volume.where(~messages.cancel, 0).rolling(n, min_periods=n).sum()
+            messages.volume.where(messages.cancel.eq(0), 0)
+            .where(messages.cancel.notna())
+            .rolling(n, min_periods=n)
+            .sum()
         )
         ratio = cancel_volume / order_volume.where(order_volume.gt(0))
         cancellation_values = pd.DataFrame(

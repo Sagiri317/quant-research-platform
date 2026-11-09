@@ -21,6 +21,7 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share.level2 import (
+    first_unknown_event_time,
     observed_segments,
 )
 from quant_research_platform.storage.atomic import (
@@ -210,6 +211,7 @@ def fit_hawkes(config):
     ):
         raise ValueError("hawkes_input_identity_mismatch")
     segments, observed_assets, unknown = [], set(), 0
+    unknown_kind_events = truncated_segments = 0
     for day in pd.date_range(
         pd.Timestamp(lower).normalize(), pd.Timestamp(upper).normalize(), freq="D"
     ):
@@ -225,6 +227,15 @@ def fit_hawkes(config):
             start, end = quotes.timestamp.iloc[0], quotes.timestamp.iloc[-1]
             trades = selected["trades"]
             trades = trades.loc[trades.timestamp.lt(end)]
+            unknown_at = first_unknown_event_time(trades)
+            unknown_kind_events += int(trades.event_kind.eq("unknown").sum())
+            if pd.notna(unknown_at):
+                truncated_segments += 1
+                quotes = quotes.loc[quotes.timestamp.lt(unknown_at)]
+                if len(quotes) < 2:
+                    continue
+                end = quotes.timestamp.iloc[-1]
+                trades = trades.loc[trades.timestamp.lt(end)]
             unknown += int(
                 (
                     trades.event_kind.eq("trade") & ~trades.side.isin(["buy", "sell"])
@@ -276,6 +287,8 @@ def fit_hawkes(config):
         "fit_cutoff": cutoff.isoformat(),
         "observed_event_counts": totals.astype(int).tolist(),
         "unknown_side_trades_excluded": unknown,
+        "unknown_kind_events": unknown_kind_events,
+        "unknown_kind_truncated_segments": truncated_segments,
         "segments": len(segments),
         "negative_log_likelihood": float(fitted.fun * event_count),
         "iterations": int(fitted.nit),

@@ -180,14 +180,20 @@ def normalize(frame, stream, instruments, *, clock_counts=None):
         work[column] = values.where(valid) / (10_000 if column in price_columns else 1)
     if stream == "hft_orders":
         work["event_kind"] = np.where(
-            work.exchange.eq("SSE") & work.order_type.eq("D"), "cancel", "order"
+            work.exchange.eq("SZSE") | work.order_type.isin(("A",)),
+            "order",
+            np.where(work.order_type.isin(("D",)), "cancel", "unknown"),
         )
         work["side"] = work.order_code.map({"B": "buy", "S": "sell"})
     elif stream == "hft_trades":
         work["event_kind"] = np.where(
-            work.exchange.eq("SZSE") & work.trade_code.eq("C"),
+            work.exchange.eq("SZSE") & work.trade_code.isin(("C",)),
             "cancel",
-            np.where(work.trade_code.isin(["0", "T", "", "\x00"]), "trade", "unknown"),
+            np.where(
+                work.exchange.eq("SSE") | work.trade_code.isin(["0", "T"]),
+                "trade",
+                "unknown",
+            ),
         )
         work["side"] = work.bs_flag.map({"B": "buy", "S": "sell"})
         cancellations = work.exchange.eq("SZSE") & work.trade_code.eq("C")
@@ -246,8 +252,9 @@ def materialize_interim_data(
         symbols = [item["wind_code"].upper() for item in instruments]
         spec = interim_spec(stream)
         clock_counts = {"HHMMSS": 0, "HHMMSSmmm": 0}
+        event_counts = dict.fromkeys(("trade", "order", "cancel", "unknown"), 0)
 
-        def frames(files, stream, symbols, spec, clock_counts):
+        def frames(files, stream, symbols, spec, clock_counts, event_counts):
             for path in files:
                 source = ds.dataset(path, format="parquet")
                 scanner = source.scanner(
@@ -273,6 +280,9 @@ def materialize_interim_data(
                         raise ValueError("level2_source_date_mismatch")
                     frame["source_row"] += offset
                     offset += len(frame)
+                    if stream != "hft_quotes":
+                        for kind, count in frame.event_kind.value_counts().items():
+                            event_counts[kind] += int(count)
                     yield frame.loc[:, spec.required_columns]
                 if offset == 0:
                     empty = pa.Table.from_batches(
@@ -285,7 +295,7 @@ def materialize_interim_data(
         output = Path(output_roots[stream])
         write_dataset(
             output,
-            frames(files, stream, symbols, spec, clock_counts),
+            frames(files, stream, symbols, spec, clock_counts, event_counts),
             spec=spec,
             metadata={
                 "source_evidence": {
@@ -295,6 +305,20 @@ def materialize_interim_data(
                     "instruments": instruments,
                     "timestamp_semantics": "vendor_event_time_no_receive_clock",
                     "clock_encoding_counts": clock_counts,
+                    **(
+                        {"event_kind_counts": event_counts}
+                        if stream != "hft_quotes"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "trade_direction_basis": (
+                                "vendor_bs_flag;aggressor_unverified"
+                            )
+                        }
+                        if stream == "hft_trades"
+                        else {}
+                    ),
                 },
             },
         )

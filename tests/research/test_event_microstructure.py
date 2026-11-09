@@ -118,7 +118,7 @@ def test_cancel_windows_keep_same_stream_order_and_cross_stream_tie_convention(
     raw_orders = raw_events("hft_orders").iloc[: 3 if exchange == "SSE" else 2].copy()
     raw_orders["wind_code"] = code
     raw_orders["time"], raw_orders["volume"] = 93001000, 100.0
-    raw_orders["order_type"] = ["D", "2", "2"] if exchange == "SSE" else "2"
+    raw_orders["order_type"] = ["D", "A", "A"] if exchange == "SSE" else "2"
     raw_trades = raw_events("hft_trades").iloc[: 0 if exchange == "SSE" else 1].copy()
     raw_trades["wind_code"] = code
     raw_trades["time"], raw_trades["volume"], raw_trades["trade_code"] = (

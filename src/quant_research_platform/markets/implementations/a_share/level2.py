@@ -32,6 +32,13 @@ def order_reference(value):
     return None if pd.isna(value) or value <= 0 or value == 2**64 - 1 else int(value)
 
 
+def first_unknown_event_time(*streams):
+    """Locate the causal barrier for recursive histories within one segment."""
+    return pd.concat(
+        [frame.loc[frame.event_kind.eq("unknown"), "timestamp"] for frame in streams]
+    ).min()
+
+
 def iter_level2_events(orders, trades):
     """Tie convention: trade stream before order stream, then each source's row order.
 
