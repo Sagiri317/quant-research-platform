@@ -716,13 +716,7 @@ def backtest_a_share(
                             {"eligible": "bool"}
                         )
                     )
-                    if (
-                        dataset.empty
-                        and not panel.empty
-                        and (
-                            not explicit_decisions or decision_timestamp >= output_start
-                        )
-                    ):
+                    if dataset.empty and not panel.empty and produces_interval:
                         raise PortfolioTargetBlocked(
                             "portfolio_research_dataset_session_missing"
                         )

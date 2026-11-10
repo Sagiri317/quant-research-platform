@@ -1110,7 +1110,10 @@ def test_enhanced_calibration_excludes_research_marks(tmp_path, monkeypatch):
     assert all(checked.values())
 
 
-def test_enhanced_calibration_keeps_suspended_weekly_endpoints(tmp_path, monkeypatch):
+@pytest.mark.parametrize("missing_calibration_session", [False, True])
+def test_enhanced_calibration_keeps_suspended_weekly_endpoints(
+    tmp_path, monkeypatch, missing_calibration_session
+):
     frames, fees, window, candidate = _enhanced_inputs(monkeypatch)
     panel = frames["panel"]
     dates = pd.date_range(panel.timestamp.min(), panel.timestamp.max())
@@ -1137,6 +1140,11 @@ def test_enhanced_calibration_keeps_suspended_weekly_endpoints(tmp_path, monkeyp
         ]
     panel.loc[suspended, "is_trading"] = False
     panel.loc[suspended, "amount"] = 0.0
+    if missing_calibration_session:
+        frames["risk_context"] = frames["dataset"].copy()
+        frames["dataset"] = frames["dataset"].loc[
+            frames["dataset"].timestamp.ne(pd.Timestamp("2022-12-09"))
+        ]
     completed = []
     original = daily._completed_calibration_rows
 
@@ -1160,10 +1168,12 @@ def test_enhanced_calibration_keeps_suspended_weekly_endpoints(tmp_path, monkeyp
         final_calibrations=final,
     )
     assert list(chunks)
-    assert len(completed) == 14
+    valid_dates = 6 if missing_calibration_session else 7
+    assert len(completed) == valid_dates * 2
     calibration = final[0]["calibration"]
-    assert calibration["coverage"] == 1.0
-    assert calibration["valid_rebalance_dates"] == 7
+    assert calibration["scheduled_rebalance_dates"] == 7
+    assert calibration["coverage"] == pytest.approx(valid_dates / 7)
+    assert calibration["valid_rebalance_dates"] == valid_dates
     # Both consecutive Monday carries use Fridays: five compounding sessions.
     assert calibration["slope"] == pytest.approx(1.003**5 - 1.001**5, rel=1e-12)
 
