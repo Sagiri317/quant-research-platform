@@ -213,7 +213,34 @@ def calculate(decisions, sources, *, columns, parameters=None):
             aligned = _align(states, work, fields, ids=np.repeat(product, len(work)))
             result[fields] = aligned[fields].to_numpy()
         # Exposure must refer to this benchmark; an all-A beta is different.
-        if "hedging_beta" in work:
+        exposure = work.get("hedging_beta")
+        if (
+            exposure is None
+            and any(name.endswith("hedging_exposure") for name in usable)
+            and {"period_return", "signal_session"} <= set(work)
+        ):
+            from quant_research_platform.compute.dataframe.history import liquidity_beta
+
+            index_id = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}[
+                product
+            ]
+            benchmark = (
+                sources["index_market"]
+                .loc[sources["index_market"].source_asset_id.eq(index_id)]
+                .sort_values("timestamp")
+            )
+            returns = (
+                benchmark.close
+                / benchmark.close.shift().where(benchmark.close.shift() > 0)
+                - 1
+            ).set_axis(benchmark.timestamp)
+            exposure = pd.Series(np.nan, index=work.index)
+            for _, at in work.groupby("asset_id", sort=False).indices.items():
+                exposure.loc[at] = liquidity_beta(
+                    work.iloc[at].period_return,
+                    work.iloc[at].signal_session.map(returns),
+                )
+        if exposure is not None:
             interactions = {
                 "basis_shock_x_hedging_exposure": "index_future_basis_change_1d",
                 "oi_shock_x_hedging_exposure": "index_future_oi_change_1d",
@@ -224,7 +251,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                         _align(
                             states, work, (source,), ids=np.repeat(product, len(work))
                         )[source].to_numpy()
-                        * work.hedging_beta
+                        * exposure
                     )
     if usable & set(PAIRS):
         panel = sources["market_panel_1d"]

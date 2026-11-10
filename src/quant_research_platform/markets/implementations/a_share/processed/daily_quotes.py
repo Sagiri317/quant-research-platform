@@ -26,6 +26,7 @@ CONTEXT = (
     "execution_session",
     "order_submit_at",
     "return_available_at",
+    LABEL + "_available_at",
     "eligible",
     "open",
     "close",
@@ -57,6 +58,7 @@ def processed_specs():
                     "volatility_60d",
                     "implied_variance_20d",
                     "implied_variance_60d",
+                    "market_return",
                 )
                 if etf
                 else ()
@@ -91,6 +93,7 @@ def processed_specs():
                 volatility_60d="decimal_return",
                 implied_variance_20d="annualized_variance",
                 implied_variance_60d="annualized_variance",
+                market_return="decimal_return",
             )
         result.append(
             ProcessedDataSpec(
@@ -103,7 +106,7 @@ def processed_specs():
                 partition_columns=("year",),
                 column_roles=roles,
                 column_units=units,
-                label_availability_columns={LABEL: "return_available_at"},
+                label_availability_columns={LABEL: LABEL + "_available_at"},
                 source_input_data_ids=(
                     source,
                     "trading_calendar",
@@ -112,6 +115,7 @@ def processed_specs():
                             "public_domestic_etf_actions",
                             "public_option_risk",
                             "public_option_contracts",
+                            "index_market",
                         )
                         if etf
                         else ()
@@ -121,6 +125,7 @@ def processed_specs():
                     "public_domestic_etf_actions",
                     "public_option_risk",
                     "public_option_contracts",
+                    "index_market",
                 )
                 if etf
                 else (),
@@ -175,13 +180,15 @@ def daily_decisions(prices, calendar, *, actions=None):
         out["execution_session"] = following
         out["timestamp"] = following + pd.Timedelta(hours=1)
         out["order_submit_at"] = out.timestamp + pd.Timedelta(seconds=1)
-        out["return_available_at"] = following + pd.Timedelta(hours=7, seconds=1)
+        out["return_available_at"] = axis + pd.Timedelta(hours=7, seconds=1)
+        out[LABEL + "_available_at"] = following + pd.Timedelta(hours=7, seconds=1)
         out[LABEL] = (next_prices.close / next_prices.open - 1).where(valid)
         out["period_return"] = (
             data.close / data.close.shift().where(data.close.shift() > 0) - 1
         )
         out["adj_close"] = np.nan
         out["secondary_flow_imbalance"] = np.nan
+        out["market_return"] = np.nan
         if "volume" in data and actions is None:
             out["period_return"] = np.nan
         if actions is not None:
@@ -272,6 +279,19 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             actions.available_at, utc=True
         ).dt.tz_localize(None)
     frame = daily_decisions(prices, calendar, actions=actions)
+    if "index_market" in inputs:
+        benchmark = materialize_dataset_session(
+            open_dataset_session(
+                **_dataset_input_options(inputs["index_market"])
+            ).projected_view(("source_asset_id", "timestamp", "open", "close"))
+        )
+        if benchmark.source_asset_id.nunique() != 1:
+            raise ValueError("etf_benchmark_requires_one_explicit_index")
+        benchmark = daily_decisions(
+            benchmark.rename(columns={"source_asset_id": "asset_id"}), calendar
+        )
+        returns = benchmark.set_index("signal_session").period_return
+        frame["market_return"] = frame.signal_session.map(returns)
     if {"public_option_risk", "public_option_contracts"} <= set(inputs):
         from quant_research_platform.research.factors.option_variance import (
             implied_variances,

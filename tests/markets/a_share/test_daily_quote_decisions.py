@@ -45,7 +45,10 @@ def test_etf_intraday_label_is_next_declared_session_and_cash_adjustment_cancels
     assert first.timestamp == pd.Timestamp("2024-01-08 01:00")
     assert first.close == 11
     assert first.next_session_intraday_return == pytest.approx(0.1)
-    assert first.return_available_at == pd.Timestamp("2024-01-08 07:00:01")
+    assert first.return_available_at == pd.Timestamp("2024-01-05 07:00:01")
+    assert first.next_session_intraday_return_available_at == pd.Timestamp(
+        "2024-01-08 07:00:01"
+    )
     changed = prices.copy()
     changed.loc[1, ["open", "close"]] *= 100
     assert daily_quotes.daily_decisions(changed, calendar).iloc[

@@ -58,3 +58,51 @@ def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     assert result.attrs["missing_source_dependencies"] == {
         "us_short_sale_activity_fraction": ["public_finra_short_volume"]
     }
+
+
+def test_hedging_exposure_uses_the_actual_futures_benchmark():
+    dates = pd.bdate_range("2024-01-02", periods=132)
+    changes = 0.01 * np.sin(np.arange(len(dates)) / 3)
+    spot = 100 * np.cumprod(1 + changes)
+    benchmark = pd.DataFrame(
+        dict(source_asset_id="000300", timestamp=dates, close=spot)
+    )
+    f = pd.DataFrame(
+        dict(
+            asset_id="IF",
+            product="IF",
+            timestamp=dates,
+            available_at=dates + pd.Timedelta(hours=16),
+            close=spot * (1 + np.arange(len(dates)) * 0.001),
+            volume=100.0,
+            open_interest=100.0,
+        )
+    )
+    c = pd.DataFrame(
+        dict(
+            asset_id=["IF"],
+            product="IF",
+            timestamp=dates[0],
+            available_at=dates[0] + pd.Timedelta(hours=16),
+            expiry_date=pd.Timestamp("2026-01-01"),
+        )
+    )
+    decision = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=dates + pd.Timedelta(days=1),
+            signal_session=dates,
+            period_return=2 * changes,
+        )
+    )
+    result = calculate(
+        decision,
+        dict(
+            public_futures_daily=f, public_futures_contracts=c, index_market=benchmark
+        ),
+        columns=["basis_shock_x_hedging_exposure"],
+    )
+    assert result.basis_shock_x_hedging_exposure.iloc[-1] == pytest.approx(
+        0.002, rel=1e-10
+    )
