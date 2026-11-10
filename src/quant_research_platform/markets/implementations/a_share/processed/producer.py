@@ -896,6 +896,33 @@ def _calendar_panel_axis(
         .all()
     ):
         raise ValueError("a_share_input_key_outside_panel")
+    # Unknown exit bounds restrict clock admission, not consecutive observed
+    # history. Missing own-market sessions or unknown identities still break it.
+    ordered = declared.sort_values(["asset_id", "timestamp"], kind="mergesort")
+    prior = ordered.groupby("asset_id", sort=False)[
+        ["timestamp", "listing_date", "market_type"]
+    ].shift()
+    continuous = pd.Series(False, index=ordered.index)
+    for market, state in states.items():
+        positions = prior.market_type.eq(market).fillna(False)
+        start = prior.loc[positions, "timestamp"]
+        end = ordered.loc[positions, "timestamp"]
+        opened = state.index[state.to_numpy(dtype=bool)]
+        intervening_opens = opened.searchsorted(end, side="left") - opened.searchsorted(
+            start, side="right"
+        )
+        known_days = state.index.searchsorted(
+            end, side="left"
+        ) - state.index.searchsorted(start, side="right")
+        continuous.loc[positions] = (intervening_opens == 0) & (
+            known_days == (end - start).dt.days.to_numpy() - 1
+        )
+    continuous &= (
+        ordered.listing_date.notna()
+        & ordered.listing_date.eq(prior.listing_date)
+        & ordered.market_type.notna()
+    )
+    declared["_calendar_segment"] = (~continuous).groupby(ordered.asset_id).cumsum()
     return declared
 
 

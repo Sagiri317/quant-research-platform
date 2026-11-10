@@ -151,7 +151,6 @@ def compute_market_panel(
         market_history,
         observed_market_sessions=observed_market_sessions,
     )
-    facts.loc[dense["delisting_date_unresolved"].fillna(True), :] = pd.NA
     dense[facts.columns] = facts
     return dense.sort_values(
         ["timestamp", "market_id", "asset_id"], kind="mergesort"
