@@ -287,3 +287,41 @@ def test_contiguous_relisting_still_resets_numerical_owners(tmp_path, target, op
     else:
         assert result.loc[dates[4], ["can_enter", "can_exit"]].isna().all()
         assert result.loc[dates[5], ["can_enter", "can_exit"]].all()
+
+
+def test_exit_knowledge_isolated_by_asset_listing_and_unknown_reset():
+    dates = pd.bdate_range("2024-01-02", periods=8).as_unit("ns")
+    reset = _panel(dates[:7], "a").assign(
+        delisting_date=pd.NaT, delisting_date_unresolved=False
+    )
+    reset.loc[:1, "delisting_date"] = dates[1]
+    reset.loc[2, "delisting_date_unresolved"] = True
+    exited = _panel(dates[:2], "b").assign(
+        delisting_date=dates[2], delisting_date_unresolved=False
+    )
+    active = _panel(dates[:1], "c").assign(
+        delisting_date=pd.NaT, delisting_date_unresolved=False
+    )
+    relisted = pd.concat(
+        [
+            _panel(dates[:2], "d").assign(delisting_date=dates[2]),
+            _panel(dates[5:6], "d").assign(
+                listing_date=dates[5], delisting_date=pd.NaT
+            ),
+        ],
+        ignore_index=True,
+    ).assign(delisting_date_unresolved=False)
+    panel = pd.concat([reset, exited, active, relisted], ignore_index=True)
+    axis = producer._calendar_panel_axis(
+        panel, _calendar({1: dates}), panel_end=dates[-1]
+    )
+    expected = {
+        "a": dates.tolist(),
+        "b": dates[:3].tolist(),
+        "c": dates.tolist(),
+        "d": dates[:3].tolist() + dates[5:].tolist(),
+    }
+    assert {
+        asset: sorted(frame.timestamp.tolist())
+        for asset, frame in axis.groupby("asset_id")
+    } == expected
