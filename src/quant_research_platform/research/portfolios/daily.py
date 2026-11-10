@@ -373,7 +373,7 @@ def backtest_a_share(
         "decision_at"
     )
 
-    if sessions.empty:
+    if sessions.empty or output_intervals.empty:
         raise PortfolioTargetBlocked("portfolio_execution_window_empty")
     prediction_window = prediction_window or TimeWindow(
         max(
@@ -598,6 +598,7 @@ def backtest_a_share(
                 view.unknown_market_assets,
             )
             benchmark_weights = pd.Series(dtype="float64")
+            produces_interval = decision_timestamp in output_intervals.index
             alpha: pd.Series | None = None
             current_cross: pd.DataFrame | None = None
             if enhanced:
@@ -683,7 +684,15 @@ def backtest_a_share(
                         waiting_alpha[1],
                     )
                     waiting_alpha = None
-                if explicit_decisions or decision_timestamp >= alpha_start:
+                calibration_candidate = (
+                    frozen_calibration is None
+                    and decision_timestamp in calibration_dates.index
+                    and calibration_dates.loc[decision_timestamp, "available_at"]
+                    <= sessions[-1]
+                )
+                if (explicit_decisions or decision_timestamp >= alpha_start) and (
+                    produces_interval or calibration_candidate
+                ):
                     dataset = (
                         dataset_at(decision_timestamp)
                         if not panel.empty
@@ -711,18 +720,7 @@ def backtest_a_share(
                         alpha = _prediction_alpha(
                             prediction_rows, prediction_lookup
                         ).reindex(pd.Index(dataset.asset_id, name="asset_id"))
-                    has_next_session = position + 1 < len(sessions)
-                    if (
-                        alpha is not None
-                        and frozen_calibration is None
-                        and has_next_session
-                        and (decision_timestamp in calibration_dates.index)
-                        and is_rebalance_session(
-                            decision_timestamp,
-                            next_timestamp,
-                            candidate.rebalance_schedule,
-                        )
-                    ):
+                    if alpha is not None and calibration_candidate:
                         calibration_alpha = alpha.copy(deep=True)
                         calibration_alpha.index = pd.MultiIndex.from_arrays(
                             (
@@ -736,7 +734,7 @@ def backtest_a_share(
                         waiting_alpha = (calibration_alpha, decision_timestamp)
             if benchmark_frames is not None:
                 benchmark_weights = next(benchmark_frames)
-            if decision_timestamp < output_start:
+            if not produces_interval:
                 continue
             if not enhanced:
                 dataset = (
@@ -765,8 +763,6 @@ def backtest_a_share(
                     dataset,
                     prediction_lookup,
                 )
-            if decision_timestamp not in output_intervals.index:
-                continue
             endpoint_timestamp = output_intervals.loc[decision_timestamp, "end_at"]
             next_view = panel_at(next_timestamp)
             next_panel = next_view.valuation
@@ -1041,13 +1037,6 @@ def backtest_a_share(
             emitted = True
             yield yielded_value
             sequence += 1
-        missing, extra = (
-            (0, 0)
-            if decision_columns is not None
-            else prediction_lookup.coverage_counts()
-        )
-        if missing or extra:
-            raise ValueError("misaligned_persisted_prediction_keys")
         if not emitted:
             raise PortfolioTargetBlocked("portfolio_execution_window_empty")
         if enhanced and frozen_calibration is None:

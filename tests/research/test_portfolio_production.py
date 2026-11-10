@@ -126,9 +126,8 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
 
 
 class _PredictionLookup:
-    def __init__(self, *, missing: bool = False, extra: bool = False) -> None:
+    def __init__(self, *, missing: bool = False) -> None:
         self.missing = missing
-        self.extra = extra
         self.matched: list[tuple[pd.Timestamp, str]] = []
 
     def values_for_frame(self, frame: pd.DataFrame, *, mark_matched: bool):
@@ -147,7 +146,7 @@ class _PredictionLookup:
         return values, found
 
     def coverage_counts(self) -> tuple[int, int]:
-        return (0, 1 if self.extra else 0)
+        return (0, 0)
 
 
 def _build_producer(
@@ -693,8 +692,10 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     ] == pytest.approx(0.360160)
 
 
-@pytest.mark.parametrize("missing_session", [None, "2023-01-03", "2023-01-04"])
-def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
+@pytest.mark.parametrize(
+    "missing_session", [None, "2023-01-03", "2023-01-04", "2023-01-05", "2023-01-06"]
+)
+def test_frozen_enhanced_reads_only_actionable_research_sessions(
     tmp_path, monkeypatch, missing_session
 ):
     frames, fee_frame, output_window = _inputs()
@@ -733,7 +734,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
                 "timestamp": timestamp,
                 "weight": 0.5,
             }
-            for timestamp in pd.bdate_range(output_window.start, output_window.end)
+            for timestamp in pd.to_datetime(["2023-01-03", "2023-01-04"])
             for asset in ("a", "b")
         ]
     )
@@ -788,7 +789,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         frozen_calibration=calibration,
         final_calibrations=final_calibrations,
     )
-    if missing_session is not None:
+    if missing_session in {"2023-01-03", "2023-01-04"}:
         with pytest.raises(
             PortfolioTargetBlocked, match="^portfolio_research_dataset_session_missing$"
         ):
@@ -802,7 +803,7 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
     assert max(risk_dates) == pd.Timestamp(output_window.end)
     assert set(lookup.matched) == {
         (timestamp, asset)
-        for timestamp in pd.bdate_range(output_window.start, output_window.end)
+        for timestamp in pd.to_datetime(["2023-01-03", "2023-01-04"])
         for asset in ("a", "b")
     }
     assert all(
@@ -1726,7 +1727,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
 
 
-def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(
+def test_simple_producer_uses_only_executable_decision_sessions(
     tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
@@ -1742,22 +1743,6 @@ def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup
     assert max(
         pd.to_datetime(frame["decision_timestamp"]).max() for frame in result
     ) <= pd.Timestamp("2023-01-04")
-
-
-def test_simple_producer_prediction_coverage_fails_closed(
-    tmp_path: Path, monkeypatch
-) -> None:
-    frames, fee_frame, output_window = _inputs()
-    output, _calls = _build_producer(
-        tmp_path,
-        monkeypatch,
-        frames=frames,
-        fee_frame=fee_frame,
-        output_window=output_window,
-        prediction_lookup=_PredictionLookup(extra=True),
-    )
-    with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
-        list(output)
 
 
 @pytest.mark.parametrize("unknown_quote", (False, True))
@@ -2272,10 +2257,7 @@ def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions
         PortfolioTargetBlocked, match="portfolio_execution_window_empty"
     ):
         list(output)
-    assert {timestamp.date() for timestamp, _asset in lookup.matched} == {
-        pd.Timestamp("2023-01-09").date(),
-        pd.Timestamp("2023-01-10").date(),
-    }
+    assert lookup.matched == []
 
 
 def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis():

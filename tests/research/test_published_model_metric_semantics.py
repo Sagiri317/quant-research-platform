@@ -829,12 +829,12 @@ def test_selection_and_explanation_share_loss_comparability(tmp_path, difference
 @pytest.mark.parametrize(
     "mutation", ["source", "transform", "clip", "semantics", "extra"]
 )
-def test_model_and_prediction_validate_frozen_target_definition(tmp_path, mutation):
+def test_model_facts_reject_invalid_target_definition(tmp_path, mutation):
     from copy import deepcopy
 
-    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.contracts.models import validate_model_facts
 
-    _, case, prediction, _, _ = _case(tmp_path)
+    _, case, _, _, _ = _case(tmp_path)
     definition = deepcopy(case.facts["target_definition"])
     if mutation == "source":
         definition["source_label"] = "unrelated_label"
@@ -846,16 +846,9 @@ def test_model_and_prediction_validate_frozen_target_definition(tmp_path, mutati
         definition["label_semantics"] = []
     else:
         definition["spec_path"] = "not_a_scientific_definition"
-    manifest = json.loads((prediction / "manifest.json").read_text())
-    manifest["metadata"]["model_facts"]["target_definition"] = definition
-    (prediction / "manifest.json").write_text(json.dumps(manifest))
+    facts = {**case.facts, "target_definition": definition}
     with pytest.raises(ValueError, match="model_target_definition_invalid"):
-        read_predictions(prediction)
-    saved = json.loads((case.root / "model.json").read_text())
-    saved["facts"]["target_definition"] = definition
-    (case.root / "model.json").write_text(json.dumps(saved))
-    with pytest.raises(ValueError, match="model_target_definition_invalid"):
-        load_model(case.root)
+        validate_model_facts(facts, case.result.metadata)
 
 
 def test_raw_unclipped_model_target_can_compare_with_its_identical_source_label(

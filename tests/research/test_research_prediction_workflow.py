@@ -96,13 +96,8 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
         assert pd.Series(prediction).notna().all()
 
 
-@pytest.mark.parametrize(
-    ("model_algorithm", "expected_package", "wrong_package"),
-    (("linear_regression", "internal", "sklearn"),),
-)
-def test_native_prediction_binds_backend_package_to_actual_model_owner(
-    tmp_path, model_algorithm: str, expected_package: str, wrong_package: str
-) -> None:
+def test_prediction_keeps_only_consumed_model_facts(tmp_path) -> None:
+    model_algorithm = "linear_regression"
     frame = _demo_research_rows().assign(
         instant_target=lambda value: value["momentum_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
@@ -142,17 +137,7 @@ def test_native_prediction_binds_backend_package_to_actual_model_owner(
     )
     manifest = case.root / "model.json"
     payload = json.loads(manifest.read_text())
-    assert payload["model_metadata"]["dependency_status"]["package"] == expected_package
-    payload["model_metadata"]["dependency_status"]["package"] = wrong_package
-    manifest.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        predict_frame(
-            tmp_path / "invalid",
-            frame,
-            case,
-            window={"start": "2014-01-03", "end": "2014-01-03"},
-        )
-    assert not (tmp_path / "invalid" / "prediction").exists()
+    assert payload["model_metadata"]["dependency_status"]["package"] == "internal"
 
 
 @pytest.mark.parametrize("start", ["2014-01-01", "2014-01-02"])

@@ -75,6 +75,11 @@ def test_fmb_common_family_uses_mature_eligible_rows_for_every_regression(
         scope or "own"
     )
     with artifact.table("fama_macbeth_periods.parquet") as actual:
+        binary = actual.loc[actual.regression_id.eq("total_market_cap:single:z")]
+        # Two binary groups give an independent one-degree-of-freedom LM reference.
+        assert binary.white_p_value.to_numpy() == pytest.approx(
+            0.8706072570191666, abs=1e-12
+        )
         if scope == "common":
             assert actual.observation_count.eq(4).all()
             assert actual.status.eq("DEFINED").all()

@@ -486,6 +486,70 @@ def test_public_prediction_selection_cannot_extend_declaration(tmp_path):
         portfolio_production.backtest(config)
 
 
+def test_unused_prediction_keys_preserve_actionable_account(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+    from tests.helpers.portfolio_ledger import session_frame
+
+    config = _public_prediction_config(tmp_path)
+    rows, metadata = read_predictions(config["predictions"][0]["path"])
+    active = pd.concat(
+        [
+            rows.assign(timestamp=pd.Timestamp(day))
+            for day in pd.bdate_range("2023-01-02", "2023-01-04")
+        ],
+        ignore_index=True,
+    )
+    metadata["effective_prediction_end"] = None
+    metadata["prediction_rows"] = None
+    selected = tmp_path / "active-predictions"
+    write_prediction_outputs(
+        output_path=selected, output_chunks=[active], metadata=metadata
+    )
+    config["predictions"][0]["path"] = str(selected)
+    expected = list(
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
+    )
+    unused = pd.concat(
+        [
+            rows.assign(timestamp=pd.Timestamp("2023-01-05")),
+            rows.assign(timestamp=pd.Timestamp("2023-01-06")),
+            rows.iloc[:1].assign(asset_id="outside-pool"),
+        ],
+        ignore_index=True,
+    )
+    superset = tmp_path / "superset-predictions"
+    write_prediction_outputs(
+        output_path=superset,
+        output_chunks=[pd.concat([active, unused], ignore_index=True)],
+        metadata=metadata,
+    )
+    config["predictions"][0]["path"] = str(superset)
+    config["output"] = str(tmp_path / "superset-account")
+    actual = list(
+        read_portfolio_ledger_artifact(
+            portfolio_production.backtest(config)
+        ).iter_chunks()
+    )
+    assert len(actual) == len(expected) == 3
+    for old, new in zip(expected, actual, strict=True):
+        assert [(r.asset_id, r.timestamp_ns, r.quantity) for r in old.trades] == [
+            (r.asset_id, r.timestamp_ns, r.quantity) for r in new.trades
+        ]
+        left, right = session_frame(old), session_frame(new)
+        floating = left.select_dtypes(include="floating").columns
+        pd.testing.assert_frame_equal(
+            left.drop(columns=floating), right.drop(columns=floating)
+        )
+        pd.testing.assert_frame_equal(
+            left[floating], right[floating], check_exact=False, rtol=1e-12, atol=1e-9
+        )
+
+
 @pytest.mark.parametrize("intraday_selection", [False, True])
 def test_public_prediction_selection_keeps_end_day_intraday_values(
     tmp_path, monkeypatch, intraday_selection

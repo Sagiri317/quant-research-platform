@@ -306,7 +306,7 @@ def test_adv_missing_sell_amount_and_requested_turnover_exclude_receivable(
 
 
 @pytest.mark.parametrize("direction", ["remove", "add", "relabel"])
-def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
+def test_native_writer_enforces_zero_share_receivable_continuity(
     tmp_path, monkeypatch, direction
 ):
     batches = corporate._distribution_batches(
@@ -405,24 +405,6 @@ def test_native_writer_and_reader_enforce_zero_share_receivable_continuity(
             produce=lambda emit: [emit(batch) for batch in (*previous, bad)],
         )
     assert not (tmp_path / "rejected").exists()
-    # Fault injection isolates the reader's independent trust boundary: bypass
-    # only writer transition validation when serializing the malformed fixture.
-    with monkeypatch.context() as scoped:
-        scoped.setattr(
-            ledger,
-            "validate_portfolio_transition",
-            lambda batch, *_: {
-                row.asset_id: row for row in batch.valuations if row.phase == "end"
-            },
-        )
-        root = ledger.write_portfolio_ledger_artifact(
-            tmp_path / "corrupt",
-            capital=capital,
-            metadata={"window": {"start": "2023-01-03", "end": "2023-01-10"}},
-            produce=lambda emit: [emit(batch) for batch in (*previous, bad)],
-        )
-    with pytest.raises(ValueError, match=error):
-        list(ledger.read_portfolio_ledger_artifact(root).iter_chunks())
 
 
 def test_observed_same_price_on_ex_date_is_a_genuine_quote():

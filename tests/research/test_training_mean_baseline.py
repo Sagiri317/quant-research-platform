@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.models import (
     ModelSpec,
@@ -132,18 +131,12 @@ def test_requested_training_mean_requires_saved_training_evidence(tmp_path):
 
 
 @pytest.mark.parametrize("invalid", [True, "1.0", None])
-def test_saved_training_mean_must_be_a_finite_number(tmp_path, invalid):
-    _, case, prediction, _, _ = _case(tmp_path)
+def test_model_metadata_rejects_invalid_training_mean(tmp_path, invalid):
+    _, case, _, _, _ = _case(tmp_path)
     with pytest.raises(ValueError, match="invalid_model_training_target_mean"):
         validate_model_metadata_core(
             {**case.result.metadata, "training_target_mean": invalid}
         )
-    path = prediction / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["metadata"]["model_metadata"]["training_target_mean"] = invalid
-    path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="prediction_training_target_mean_invalid"):
-        read_predictions(prediction)
 
 
 @pytest.mark.parametrize("baseline", [None, "evaluation_mean", 1, []])

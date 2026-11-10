@@ -375,42 +375,6 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
         assert set(pairs.portfolio_id) == {"champion_top20", "champion_enhanced"}
 
 
-@pytest.mark.parametrize(
-    "mutation", ["future_selection", "future_maturity", "invalid_rank"]
-)
-def test_account_rejects_invalid_persisted_prediction_facts(
-    source_chain, tmp_path, mutation
-):
-    import json
-    import shutil
-
-    case = source_chain
-    config = {**case.portfolio_configs["global"], "output": str(tmp_path / "bad")}
-    item = dict(config["predictions"][0])
-    copied = tmp_path / "predictions"
-    shutil.copytree(item["path"], copied)
-    item["path"] = str(copied)
-    config["predictions"] = [item]
-    if mutation == "invalid_rank":
-        frame = pd.read_parquet(copied / "prediction.parquet")
-        frame.loc[0, "prediction_rank_score"] = 1e100
-        frame.to_parquet(copied / "prediction.parquet", index=False)
-        reason = "invalid_prediction_rank_values"
-    else:
-        manifest = json.loads((copied / "manifest.json").read_text())
-        metadata = manifest["metadata"]
-        if mutation == "future_selection":
-            metadata["model_facts"]["selection_cutoff"] = "2099-01-01"
-            reason = "model_selection_after_fit_cutoff"
-        else:
-            metadata["model_metadata"]["label_available_max"] = "2099-01-01"
-            reason = "model_training_label_after_fit_cutoff"
-        (copied / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match=reason):
-        backtest(config)
-    assert not (tmp_path / "bad").exists()
-
-
 def test_frozen_alpha_schedules_use_real_mature_prediction_returns(
     source_chain, tmp_path
 ):

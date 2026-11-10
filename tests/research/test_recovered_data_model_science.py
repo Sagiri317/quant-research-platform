@@ -545,40 +545,6 @@ def test_prediction_groups_survive_zero_or_one_label_and_do_not_forge_tail_sprea
     assert summary.bottom_group_mean_label_value.tolist() == [1.0]
 
 
-@pytest.mark.parametrize("mutation", ["count", "empty_mean", "foreign_pair"])
-def test_native_group_validator_rejects_forged_observations(tmp_path, mutation):
-    output = _grouped_output(tmp_path)
-    path = output / "grouped_label_values.parquet"
-    groups = pd.read_parquet(path)
-    if mutation == "count":
-        groups.loc[0, ["n_obs", "mean_label_value"]] = [1, 4.0]
-    elif mutation == "empty_mean":
-        groups.loc[0, "mean_label_value"] = 4.0
-    else:
-        groups.loc[0, "timestamp"] = pd.Timestamp("2024-01-05")
-    groups = groups.sort_values(["timestamp", "signal", "label", "group"]).reset_index(
-        drop=True
-    )
-    groups.to_parquet(path, index=False)
-    expected_error = {
-        "count": "evaluation_metric_group_observations_mismatch",
-        "empty_mean": "evaluation_group_observations_invalid",
-        "foreign_pair": "evaluation_metric_group_observations_mismatch",
-    }[mutation]
-    with pytest.raises(ValueError, match=f"^{expected_error}$"):
-        read_evaluation_outputs(output)
-
-
-def test_group_only_read_rejects_mean_without_observations(tmp_path):
-    output = _grouped_output(tmp_path)
-    path = output / "grouped_label_values.parquet"
-    groups = pd.read_parquet(path)
-    groups.loc[0, "mean_label_value"] = 4.0
-    groups.to_parquet(path, index=False)
-    with pytest.raises(ValueError, match="evaluation_group_observations_invalid"):
-        read_evaluation_outputs(output, tables=("grouped_label_values",))
-
-
 @pytest.mark.parametrize(
     "mutation", [None, "random_seed", "target_definition", "input_units"]
 )

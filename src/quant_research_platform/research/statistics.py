@@ -12,6 +12,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 from scipy.fft import irfft, next_fast_len, rfft
+from scipy.linalg import orth
 from scipy.stats import chi2, kurtosis, norm, skew
 from statsmodels.regression.linear_model import OLS, WLS
 from statsmodels.stats.multitest import multipletests
@@ -812,7 +813,8 @@ def fama_macbeth_period(
         left, right = np.triu_indices(x.shape[1])
         auxiliary = OLS(
             white_response,
-            x[:, left] * x[:, right],
+            orth(x[:, left] * x[:, right]),
+            hasconst=True,
         ).fit()
         white_p_value = float(
             chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
