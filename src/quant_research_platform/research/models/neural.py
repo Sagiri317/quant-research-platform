@@ -280,15 +280,21 @@ def fit_sequence(prepared, spec, validation=None):
         normalized = ((target - mean) / scale).astype("float32")
     validation_arrays = None
     if validation is not None:
+        history = context.groupby("asset_id", sort=False).tail(
+            parameters["sequence_length"] - 1
+        )
+        keys = ["asset_id", "timestamp"]
+        # The context read can include the final training date. Keep its actual
+        # observations once, without masking duplicates within either input.
+        history = history.loc[
+            ~pd.MultiIndex.from_frame(history[keys]).isin(
+                pd.MultiIndex.from_frame(validation.sequence_context[keys])
+            )
+        ]
         validation = replace(
             validation,
             sequence_context=pd.concat(
-                [
-                    context.groupby("asset_id", sort=False).tail(
-                        parameters["sequence_length"] - 1
-                    ),
-                    validation.sequence_context,
-                ],
+                [history, validation.sequence_context],
                 ignore_index=True,
             ),
         )

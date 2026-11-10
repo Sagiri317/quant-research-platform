@@ -8,9 +8,6 @@ from typing import Annotated
 import typer
 
 from quant_research_platform.policy.share_safety import sanitize_shared_text
-from quant_research_platform.storage.identity import (
-    filesystem_exists,
-)
 from quant_research_platform.storage.schema_inventory import (
     write_schema_inventory,
 )
@@ -32,9 +29,6 @@ def schema_inventory(
         typer.Option("--output", help="New JSON output path."),
     ] = ...,
 ) -> None:
-    if filesystem_exists(output):
-        typer.echo("output_already_exists", err=True)
-        raise typer.Exit(code=2)
     try:
         write_schema_inventory(project_root, output)
     except Exception as exc:

@@ -659,3 +659,41 @@ def test_disjoint_discovery_skips_year_gap_without_bypassing_input_validation(tm
     (root / "data/year=2021/selected.parquet").write_bytes(b"selected defect")
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         dataset_reading.open_dataset_session(**options)
+
+
+def test_repeated_day_views_open_only_matching_native_payloads(tmp_path, monkeypatch):
+    from collections import Counter
+
+    from quant_research_platform.storage import parquet
+
+    root = tmp_path / "daily"
+    days = pd.date_range("2024-01-01", periods=6)
+    frame = pd.DataFrame(
+        {"market_id": "a_share", "asset_id": "a", "timestamp": days, "value": range(6)}
+    )
+    write_dataset(
+        root,
+        (frame.iloc[i : i + 1] for i in range(len(frame))),
+        spec=make_processed_dataset_spec("daily"),
+    )
+    session = dataset_reading.open_dataset_session(root)
+    opened = Counter()
+    original = parquet.open_filesystem_file
+
+    def measured(path, **kwargs):
+        opened[Path(path)] += 1
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(parquet, "open_filesystem_file", measured)
+    actual = pd.concat(
+        [
+            dataset_reading.materialize_dataset_session(
+                session.filtered_view(TimeWindow(day, day))
+            )
+            for day in days
+        ],
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(actual, frame.astype({"timestamp": "datetime64[ns]"}))
+    assert len(opened) == len(days)
+    assert set(opened.values()) == {1}

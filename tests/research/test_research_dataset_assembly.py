@@ -428,17 +428,24 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(default_layout, processed_catalog, frame=frame)
+    physical_files = 0
     for spec in processed_catalog.list():
         source = frame.loc[:, list(spec.column_roles)]
         if auxiliary_order == "asset" and spec.data_id != "demo_annotations":
             source = source.sort_values(["asset_id", "timestamp"], ignore_index=True)
         root = tiny_layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        part_rows = 1 if spec.data_id == "demo_annotations" else 3
         write_dataset(
             root,
-            (source.iloc[position : position + 1] for position in range(len(source))),
+            (
+                source.iloc[position : position + part_rows]
+                for position in range(0, len(source), part_rows)
+            ),
             spec=spec,
         )
-        assert inspect_dataset(root).file_count == len(source)
+        parts = inspect_dataset(root).file_count
+        assert parts == len(range(0, len(source), part_rows))
+        physical_files += parts
     base_spec = processed_catalog.get(dataset_catalog.get("demo").base_input_data_id)
     base_root = tiny_layout.processed_data_root(
         base_spec.market_id, base_spec.kind, base_spec.data_id
@@ -473,16 +480,24 @@ def test_research_dataset_session_complete_chunks_preserve_output(
     )
     from collections import Counter
 
-    from quant_research_platform.storage.datasets import reading
+    from quant_research_platform.storage import parquet
 
     opens = Counter()
-    original = reading.iter_declared_parquet_member_batches
+    original = parquet.open_filesystem_file
+    original_filter = parquet._filter_arrow_batch
+    physical_rows = 0
 
     def measured(path, **kwargs):
         opens[Path(path)] += 1
-        yield from original(path, **kwargs)
+        return original(path, **kwargs)
 
-    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", measured)
+    def measured_filter(batch, filters):
+        nonlocal physical_rows
+        physical_rows += batch.num_rows
+        return original_filter(batch, filters)
+
+    monkeypatch.setattr(parquet, "open_filesystem_file", measured)
+    monkeypatch.setattr(parquet, "_filter_arrow_batch", measured_filter)
     tiny_root = assemble_research_dataset(
         inputs={
             item.data_id: tiny_layout.processed_data_root(
@@ -498,9 +513,11 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    assert len(opens) == 3 * len(frame)
+    assert len(opens) == physical_files
+    assert physical_rows == 3 * len(frame)
     assert set(opens.values()) == {1}
-    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", original)
+    monkeypatch.setattr(parquet, "open_filesystem_file", original)
+    monkeypatch.setattr(parquet, "_filter_arrow_batch", original_filter)
     default = pd.concat(
         read_dataset(
             default_layout.research_dataset_root(MarketId("a_share"), "demo"),
@@ -652,6 +669,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     [
         ("strict", 1, None),
         ("strict", 1, "2023-12-31"),
+        ("strict", 2, "2024-01-01"),
         ("strict", 2, "2024-01-02"),
         ("strict", 1, "2024-01-04"),
         ("strict", 2, "2024-01-06"),
@@ -692,7 +710,13 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
         rows
         if extra_date is None
         else pd.concat(
-            (rows, rows.iloc[:1].assign(timestamp=pd.Timestamp(extra_date))),
+            (
+                rows,
+                rows.iloc[:1].assign(
+                    timestamp=pd.Timestamp(extra_date),
+                    asset_id="extra_asset" if extra_date == "2024-01-01" else "asset_a",
+                ),
+            ),
             ignore_index=True,
         ).sort_values("timestamp")
     )
@@ -739,15 +763,9 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
             time_window=TimeWindow("2023-12-31", "2024-01-04"),
         )
 
-    if extra_date in {"2023-12-31", "2024-01-02", "2024-01-04"}:
-        with pytest.raises(
-            ValueError, match="extra_research_input_keys: demo_factors: 1"
-        ):
-            assemble()
-        assert not layout.research_dataset_root(spec.market_id, spec.data_id).exists()
-    else:
-        frame = read_dataset(assemble())
-        assert frame.timestamp.tolist() == rows.timestamp.tolist()
+    frame = read_dataset(assemble())
+    assert frame.timestamp.tolist() == rows.timestamp.tolist()
+    assert frame[DEMO_FACTOR_COLUMN].tolist() == rows[DEMO_FACTOR_COLUMN].tolist()
     assert all(
         (
             hashlib.sha256(path.read_bytes()).hexdigest() == digest
@@ -1194,8 +1212,13 @@ def test_native_assembly_uses_exact_scalar_key_identity(
             result.asset_id, read_dataset(tmp_path / "base").asset_id
         )
         assert result.other.tolist() == [7.0]
+    elif sparse:
+        result = read_dataset(assembler_module.assemble(config))
+        assert result.other.isna().all()
     else:
-        with pytest.raises(ValueError, match="extra_research_input_keys: auxiliary: 1"):
+        with pytest.raises(
+            ValueError, match="missing_research_input_keys: auxiliary: 1"
+        ):
             assembler_module.assemble(config)
         assert not (tmp_path / "joined").exists()
 

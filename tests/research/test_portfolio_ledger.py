@@ -19,7 +19,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     FeeSchedule,
     fee_schedule_from_frame,
     prepare_trade_cost,
-    require_fee_coverage,
 )
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
@@ -301,12 +300,11 @@ def test_fee_source_preserves_identity_and_exact_counts(tmp_path: Path) -> None:
             for row in source.rows
         ]
     )
-    require_fee_coverage(
-        fee_schedule_from_frame(frame, content_identity=source.source_identity),
-        date(2019, 1, 1),
-        date(2025, 12, 31),
-        markets=("shanghai", "shenzhen"),
-    )
+    schedule = fee_schedule_from_frame(frame, content_identity=source.source_identity)
+    for when in (date(2019, 1, 1), date(2025, 12, 31)):
+        for market in ("shanghai", "shenzhen"):
+            for side in ("buy", "sell"):
+                prepare_trade_cost(when, market, side, schedule, _assumptions())
 
 
 @pytest.mark.parametrize("field", ("row_count", "file_bytes"))
@@ -394,9 +392,9 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
         for rule in schedule.rules
     )
     gap_schedule = FeeSchedule(rules=gap, content_identity=schedule.content_identity)
-    with pytest.raises(ValueError, match="coverage_missing"):
-        require_fee_coverage(
-            gap_schedule, date(2023, 8, 27), date(2023, 8, 28), markets=("shanghai",)
+    with pytest.raises(ValueError, match="a_share_fee_schedule_missing"):
+        prepare_trade_cost(
+            date(2023, 8, 27), "shanghai", "sell", gap_schedule, _assumptions()
         )
     transfer = next(
         rule

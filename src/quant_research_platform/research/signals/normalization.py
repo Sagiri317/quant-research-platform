@@ -25,7 +25,13 @@ def normalize_signal_frame(
 ) -> pd.DataFrame:
     result = frame.copy()
     for signal in signals:
-        _validate_signal_source_kind(signal, source_columns_by_kind)
+        if source_columns_by_kind is not None and signal.source_column not in (
+            source_columns_by_kind.get(signal.source_kind, ())
+        ):
+            raise ValueError(
+                "invalid_signal_source_kind_column: "
+                f"{signal.source_kind}:{signal.source_column}"
+            )
         result[signal.signal_id] = _normalize_signal_values(
             result,
             signal=signal,
@@ -40,20 +46,6 @@ def normalize_signal_frame(
     if not consumed_sources:
         return result
     return result.drop(columns=sorted(consumed_sources))
-
-
-def _validate_signal_source_kind(
-    signal: SignalSpec,
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None,
-) -> None:
-    if source_columns_by_kind is None:
-        return
-    declared = set(source_columns_by_kind.get(signal.source_kind, ()))
-    if signal.source_column not in declared:
-        raise ValueError(
-            "invalid_signal_source_kind_column: "
-            f"{signal.source_kind}:{signal.source_column}"
-        )
 
 
 def _normalize_signal_values(
@@ -84,10 +76,6 @@ def _normalize_signal_values(
     elif signal.transform == "zscore":
         grouped = values.groupby(group_timestamps, sort=False)
         values = grouped.transform(_stable_zscore)
-    elif signal.transform != "identity":
-        raise ValueError(f"unsupported_signal_transform: {signal.transform}")
     if signal.direction == "lower_is_better":
         values = -values.astype("float64")
-    elif signal.direction != "higher_is_better":
-        raise ValueError(f"unsupported_signal_direction: {signal.direction}")
     return values

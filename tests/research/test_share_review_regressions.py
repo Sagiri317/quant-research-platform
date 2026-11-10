@@ -13,6 +13,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
     PortfolioValuation,
+    validate_portfolio_transition,
 )
 from quant_research_platform.research.portfolios.accounting import (
     ResearchValuationMarks,
@@ -145,12 +146,16 @@ def test_late_disclosed_dividend_uses_actual_record_shares_after_sale(
         registration, entitlement_record_at_ns=registration.timestamp_ns + 1
     )
     with pytest.raises(ValueError, match="portfolio_registration_record_date_invalid"):
-        replace(
-            batches[1],
-            rights_adjustments=tuple(
-                corrupted if event is registration else event
-                for event in batches[1].rights_adjustments
+        validate_portfolio_transition(
+            replace(
+                batches[1],
+                rights_adjustments=tuple(
+                    corrupted if event is registration else event
+                    for event in batches[1].rights_adjustments
+                ),
             ),
+            PortfolioCapital("candidate", 10000, "CNY", "cash_equity"),
+            None,
         )
 
 

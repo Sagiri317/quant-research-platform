@@ -119,13 +119,15 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 
 ## 文档与验证
 
-[研究方法与接口索引](docs/specifications.md)按主题列出接口、字段与市场规则。
-想了解研究结论，可先读前面的研究报告；要复现实验或修改实现，再查下列详细文档。
+研究结论见前面的报告；复现实验或修改实现时，按主题查阅下列文档。
 
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股计算方法与交易规则](docs/a-share.md)
-- [策略学习、公式搜索、不确定性与研究 agent](docs/research-learning.md)
+- [A 股 Level-2、日级评价与库存账户](docs/a-share-hft.md)
+- [研究选择与比较方法](docs/research.md)
+- [策略学习、公式搜索与不确定性](docs/research-learning.md)
+- [研究 agent 的交互与权限](docs/agent.md)
 
 环境配置见 [environment.yml](environment.yml) 和 [pyproject.toml](pyproject.toml)，项目运行使用独立 Conda 环境。
 

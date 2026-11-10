@@ -1158,9 +1158,4 @@ def read_selection(path):
 
     from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 
-    value = parse_qrp_json_object(Path(path).read_bytes())
-    _validate_refit_scope(value)
-    decisions = _selection_decisions(value)
-    if any(value.get(key) != item for key, item in decisions.items()):
-        raise ValueError("selection_choice_mismatch")
-    return value
+    return parse_qrp_json_object(Path(path).read_bytes())

@@ -111,6 +111,14 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
     capital = PortfolioCapital("candidate", 100.0, "CNY", "cash_equity")
     batch = _account()
     metadata = {"window": {"start": "2023-01-01", "end": "2023-01-02"}}
+    validations = []
+    validate = PortfolioLedgerBatch._validated_phases
+
+    def validate_once(batch):
+        validations.append(batch.sequence)
+        return validate(batch)
+
+    monkeypatch.setattr(PortfolioLedgerBatch, "_validated_phases", validate_once)
     root = artifacts.write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=capital,
@@ -133,6 +141,7 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
     assert summary["fees"] == 1.0
     assert summary["net_pnl"] == -1.0
     assert summary["nav"] == 99.0
+    assert validations == [0]
     from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
     with pytest.raises(OutputAlreadyExistsError):

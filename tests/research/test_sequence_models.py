@@ -13,6 +13,64 @@ from tests.correctness.test_direct_model_operations import data, fit_config, inp
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
+@pytest.mark.parametrize("days", [[6, 7], [6, 9]])
+def test_validation_loss_uses_observed_history_between_sample_windows(
+    tmp_path, algorithm, days
+):
+    inputs = data(tmp_path)
+    frame = pd.read_parquet(inputs)
+    gap = frame.timestamp.dt.day.gt(3) & ~frame.timestamp.dt.day.isin(days)
+    frame.loc[gap, "x"] += frame.loc[gap, "timestamp"].dt.day * 10
+    unavailable = gap & frame.timestamp.dt.day.mod(2).eq(0)
+    frame.loc[unavailable, "label"] = np.nan
+    frame.loc[unavailable, "label_available_at"] = pd.Timestamp("2030-01-01")
+    frame.to_parquet(inputs, index=False, row_group_size=2)
+    config = fit_config(tmp_path, inputs)
+    config["model"].update(
+        model_algorithm=algorithm,
+        hyperparameters={
+            "device": "cpu",
+            "hidden_size": 4,
+            "epochs": 1,
+            "sequence_length": 3,
+        },
+    )
+    config["validation"] = {
+        "windows": [
+            {"start": f"2020-01-{day:02d}", "end": f"2020-01-{day:02d}"} for day in days
+        ],
+        "cutoff": f"2020-01-{days[-1]:02d}",
+    }
+    model_path = fit(config)
+    result, _ = load_model(model_path)
+    predictions, _ = read_predictions(
+        predict(
+            {
+                "model": str(model_path),
+                "inputs": str(inputs),
+                "input_spec": input_spec(),
+                "output": str(tmp_path / "pred"),
+                "prediction_window": {
+                    "start": f"2020-01-{days[0]:02d}",
+                    "end": f"2020-01-{days[-1]:02d}",
+                },
+            }
+        )
+    )
+    scored = predictions.loc[predictions.timestamp.dt.day.isin(days)].merge(
+        frame[["timestamp", "asset_id", "label"]],
+        on=["timestamp", "asset_id"],
+        validate="one_to_one",
+    )
+    assert len(scored) == len(days) * 3
+    assert result.metadata["rows_after_input_label_dropna"] == 9
+    assert result.prediction_model.scaler.mean_ == pytest.approx((2.0,))
+    assert result.metadata["learning_curve"]["epochs"][-1][
+        "validation_loss"
+    ] == pytest.approx(np.mean((scored.prediction_score - scored.label) ** 2), rel=1e-6)
+
+
+@pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
 @pytest.mark.parametrize("grouped", [False, True])
 def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     tmp_path, algorithm, grouped, monkeypatch

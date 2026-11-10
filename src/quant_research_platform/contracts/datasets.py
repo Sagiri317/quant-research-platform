@@ -133,11 +133,17 @@ class ResearchDatasetSpec(DataSpec):
             )
         if self.key_coverage.get(self.base_input_data_id, "strict") != "strict":
             raise ValueError("base_input_key_coverage_must_be_strict")
-        _validate_column_tuple(self.factor_columns, "factor_columns", required=False)
-        _validate_column_tuple(self.feature_columns, "feature_columns", required=False)
-        _validate_column_tuple(self.label_columns, "label_columns", required=False)
-        _validate_column_tuple(self.filter_columns, "filter_columns", required=False)
-        _validate_column_tuple(self.context_columns, "context_columns", required=False)
+        semantic_columns = (
+            ("factor_columns", (ColumnRole.FACTOR,)),
+            ("feature_columns", (ColumnRole.FEATURE,)),
+            ("label_columns", (ColumnRole.LABEL,)),
+            ("filter_columns", (ColumnRole.MASK, ColumnRole.UNIVERSE)),
+            ("context_columns", (ColumnRole.CONTEXT,)),
+        )
+        for field_name, _ in semantic_columns:
+            _validate_column_tuple(
+                getattr(self, field_name), field_name, required=False
+            )
         factor_feature_overlap = sorted(
             set(self.factor_columns).intersection(self.feature_columns)
         )
@@ -145,18 +151,17 @@ class ResearchDatasetSpec(DataSpec):
             raise ValueError(
                 "research_factor_feature_overlap: " + ", ".join(factor_feature_overlap)
             )
-        for field_name, columns in (
-            ("factor_columns", self.factor_columns),
-            ("feature_columns", self.feature_columns),
-            ("label_columns", self.label_columns),
-            ("filter_columns", self.filter_columns),
-            ("context_columns", self.context_columns),
-        ):
-            _validate_semantic_column_membership(
-                columns,
-                field_name=field_name,
-                required_columns=self.required_columns,
-            )
+        for field_name, _ in semantic_columns:
+            missing = [
+                column
+                for column in getattr(self, field_name)
+                if column not in self.column_roles
+            ]
+            if missing:
+                raise ValueError(
+                    f"research_semantic_column_not_required: {field_name}: "
+                    + ", ".join(missing)
+                )
         _validate_feature_transforms(
             self.feature_transforms,
             feature_columns=self.feature_columns,
@@ -172,36 +177,17 @@ class ResearchDatasetSpec(DataSpec):
             raise ValueError(
                 "research_input_column_overlap: " + ", ".join(invalid_research_inputs)
             )
-        _validate_semantic_column_roles(
-            self.factor_columns,
-            field_name="factor_columns",
-            column_roles=self.column_roles,
-            allowed_roles=(ColumnRole.FACTOR,),
-        )
-        _validate_semantic_column_roles(
-            self.feature_columns,
-            field_name="feature_columns",
-            column_roles=self.column_roles,
-            allowed_roles=(ColumnRole.FEATURE,),
-        )
-        _validate_semantic_column_roles(
-            self.label_columns,
-            field_name="label_columns",
-            column_roles=self.column_roles,
-            allowed_roles=(ColumnRole.LABEL,),
-        )
-        _validate_semantic_column_roles(
-            self.filter_columns,
-            field_name="filter_columns",
-            column_roles=self.column_roles,
-            allowed_roles=(ColumnRole.MASK, ColumnRole.UNIVERSE),
-        )
-        _validate_semantic_column_roles(
-            self.context_columns,
-            field_name="context_columns",
-            column_roles=self.column_roles,
-            allowed_roles=(ColumnRole.CONTEXT,),
-        )
+        for field_name, allowed_roles in semantic_columns:
+            invalid = [
+                column
+                for column in getattr(self, field_name)
+                if self.column_roles[column] not in allowed_roles
+            ]
+            if invalid:
+                raise ValueError(
+                    f"research_semantic_column_role_invalid: {field_name}: "
+                    + ", ".join(invalid)
+                )
         normalized_key_coverage = {
             data_id: self.key_coverage.get(data_id, "strict")
             for data_id in self.input_data_ids
@@ -210,38 +196,6 @@ class ResearchDatasetSpec(DataSpec):
             self,
             "key_coverage",
             MappingProxyType(normalized_key_coverage),
-        )
-
-
-def _validate_semantic_column_membership(
-    columns: tuple[str, ...],
-    *,
-    field_name: str,
-    required_columns: tuple[str, ...],
-) -> None:
-    required = set(required_columns)
-    missing = [column for column in columns if column not in required]
-    if missing:
-        raise ValueError(
-            f"research_semantic_column_not_required: {field_name}: "
-            + ", ".join(missing)
-        )
-
-
-def _validate_semantic_column_roles(
-    columns: tuple[str, ...],
-    *,
-    field_name: str,
-    column_roles: Mapping[str, ColumnRole],
-    allowed_roles: tuple[ColumnRole, ...],
-) -> None:
-    invalid = [
-        column for column in columns if column_roles.get(column) not in allowed_roles
-    ]
-    if invalid:
-        raise ValueError(
-            f"research_semantic_column_role_invalid: {field_name}: "
-            + ", ".join(invalid)
         )
 
 

@@ -99,10 +99,6 @@ def evaluate(config):
     if type(config["sample_role"]) is not str or not config["sample_role"].strip():
         raise ValueError("evaluation_sample_role_invalid")
     window = TimeWindow(**config["window"])
-    if window.end is None or any(
-        pd.isna(pd.Timestamp(value)) for value in (window.start, window.end)
-    ):
-        raise ValueError("evaluation_window_invalid")
     cutoff = strict_timestamp_series(
         pd.Series([config["cutoff"]]), error="evaluation_cutoff_invalid"
     ).iloc[0]

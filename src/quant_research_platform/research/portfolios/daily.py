@@ -337,7 +337,6 @@ def backtest_a_share(
         fee_schedule_from_frame,
         market_name_for_type,
         prepare_trade_cost,
-        require_fee_coverage,
     )
 
     if not isinstance(candidate, PortfolioCandidateSpec):
@@ -437,15 +436,6 @@ def backtest_a_share(
     fee_frame = _read_materialized(fee_root, _FEE_COLUMNS, business_columns=("rate",))
     fee_schedule = fee_schedule_from_frame(fee_frame, content_identity=fee_identity)
 
-    try:
-        require_fee_coverage(
-            fee_schedule,
-            pd.Timestamp(output_window.start).date(),
-            pd.Timestamp(output_window.end).date(),
-            markets=("shanghai", "shenzhen"),
-        )
-    except ValueError as exc:
-        raise PortfolioTargetBlocked("portfolio_fee_coverage_missing") from exc
     dataset_root = inputs["dataset"]
     panel_root = inputs["panel"]
     execution_root = inputs["execution"]

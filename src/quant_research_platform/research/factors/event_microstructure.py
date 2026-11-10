@@ -105,7 +105,7 @@ def trade_statistics(trades, config, *, columns=None):
         )
     flow_columns = columns - interval_columns - {"trade_intensity"}
     if flow_columns:
-        side = work.side.map({"buy": 1.0, "sell": -1.0}).where(known)
+        side = work.side.map({"buy": 1.0, "sell": -1.0}).astype(float).where(known)
         volume = work.volume.where(work.volume.gt(0) & known)
         signed = side * volume
         if "trade_event_flow_imbalance" in columns:
@@ -204,14 +204,14 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
                 cancel_pressure.append(np.nan)
             return
         born, remaining, side, original = remove(key)
-        valid = np.isfinite(amount) and 0 < amount <= remaining and when > born
+        valid = np.isfinite(amount) and 0 < amount <= remaining
         matched.append(int(valid))
         if not valid:
             if cancel:
                 cancelled.append(np.nan)
                 cancel_pressure.append(np.nan)
             return
-        age = when - born
+        age = when - born if when > born else np.nan
         if cancel:
             cancelled.append(age)
             cancel_pressure.append((1 if side == 0 else -1) * amount * age)

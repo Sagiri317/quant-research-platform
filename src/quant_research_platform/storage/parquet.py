@@ -1,4 +1,4 @@
-"""The sole handle-bound Parquet traversal for dataset storage."""
+"""Parquet traversal with native footer reuse for repeated dataset selections."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.dataset as ds
+import pyarrow.fs as fs
 import pyarrow.parquet as pq
 
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -20,6 +22,7 @@ from quant_research_platform.runtime.resources import (
     DEFAULT_BATCH_ROWS,
 )
 from quant_research_platform.storage.identity import (
+    native_filesystem_path,
     open_filesystem_file,
 )
 
@@ -40,6 +43,16 @@ class PreparedMembershipValues:
     values: pa.Array
 
 
+def dataset_part_fragments(paths):
+    """Let Arrow retain footer metadata for repeated selections in one session."""
+    parquet = ds.ParquetFileFormat()
+    filesystem = fs.LocalFileSystem()
+    return {
+        path: parquet.make_fragment(str(native_filesystem_path(path)), filesystem)
+        for path in paths
+    }
+
+
 def inspect_dataset_part(
     path: Path, *, require_logical_dtypes: bool = True
 ) -> DatasetPartMetadata:
@@ -57,12 +70,20 @@ def iter_dataset_part_batches(
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
     row_groups: tuple[int, ...] | None = None,
+    fragment: ds.ParquetFileFragment | None = None,
     metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
 ) -> Iterator[pa.RecordBatch]:
-    """Stream native Arrow batches while binding metadata and bytes to one handle."""
+    """Stream bounded batches; published native files may reuse their footer."""
     if type(batch_rows) is not int or batch_rows <= 0:
         raise ValueError("invalid_batch_rows")
-    with _opened_parquet(path) as opened:
+    metadata = None
+    if fragment is not None and parquet_filters:
+        metadata = fragment.metadata
+        if row_groups is None:
+            row_groups = tuple(_matching_row_groups(fragment, parquet_filters))
+        if not row_groups:
+            return
+    with _opened_parquet(path, metadata=metadata) as opened:
         parquet_file, handle = opened
         physical_schema = parquet_file.schema_arrow.remove_metadata()
         if metadata_observer is not None:
@@ -101,10 +122,12 @@ def iter_dataset_part_batches(
 
 
 @contextmanager
-def _opened_parquet(path: Path):
+def _opened_parquet(path: Path, *, metadata=None):
     """Open one selected member; decoding errors propagate without a recheck."""
     with closing_iterator(open_filesystem_file(Path(path))) as handle:
-        with closing_iterator(pq.ParquetFile(handle, pre_buffer=False)) as parquet:
+        with closing_iterator(
+            pq.ParquetFile(handle, pre_buffer=False, metadata=metadata)
+        ) as parquet:
             yield (parquet, handle)
 
 
@@ -142,7 +165,7 @@ def _matching_row_groups(
     indexes = list(range(parquet_file.metadata.num_row_groups))
     if not filters:
         return indexes
-    positions = _top_level_parquet_leaf_positions(parquet_file, filters)
+    positions = _top_level_parquet_leaf_positions(parquet_file.metadata, filters)
     return [
         row_group_index
         for row_group_index in indexes
@@ -164,14 +187,14 @@ def _matching_row_groups(
 
 
 def _top_level_parquet_leaf_positions(
-    parquet_file: pq.ParquetFile, filters: list[tuple[str, str, Any]]
+    metadata: pq.FileMetaData, filters: list[tuple[str, str, Any]]
 ) -> dict[str, int | None]:
     result: dict[str, int | None] = {}
     for column, _, _ in filters:
         matches = [
             index
-            for index in range(parquet_file.metadata.num_columns)
-            if parquet_file.schema.column(index).path == column
+            for index in range(metadata.num_columns)
+            if metadata.schema.column(index).path == column
         ]
         result[column] = matches[0] if len(matches) == 1 else None
     return result

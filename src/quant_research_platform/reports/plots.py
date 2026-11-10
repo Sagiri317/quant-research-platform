@@ -885,6 +885,18 @@ def _plot_explanation_summary(
     return figure, axes
 
 
+def _explanation_timestamp(timestamp):
+    from quant_research_platform.contracts.time import _coerce_bound
+
+    try:
+        selected = pd.Timestamp(_coerce_bound(timestamp))
+    except (ValueError, TypeError):
+        raise ValueError("plot_timestamp_invalid") from None
+    if pd.isna(selected):
+        raise ValueError("plot_timestamp_invalid")
+    return selected
+
+
 @_styled
 def _plot_explanation_waterfall(
     metadata,
@@ -900,14 +912,7 @@ def _plot_explanation_waterfall(
     sample_role = _explanation_context(metadata, sample_role)
     if not {"predictions", "contributions"} <= set(tables):
         raise ValueError("plot_explanation_contributions_unavailable")
-    from quant_research_platform.contracts.time import _coerce_bound
-
-    try:
-        selected_time = pd.Timestamp(_coerce_bound(timestamp))
-    except (ValueError, TypeError):
-        raise ValueError("plot_timestamp_invalid") from None
-    if pd.isna(selected_time):
-        raise ValueError("plot_timestamp_invalid")
+    selected_time = _explanation_timestamp(timestamp)
     predictions = tables["predictions"]
     selected = predictions.loc[
         predictions.timestamp.eq(selected_time) & predictions.asset_id.eq(asset_id)
@@ -1125,7 +1130,16 @@ def plot(config):
             if kind == "explanation_summary"
             else ["predictions", "contributions"]
         )
-        metadata, tables = read_explanation(source, members=members)
+        metadata, tables = read_explanation(
+            source,
+            members=members,
+            observation=(
+                _explanation_timestamp(config["timestamp"]),
+                config["asset_id"],
+            )
+            if kind == "explanation_waterfall"
+            else None,
+        )
         common = {
             "source_reference": str(source),
             "sample_role": config["sample_role"],

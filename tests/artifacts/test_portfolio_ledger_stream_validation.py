@@ -10,6 +10,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioRightsAdjustment,
     PortfolioValuation,
+    validate_portfolio_transition,
 )
 
 
@@ -56,9 +57,12 @@ def test_rights_adjustment_rejects_invalid_numeric_fields(invalid):
         if field.type != "float":
             continue
         with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
-            replace(
-                batch,
-                rights_adjustments=(replace(event, **{field.name: invalid}),),
+            validate_portfolio_transition(
+                replace(
+                    batch, rights_adjustments=(replace(event, **{field.name: invalid}),)
+                ),
+                PortfolioCapital("candidate", 100, "CNY", "cash_equity"),
+                None,
             )
 
 

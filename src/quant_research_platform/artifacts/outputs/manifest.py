@@ -49,11 +49,6 @@ def validate_output_manifest(
         raise ValueError("output_manifest_schema_id_mismatch")
 
     output_definition_id = value["output_definition_id"]
-    if type(output_definition_id) is not str:
-        raise ValueError("output_manifest_definition_id_invalid")
-    if output_definition_id not in _OUTPUT_DEFINITION_FILES:
-        raise ValueError("output_manifest_definition_id_invalid")
-
     metadata = value["metadata"]
     if type(metadata) is not dict:
         raise ValueError("output_manifest_metadata_invalid")

@@ -228,7 +228,9 @@ def test_off_quote_signals_use_visible_context_without_crossing_session():
     )
     assert result.prediction_score.tolist() == [1.0, 2.0, 4.0]
     assert result.timestamp.tolist() == predictions.timestamp.iloc[[0, 1, 3]].tolist()
-    assert process_prediction_signals(predictions.iloc[[1]], panel, stage).empty
+    assert process_prediction_signals(
+        predictions.iloc[[1]], panel, stage
+    ).prediction_score.tolist() == [2.0]
     # Filtering leaves the off-quote clock for the existing execution mapper.
     from quant_research_platform.research.portfolios.high_frequency import _decisions
 
@@ -237,3 +239,62 @@ def test_off_quote_signals_use_visible_context_without_crossing_session():
         mapped[(predictions.timestamp.iloc[0].value, "a")][0]
         == panel.timestamp.iloc[1].value
     )
+
+
+def test_incomplete_book_does_not_remask_saved_signals_or_reset_filter(tmp_path):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        summarize_portfolio_ledger,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.portfolios import PortfolioCapital
+
+    panel = quotes("2024-01-02", assets=("a",))
+    panel.loc[0, ["eligible", "bid_vol1"]] = [False, np.nan]
+    predictions = panel[["timestamp", "asset_id"]].assign(
+        prediction_score=[1.0, 3.0, np.nan]
+    )
+    filtered = process_prediction_signals(
+        predictions,
+        panel,
+        signal_processing_parameters([{"method": "ewma", "halflife_seconds": 3}]),
+    )
+    assert filtered.prediction_score.tolist() == [1.0, 2.0]
+    # A genuinely missing prediction resets recursive state, even on a valid book.
+    missing = predictions.copy()
+    missing["prediction_score"] = [1.0, np.nan, 3.0]
+    assert process_prediction_signals(
+        missing,
+        panel,
+        signal_processing_parameters([{"method": "ewma", "halflife_seconds": 3}]),
+    ).prediction_score.tolist() == [1.0, 3.0]
+
+    summaries = []
+    for name, stages in (
+        ("raw", None),
+        ("identity", [{"method": "threshold", "threshold": 0}]),
+    ):
+        config = parameters(("a",))
+        if stages is not None:
+            config["signal_processing"] = stages
+        batches = list(
+            inventory_batches(
+                [(daily_view(panel), panel, predictions.iloc[:1])],
+                schedule(),
+                _parameters(config),
+                TimeWindow("2024-01-02", "2024-01-02"),
+            )
+        )
+        assert sum(trade.quantity for batch in batches for trade in batch.trades) == 200
+        root = write_portfolio_ledger_artifact(
+            tmp_path / name,
+            capital=PortfolioCapital("signals", 5000, "CNY", "cash_equity"),
+            metadata={"window": {"start": "2024-01-02", "end": "2024-01-02"}},
+            produce=lambda emit, batches=batches: [emit(batch) for batch in batches],
+        )
+        artifact = read_portfolio_ledger_artifact(root)
+        summaries.append(
+            summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
+        )
+    assert summaries[0] == summaries[1]
+    assert summaries[0]["nav"] == pytest.approx(4998)

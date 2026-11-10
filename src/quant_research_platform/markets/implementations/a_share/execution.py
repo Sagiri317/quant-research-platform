@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from types import MappingProxyType
 from typing import Literal
 
@@ -230,50 +230,6 @@ def market_name_for_type(value: object) -> str:
         return MARKET_TYPE_TO_NAME[int(value)]
     except KeyError as exc:
         raise ValueError("a_share_market_type_invalid") from exc
-
-
-def require_fee_coverage(
-    schedule: FeeSchedule,
-    start_date: date,
-    end_date: date,
-    *,
-    markets: tuple[str, ...],
-) -> None:
-    """Require all applicable formal fee codes across the requested interval."""
-
-    if (
-        type(start_date) is not date
-        or type(end_date) is not date
-        or start_date > end_date
-        or type(markets) is not tuple
-        or not markets
-        or any(market not in _RUNTIME_MARKETS for market in markets)
-    ):
-        raise ValueError("a_share_fee_coverage_request_invalid")
-    if len(set(markets)) != len(markets):
-        raise ValueError("a_share_fee_coverage_request_invalid")
-    boundaries = {start_date}
-    for rule in schedule.rules:
-        if start_date < rule.effective_date <= end_date:
-            boundaries.add(rule.effective_date)
-        if start_date <= rule.end_date < end_date:
-            boundaries.add(rule.end_date + timedelta(days=1))
-    for current in sorted(boundaries):
-        for market in markets:
-            for side, required in (
-                ("buy", {"BROKER_COMMISSION", "TRANSFER_FEE"}),
-                ("sell", set(_CHARGE_CODES)),
-            ):
-                available = {
-                    rule.fee_code
-                    for rule in schedule.rules_for(
-                        current,
-                        market=market,
-                        side=side,
-                    )
-                }
-                if not required.issubset(available):
-                    raise ValueError("a_share_fee_schedule_coverage_missing")
 
 
 @dataclass(frozen=True)

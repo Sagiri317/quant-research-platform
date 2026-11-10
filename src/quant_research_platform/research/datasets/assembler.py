@@ -21,7 +21,6 @@ from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     DECISION_CONTEXT_COLUMNS,
     TimeWindow,
-    time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
@@ -118,11 +117,6 @@ def _iter_joined_processed_chunks(
         "timestamp",
         *(key for key in dataset_spec.primary_key if key != "timestamp"),
     )
-    _, stop, closed = time_window_timestamp_interval(time_window)
-    stop = pd.Timestamp(stop)
-    if not closed:
-        stop -= pd.Timedelta(1, "ns")
-    pending = None
     risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
     risk_facts = (
         read_asof_risk_facts(
@@ -141,72 +135,45 @@ def _iter_joined_processed_chunks(
         )
     ) as chunks:
         auxiliary = {}
-        for data_id in dataset_spec.input_data_ids:
+        for data_id, session in sessions.items():
             if data_id in {dataset_spec.base_input_data_id, risk_input_id}:
                 continue
-            # Physical partitions may be asset-major. Read selected rows once,
-            # then order their actual timestamps before slicing base domains.
-            frame = materialize_dataset_session(sessions[data_id])
-            timestamps = strict_timestamp_series(
+            # Asset-major members can span every base interval. Scan them once,
+            # then consume time slices without re-decoding overlapping row groups.
+            frame = materialize_dataset_session(session)
+            frame["timestamp"] = strict_timestamp_series(
                 frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
-            frame["timestamp"] = timestamps
-            order = timestamps.argsort(kind="mergesort")
-            auxiliary[data_id] = (
-                frame.iloc[order].reset_index(drop=True),
-                timestamps.iloc[order].reset_index(drop=True),
-            )
-
-        def auxiliary_through(end):
-            inputs = {}
-            for data_id, (frame, timestamps) in auxiliary.items():
-                split = int(timestamps.searchsorted(end, side="right"))
-                inputs[data_id] = frame.iloc[:split]
-                auxiliary[data_id] = (frame.iloc[split:], timestamps.iloc[split:])
-            return inputs
-
+            auxiliary[data_id] = frame.sort_values("timestamp", kind="stable")
+        yielded = False
         for frame in chunks:
             if frame.empty:
                 continue
-            if pending is not None:
-                end = pd.Timestamp(pending.timestamp.iloc[-1])
-                chunk = _join_processed_inputs(
-                    dataset_spec=dataset_spec,
-                    input_frames=auxiliary_through(end),
-                    base_frame=pending,
-                    diagnostics=diagnostics,
-                    risk_exposure_input=risk_exposure_input,
-                    risk_facts=risk_facts,
-                    risk_cache=risk_cache,
-                )
-                yield chunk.sort_values(
-                    list(physical_order), kind="mergesort", ignore_index=True
-                )
-            pending = frame.assign(
-                timestamp=strict_timestamp_series(
-                    frame.timestamp, error="invalid_time_chunk_timestamp_values"
-                )
+            timestamps = strict_timestamp_series(
+                frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
-        if pending is None:
-            # An empty base still has no authority to hide auxiliary extra keys.
-            for data_id, auxiliary in auxiliary_through(stop).items():
-                if len(auxiliary):
-                    raise ValueError(
-                        f"extra_research_input_keys: {data_id}: {len(auxiliary)}"
-                    )
+            inputs = {}
+            for data_id, selected in auxiliary.items():
+                stop = selected.timestamp.searchsorted(
+                    timestamps.iloc[-1], side="right"
+                )
+                inputs[data_id] = selected.iloc[:stop]
+                auxiliary[data_id] = selected.iloc[stop:]
+            chunk = _join_processed_inputs(
+                dataset_spec=dataset_spec,
+                input_frames=inputs,
+                base_frame=frame.assign(timestamp=timestamps),
+                diagnostics=diagnostics,
+                risk_exposure_input=risk_exposure_input,
+                risk_facts=risk_facts,
+                risk_cache=risk_cache,
+            )
+            yielded = True
+            yield chunk.sort_values(
+                list(physical_order), kind="mergesort", ignore_index=True
+            )
+        if not yielded:
             raise ValueError("no_research_dataset_sessions")
-        chunk = _join_processed_inputs(
-            dataset_spec=dataset_spec,
-            input_frames=auxiliary_through(stop),
-            base_frame=pending,
-            diagnostics=diagnostics,
-            risk_exposure_input=risk_exposure_input,
-            risk_facts=risk_facts,
-            risk_cache=risk_cache,
-        )
-        yield chunk.sort_values(
-            list(physical_order), kind="mergesort", ignore_index=True
-        )
 
 
 def _join_processed_inputs(
@@ -222,12 +189,11 @@ def _join_processed_inputs(
     base = dataset_spec.base_input_data_id
     risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
     assembled = base_frame.reset_index(drop=True)
-    for frame in (base_frame, *input_frames.values()):
-        if (
-            "market_id" in frame
-            and not frame.market_id.eq(str(dataset_spec.market_id)).all()
-        ):
-            raise ValueError("research_dataset_market_mismatch")
+    if (
+        "market_id" in base_frame
+        and not base_frame.market_id.eq(str(dataset_spec.market_id)).all()
+    ):
+        raise ValueError("research_dataset_market_mismatch")
     base_keys = _scalar_keys(assembled, dataset_spec.primary_key)
     for input_data_id in dataset_spec.input_data_ids:
         if input_data_id in {base, risk_input_id}:
@@ -239,6 +205,14 @@ def _join_processed_inputs(
             dataset_spec=dataset_spec,
             input_data_id=input_data_id,
         )
+        matched = input_frame.iloc[
+            [position for position in positions if position >= 0]
+        ]
+        if (
+            "market_id" in matched
+            and not matched.market_id.eq(str(dataset_spec.market_id)).all()
+        ):
+            raise ValueError("research_dataset_market_mismatch")
         payload = input_frame.drop(columns=list(dataset_spec.primary_key))
         if -1 in positions:
             # Adding a missing row must not round observed discrete values.
@@ -304,9 +278,6 @@ def _input_key_positions(
             _scalar_keys(input_frame, dataset_spec.primary_key)
         )
     }
-    extra = input_positions.keys() - set(base_keys)
-    if extra:
-        raise ValueError(f"extra_research_input_keys: {input_data_id}: {len(extra)}")
     positions = [input_positions.get(key, -1) for key in base_keys]
     policy = dataset_spec.key_coverage.get(input_data_id, "strict")
     if policy == "sparse":

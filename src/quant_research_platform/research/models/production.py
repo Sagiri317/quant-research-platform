@@ -26,6 +26,8 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.time import (
     TimeWindow,
     _window_payload,
+    is_datetime_window,
+    prediction_window_mask,
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -54,6 +56,7 @@ def fit_model(
     trading_calendar=None,
     validation_frames=None,
     validation_cutoff=None,
+    validation_windows=None,
 ):
     """Fit one candidate on its legal observed domain."""
     cutoff = strict_timestamp_series(
@@ -67,6 +70,8 @@ def fit_model(
         candidate_parameters = None
     if (validation_frames is None) != (validation_cutoff is None):
         raise ValueError("sequence_validation_configuration_invalid")
+    if validation_windows is not None and validation_frames is None:
+        raise ValueError("sequence_validation_configuration_invalid")
 
     def scoped():
         with closing_iterator(iter(frames)) as source:
@@ -76,16 +81,7 @@ def fit_model(
                 )
                 mask = pd.Series(False, index=frame.index)
                 for window in windows:
-                    from quant_research_platform.contracts.time import (
-                        time_window_timestamp_interval,
-                    )
-
-                    lower, upper, closed = time_window_timestamp_interval(window)
-                    mask |= timestamps.ge(pd.Timestamp(lower)) & (
-                        timestamps.le(pd.Timestamp(upper))
-                        if closed
-                        else timestamps.lt(pd.Timestamp(upper))
-                    )
+                    mask |= prediction_window_mask(timestamps, window)
                 yield frame.loc[mask]
 
     prepared = fitting._collect_training_frame(
@@ -110,6 +106,9 @@ def fit_model(
             fitting_cutoff=validation_cutoff,
             availability_column=label_availability_column,
             trading_calendar=trading_calendar,
+            sample_windows=_fit_windows(validation_windows, validation_cutoff)
+            if validation_windows is not None
+            else None,
         )
         if validation.training.empty:
             raise ValueError("model_validation_sample_empty")
@@ -196,6 +195,18 @@ def fit(config: Mapping) -> Path:
             or pd.Timestamp(validation_windows[0].start) <= cutoff
         ):
             raise ValueError("model_validation_training_overlap")
+    validation_read_windows = validation_windows
+    if validation_windows and spec.model_algorithm in SEQUENCE_ALGORITHMS:
+        # Histories include real observations between loss windows. Labels and
+        # maturity are evaluated only inside the declared validation windows.
+        validation_read_windows = (
+            TimeWindow(
+                pd.Timestamp(windows[-1].end).to_pydatetime()
+                if is_datetime_window(validation_windows[-1])
+                else pd.Timestamp(windows[-1].end).date(),
+                validation_windows[-1].end,
+            ),
+        )
     assets = config.get("asset_ids")
     if assets is not None and (
         type(assets) is not list
@@ -206,7 +217,7 @@ def fit(config: Mapping) -> Path:
         raise ValueError("training_asset_ids_invalid")
     options = _dataset_input_options(
         source,
-        discovery_windows=(*windows, *validation_windows),
+        discovery_windows=(*windows, *validation_read_windows),
         row_filters=(("asset_id", "in", tuple(assets)),) if assets is not None else (),
     )
     selected_columns = options.get("columns")
@@ -385,10 +396,11 @@ def fit(config: Mapping) -> Path:
             candidate_parameters=config.get("candidate_parameters"),
             label_availability_column=availability,
             trading_calendar=calendar,
-            validation_frames=checked_frames(validation_windows)
+            validation_frames=checked_frames(validation_read_windows)
             if validation is not None
             else None,
             validation_cutoff=validation["cutoff"] if validation is not None else None,
+            validation_windows=validation_windows if validation is not None else None,
         )
         from quant_research_platform.research.models.persisted import save_model
 

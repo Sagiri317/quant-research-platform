@@ -1,6 +1,5 @@
-"""Model fitting, legal sample retention and shared preprocessing contracts."""
+"""Model fitting, legal sample retention and owned preprocessing buffers."""
 
-import pickle
 import warnings
 
 import numpy as np
@@ -112,136 +111,62 @@ def test_training_retention_preserves_all_legal_rows_and_same_day_order():
     )
 
 
-def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
-    specs = tuple(
-        ModelSpec(
-            model_id=f"linear_{index}",
-            model_algorithm="lasso_regression",
-            input_factor_columns=("x",),
-            target_column="label",
-            hyperparameters={"alpha": alpha},
-            random_seed=37,
-        )
-        for index, alpha in enumerate((0.01, 10.0))
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2020-01-01", periods=12).repeat(3),
-            "x": np.arange(36.0),
-            "label": np.sin(np.arange(36.0)),
-            "eligible": True,
-            "label_available_at": pd.Timestamp("2020-01-13"),
-        }
-    )
-    expected = [
-        fitting._fit_model_result(
-            fitting._collect_training_frame([frame], spec, fitting_cutoff="2020-01-13"),
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-        )
-        for spec in specs
-    ]
-    counts = {"weights": 0, "scaler": 0, "transform": 0}
-    originals = (
-        fitting.equal_timestamp_sample_weights,
-        fitting.ModelMatrixScaler.fit,
-        fitting.ModelMatrixScaler.transform,
-    )
-
-    def weights(*args, **kwargs):
-        counts["weights"] += 1
-        return originals[0](*args, **kwargs)
-
-    def scaler(*args, **kwargs):
-        counts["scaler"] += 1
-        return originals[1](*args, **kwargs)
-
-    def transform(*args, **kwargs):
-        counts["transform"] += 1
-        return originals[2](*args, **kwargs)
-
-    monkeypatch.setattr(fitting, "equal_timestamp_sample_weights", weights)
-    monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", scaler)
-    monkeypatch.setattr(fitting.ModelMatrixScaler, "transform", transform)
-    prepared = fitting._collect_training_frame(
-        [frame], specs[0], fitting_cutoff="2020-01-13"
-    )
-    actual = [
-        fitting._fit_model_result(
-            prepared, spec, estimator=build_estimator_from_model_spec(spec)
-        )
-        for spec in specs
-    ]
-    assert counts == {"weights": 1, "scaler": 1, "transform": 1}
-    for reference, result in zip(expected, actual, strict=True):
-        numerical = {"scaler", "feature_importance"}
-        assert set(result.metadata) == set(reference.metadata)
-        assert {
-            key: value for key, value in result.metadata.items() if key not in numerical
-        } == {
-            key: value
-            for key, value in reference.metadata.items()
-            if key not in numerical
-        }
-        assert result.metadata["scaler"]["columns"] == list(specs[0].input_columns)
-        assert set(result.metadata["feature_importance"]) == set(
-            reference.metadata["feature_importance"]
-        )
-        # Independent fits may differ by roundoff; saved state must remain consistent.
-        for column in result.metadata["feature_importance"]:
-            assert result.metadata["feature_importance"][column] == pytest.approx(
-                reference.metadata["feature_importance"][column], rel=1e-12, abs=1e-14
-            )
-        restored = pickle.loads(pickle.dumps(result.prediction_model))
-        np.testing.assert_allclose(
-            restored.scaler.transform(frame[["x"]]),
-            reference.prediction_model.scaler.transform(frame[["x"]]),
-            rtol=1e-13,
-            atol=1e-14,
-        )
-        np.testing.assert_allclose(
-            restored.predict(frame[["x"]]),
-            reference.prediction_model.predict(frame[["x"]]),
-            rtol=1e-12,
-            atol=1e-14,
-        )
-
-
-def test_estimator_mutation_cannot_change_shared_preprocessing():
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [("lasso_regression", {"alpha": 0.01, "copy_X": copy}) for copy in (True, False)]
+    + [("ridge_regression", {"alpha": 0.1, "copy_X": copy}) for copy in (True, False)]
+    + [("xgboost_regressor", {"device": "cpu", "n_estimators": 3, "max_depth": 2})],
+)
+def test_real_estimators_consume_prepared_matrix_without_changing_source(
+    algorithm, parameters
+):
     spec = ModelSpec(
-        model_id="isolated",
-        model_algorithm="lasso_regression",
-        input_factor_columns=("x",),
+        model_id="candidate",
+        model_algorithm=algorithm,
+        input_factor_columns=("x", "z"),
         target_column="label",
+        hyperparameters=parameters,
+        random_seed=37,
     )
     frame = pd.DataFrame(
         {
-            "timestamp": pd.Timestamp("2020-01-01"),
-            "x": [1.0, 2.0, 3.0],
-            "label": [3.0, 1.0, 2.0],
+            "timestamp": pd.to_datetime(["2020-01-01"] * 4 + ["2020-01-02"] * 2),
+            "x": np.arange(6.0),
+            "z": [2.0, 5.0, 1.0, 4.0, 9.0, 3.0],
+            "label": np.sin(np.arange(6.0)),
             "eligible": True,
-            "label_available_at": pd.Timestamp("2020-01-02"),
+            "label_available_at": pd.Timestamp("2020-01-03"),
         }
     )
+    source = frame.copy(deep=True)
     prepared = fitting._collect_training_frame(
-        [frame], spec, fitting_cutoff="2020-01-02"
+        [frame], spec, fitting_cutoff="2020-01-03"
     )
-    original = pickle.dumps((prepared.preprocessing, prepared.matrix))
     training = prepared.training.copy(deep=True)
-
-    class MutatingEstimator:
-        def fit(self, matrix, target, *, sample_weight):
-            matrix.loc[:, "x"] = 999.0
-            target[:] = 999.0
-            sample_weight[:] = 999.0
-            raise RuntimeError("mutated_estimator_inputs")
-
-    with pytest.raises(RuntimeError, match="mutated_estimator_inputs"):
-        fitting._fit_predictor(
-            spec, prepared_training=prepared, estimator=MutatingEstimator()
-        )
-    assert pickle.dumps((prepared.preprocessing, prepared.matrix)) == original
-    pd.testing.assert_frame_equal(prepared.training, training, check_exact=True)
+    weights, scaler = prepared.preprocessing
+    original_weights = weights.copy()
+    reference = build_estimator_from_model_spec(spec)
+    reference.fit(
+        prepared.matrix.copy(deep=True),
+        training.label.to_numpy(copy=True),
+        sample_weight=weights.copy(),
+    )
+    actual = fitting._fit_model_result(
+        prepared, spec, estimator=build_estimator_from_model_spec(spec)
+    )
+    expected = reference.predict(scaler.transform(frame[["x", "z"]]))
+    np.testing.assert_allclose(
+        actual.prediction_model.predict(frame[["x", "z"]]),
+        expected,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    assert actual.metadata["training_target_mean"] == pytest.approx(
+        np.average(training.label, weights=original_weights)
+    )
+    pd.testing.assert_frame_equal(frame, source)
+    pd.testing.assert_frame_equal(prepared.training, training)
+    np.testing.assert_array_equal(weights, original_weights)
 
 
 def test_training_raw_validation_runs_once_with_duplicate_dataframe_index(monkeypatch):

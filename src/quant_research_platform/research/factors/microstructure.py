@@ -84,7 +84,8 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
             if "book_ofi" in needed:
                 values["book_ofi"] = ofi
             if "depth_normalized_ofi" in needed:
-                values["depth_normalized_ofi"] = ofi / (work.bid_vol1 + work.ask_vol1)
+                depth = work.bid_vol1 + work.ask_vol1
+                values["depth_normalized_ofi"] = ofi / depth.where(depth.gt(0))
             if "book_ofi_30s" in needed:
                 values["book_ofi_30s"] = _trailing_sum(ofi, work.timestamp, 30)
         for seconds in (3, 30, 60):

@@ -22,26 +22,20 @@ class ExactPrimaryKeyIndex:
         self._key_schema = key_schema
         self._namespaces: dict[str, dict[bytes, bytes | None]] = {}
 
-    @property
-    def primary_key(self) -> tuple[str, ...]:
-        return self._primary_key
-
     def _namespace(self, namespace: str) -> dict[bytes, bytes | None]:
         return self._namespaces.get(namespace, {})
 
-    def _insert_rows(self, rows: Iterable[tuple[str, bytes, bytes | None]]) -> int:
-        pending: dict[str, dict[bytes, bytes | None]] = {}
-        inserted = 0
-        for namespace, identity, value in rows:
-            existing = self._namespace(namespace)
+    def _insert_rows(
+        self, namespace: str, rows: Iterable[tuple[bytes, bytes | None]]
+    ) -> int:
+        existing = self._namespace(namespace)
+        pending: dict[bytes, bytes | None] = {}
+        for identity, value in rows:
             key = bytes(identity)
-            additions = pending.setdefault(namespace, {})
-            if key not in existing and key not in additions:
-                additions[key] = None if value is None else bytes(value)
-                inserted += 1
-        for namespace, additions in pending.items():
-            self._namespaces.setdefault(namespace, {}).update(additions)
-        return inserted
+            if key not in existing and key not in pending:
+                pending[key] = None if value is None else bytes(value)
+        self._namespaces.setdefault(namespace, {}).update(pending)
+        return len(pending)
 
     def _key_table(self, table: pa.Table) -> pa.Table:
         if any(column not in table.column_names for column in self._primary_key):
@@ -65,20 +59,13 @@ class ExactPrimaryKeyIndex:
     def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
         keys = self._key_table(table)
         return table.num_rows - self._insert_rows(
-            self._payload_rows(keys, namespace=namespace)
+            namespace, ((key, None) for key in self._payload_rows(keys))
         )
 
     def add_identity_payloads(
         self, *, namespace: str, payloads: Iterable[tuple[bytes, bytes]]
     ) -> int:
-        return self.add_identity_payload_rows(
-            rows=((namespace, identity, value) for identity, value in payloads)
-        )
-
-    def add_identity_payload_rows(
-        self, *, rows: Iterable[tuple[str, bytes, bytes]]
-    ) -> int:
-        return self._insert_rows(rows)
+        return self._insert_rows(namespace, payloads)
 
     def add_float_value_table(
         self,
@@ -96,18 +83,16 @@ class ExactPrimaryKeyIndex:
         def rows():
             values = table.column(value_column)
             validation = table.column(validation_column or value_column)
-            for position, (_, key, _) in enumerate(
-                self._payload_rows(keys, namespace=namespace)
-            ):
+            for position, key in enumerate(self._payload_rows(keys)):
                 keep = selected is None or selected[position].as_py()
                 value = _float_value_payload(
                     validation[position], retain=retain_values and keep
                 )
                 if keep and validation_column not in (None, value_column):
                     value = _float_value_payload(values[position], retain=retain_values)
-                yield (namespace, key, value)
+                yield key, value
 
-        return table.num_rows - self._insert_rows(rows())
+        return table.num_rows - self._insert_rows(namespace, rows())
 
     def lookup_float_values(
         self,
@@ -124,10 +109,8 @@ class ExactPrimaryKeyIndex:
             bytearray(table.num_rows),
         )
         pending: dict[bytes, bytes] = {}
-        rows = self._prepared_comparison_rows(
-            table, namespace=source_namespace, value_columns=()
-        )
-        for position, (_, key, _) in enumerate(rows):
+        rows = self._prepared_comparison_rows(table, value_columns=())
+        for position, (key, _) in enumerate(rows):
             key = bytes(key)
             payload = source.get(key)
             if payload is None:
@@ -152,10 +135,8 @@ class ExactPrimaryKeyIndex:
     def add_comparison_table(
         self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
     ) -> int:
-        rows = self._prepared_comparison_rows(
-            table, namespace=namespace, value_columns=value_columns
-        )
-        return table.num_rows - self._insert_rows(rows)
+        rows = self._prepared_comparison_rows(table, value_columns=value_columns)
+        return table.num_rows - self._insert_rows(namespace, rows)
 
     def _compare_table(
         self,
@@ -170,15 +151,15 @@ class ExactPrimaryKeyIndex:
 
         def rows():
             nonlocal changed
-            for namespace, key, value in self._prepared_comparison_rows(
-                table, namespace=actual_namespace, value_columns=value_columns
+            for key, value in self._prepared_comparison_rows(
+                table, value_columns=value_columns
             ):
                 key = bytes(key)
                 if key in expected and expected[key] != value:
                     changed += 1
-                yield namespace, key, None
+                yield key, None
 
-        duplicates = table.num_rows - self._insert_rows(rows())
+        duplicates = table.num_rows - self._insert_rows(actual_namespace, rows())
         return duplicates, changed
 
     def classify_comparison_table(
@@ -187,10 +168,8 @@ class ExactPrimaryKeyIndex:
         existing = self._namespace(namespace)
         pending: dict[bytes, bytes] = {}
         positions: list[int] = []
-        for position, (_, key, value) in enumerate(
-            self._prepared_comparison_rows(
-                table, namespace=namespace, value_columns=value_columns
-            )
+        for position, (key, value) in enumerate(
+            self._prepared_comparison_rows(table, value_columns=value_columns)
         ):
             key, value = (bytes(key), bytes(value))
             if key in existing:
@@ -212,16 +191,13 @@ class ExactPrimaryKeyIndex:
         self,
         table: pa.Table,
         *,
-        namespace: str,
         value_columns: Sequence[str],
     ):
         selected = self._validate_comparison_table_grammar(
             table, value_columns=value_columns
         )
         keys = self._key_table(table)
-        return self._comparison_payload_rows(
-            keys, table.select(selected), namespace=namespace
-        )
+        return self._comparison_payload_rows(keys, table.select(selected))
 
     def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
         values = self._namespace(namespace)
@@ -275,9 +251,7 @@ class ExactPrimaryKeyIndex:
             raise ValueError("missing_dataset_comparison_column")
         return selected
 
-    def _payload_rows(
-        self, keys: pa.Table, *, namespace: str
-    ) -> Iterator[tuple[str, bytes, None]]:
+    def _payload_rows(self, keys: pa.Table) -> Iterator[bytes]:
         columns = []
         for name in self._primary_key:
             column = keys.column(name)
@@ -293,18 +267,16 @@ class ExactPrimaryKeyIndex:
             else:
                 columns.append(_key_column_payloads(column))
         for _ in range(keys.num_rows):
-            yield (namespace, b"".join(next(column) for column in columns), None)
+            yield b"".join(next(column) for column in columns)
 
     def _comparison_payload_rows(
-        self, keys: pa.Table, values: pa.Table, *, namespace: str
-    ) -> Iterator[tuple[str, bytes, bytearray]]:
+        self, keys: pa.Table, values: pa.Table
+    ) -> Iterator[tuple[bytes, bytearray]]:
         value_fields = tuple(
             values.schema.field(column) for column in values.column_names
         )
         value_arrays = tuple(values.column(column) for column in values.column_names)
-        for row_index, (_, key_payload, _) in enumerate(
-            self._payload_rows(keys, namespace=namespace)
-        ):
+        for row_index, key_payload in enumerate(self._payload_rows(keys)):
             value_payload = bytearray()
             for column, field in zip(value_arrays, value_fields, strict=True):
                 _append_arrow_scalar_payload(
@@ -314,16 +286,43 @@ class ExactPrimaryKeyIndex:
                     allow_null=True,
                     allow_nonfinite=True,
                 )
-            yield (namespace, key_payload, value_payload)
+            yield key_payload, value_payload
 
 
 def _key_column_payloads(column: pa.Array | pa.ChunkedArray) -> Iterator[bytes]:
+    # The index already fixes each column's Arrow type. Keep only its exact
+    # value, framing variable-width cells instead of repeating schema tags.
+    kind = column.type
+    if pa.types.is_dictionary(kind):
+        yield from _key_column_payloads(column.cast(kind.value_type))
+        return
     for value in column:
-        payload = bytearray()
-        _append_arrow_scalar_payload(
-            payload, value, column.type, normalize_float_zero=True
-        )
-        yield bytes(payload)
+        if not value.is_valid:
+            raise ValueError("dataset_primary_key_null")
+        if pa.types.is_temporal(kind):
+            yield struct.pack(">q", value.value)
+        elif pa.types.is_integer(kind):
+            yield value.as_py().to_bytes(
+                kind.bit_width // 8, "big", signed=pa.types.is_signed_integer(kind)
+            )
+        elif pa.types.is_boolean(kind):
+            yield bytes((value.as_py(),))
+        elif pa.types.is_floating(kind):
+            number = float(value.as_py())
+            if math.isnan(number):
+                raise ValueError("dataset_primary_key_null")
+            if not math.isfinite(number):
+                raise ValueError("invalid_dataset_primary_key_value")
+            yield struct.pack(">d", 0.0 if number == 0 else number)
+        elif pa.types.is_string(kind) or pa.types.is_large_string(kind):
+            raw = value.as_buffer()
+            yield struct.pack(">Q", len(raw)) + raw.to_pybytes()
+        else:
+            payload = bytearray()
+            _append_arrow_scalar_payload(
+                payload, value, kind, normalize_float_zero=True
+            )
+            yield bytes(payload)
 
 
 def _float_value_payload(scalar: pa.Scalar, *, retain: bool) -> bytes | None:

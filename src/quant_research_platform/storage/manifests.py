@@ -33,13 +33,6 @@ def read_manifest(path: Path) -> dict[str, Any]:
     return read_qrp_json_file(path)[1]
 
 
-def read_qrp_json(path: Path, *, expected_schema_id: str, error: str) -> dict[str, Any]:
-    payload = read_qrp_json_file(path)[1]
-    if payload.get("schema_id") != expected_schema_id:
-        raise ValueError(error)
-    return payload
-
-
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     snapshot, text = _qrp_json_snapshot_text(payload)
     _require_schema_id(snapshot)

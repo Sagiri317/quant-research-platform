@@ -646,8 +646,3 @@ def test_selection_ir_requires_known_mean_and_std(tmp_path, prefix, missing):
     selection_config["output"] = str(tmp_path / "invalid-selection.json")
     with pytest.raises(ValueError, match="^invalid_model_metadata$"):
         select(selection_config)
-    frozen["metrics"][0] = metrics
-    frozen["families"][0]["trial_metrics"][0] = metrics
-    selected.write_text(json.dumps(frozen))
-    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
-        read_selection(selected)

@@ -25,7 +25,10 @@ from quant_research_platform.contracts.models import (
     _thaw_model_hyperparameters,
     sequence_context_columns,
 )
-from quant_research_platform.contracts.time import time_value_isoformat
+from quant_research_platform.contracts.time import (
+    prediction_window_mask,
+    time_value_isoformat,
+)
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
@@ -62,7 +65,6 @@ class PreparedTraining:
 
     @cached_property
     def preprocessing(self):
-        # Begin the trial before learning; candidates share only immutable fit facts.
         weights = equal_timestamp_sample_weights(
             self.training["timestamp"],
             self.training_weighting,
@@ -295,6 +297,7 @@ def _collect_training_frame(
     fitting_cutoff: object,
     availability_column: str | None = None,
     trading_calendar=None,
+    sample_windows=None,
 ) -> PreparedTraining:
     required = set(spec.input_columns)
     required.add(spec.target_column)
@@ -357,6 +360,13 @@ def _collect_training_frame(
                         ],
                     ]
                 )
+            if sample_windows is not None:
+                selected = pd.Series(False, index=chunk.index)
+                for window in sample_windows:
+                    selected |= prediction_window_mask(chunk.timestamp, window)
+                chunk = chunk.loc[selected]
+                if chunk.empty:
+                    continue
             filtered, metadata = _legal_training_rows(
                 chunk,
                 spec,
@@ -470,7 +480,7 @@ def _collect_training_frame(
         filter_metadata,
         spec.input_columns,
         spec.training_weighting,
-        _native_missing(spec),
+        spec.model_algorithm == "xgboost_regressor",
         sessions,
         spec.training_scaling,
         pd.concat(sequence_context, ignore_index=True) if sequence_context else None,
@@ -485,14 +495,11 @@ def _fit_predictor(
     estimator: object,
     validation=None,
 ) -> object:
-    y = prepared_training.training[spec.target_column].to_numpy(
-        dtype="float64", copy=True
-    )
+    y = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     weights, scaler = prepared_training.preprocessing
-    weights = weights.copy()
     from sklearn.exceptions import ConvergenceWarning
 
-    scaled_matrix = prepared_training.matrix.copy(deep=True)
+    scaled_matrix = prepared_training.matrix
     fit_options = {}
     patience = spec.hyperparameters.get("early_stopping_rounds")
     if validation is not None:
@@ -565,15 +572,3 @@ def model_training_read_columns(
             )
         )
     )
-
-
-def _native_missing(spec):
-    if spec.model_algorithm in {
-        "linear_regression",
-        *SEQUENCE_ALGORITHMS,
-    }:
-        return False
-    estimator = estimators.build_estimator_from_model_spec(spec)
-    from sklearn.utils import get_tags
-
-    return bool(get_tags(estimator).input_tags.allow_nan)

@@ -5,7 +5,7 @@ events.
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from math import fsum, isclose, isfinite
 from typing import Literal
 
@@ -218,7 +218,8 @@ class PortfolioLedgerBatch:
     diagnostics: tuple[PortfolioDiagnostic, ...]
     rights_adjustments: tuple[PortfolioRightsAdjustment, ...] = ()
 
-    def __post_init__(self) -> None:
+    def _validated_phases(self):
+        """Establish batch facts once, at ledger publication."""
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("portfolio_ledger_sequence_invalid")
         for rows, kind, numeric_fields in (
@@ -609,6 +610,8 @@ class PortfolioLedgerBatch:
         ):
             raise ValueError("portfolio_ledger_diagnostic_invalid")
 
+        return phases
+
 
 def portfolio_notional_tolerance(nav: float) -> float:
     """Currency tolerance for independently accumulated portfolio amounts."""
@@ -629,11 +632,8 @@ def validate_portfolio_transition(
     capital: PortfolioCapital,
     previous: dict[str, PortfolioValuation] | None,
 ) -> dict[str, PortfolioValuation]:
-    """Check persisted continuity and instrument-specific economic identities."""
-    phases = {
-        phase: {row.asset_id: row for row in batch.valuations if row.phase == phase}
-        for phase in ("before", "after", "end")
-    }
+    """Validate a new batch and its continuity at ledger publication."""
+    phases = batch._validated_phases()
     before, after, end = (phases[phase] for phase in ("before", "after", "end"))
     tolerance = portfolio_notional_tolerance(sum(row.value for row in before.values()))
     if previous is None:
@@ -876,7 +876,7 @@ def validate_portfolio_transition(
             abs_tol=tolerance,
         ):
             raise ValueError("portfolio_ledger_target_state_invalid")
-    return {asset: replace(row) for asset, row in end.items()}
+    return end
 
 
 @dataclass(frozen=True, slots=True)

@@ -1066,10 +1066,6 @@ def _selection_trial_rows(selections, selection_group):
                         or metric_id == "validation_rows"
                     ):
                         continue
-                    if value is not None and (
-                        type(value) not in {int, float} or not np.isfinite(value)
-                    ):
-                        raise ValueError("statistics_trial_metric_invalid")
                     if "rankic" in metric_id:
                         count = metrics["validation_valid_rankic_count"]
                     elif (

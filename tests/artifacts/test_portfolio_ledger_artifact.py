@@ -17,6 +17,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioTargetBlocked,
     PortfolioValuation,
+    validate_portfolio_transition,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
@@ -49,13 +50,20 @@ def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
     )
     batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2019-01-02"))
     with pytest.raises(ValueError, match="portfolio_ledger_orphan_economic_fact"):
-        replace(
-            batch,
-            trades=(
-                *batch.trades,
-                ExecutedTrade("orphan", "order", 1, "missing", 1.0, 1.0),
+        write_portfolio_ledger_artifact(
+            tmp_path / "orphan",
+            **_ledger_spec(),
+            produce=lambda emit: emit(
+                replace(
+                    batch,
+                    trades=(
+                        *batch.trades,
+                        ExecutedTrade("orphan", "order", 1, "missing", 1.0, 1.0),
+                    ),
+                )
             ),
         )
+    assert not filesystem_exists(tmp_path / "orphan")
     bad = replace(
         batch,
         diagnostics=(
@@ -884,4 +892,8 @@ def test_typed_portfolio_ledger_rejects_invalid_numeric_fields(invalid):
                 continue
             changed = replace(rows[0], **{field.name: invalid})
             with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
-                replace(batch, **{table: (changed, *rows[1:])})
+                validate_portfolio_transition(
+                    replace(batch, **{table: (changed, *rows[1:])}),
+                    _ledger_spec()["capital"],
+                    None,
+                )

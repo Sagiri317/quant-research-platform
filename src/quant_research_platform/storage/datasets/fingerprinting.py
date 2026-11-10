@@ -28,7 +28,7 @@ from quant_research_platform.storage.datasets.schema import (
     validate_dataset_manifest_payload,
 )
 from quant_research_platform.storage.datasets.types import DatasetFingerprint
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.exact_keys import _append_arrow_scalar_payload
 
 
 def fingerprint_dataset(
@@ -181,22 +181,25 @@ def _iter_fingerprint_hashes(
     ):
         schema = pa.schema([arrow_schema.field(column) for column in frame.columns])
         table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
-        index = ExactPrimaryKeyIndex(primary_key=primary_key)
-        rows = index._prepared_comparison_rows(
-            table,
-            namespace="fingerprint",
-            value_columns=tuple(
-                column for column in frame if column not in primary_key
-            ),
-        )
-        yield np.fromiter(
-            (
-                int.from_bytes(hashlib.sha256(key + value).digest()[:8], "big")
-                for _namespace, key, value in rows
-            ),
-            dtype=np.uint64,
-            count=len(frame),
-        )
+        columns = (*primary_key, *(name for name in frame if name not in primary_key))
+
+        def hashes():
+            for position in range(len(frame)):
+                payload = bytearray()
+                for name in columns:
+                    key = name in primary_key
+                    values = table.column(name)
+                    _append_arrow_scalar_payload(
+                        payload,
+                        values[position],
+                        values.type,
+                        allow_null=not key,
+                        allow_nonfinite=not key,
+                        normalize_float_zero=key,
+                    )
+                yield int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+        yield np.fromiter(hashes(), dtype=np.uint64, count=len(frame))
         return
     if not len(frame):
         return

@@ -17,6 +17,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
     PortfolioValuation,
+    validate_portfolio_transition,
 )
 from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,
@@ -186,7 +187,7 @@ def test_endpoint_dividend_ledger_roundtrip_has_no_double_count(tmp_path):
     assert summary["gross_pnl"] == 0
     assert portfolio_interval_economics(batch)["gross_return"] == 0
     with pytest.raises(ValueError, match="reconciliation"):
-        replace(batch, cashflows=())
+        validate_portfolio_transition(replace(batch, cashflows=()), capital, None)
     corrupted = replace(
         batch,
         rights_adjustments=tuple(
@@ -352,8 +353,13 @@ def test_fractional_rights_roundtrip_and_pnl_without_double_deduction(
         None if mark else "rounding_price_unavailable"
     )
     with pytest.raises(ValueError, match="portfolio_rights_adjustment_invalid"):
-        replace(
-            batch, rights_adjustments=(replace(changes[0], quantity_rounding_loss=1),)
+        validate_portfolio_transition(
+            replace(
+                batch,
+                rights_adjustments=(replace(changes[0], quantity_rounding_loss=1),),
+            ),
+            capital,
+            None,
         )
 
 

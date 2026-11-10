@@ -1040,7 +1040,6 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
     ):
         raise ValueError("model_training_asset_scope_invalid")
     if expected is not None:
-        validate_model_facts(expected)
         for key in (
             "market_id",
             "family_id",

@@ -13,7 +13,7 @@ def linear_feature_importance(
 ) -> dict[str, float]:
     values = np.abs(coefficients[1:])
     return {
-        column: float(abs(value))
+        column: float(value)
         for column, value in zip(spec.input_columns, values, strict=True)
     }
 
@@ -31,7 +31,7 @@ def estimator_feature_importance(
     if hasattr(predictor, "coef_"):
         values = np.abs(np.ravel(np.asarray(predictor.coef_, dtype="float64")))
         return {
-            column: float(abs(value))
+            column: float(value)
             for column, value in zip(spec.input_columns, values, strict=True)
         }
     return None

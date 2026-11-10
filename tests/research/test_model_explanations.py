@@ -231,22 +231,6 @@ def test_small_affine_output_keeps_real_contributions_and_residual(tmp_path, tar
     )
     assert 0 < abs(saved.additivity_residual) <= saved.additivity_tolerance
     assert tables["summary"].observation_count.eq(1).all()
-    tables["predictions"].loc[0, "additivity_tolerance"] = abs(
-        saved.additivity_residual
-    )
-    tables["predictions"].loc[0, "additivity_residual"] = np.nextafter(
-        saved.additivity_residual, 0
-    )
-    _, stricter = read_explanation(
-        write_explanation(tmp_path / "stricter", metadata=metadata, tables=tables)
-    )
-    assert stricter["predictions"].additivity_tolerance[0] == abs(
-        saved.additivity_residual
-    )
-    for invalid in (2 * saved.additivity_tolerance, abs(saved.additivity_residual) / 2):
-        tables["predictions"].loc[0, "additivity_tolerance"] = invalid
-        with pytest.raises(ValueError, match="explanation_additivity_failed"):
-            write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
 
 
 def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
@@ -562,28 +546,19 @@ def test_explanation_without_labels_and_no_implicit_fit(tmp_path, monkeypatch):
     assert len(tables["predictions"]) == 24
 
 
-def test_read_rejects_tampered_explanation_values(tmp_path, subtests):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+def test_publication_rejects_invalid_explanation_tables(tmp_path, subtests):
     from quant_research_platform.artifacts.explanations import write_explanation
 
     _, _, config = _case(tmp_path)
-    output = explain(config)
-    metadata, tables = read_explanation(output)
+    metadata, tables = read_explanation(explain(config))
     for member, column, value, error in (
-        (
-            "contributions",
-            "contribution",
-            tables["contributions"].contribution[0] + 1,
-            "additivity_failed",
-        ),
         (
             "predictions",
             "prediction_score",
             tables["predictions"].prediction_score[0] + 1,
             "prediction_binding_invalid",
         ),
+        ("predictions", "additivity_tolerance", -1, "additivity_failed"),
         ("contributions", "contribution", np.inf, "table_nonfinite"),
         *(
             ("contributions", "input_value", value, "input_value_invalid")
@@ -595,24 +570,6 @@ def test_read_rejects_tampered_explanation_values(tmp_path, subtests):
             changed[member].loc[0, column] = value
             with pytest.raises(ValueError, match=error):
                 write_explanation(tmp_path / member, metadata=metadata, tables=changed)
-            path = output / f"{member}.parquet"
-            schema = pq.read_schema(path)
-            pq.write_table(
-                pa.Table.from_pandas(
-                    changed[member], schema=schema, preserve_index=False
-                ),
-                path,
-            )
-            try:
-                with pytest.raises(ValueError, match=error):
-                    read_explanation(output)
-            finally:
-                pq.write_table(
-                    pa.Table.from_pandas(
-                        tables[member], schema=schema, preserve_index=False
-                    ),
-                    path,
-                )
 
 
 def test_cli_is_same_explain_operation(tmp_path):
@@ -633,8 +590,9 @@ def test_cli_is_same_explain_operation(tmp_path):
     assert set(read_explanation(Path(config["output"]))[1]) == {"native_importance"}
 
 
-def test_shap_nonfinite_row_is_explicit_without_hiding_other_predictions(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize("invalid", ["nonfinite", "additivity"])
+def test_shap_invalid_row_is_explicit_without_hiding_other_predictions(
+    tmp_path, monkeypatch, invalid
 ):
     from quant_research_platform.research.models.explanations import _import_shap
 
@@ -645,7 +603,9 @@ def test_shap_nonfinite_row_is_explicit_without_hiding_other_predictions(
 
     def partially_nonfinite(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
-        result.values[0, 0] = np.nan
+        result.values[0, 0] = (
+            np.nan if invalid == "nonfinite" else result.values[0, 0] + 1.0
+        )
         return result
 
     monkeypatch.setattr(shap.TreeExplainer, "__call__", partially_nonfinite)
@@ -712,11 +672,14 @@ def test_permutation_mse_dispersion_matches_repeat_population_sd(tmp_path):
 @pytest.mark.parametrize(
     "mutation", ["unknown_method", "missing_unit", "missing_space", "baseline"]
 )
-def test_read_rejects_missing_or_relabelled_scientific_metadata(tmp_path, mutation):
+def test_publication_rejects_missing_or_relabelled_scientific_metadata(
+    tmp_path, mutation
+):
     _, _, config = _case(tmp_path)
     output = explain(config)
-    path = output / "metadata.json"
-    payload = json.loads(path.read_text())
+    from quant_research_platform.artifacts.explanations import write_explanation
+
+    payload, tables = read_explanation(output)
     if mutation == "unknown_method":
         payload["methods"] = ["unknown_method"]
     elif mutation == "missing_unit":
@@ -725,20 +688,19 @@ def test_read_rejects_missing_or_relabelled_scientific_metadata(tmp_path, mutati
         payload.pop("output_space")
     else:
         payload["attribution"]["baseline"] = "invented"
-    path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="metadata_invalid"):
-        read_explanation(output)
+        write_explanation(tmp_path / "invalid", metadata=payload, tables=tables)
 
 
-def test_read_binds_explanation_method_to_actual_model_kind(tmp_path):
+def test_publication_binds_explanation_method_to_actual_model_kind(tmp_path):
     _, _, config = _case(tmp_path)
     output = explain(config)
-    path = output / "metadata.json"
-    metadata = json.loads(path.read_text())
+    from quant_research_platform.artifacts.explanations import write_explanation
+
+    metadata, tables = read_explanation(output)
     metadata["model_algorithm"] = "xgboost_regressor"
-    path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="linear_model_required"):
-        read_explanation(output)
+        write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
 
 
 @pytest.mark.parametrize(

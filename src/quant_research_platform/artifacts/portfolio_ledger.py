@@ -272,14 +272,14 @@ class _LedgerValidation:
     def observe(self, batch):
         if type(batch) is not PortfolioLedgerBatch or batch.sequence != self.sequence:
             raise ValueError("portfolio_ledger_sequence_invalid")
+        self.previous = validate_portfolio_transition(
+            batch, self.capital, self.previous
+        )
         if any(
             not self.bounds[0] <= row.timestamp_ns <= self.bounds[1]
             for row in batch.valuations
         ):
             raise ValueError("portfolio_ledger_valuation_window_invalid")
-        self.previous = validate_portfolio_transition(
-            batch, self.capital, self.previous
-        )
         inserted = self.key_index.add_identity_payloads(
             namespace="fills",
             payloads=(

@@ -260,3 +260,96 @@ def test_selected_trade_interval_needs_no_order_stream_or_price_volume():
     assert np.isnan(result.trade_interval_seconds.iloc[0])
     assert result.trade_interval_seconds.iloc[1] == 3
     assert list(result) == [*protocol.KEY, "trade_interval_seconds"]
+
+
+@pytest.mark.parametrize("data_id", ("hft_factors", "hft_event_factors"))
+def test_local_undefined_values_survive_native_factor_publication(tmp_path, data_id):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.research.protocols.a_share_hft import processed_specs
+    from quant_research_platform.sources.venvoo import interim_spec
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    instruments = [{"wind_code": "600000.SH", "asset_id": "sse", "exchange": "SSE"}]
+    raw = raw_quotes((93000000, 93003000, 93006000, 93030000)).assign(
+        wind_code="600000.SH"
+    )
+    raw["bid_px1"], raw["ask_px1"] = 99900, 100100
+    raw["bid_vol1"], raw["ask_vol1"] = [100, 0, 100, 100], [50, 0, 50, 50]
+    quotes = normalize(raw, "hft_quotes", instruments)
+    raw_orders = raw_events("hft_orders").copy()
+    raw_orders["wind_code"] = "600000.SH"
+    raw_orders["time"] = [93001000, 93001000, 93004000, 93005000]
+    raw_orders["volume"] = [100.0, 40.0, 20.0, 60.0]
+    raw_orders["order_type"], raw_orders["order_code"] = ["A", "D", "D", "A"], "B"
+    raw_orders["ex_order_id"] = [11, 11, 11, 12]
+    orders = normalize(raw_orders, "hft_orders", instruments)
+    raw_trades = raw_events("hft_trades").iloc[:2].copy()
+    raw_trades["wind_code"], raw_trades["time"] = "600000.SH", [93000000, 93000500]
+    raw_trades["bid_order_id"], raw_trades["ask_order_id"] = 0, 0
+    raw_trades["bs_flag"] = "B"
+    trades = normalize(raw_trades, "hft_trades", instruments)
+    panel = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    inputs = {}
+    for name, frame in (
+        ("hft_panel", panel),
+        ("hft_orders", orders),
+        ("hft_trades", trades),
+    ):
+        root = tmp_path / name
+        spec = (
+            next(item for item in processed_specs() if item.data_id == name)
+            if name == "hft_panel"
+            else interim_spec(name)
+        )
+        write_dataset(root, frame, spec=spec)
+        inputs[name] = str(root)
+    columns = (
+        ["spread_cny", "book_ofi", "depth_normalized_ofi"]
+        if data_id == "hft_factors"
+        else [
+            "trade_signed_run",
+            "trade_volume_flow_imbalance",
+            "observed_order_age_seconds",
+            "observed_cancel_age_seconds",
+            "observed_lifecycle_match_fraction",
+        ]
+    )
+    output = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": data_id,
+            "inputs": {"hft_panel": inputs["hft_panel"]}
+            if data_id == "hft_factors"
+            else inputs,
+            "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+            "output_root": str(tmp_path / "factors"),
+            "factor_columns": columns,
+            **(
+                {
+                    "parameters": {
+                        "order_link_field": "ex_order_id",
+                        "event_window": 2,
+                        "volume_window": 100,
+                    }
+                }
+                if data_id == "hft_event_factors"
+                else {}
+            ),
+        }
+    )
+    result = read_dataset(output)
+    if data_id == "hft_factors":
+        np.testing.assert_allclose(result.spread_cny, 0.02)
+        assert result.book_ofi.iloc[1] == -50
+        assert np.isnan(result.depth_normalized_ofi.iloc[1])
+        assert result.depth_normalized_ofi.iloc[2] == pytest.approx(1 / 3)
+    else:
+        # Same-stream source rows prove 100 - 40 - 20 = 40 shares remain.
+        # Sub-millisecond cancel age stays unknown; later observed age is usable.
+        np.testing.assert_allclose(
+            result.observed_order_age_seconds.iloc[1:3], [2, (40 * 5 + 60 * 1) / 100]
+        )
+        assert result.observed_cancel_age_seconds.iloc[1:3].isna().all()
+        assert result.observed_lifecycle_match_fraction.iloc[2] == 1
+        assert result.trade_volume_flow_imbalance.iloc[1] == 1
+        assert result.iloc[-1][columns].isna().all()

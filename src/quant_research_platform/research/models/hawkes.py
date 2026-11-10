@@ -307,7 +307,9 @@ def load_hawkes(path):
     facts = parse_qrp_json_object((Path(path) / "model.json").read_bytes())
     if facts["kind"] != "bivariate_exponential_hawkes":
         raise ValueError("hawkes_model_kind_invalid")
-    cutoff = pd.Timestamp(facts["fit_cutoff"])
-    if pd.isna(cutoff) or cutoff.tz is not None:
-        raise ValueError("hawkes_fit_cutoff_invalid")
-    return hawkes_parameters(facts["parameters"]), cutoff
+    parameters = facts["parameters"]
+    return (
+        np.asarray(parameters["baseline"], dtype=float),
+        np.asarray(parameters["branching"], dtype=float),
+        parameters["decay"],
+    ), pd.Timestamp(facts["fit_cutoff"])

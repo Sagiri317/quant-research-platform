@@ -135,6 +135,7 @@ def test_dataset_file_batches_preserve_output_across_files(
         logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
         read_paths=paths,
+        _fragments=dict.fromkeys(paths),
         arrow_schema=batches[paths[0]].schema,
     )
     converted = dataset_reading.iter_dataset_file_batches(context, columns=("value",))

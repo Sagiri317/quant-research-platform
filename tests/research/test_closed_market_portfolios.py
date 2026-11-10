@@ -33,7 +33,8 @@ from quant_research_platform.research.portfolios.diagnostics import (
 from quant_research_platform.research.risk import (
     FactorRiskConfig,
 )
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from tests.helpers.portfolio_inputs import _interim_specs
 from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
 from tests.helpers.portfolio_ledger import session_frame
 
@@ -69,6 +70,39 @@ def _ledger(layout, roots):
             1_000_000.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0
         ),
     )
+
+
+def test_single_market_account_uses_only_its_execution_fees(tmp_path):
+    layout, roots, _, panel = _native_inputs(
+        tmp_path / "inputs", fault="normal_open", open_assets=0
+    )
+    assert panel.market_type.unique().tolist() == [1]
+    expected = list(_ledger(layout, roots))
+    assert any(batch.trades for batch in expected)
+    fees = read_dataset(layout["fees"])
+    for market in ("shanghai", "shenzhen"):
+        fee_root = tmp_path / market
+        write_dataset(
+            fee_root,
+            fees.assign(market=market),
+            spec=_interim_specs().get("a_share_fee_schedule"),
+        )
+        stream = _ledger({**layout, "fees": fee_root}, roots)
+        if market == "shenzhen":
+            with pytest.raises(ValueError, match="a_share_fee_schedule_missing"):
+                list(stream)
+            continue
+        actual = list(stream)
+        assert [(b.trades, b.cashflows, b.valuations) for b in actual] == [
+            (b.trades, b.cashflows, b.valuations) for b in expected
+        ]
+        ledger = write_portfolio_ledger_artifact(
+            tmp_path / "ledger",
+            capital=PortfolioCapital("shanghai", 1e6, "CNY", "cash_equity"),
+            metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
+            produce=lambda emit, actual=actual: [emit(batch) for batch in actual],
+        )
+        assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == actual
 
 
 def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoints(

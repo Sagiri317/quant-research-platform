@@ -120,7 +120,6 @@ def process_prediction_signals(
                 "asset_id",
                 "segment_id",
                 "session_date",
-                "eligible",
                 "exchange",
                 "instrument_type",
             )
@@ -150,8 +149,7 @@ def process_prediction_signals(
         & current_session.ne("")
         & current_session.eq(work._session)
     )
-    work["eligible"] = work.eligible.fillna(False) & valid
-    work["prediction_score"] = work.prediction_score.where(work.eligible)
+    work["prediction_score"] = work.prediction_score.where(valid)
     for _, group in work.groupby(
         ["asset_id", "session_date", "segment_id"], sort=False
     ):

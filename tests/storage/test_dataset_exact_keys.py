@@ -145,7 +145,7 @@ def test_exact_primary_key_index_retains_exact_native_semantics():
 
 
 @pytest.mark.parametrize("string_type", (pa.string(), pa.large_string()))
-def test_chunked_repeated_keys_preserve_canonical_bytes_and_batch_identity(string_type):
+def test_chunked_repeated_keys_use_compact_schema_bound_identity(string_type):
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     timestamp_type = pa.timestamp("ns", tz="UTC")
     table = pa.table(
@@ -157,14 +157,10 @@ def test_chunked_repeated_keys_preserve_canonical_bytes_and_batch_identity(strin
     index = module.ExactPrimaryKeyIndex(primary_key=table.column_names)
     assert index.add_table(table) == 1
 
-    def frame(kind, payload):
-        tag = str(kind).encode("utf-8")
-        value = b"1" + payload
-        return struct.pack(">Q", len(tag)) + tag + struct.pack(">Q", len(value)) + value
-
     expected = {
-        frame(string_type, asset.encode("utf-8"))
-        + frame(timestamp_type, struct.pack(">q", timestamp))
+        struct.pack(">Q", len(asset.encode("utf-8")))
+        + asset.encode("utf-8")
+        + struct.pack(">q", timestamp)
         for asset, timestamp in (("甲", 1), ("b", 2), ("甲", 2))
     }
     assert set(index._namespaces["dataset"]) == expected

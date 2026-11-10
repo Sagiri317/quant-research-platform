@@ -2102,7 +2102,7 @@ def test_simple_producer_distinguishes_fee_coverage_from_malformed_fee(
         fee_frame=missing_coverage,
         output_window=output_window,
     )
-    with pytest.raises(PortfolioTargetBlocked, match="portfolio_fee_coverage_missing"):
+    with pytest.raises(ValueError, match="a_share_fee_schedule_missing"):
         list(output)
     malformed = fee_frame.copy()
     malformed["rate"] = malformed["rate"].astype(object)

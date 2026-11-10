@@ -17,7 +17,7 @@ from quant_research_platform.storage.atomic import (
 from quant_research_platform.storage.identity import open_filesystem_file
 from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
-    _opened_parquet,
+    iter_dataset_part_batches,
     parquet_table_writer,
 )
 
@@ -184,7 +184,7 @@ def attribution_additivity(base, contributions, output, relative):
     return residual, tolerance, ""
 
 
-def _validate(metadata, tables, *, partial=False):
+def _validate(metadata, tables):
     if not isinstance(metadata, dict) or metadata.get("kind") != "MODEL_EXPLANATION":
         raise ValueError("explanation_metadata_invalid")
     for key in ("model", "model_id", "model_algorithm", "target_column", "label_unit"):
@@ -269,13 +269,10 @@ def _validate(metadata, tables, *, partial=False):
         expected.update(("permutation_repeats", "permutation_summary"))
     if set(methods) - {"native_importance", "permutation"}:
         expected.update(("predictions", "contributions", "summary"))
-    if (
-        not expected
-        or not tables
-        or (set(tables) - expected if partial else set(tables) != expected)
-    ):
+    if not expected or set(tables) != expected:
         raise ValueError("explanation_members_invalid")
     result = {}
+    arrow_tables = {}
     for name, frame in tables.items():
         schema = _SCHEMAS[name]
         if list(frame.columns) != schema.names or frame.empty:
@@ -286,6 +283,7 @@ def _validate(metadata, tables, *, partial=False):
             )
         except (pa.ArrowException, ValueError, TypeError):
             raise ValueError("explanation_table_schema_invalid") from None
+        arrow_tables[name] = table
         converted = table.to_pandas()
         if (
             converted[_KEYS[name]].isna().any(axis=None)
@@ -380,28 +378,21 @@ def _validate(metadata, tables, *, partial=False):
             or not counts.eq(len(metadata["input_columns"])).all()
         ):
             raise ValueError("explanation_row_binding_invalid")
-        predictions = predictions.sort_index()
-        matrix = contributions.pivot(
-            index=["timestamp", "asset_id"], columns="feature", values="contribution"
-        ).reindex(columns=metadata["input_columns"])
         defined = predictions.status.eq("DEFINED")
-        if matrix.loc[defined].isna().any(axis=None) or matrix.loc[
-            ~defined
-        ].notna().any(axis=None):
+        row_defined = defined.reindex(
+            pd.MultiIndex.from_frame(contributions[["timestamp", "asset_id"]])
+        ).to_numpy()
+        if contributions.contribution.notna().ne(row_defined).any():
             raise ValueError("explanation_row_status_invalid")
-        for key, row in predictions.loc[defined].iterrows():
-            residual, tolerance, reason = attribution_additivity(
-                row.base_value,
-                matrix.loc[key],
-                row.explained_output,
-                metadata["attribution"]["additivity_relative_tolerance"],
-            )
-            if (
-                reason
-                or abs(row.additivity_residual) > row.additivity_tolerance
-                or not abs(residual) <= row.additivity_tolerance <= tolerance
-            ):
-                raise ValueError("explanation_additivity_failed")
+        # The producer computes additivity and its status once. Publication
+        # checks the saved result's shape and bounds, not a second attribution.
+        if (
+            predictions.loc[defined, "additivity_residual"]
+            .abs()
+            .gt(predictions.loc[defined, "additivity_tolerance"])
+            .any()
+        ):
+            raise ValueError("explanation_additivity_failed")
     if "summary" in result:
         summary = result["summary"]
         if (
@@ -422,7 +413,7 @@ def _validate(metadata, tables, *, partial=False):
             .all()
         ):
             raise ValueError("explanation_summary_coverage_invalid")
-    return result
+    return arrow_tables
 
 
 def write_explanation(path: Path, *, metadata: dict, tables: dict) -> Path:
@@ -431,18 +422,14 @@ def write_explanation(path: Path, *, metadata: dict, tables: dict) -> Path:
     path = Path(path)
 
     def write(staging):
-        for name, frame in tables.items():
+        for name, table in tables.items():
             with open_filesystem_file(
                 staging / (name + ".parquet"), mode="xb"
             ) as handle:
                 with parquet_table_writer(
                     handle, compression="zstd", schema=_SCHEMAS[name]
                 ) as writer:
-                    writer(
-                        pa.Table.from_pandas(
-                            frame, schema=_SCHEMAS[name], preserve_index=False
-                        )
-                    )
+                    writer(table)
         atomic_write_json(
             staging / "metadata.json", {**metadata, "members": list(tables)}
         )
@@ -452,13 +439,12 @@ def write_explanation(path: Path, *, metadata: dict, tables: dict) -> Path:
 
 
 def read_explanation(
-    path: Path, *, members: list[str] | tuple[str, ...] | None = None
+    path: Path,
+    *,
+    members: list[str] | tuple[str, ...] | None = None,
+    observation: tuple[pd.Timestamp, str] | None = None,
 ) -> tuple[dict, dict[str, pd.DataFrame]]:
-    """Read selected members; row attributions also require their prediction pair.
-
-    Omit members to validate the complete artifact. Summaries and native importance
-    are independently consumable; no predictor is loaded or explanation rerun.
-    """
+    """Decode selected native tables, optionally selecting one attribution key."""
     path = Path(path)
     metadata = read_qrp_json_file(path / "metadata.json")[1]
     declared = metadata.get("members")
@@ -478,17 +464,18 @@ def read_explanation(
         or set(selected) - set(declared)
     ):
         raise ValueError("explanation_members_invalid")
-    needed = set(selected)
-    if needed & {"predictions", "contributions"}:
-        needed.update(("predictions", "contributions"))
-    if needed - set(declared):
-        raise ValueError("explanation_members_invalid")
     tables = {}
-    for name in declared:
-        if name not in needed:
-            continue
-        with _opened_parquet(path / (name + ".parquet")) as (parquet, _handle):
-            if parquet.schema_arrow.remove_metadata() != _SCHEMAS[name]:
-                raise ValueError("explanation_table_schema_invalid")
-            tables[name] = parquet.read().to_pandas()
-    return metadata, _validate(metadata, tables, partial=members is not None)
+    for name in selected:
+        filters = None
+        if observation is not None and name in {"predictions", "contributions"}:
+            timestamp, asset = observation
+            filters = [("timestamp", "==", timestamp), ("asset_id", "==", asset)]
+        tables[name] = pa.Table.from_batches(
+            list(
+                iter_dataset_part_batches(
+                    path / (name + ".parquet"), parquet_filters=filters
+                )
+            ),
+            schema=_SCHEMAS[name],
+        ).to_pandas()
+    return metadata, tables

@@ -455,7 +455,7 @@ def test_strict_research_input_value_nan_does_not_count_as_missing_key(
 
 
 @pytest.mark.parametrize("coverage_policy", ["strict", "sparse"])
-def test_research_input_extra_key_outside_base_fails_closed(
+def test_research_input_extra_key_outside_base_is_not_consumed(
     tmp_path: Path, coverage_policy: str
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -464,22 +464,28 @@ def test_research_input_extra_key_outside_base_fails_closed(
         make_dummy_research_dataset_spec(key_coverage={"factors": coverage_policy})
     )
     write_dummy_processed_inputs(layout, processed_catalog, extra_factor_key=True)
-    with pytest.raises(ValueError, match="extra_research_input_keys: factors: 1"):
-        assemble_research_dataset(
-            inputs={
-                item.data_id: layout.processed_data_root(
-                    item.market_id, item.kind, item.data_id
-                )
-                for item in processed_catalog.list()
-                if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
-            },
-            output_root=layout.research_dataset_root(
-                dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
-            ),
-            dataset_catalog=dataset_catalog,
-            dataset_id="dummy_dataset",
-            time_window=TimeWindow("2024-01-02", "2024-01-03"),
-        )
+    assemble_research_dataset(
+        inputs={
+            item.data_id: layout.processed_data_root(
+                item.market_id, item.kind, item.data_id
+            )
+            for item in processed_catalog.list()
+            if item.data_id in dataset_catalog.get("dummy_dataset").input_data_ids
+        },
+        output_root=layout.research_dataset_root(
+            dataset_catalog.get("dummy_dataset").market_id, "dummy_dataset"
+        ),
+        dataset_catalog=dataset_catalog,
+        dataset_id="dummy_dataset",
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+    result = read_dataset(layout.research_dataset_root("dummy_market", "dummy_dataset"))
+    assert result.asset_id.tolist() == ["asset_a", "asset_b"]
+    assert result.timestamp.tolist() == list(
+        pd.to_datetime(["2024-01-02", "2024-01-03"])
+    )
+    assert result.factor_1.tolist() == [1.0, 2.0]
+    assert result.label_1.tolist() == [0.1, 0.2]
 
 
 def test_research_dataset_reports_incompatible_and_missing_required_specs() -> None:

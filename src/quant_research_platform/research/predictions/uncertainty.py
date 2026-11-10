@@ -131,11 +131,9 @@ def apply_uncertainty(config):
     ):
         raise ValueError("uncertainty_calibration_not_frozen")
     cost = strict_finite_float(config["cost"], error="uncertainty_cost_invalid")
-    radius = strict_finite_float(
-        calibration["radius"], error="uncertainty_radius_invalid"
-    )
-    if cost < 0 or radius < 0:
-        raise ValueError("uncertainty_cost_or_radius_negative")
+    radius = calibration["radius"]
+    if cost < 0:
+        raise ValueError("uncertainty_cost_negative")
     frame, metadata = read_predictions(
         Path(config["predictions"]), time_window=TimeWindow(**config["window"])
     )

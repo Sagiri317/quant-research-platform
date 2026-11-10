@@ -102,6 +102,7 @@ def test_reader_propagates_decode_failure(
         data_root = Path(".")
         native = False
         read_paths = (Path("part.parquet"),)
+        _fragments = {Path("part.parquet"): None}
         physical_columns = ("value",)
         logical_columns = ("value",)
         logical_dtypes = {}
@@ -146,6 +147,7 @@ def test_dataset_iterator_context_preserves_caller_primary(
         data_root = Path(".")
         native = False
         read_paths = (Path("part.parquet"),)
+        _fragments = {Path("part.parquet"): None}
         physical_columns = ("value",)
         logical_columns = ("value",)
         logical_dtypes = {}

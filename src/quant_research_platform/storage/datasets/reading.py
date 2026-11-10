@@ -59,6 +59,7 @@ from quant_research_platform.storage.parquet import (
     DatasetPartMetadata,
     PreparedMembershipValues,
     _physical_filter_scalar,
+    dataset_part_fragments,
     inspect_dataset_part,
     iter_dataset_part_batches,
 )
@@ -81,6 +82,7 @@ class DatasetSession:
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
+    _fragments: dict
     _allow_infinite_columns: tuple[str, ...] = ()
 
     @property
@@ -425,6 +427,7 @@ def _bare_dataset_session(
         parquet_filters=tuple(filters) or None,
         all_paths=paths,
         read_paths=paths,
+        _fragments={},
     )
 
 
@@ -592,6 +595,7 @@ def _build_dataset_session(
     session = DatasetSession(
         all_paths=all_paths,
         read_paths=selected_paths,
+        _fragments=dataset_part_fragments(selected_paths),
         root=root,
         data_root=data_root,
         logical_columns=logical_columns,
@@ -705,6 +709,7 @@ def iter_declared_parquet_member_batches(
     columns: tuple[str, ...] | None = None,
     parquet_filters: list[tuple[str, str, Any]] | None = None,
     dtype_overrides: Mapping[str, object] | None = None,
+    fragment=None,
     metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
     persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
@@ -717,6 +722,7 @@ def iter_declared_parquet_member_batches(
             batch_rows=rows_per_batch,
             columns=columns,
             parquet_filters=parquet_filters,
+            fragment=fragment,
             metadata_observer=metadata_observer,
         )
     ) as batches:
@@ -783,6 +789,7 @@ def iter_dataset_file_batches(
                 parquet_filters=context.parquet_filters,
                 batch_rows=rows_per_batch,
                 dtype_overrides=dtype_overrides,
+                fragment=context._fragments.get(path),
                 metadata_observer=validate_metadata
                 if not context.native or validate_parts
                 else None,

@@ -1,4 +1,4 @@
-"""A-share weighting accepts explicit decay independently of research roles."""
+"""A-share model eligibility and weighting follow the scientific protocol."""
 
 import pytest
 
@@ -45,3 +45,21 @@ def test_explicit_robustness_role_still_blocks_formal_joint_inference(role):
     assert _inference_blocker({"training_weighting": {"role": role}}) == (
         None if role == "primary" else "training_weighting_robustness_excluded"
     )
+
+
+@pytest.mark.parametrize("mode", ("eligible", "unfiltered"))
+def test_a_share_filter_admission(mode):
+    spec = ModelSpec(
+        model_id="candidate",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        target_column="label",
+        sample_filter_mode=mode,
+    )
+    if mode == "unfiltered":
+        with pytest.raises(
+            ValueError, match="a_share_model_sample_filter_mode_not_supported"
+        ):
+            validate_model_selection([spec])
+    else:
+        validate_model_selection([spec])

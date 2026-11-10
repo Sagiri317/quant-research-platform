@@ -11,8 +11,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.explanations import (
@@ -425,12 +423,12 @@ def test_selected_summary_reader_and_plot_ignore_unconsumed_members(
         plots.plot({**config, "output": str(tmp_path / "missing.png")})
 
 
-def test_waterfall_reads_and_validates_pair_without_summary(tmp_path):
+def test_waterfall_reads_selected_pair_without_summary(tmp_path):
     source = explanation_fixture(tmp_path / "explain")
     (source / "summary.parquet").unlink()
     (source / "native_importance.parquet").unlink()
     _, tables = read_explanation(source, members=["contributions"])
-    assert set(tables) == {"predictions", "contributions"}
+    assert set(tables) == {"contributions"}
     config = {
         "kind": "explanation_waterfall",
         "inputs": str(source),
@@ -439,37 +437,60 @@ def test_waterfall_reads_and_validates_pair_without_summary(tmp_path):
         "asset_id": "asset-A",
     }
     assert plots.plot(config).stat().st_size > 1000
-    tables["contributions"].loc[0, "contribution"] += 1.0
-    member_path = source / "contributions.parquet"
-    pq.write_table(
-        pa.Table.from_pandas(
-            tables["contributions"], schema=pq.read_schema(member_path)
-        ),
-        member_path,
-    )
-    with pytest.raises(ValueError, match="explanation_additivity_failed"):
-        read_explanation(source, members=["predictions"])
-    with pytest.raises(ValueError, match="explanation_additivity_failed"):
-        plots.plot({**config, "output": str(tmp_path / "invalid.png")})
     (source / "predictions.parquet").unlink()
-    with pytest.raises(FileNotFoundError):
-        read_explanation(source, members=["contributions"])
     with pytest.raises(FileNotFoundError):
         plots.plot({**config, "output": str(tmp_path / "missing.png")})
 
 
-def test_selected_summary_still_checks_own_coverage_and_publication_requires_all(
-    tmp_path,
-):
+def test_publication_requires_complete_members_and_valid_coverage(tmp_path):
     source = explanation_fixture(tmp_path / "explain")
-    metadata, tables = read_explanation(source, members=["summary"])
+    metadata, tables = read_explanation(source)
     with pytest.raises(ValueError, match="explanation_members_invalid"):
-        write_explanation(tmp_path / "incomplete", metadata=metadata, tables=tables)
+        write_explanation(
+            tmp_path / "incomplete",
+            metadata=metadata,
+            tables={"summary": tables["summary"]},
+        )
     tables["summary"].loc[0, "observation_count"] = 2
-    member_path = source / "summary.parquet"
-    pq.write_table(
-        pa.Table.from_pandas(tables["summary"], schema=pq.read_schema(member_path)),
-        member_path,
-    )
     with pytest.raises(ValueError, match="explanation_summary_coverage_invalid"):
-        read_explanation(source, members=["summary"])
+        write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
+
+
+def test_waterfall_pushes_exact_observation_to_native_reader(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts import explanations
+
+    source = explanation_fixture(tmp_path / "explain")
+    metadata, tables = read_explanation(source)
+    for name in ("predictions", "contributions"):
+        tables[name] = pd.concat(
+            [tables[name], tables[name].assign(asset_id="asset-B")], ignore_index=True
+        )
+    tables["summary"][["observation_count", "sample_count"]] = 2
+    source = write_explanation(tmp_path / "two-keys", metadata=metadata, tables=tables)
+    opened = []
+    original = explanations.iter_dataset_part_batches
+
+    def selected(path, **kwargs):
+        batches = list(original(path, **kwargs))
+        opened.append(
+            (path.name, kwargs["parquet_filters"], sum(b.num_rows for b in batches))
+        )
+        yield from batches
+
+    monkeypatch.setattr(explanations, "iter_dataset_part_batches", selected)
+    config = {
+        "kind": "explanation_waterfall",
+        "inputs": str(source),
+        "output": str(tmp_path / "waterfall.png"),
+        "timestamp": "2026-01-02T09:30:00.000000123",
+        "asset_id": "asset-A",
+    }
+    assert plots.plot(config).stat().st_size > 1000
+    filters = [
+        ("timestamp", "==", pd.Timestamp(config["timestamp"])),
+        ("asset_id", "==", "asset-A"),
+    ]
+    assert opened == [
+        ("predictions.parquet", filters, 1),
+        ("contributions.parquet", filters, 4),
+    ]
