@@ -190,12 +190,14 @@ def test_market_model_252_pair_and_60_residual_exact_fresh_thresholds():
     assert result.beta.isna().all()
 
 
-def test_partial_windows_keep_lifecycle_and_output_chunk_boundaries():
+@pytest.mark.parametrize("dtype", ["float64", "Float64", "string"])
+def test_partial_windows_keep_lifecycle_and_output_chunk_boundaries(dtype):
     from quant_research_platform.contracts.time import TimeWindow
 
     values = np.sin(np.arange(80)) * 0.01
     values[::5] = np.nan
     data = panel(values, [0] * 80).assign(listing_date=pd.Timestamp("2000-01-01"))
+    data = data.astype({"period_return": dtype, "amount": dtype})
     names = ("avg_amount_20d", "volatility_20d", "skewness_20d")
     full = calculate_price_volume_factors(
         data, factor_columns=names, history_keys=("asset_id", "listing_date")

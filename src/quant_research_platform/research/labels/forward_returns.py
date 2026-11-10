@@ -24,6 +24,7 @@ def add_forward_return_labels(
     execution_price_column: str = "adj_open",
     sessions: Sequence[object],
     include_next_intraday: bool = False,
+    history_keys: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     """Add fixed-session real-open returns independently of execution permissions.
 
@@ -32,6 +33,7 @@ def add_forward_return_labels(
     The wd-adjusted opening price depends on that session's closing inputs.
     Availability is therefore the exit session's 15:00 Asia/Shanghai close,
     represented as a UTC-naive instant, without changing the opening endpoints.
+    Additional history keys keep both endpoints within the same lifecycle.
     """
 
     if type(include_next_intraday) is not bool:
@@ -46,6 +48,7 @@ def add_forward_return_labels(
         asset_column=asset_column,
         date_column=date_column,
         execution_price_column=execution_price_column,
+        history_keys=history_keys,
     )
     axis = _session_axis(sessions)
     if include_next_intraday and "adj_close" not in validated:
@@ -58,6 +61,7 @@ def add_forward_return_labels(
         date_column=date_column,
         execution_price_column=execution_price_column,
         include_next_intraday=include_next_intraday,
+        history_keys=history_keys,
     )
 
 
@@ -70,6 +74,7 @@ def _forward_return_labels(
     date_column="timestamp",
     execution_price_column="adj_open",
     include_next_intraday=False,
+    history_keys=(),
 ):
     """Calculate endpoints after the caller validates keys and the session axis."""
     result = validated.sort_values([asset_column, date_column], kind="mergesort")
@@ -78,11 +83,14 @@ def _forward_return_labels(
         error="invalid_forward_return_price",
         allow_null=True,
     ).astype("float64")
-    keys = pd.MultiIndex.from_arrays([result[asset_column], result[date_column]])
+    identities = result.groupby(
+        list(dict.fromkeys((asset_column, *history_keys))), sort=False, dropna=False
+    ).ngroup()
+    keys = pd.MultiIndex.from_arrays([identities, result[date_column]])
     positions = axis.get_indexer(result[date_column])
     prices = price.to_numpy(dtype="float64", copy=False)
     real_quote, _ = _quote_observation_masks(result)
-    assets = result[asset_column].to_numpy(copy=False)
+    assets = identities.to_numpy(copy=False)
     entry_positions = np.flatnonzero((positions >= 0) & (positions + 1 < len(axis)))
     entry_rows = keys.get_indexer(
         pd.MultiIndex.from_arrays(
@@ -221,8 +229,14 @@ def _validate_label_input_frame(
     asset_column: str,
     date_column: str,
     execution_price_column: str,
+    history_keys: tuple[str, ...] = (),
 ) -> pd.DataFrame:
-    required_columns = (asset_column, date_column, execution_price_column)
+    required_columns = (
+        asset_column,
+        date_column,
+        execution_price_column,
+        *history_keys,
+    )
     missing = [column for column in required_columns if column not in frame.columns]
     if missing:
         raise ValueError(f"missing_forward_return_columns: {', '.join(missing)}")
@@ -230,6 +244,12 @@ def _validate_label_input_frame(
     strict_hashable_key_series(
         result[asset_column], error="invalid_forward_return_asset_key"
     )
+    for name in dict.fromkeys(history_keys):
+        strict_hashable_key_series(
+            result[name],
+            error=f"invalid_forward_return_history_key: {name}",
+            allow_null=True,
+        )
     result[date_column] = strict_timestamp_series(
         result[date_column], error="invalid_forward_return_timestamp"
     )

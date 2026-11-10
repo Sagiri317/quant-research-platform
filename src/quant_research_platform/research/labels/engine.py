@@ -17,6 +17,7 @@ def calculate_labels_for_panel(
     *,
     definitions: Sequence[LabelDefinition],
     sessions: Sequence[object],
+    history_keys: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_label_input_columns(panel_frame, requested)
@@ -26,7 +27,10 @@ def calculate_labels_for_panel(
     if set(families) - {"forward_return", "next_intraday_return"}:
         raise ValueError("unknown_label_family")
     result = add_forward_return_labels(
-        panel_frame.loc[:, list(label_panel_input_columns(requested))],
+        panel_frame.loc[
+            :,
+            list(dict.fromkeys((*label_panel_input_columns(requested), *history_keys))),
+        ],
         horizons=tuple(
             definition.horizon
             for definition in requested
@@ -37,6 +41,7 @@ def calculate_labels_for_panel(
         date_column="timestamp",
         execution_price_column="adj_open",
         sessions=sessions,
+        history_keys=history_keys,
     )
     return result
 

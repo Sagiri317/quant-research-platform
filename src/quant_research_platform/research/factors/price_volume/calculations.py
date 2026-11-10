@@ -77,6 +77,12 @@ def calculate_price_volume_factors(
     )
     if ordered.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("price_volume_key_duplicate")
+    for name in names:
+        ordered[name] = strict_finite_numeric_series(
+            ordered[name],
+            error=f"price_volume_value_invalid: {name}",
+            allow_null=True,
+        ).to_numpy(dtype="float64", copy=False)
     ordered = ordered.sort_values([*history_keys, "timestamp"], kind="mergesort")
     output: dict[str, list[np.ndarray]] = {factor: [] for factor in requested}
     bounds = (
@@ -86,12 +92,7 @@ def calculate_price_volume_factors(
         list(history_keys), sort=False, dropna=False
     ):
         values = {
-            name: strict_finite_numeric_series(
-                group[name],
-                error=f"price_volume_value_invalid: {name}",
-                allow_null=True,
-            ).to_numpy(dtype="float64", copy=False)
-            for name in names
+            name: group[name].to_numpy(dtype="float64", copy=False) for name in names
         }
         statistical_values = values
         if status:

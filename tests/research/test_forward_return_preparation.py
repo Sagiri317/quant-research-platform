@@ -9,6 +9,55 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 
 
+def test_batched_history_keys_keep_lifecycle_endpoints_and_clocks():
+    sessions = pd.bdate_range("2024-01-02", periods=10)
+    prices = np.array([10, 11, 12, 20, 22, 24, 30, 33, 36, 39], dtype="float64")
+    frame = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": sessions,
+            "adj_open": prices,
+            "adj_close": prices * 1.01,
+            "filling_flag": 0,
+            "is_trading": True,
+            "listing_date": [pd.Timestamp("2000-01-01")] * 3
+            + [pd.Timestamp("2024-01-05")] * 3
+            + [pd.NaT]
+            + [pd.Timestamp("2024-01-05")] * 3,
+            "segment": [0, 0, 0, 1, 1, 1, 2, 3, 3, 3],
+        }
+    )
+    result = add_forward_return_labels(
+        frame,
+        horizons=(1,),
+        sessions=sessions,
+        include_next_intraday=True,
+        history_keys=("listing_date", "segment"),
+    )
+    expected = np.full(10, np.nan)
+    expected[[0, 3, 7]] = [12 / 11 - 1, 24 / 22 - 1, 39 / 36 - 1]
+    np.testing.assert_allclose(result.forward_return_1d, expected, atol=1e-15)
+    expected_clock = pd.Series(pd.NaT, index=range(10), dtype="datetime64[ns]")
+    expected_clock.loc[[0, 3, 7]] = sessions[[2, 5, 9]] + pd.Timedelta(hours=7)
+    pd.testing.assert_series_equal(
+        result.forward_return_1d_available_at, expected_clock, check_names=False
+    )
+    expected[:] = np.nan
+    expected[[0, 1, 3, 4, 7, 8]] = 0.01
+    np.testing.assert_allclose(
+        result.next_session_intraday_return, expected, atol=1e-15
+    )
+    expected_clock[:] = pd.NaT
+    expected_clock.loc[[0, 1, 3, 4, 7, 8]] = sessions[
+        [1, 2, 4, 5, 8, 9]
+    ] + pd.Timedelta(hours=7)
+    pd.testing.assert_series_equal(
+        result.next_session_intraday_return_available_at,
+        expected_clock,
+        check_names=False,
+    )
+
+
 def test_shared_entries_preserve_sparse_quotes_and_horizon_availability(monkeypatch):
     sessions = pd.bdate_range("2024-01-02", periods=12)
     frame = pd.DataFrame(
@@ -191,7 +240,7 @@ def test_native_producer_persists_observed_endpoint_labels_without_execution(tmp
         prepare(request)
 
 
-def test_producer_clips_each_lifecycle_and_market_axis_without_compressing_gaps(
+def test_producer_batches_lifecycles_on_each_clipped_market_axis(
     monkeypatch,
 ):
     from quant_research_platform.markets.implementations.a_share.processed import (
@@ -274,4 +323,4 @@ def test_producer_clips_each_lifecycle_and_market_axis_without_compressing_gaps(
         rtol=1e-12,
         atol=0.0,
     )
-    assert lengths == [12, 6, 12, 11, 6, 12]
+    assert lengths == [30, 29]

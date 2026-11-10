@@ -1310,15 +1310,11 @@ def _compute_processed_frame(
             if definition.output_column in spec.required_columns
         )
         pieces = []
-        for key, group in panel.groupby(
-            ["asset_id", "listing_date"]
-            + (["_calendar_segment"] if "_calendar_segment" in panel else []),
-            sort=False,
-            dropna=False,
-        ):
-            axis = (
-                trading_sessions if asset_sessions is None else asset_sessions[key[0]]
-            )
+        history_keys = ("listing_date",) + (
+            ("_calendar_segment",) if "_calendar_segment" in panel else ()
+        )
+        for asset, group in panel.groupby("asset_id", sort=False):
+            axis = trading_sessions if asset_sessions is None else asset_sessions[asset]
             # The input already includes the requested endpoint lookahead.
             # Retain interior missing sessions without rebuilding full history.
             axis = axis[
@@ -1328,7 +1324,10 @@ def _compute_processed_frame(
             ]
             pieces.append(
                 label_engine.calculate_labels_for_panel(
-                    group, definitions=definitions, sessions=axis
+                    group,
+                    definitions=definitions,
+                    sessions=axis,
+                    history_keys=history_keys,
                 )
             )
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
