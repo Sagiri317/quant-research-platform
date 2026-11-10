@@ -163,11 +163,13 @@ def processed_catalog() -> ProcessedDataCatalog:
     from quant_research_platform.research.protocols.a_share_hft import processed_specs
 
     from .daily_quotes import processed_specs as daily_quote_specs
+    from .market_states import processed_spec as state_spec
     from .public_factors import processed_spec as public_spec
 
     return ProcessedDataCatalog(
         (
             financing_spec(),
+            state_spec(),
             public_spec("linked_market_factors"),
             public_spec("fund_flow_factors"),
             *daily_quote_specs(),

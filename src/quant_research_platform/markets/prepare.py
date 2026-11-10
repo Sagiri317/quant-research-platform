@@ -82,7 +82,11 @@ def prepare(config: Mapping) -> Path:
         kwargs = {"source_catalog": InterimDataCatalog(specs.values())}
         from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
-        if spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
+        if spec.data_id == "market_state_factors":
+            from .implementations.a_share.processed.market_states import produce
+
+            producer, kwargs = produce, {}
+        elif spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
             from .implementations.a_share.processed.daily_quotes import produce
 
             producer, kwargs = produce, {}
@@ -158,6 +162,11 @@ def prepare(config: Mapping) -> Path:
 def _configured_spec(spec, config):
     """Apply only options consumed by this explicitly requested mathematical recipe."""
     from quant_research_platform.contracts.columns import ColumnRole
+
+    if spec.data_id == "market_state_factors":
+        from .implementations.a_share.processed.market_states import configured_spec
+
+        return configured_spec(spec, config)
 
     if spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
         from .implementations.a_share.processed.daily_quotes import configured_spec

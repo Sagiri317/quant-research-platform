@@ -83,3 +83,42 @@ def test_total_return_uses_ex_date_cash_and_new_over_old_split_ratio():
     result = daily_quotes.daily_decisions(prices, calendar, actions=actions)
     assert result.adj_close.tolist() == pytest.approx([10.0, 10.0])
     assert result.period_return.iloc[1] == pytest.approx(0)
+
+
+def test_native_market_states_count_stock_replicas_once_without_style_input(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.research.test_prepare_selection import _input
+
+    prices, calendar = inputs()
+    benchmark = daily_quotes.daily_decisions(
+        prices.assign(asset_id="index:000300"), calendar
+    )
+    state = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["a", "b", "c"],
+            timestamp=pd.Timestamp("2024-01-05"),
+            market_up_fraction=0.5,
+        )
+    )
+    path = prepare(
+        dict(
+            market_id="a_share",
+            data_id="market_state_factors",
+            inputs={
+                "benchmark_daily_panel": _input(
+                    tmp_path, "benchmark_daily_panel", benchmark, native=True
+                ),
+                "market_structure_factors": _input(
+                    tmp_path, "market_structure_factors", state, native=True
+                ),
+            },
+            factor_columns=["market_up_fraction"],
+            time_window=dict(start="2024-01-08", end="2024-01-08"),
+            output_root=str(tmp_path / "state"),
+        )
+    )
+    result = read_dataset(path)
+    assert len(result) == 1
+    assert result.market_up_fraction.iloc[0] == 0.5

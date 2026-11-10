@@ -335,6 +335,12 @@ def calculate(
         )
         ratio = reference.volume / reference.baseline.where(reference.baseline > 0)
         result.loc[reference.row, "late_session_relative_activity"] = ratio.to_numpy()
+    if all(
+        name.startswith("opening_relative_activity_")
+        or name == "late_session_relative_activity"
+        for name in columns
+    ):
+        return result
     stress_windows = {w: pd.Series(np.nan, index=work.index) for w in (30, 60)}
     for _, at in work.groupby(
         [work.asset_id, day, work.segment_id], sort=False

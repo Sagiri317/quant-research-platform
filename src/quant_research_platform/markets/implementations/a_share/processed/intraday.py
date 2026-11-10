@@ -104,6 +104,12 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     selected = tuple(
         name for name, role in spec.column_roles.items() if role == "factor"
     )
+    activity = tuple(
+        name
+        for name in selected
+        if name.startswith("opening_relative_activity_")
+        or name == "late_session_relative_activity"
+    )
     metadata = {
         "producer_diagnostics": {
             "missing_inputs": sorted(
@@ -135,7 +141,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 day + pd.Timedelta(days=1) - pd.Timedelta(1, "ns"),
                 pd.Timestamp(upper) - pd.Timedelta(0 if closed else 1, "ns"),
             )
-            window = TimeWindow(first, end)
+            window = TimeWindow(first if activity else day, end)
             panel_columns = (
                 *KEY,
                 "mid",
@@ -209,15 +215,31 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     .filtered_view(TimeWindow(day, end))
                     .projected_view(("asset_id", "timestamp", "segment_id", "mid"))
                 )
-            result = calculate(
-                panel,
-                columns=selected,
-                daily_context=daily,
-                trades=trades,
-                linked_panel=linked,
-                session_days=calendar,
-                **json.loads(spec.parameters_json),
+            current = panel.loc[panel.timestamp.ge(day)]
+            result = current.loc[:, list(KEY)].copy()
+            groups = (
+                (activity, panel),
+                (tuple(name for name in selected if name not in activity), current),
             )
+            for columns, observed in groups:
+                if not columns:
+                    continue
+                value = calculate(
+                    observed,
+                    columns=columns,
+                    daily_context=daily,
+                    trades=trades,
+                    linked_panel=linked,
+                    session_days=calendar,
+                    **json.loads(spec.parameters_json),
+                )
+                result = result.merge(
+                    value.loc[value.timestamp.ge(day)],
+                    on=list(KEY),
+                    how="left",
+                    validate="one_to_one",
+                )
+            result = result.loc[:, [*KEY, *selected]]
             mask = result.timestamp.ge(
                 max(day, pd.Timestamp(lower))
             ) & result.timestamp.le(end)
