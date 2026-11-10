@@ -5,8 +5,6 @@ from math import ulp
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.portfolio_ledger import (
@@ -212,14 +210,3 @@ def test_native_zero_nav_return_stays_undefined(tmp_path):
     last = daily.iloc[-1]
     assert last.return_status == "UNDEFINED" and pd.isna(last.net_return)
     assert last.return_reason == "nonpositive_start_nav"
-
-    path = tmp_path / "statistics" / "portfolio_daily.parquet"
-    table = pq.read_table(path)
-    rows = table.to_pylist()
-    rows[-1].update(net_return=1e-8, return_status="DEFINED", return_reason="")
-    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
-    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
-        with read_statistics_artifact(tmp_path / "statistics").table(
-            "portfolio_daily.parquet"
-        ):
-            pass

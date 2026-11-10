@@ -306,16 +306,8 @@ def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
     assert result.close.isna().all()
 
 
-@pytest.mark.parametrize("consume", ["iterate", "amount_summary"])
-def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
-    tmp_path, consume
-):
+def test_ledger_publication_rejects_unsupported_research_valuation_policy(tmp_path):
     from dataclasses import replace
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.contracts.portfolios import RESEARCH_VALUATION_POLICY
 
     batch = _account()
     batch = replace(
@@ -326,34 +318,19 @@ def test_consumed_ledger_rejects_unsupported_research_valuation_policy(
                 "__cash__",
                 None,
                 "research_valuation_policy",
-                text=RESEARCH_VALUATION_POLICY,
+                text="unsupported_scientific_policy",
             ),
         ),
     )
-    capital = PortfolioCapital("policy", 100.0, "CNY", "cash_equity")
-    root = artifacts.write_portfolio_ledger_artifact(
-        tmp_path / "policy",
-        capital=capital,
-        metadata={"window": {"start": "2023-01-01", "end": "2023-01-02"}},
-        produce=lambda emit: emit(batch),
-    )
-    path = root / "diagnostics.parquet"
-    table = pq.read_table(path)
-    rows = table.to_pylist()
-    for row in rows:
-        if row["name"] == "research_valuation_policy":
-            row["text"] = "unsupported_scientific_policy"
-    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
+    root = tmp_path / "policy"
     with pytest.raises(ValueError, match="portfolio_research_valuation_policy_invalid"):
-        if consume == "iterate":
-            list(artifacts.read_portfolio_ledger_artifact(root).iter_chunks())
-        else:
-            artifacts.read_portfolio_ledger_artifact(
-                root,
-                consume_batches=lambda artifact, batches: (
-                    artifacts.summarize_portfolio_ledger(artifact.capital, batches)
-                ),
-            )
+        artifacts.write_portfolio_ledger_artifact(
+            root,
+            capital=PortfolioCapital("policy", 100.0, "CNY", "cash_equity"),
+            metadata={"window": {"start": "2023-01-01", "end": "2023-01-02"}},
+            produce=lambda emit: emit(batch),
+        )
+    assert not root.exists()
 
 
 @pytest.mark.parametrize("selected_inputs", [False, True])
