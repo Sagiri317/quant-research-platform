@@ -28,27 +28,54 @@ from tests.helpers.high_frequency import daily_view, write_daily_inputs
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
 
 
-def test_quote_only_preparation_preserves_book_factors_and_labels(tmp_path):
+@pytest.mark.parametrize(
+    ("start", "end", "days", "rows"),
+    [
+        ("2018-02-14", "2018-02-14", ["2018-02-14"], 13),
+        (
+            "2018-02-14T00:00:00",
+            "2018-02-15T01:30:00",
+            ["2018-02-14", "2018-02-15"],
+            14,
+        ),
+    ],
+)
+def test_quote_only_preparation_preserves_book_factors_and_labels(
+    tmp_path, monkeypatch, start, end, days, rows
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        high_frequency,
+    )
     from quant_research_platform.sources.venvoo import interim_spec
     from quant_research_platform.storage.datasets import write_dataset
 
     source = tmp_path / "quotes"
+    raw = raw_quotes(tuple(93000000 + 3000 * i for i in range(13)))
     quotes = normalize(
-        raw_quotes(tuple(93000000 + 3000 * i for i in range(13))),
+        pd.concat([raw, raw.assign(date=20180215)], ignore_index=True),
         "hft_quotes",
         INSTRUMENTS,
     )
     write_dataset(source, quotes, spec=interim_spec("hft_quotes"))
+    consumed = []
+
+    def observe(quotes, *args, **kwargs):
+        consumed.extend(quotes.session_date.drop_duplicates().dt.strftime("%Y-%m-%d"))
+        return build_panel(quotes, *args, **kwargs)
+
+    monkeypatch.setattr(high_frequency, "build_panel", observe)
     panel = prepare(
         {
             "market_id": "a_share",
             "data_id": "hft_panel",
             "inputs": {"hft_quotes": str(source)},
-            "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
+            "time_window": {"start": start, "end": end},
             "output_root": str(tmp_path / "panel"),
         }
     )
     observed = read_dataset(panel)
+    assert consumed == days
+    assert len(observed) == rows
     assert observed.mid.notna().all()
     assert observed.observed_trade_volume.isna().all()
     assert observed.observed_order_volume.isna().all()

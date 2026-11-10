@@ -211,7 +211,10 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                 )
             )
         for day in pd.date_range(
-            pd.Timestamp(lower).normalize(), pd.Timestamp(upper).normalize(), freq="D"
+            pd.Timestamp(lower).normalize(),
+            pd.Timestamp(upper).normalize(),
+            freq="D",
+            inclusive="both" if closed else "left",
         ):
             window = TimeWindow(day.date(), day.date())
             data = {
