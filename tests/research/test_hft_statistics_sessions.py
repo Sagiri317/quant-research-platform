@@ -160,6 +160,7 @@ def test_saved_common_correlation_uses_identical_timestamp_blocks(tmp_path, scop
         ),
         label_columns=("label",),
         label_availability_columns={"label": "label_available_at"},
+        correlation_clock="trading_day",
         n_groups=2,
     )
     saved = evaluate(
