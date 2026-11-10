@@ -73,6 +73,20 @@ def test_financing_level_activity_change_and_liquidity_pressure_by_hand():
     assert result.financing_repayment_intensity.isna().all()
 
 
+def test_missing_context_or_report_field_only_limits_its_dependents():
+    decisions, observations, sessions = inputs()
+    result = calculate(
+        decisions.drop(columns="avg_volume_20d"),
+        observations.drop(columns="lending_repayment_quantity"),
+        sessions=sessions,
+    )
+    assert result.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
+    assert result.lending_days_to_cover_20d.isna().all()
+    assert result.short_squeeze_pressure.isna().all()
+    assert result.lending_repayment_intensity.isna().all()
+    assert result.lending_net_cover_fraction_5d.tolist() == pytest.approx([0.5, 0.5])
+
+
 def test_release_revision_and_missing_calendar_only_affect_dependents():
     decisions, observations, sessions = inputs()
     delayed = observations.iloc[[-1]].assign(

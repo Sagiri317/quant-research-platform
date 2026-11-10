@@ -94,17 +94,21 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 max(0, position - lookback - config["observation_lag_sessions"])
             ]
     fields = tuple(dict.fromkeys(RECIPES[name][0] for name in selected))
-    observations = (
-        materialize_dataset_session(
-            open_dataset_session(
-                **_dataset_input_options(inputs["public_margin_balances"]),
-            )
-            .filtered_view(TimeWindow(start, frame.signal_session.max()))
-            .projected_view(("asset_id", "timestamp", "available_at", *fields))
+    observations = None
+    if len(frame):
+        reports = open_dataset_session(
+            **_dataset_input_options(inputs["public_margin_balances"])
         )
-        if len(frame)
-        else None
-    )
+        fields = tuple(
+            c
+            for c in ("asset_id", "timestamp", "available_at", *fields)
+            if c in reports.logical_columns
+        )
+        observations = materialize_dataset_session(
+            reports.filtered_view(
+                TimeWindow(start, frame.signal_session.max())
+            ).projected_view(fields)
+        )
     calendar_dependents = (
         list(selected)
         if config["observation_lag_sessions"]
@@ -127,6 +131,9 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         )
         metadata["producer_diagnostics"]["input_invalid_numeric_cells"] = result.attrs[
             "input_invalid_numeric_cells"
+        ]
+        metadata["producer_diagnostics"]["missing_context_columns"] = result.attrs[
+            "missing_context_columns"
         ]
         result = result.loc[
             result.timestamp.ge(start_at)

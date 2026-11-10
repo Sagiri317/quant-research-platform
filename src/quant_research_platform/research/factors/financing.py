@@ -198,9 +198,18 @@ def calculate(
     if not set(columns) <= RECIPES.keys():
         raise ValueError("unknown_financing_factor")
     required = {"market_id", "asset_id", "timestamp", *decision_columns(columns)}
-    if not required <= set(decisions):
+    mandatory = {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "signal_session",
+        "listing_date",
+        "eligible",
+    }
+    if not mandatory <= set(decisions):
         raise ValueError("financing_decision_inputs_missing")
-    frame = decisions.loc[:, list(required)].reset_index(drop=True).copy()
+    missing_context = sorted(required - set(decisions))
+    frame = decisions.reindex(columns=sorted(required)).reset_index(drop=True).copy()
     frame["asset_id"] = strict_string_series(
         frame.asset_id, error="financing_asset_id_invalid"
     )
@@ -265,9 +274,11 @@ def calculate(
             .set_axis(frame.index)
         )
     fields = tuple(dict.fromkeys(RECIPES[name][0] for name in columns))
-    facts = observations.loc[
-        :, ["asset_id", "timestamp", "available_at", *fields]
-    ].copy()
+    if not {"asset_id", "timestamp", "available_at"} <= set(observations):
+        raise ValueError("financing_report_identity_missing")
+    facts = observations.reindex(
+        columns=["asset_id", "timestamp", "available_at", *fields]
+    ).copy()
     facts["asset_id"] = strict_string_series(
         facts.asset_id, error="financing_asset_id_invalid"
     )
@@ -391,4 +402,5 @@ def calculate(
             )
         output[name] = result.where(np.isfinite(result) & frame.eligible.fillna(False))
     output.attrs["input_invalid_numeric_cells"] = counts
+    output.attrs["missing_context_columns"] = missing_context
     return output
