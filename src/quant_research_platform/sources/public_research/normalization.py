@@ -214,6 +214,13 @@ DATASETS = {
         "volume": "shares",
         "adjustment_basis": "text",
     },
+    "public_domestic_etf_actions": {
+        "event_type": "identifier",
+        "amount": "CNY_per_fund_unit",
+        "numerator": "ratio",
+        "denominator": "ratio",
+        "split_ratio": "ratio",
+    },
     "public_etf_actions": {
         "event_type": "identifier",
         "amount": "USD_per_share",
@@ -228,6 +235,7 @@ DATASETS = {
     },
 }
 SOURCES = {
+    "public_domestic_etf_actions": {"eastmoney_cn_etf_corporate_actions_extracted"},
     "public_domestic_etf_prices": {"eastmoney_cn_etf_daily"},
     "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
     "public_fund_financial_cells": {"csrc_official_fund_financial_cells_extracted"},
@@ -282,7 +290,10 @@ def accepts(data_id, record):
         return path.endswith(".json")
     if record["source"].startswith("etf_pcf_"):
         return path.endswith(".csv")
-    if record["source"].startswith("yahoo_"):
+    if (
+        record["source"].startswith("yahoo_")
+        or data_id == "public_domestic_etf_actions"
+    ):
         return path.endswith(".csv")
     if data_id in {
         "public_13f_holdings",
@@ -474,7 +485,7 @@ def normalize(data_id, path, record):
                 axis=1,
             ).max(axis=1)
             result["asset_id"] = (
-                result.economic_portfolio_id
+                result.report_version_identity
                 + ":"
                 + result.table_kind
                 + ":"
@@ -852,7 +863,11 @@ def normalize(data_id, path, record):
         result["asset_id"] = path.stem.split("-")[0]
         result["adjustment_basis"] = "vendor_unspecified_not_total_return"
         yield result
-    elif source in {"yahoo_chart_extracted", "yahoo_corporate_actions_extracted"}:
+    elif source in {
+        "yahoo_chart_extracted",
+        "yahoo_corporate_actions_extracted",
+        "eastmoney_cn_etf_corporate_actions_extracted",
+    }:
         frame = pd.read_csv(path, dtype="str", keep_default_na=False, na_values=[""])
         mapping = {
             "symbol": "asset_id",

@@ -280,7 +280,12 @@ def materialize_interim_data(
                     observed = frame.timestamp.dt.normalize()
                     if data_id == "public_finra_margin":
                         observed += pd.offsets.MonthEnd(0)
-                    for name in ("published_at", "available_at"):
+                    for name in (
+                        ()
+                        if data_id
+                        in {"public_etf_actions", "public_domestic_etf_actions"}
+                        else ("published_at", "available_at")
+                    ):
                         local_date = (
                             frame[name]
                             .dt.tz_convert(zone)
@@ -289,7 +294,11 @@ def materialize_interim_data(
                         )
                         if local_date.lt(observed).any():
                             raise ValueError("public_release_clock_precedes_dependency")
-                    if frame.publication_date.lt(observed).any():
+                    if (
+                        data_id
+                        not in {"public_etf_actions", "public_domestic_etf_actions"}
+                        and frame.publication_date.lt(observed).any()
+                    ):
                         raise ValueError("public_release_clock_precedes_dependency")
                     numeric_fields = [
                         field

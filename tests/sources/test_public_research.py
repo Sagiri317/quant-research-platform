@@ -12,6 +12,106 @@ from quant_research_platform.sources.public_research.normalization import normal
 from quant_research_platform.storage.datasets.reading import read_dataset
 
 
+def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
+    path = tmp_path / "cells.csv"
+    pd.DataFrame(
+        [
+            dict(
+                primary_fund_code="001001",
+                economic_portfolio_id=None,
+                share_class_header_as_provided=None,
+                report_period_end="2024-06-30",
+                value_observation_date=None,
+                table_kind="balance_sheet",
+                field="net_assets",
+                unit="CNY",
+                denominator=None,
+                value_decimal="100",
+                report_version_identity="report1",
+                leaf_table_index="1",
+                source_row_index="2",
+                expanded_column_index="3",
+                source_retrieved_at="2026-11-11T00:00:00Z",
+                source_url="https://example.org/report",
+                source_sha256="a" * 64,
+                published_at=None,
+                publication_date="2024-08-20",
+                report_declared_send_date="2024-08-20",
+            )
+        ]
+    ).to_csv(path, index=False)
+    record = dict(
+        source="csrc_official_fund_financial_cells_extracted",
+        path=path.name,
+        status="downloaded",
+        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        bytes=path.stat().st_size,
+    )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(dict(schema_version=1, records=[record]))
+    )
+    output = tmp_path / "native"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            outputs=dict(public_fund_financial_cells=str(output)),
+        )
+    )
+    frame = read_dataset(output)
+    assert frame.asset_id.tolist() == ["report1:balance_sheet:1:2:3"]
+    assert frame.economic_portfolio_id.isna().all()
+    assert frame.value_observation_date.isna().all()
+
+
+def test_domestic_etf_actions_can_be_announced_before_the_ex_date(tmp_path):
+    path = tmp_path / "actions.csv"
+    pd.DataFrame(
+        [
+            dict(
+                symbol="510500",
+                observation_date="2022-08-29",
+                event_type="splits",
+                amount=None,
+                numerator="1.14539",
+                denominator="1",
+                split_ratio="1.14539",
+                publication_date="2022-08-23",
+                published_at=None,
+                source_url="https://example.org/notice",
+                source_sha256="b" * 64,
+            )
+        ]
+    ).to_csv(path, index=False)
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            dict(
+                schema_version=1,
+                records=[
+                    dict(
+                        source="eastmoney_cn_etf_corporate_actions_extracted",
+                        path=path.name,
+                        status="downloaded",
+                        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                        bytes=path.stat().st_size,
+                    )
+                ],
+            )
+        )
+    )
+    output = tmp_path / "native"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            outputs=dict(public_domestic_etf_actions=str(output)),
+        )
+    )
+    frame = read_dataset(output)
+    assert frame.numerator.tolist() == [1.14539]
+    assert frame.available_at.iloc[0] < pd.Timestamp("2022-08-29T00:00:00Z")
+
+
 def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
     from quant_research_platform.sources.public_research.normalization import DATASETS
 
