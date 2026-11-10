@@ -11,6 +11,7 @@ import pandas as pd
 from scipy.linalg import solve_banded
 from scipy.optimize import minimize
 
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
@@ -205,11 +206,10 @@ def fit_hawkes(config):
         ).projected_view(columns[name])
         for name, path in inputs.items()
     }
-    if (
-        any(source.spec["data_id"] != name for name, source in sources.items())
-        or sources["hft_panel"].spec["market_id"] != "a_share"
-    ):
+    if any(source.spec["data_id"] != name for name, source in sources.items()):
         raise ValueError("hawkes_input_identity_mismatch")
+    for source in sources.values():
+        validate_input_market(source.spec, "a_share")
     segments, observed_assets, unknown = [], set(), 0
     unknown_kind_events = truncated_segments = 0
     for day in pd.date_range(

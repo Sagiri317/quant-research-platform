@@ -126,9 +126,38 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, unknown_kind)
         ),
         spec=interim_spec("hft_trades"),
     )
+    fit_paths = paths
+    if not unknown_kind:
+        from quant_research_platform.storage.datasets.reading import (
+            open_dataset_session,
+        )
+
+        fit_paths = {}
+        for name, path in paths.items():
+            session = open_dataset_session(path)
+            spec = {
+                k: v
+                for k, v in session.spec.items()
+                if k
+                in {
+                    "data_id",
+                    "frequency",
+                    "grain",
+                    "primary_key",
+                    "partition_columns",
+                    "column_roles",
+                    "column_units",
+                    "label_availability_columns",
+                }
+            }
+            fit_paths[name] = dict(
+                path=str(tmp_path),
+                spec=spec,
+                files=[p.relative_to(tmp_path).as_posix() for p in session.all_paths],
+            )
     model = fit_hawkes(
         {
-            "inputs": paths,
+            "inputs": fit_paths,
             "asset_ids": ["000001.SZ"],
             "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
             "fit_cutoff": "2018-02-15T00:00:00",
