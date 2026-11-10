@@ -538,6 +538,21 @@ def backtest_a_share(
                 )
             )
         dataset_at = _session_reader(dataset_frames, dataset_columns)
+        _, prediction_end, prediction_end_closed = time_window_timestamp_interval(
+            prediction_window
+        )
+
+        def alpha_for_dataset(dataset):
+            clock = dataset.decision_at if explicit_decisions else dataset.timestamp
+            selected = clock.ge(alpha_start) & (
+                clock.le(prediction_end)
+                if prediction_end_closed
+                else clock.lt(prediction_end)
+            )
+            return _prediction_alpha(dataset.loc[selected], prediction_lookup).reindex(
+                pd.Index(dataset.asset_id, name="asset_id")
+            )
+
         risk_inputs = (
             _risk_context_input_sessions(
                 roots=tuple(inputs.get("risk_context", ())),
@@ -690,8 +705,9 @@ def backtest_a_share(
                     and calibration_dates.loc[decision_timestamp, "available_at"]
                     <= sessions[-1]
                 )
-                if (explicit_decisions or decision_timestamp >= alpha_start) and (
-                    produces_interval or calibration_candidate
+                if produces_interval or (
+                    calibration_candidate
+                    and (explicit_decisions or decision_timestamp >= alpha_start)
                 ):
                     dataset = (
                         dataset_at(decision_timestamp)
@@ -712,14 +728,7 @@ def backtest_a_share(
                         )
                     if not dataset.empty or panel.empty:
                         _validate_input_keys(dataset, panel)
-                        prediction_rows = (
-                            dataset.loc[dataset.decision_at.ge(alpha_start)]
-                            if explicit_decisions
-                            else dataset
-                        )
-                        alpha = _prediction_alpha(
-                            prediction_rows, prediction_lookup
-                        ).reindex(pd.Index(dataset.asset_id, name="asset_id"))
+                        alpha = alpha_for_dataset(dataset)
                     if alpha is not None and calibration_candidate:
                         calibration_alpha = alpha.copy(deep=True)
                         calibration_alpha.index = pd.MultiIndex.from_arrays(
@@ -759,10 +768,7 @@ def backtest_a_share(
                     np.nan, index=pd.Index(dataset.asset_id, name="asset_id")
                 )
             elif not enhanced:
-                alpha = _prediction_alpha(
-                    dataset,
-                    prediction_lookup,
-                )
+                alpha = alpha_for_dataset(dataset)
             endpoint_timestamp = output_intervals.loc[decision_timestamp, "end_at"]
             next_view = panel_at(next_timestamp)
             next_panel = next_view.valuation

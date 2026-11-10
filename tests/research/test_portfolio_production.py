@@ -692,11 +692,12 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     ] == pytest.approx(0.360160)
 
 
+@pytest.mark.parametrize("prediction_start", [None, "2023-01-05"])
 @pytest.mark.parametrize(
     "missing_session", [None, "2023-01-03", "2023-01-04", "2023-01-05", "2023-01-06"]
 )
 def test_frozen_enhanced_reads_only_actionable_research_sessions(
-    tmp_path, monkeypatch, missing_session
+    tmp_path, monkeypatch, missing_session, prediction_start
 ):
     frames, fee_frame, output_window = _inputs()
     frames["panel"]["period_return"] = 0.001
@@ -783,7 +784,9 @@ def test_frozen_enhanced_reads_only_actionable_research_sessions(
         fee_frame=fee_frame,
         output_window=output_window,
         formal_dataset_window=output_window,
-        prediction_window=output_window,
+        prediction_window=TimeWindow(
+            prediction_start or output_window.start, output_window.end
+        ),
         candidate=candidate,
         prediction_lookup=lookup,
         frozen_calibration=calibration,
@@ -801,17 +804,22 @@ def test_frozen_enhanced_reads_only_actionable_research_sessions(
     assert result
     assert min(risk_dates) == pd.Timestamp("2022-12-02")
     assert max(risk_dates) == pd.Timestamp(output_window.end)
-    assert set(lookup.matched) == {
-        (timestamp, asset)
-        for timestamp in pd.to_datetime(["2023-01-03", "2023-01-04"])
-        for asset in ("a", "b")
-    }
-    assert all(
-        frame.loc[frame.asset_id.eq("__cash__"), "alpha_slope"]
-        .eq(calibration.slope)
-        .all()
-        for frame in result
-    )
+    if prediction_start is not None:
+        assert lookup.matched == []
+        assert all(not frame.executed_delta_notional.any() for frame in result)
+        assert all(frame.end_notional.sum() == pytest.approx(100.0) for frame in result)
+    else:
+        assert set(lookup.matched) == {
+            (timestamp, asset)
+            for timestamp in pd.to_datetime(["2023-01-03", "2023-01-04"])
+            for asset in ("a", "b")
+        }
+        assert all(
+            frame.loc[frame.asset_id.eq("__cash__"), "alpha_slope"]
+            .eq(calibration.slope)
+            .all()
+            for frame in result
+        )
     assert final_calibrations == []
 
 
