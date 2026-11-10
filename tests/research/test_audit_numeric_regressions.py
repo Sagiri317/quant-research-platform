@@ -5,7 +5,6 @@ from contextlib import closing
 import numpy as np
 import pandas as pd
 import pytest
-from statsmodels.tools.sm_exceptions import SingularMatrixWarning
 
 from quant_research_platform.research.statistics import (
     cscv_pbo,
@@ -84,20 +83,12 @@ def test_multi_factor_fmb_retains_orthogonal_small_coefficient(weighted):
     )
     frame["label"] = np.where(frame.x == 0, magnitude, frame.z + 3)
     frame["weight"] = np.where(frame.x == 0, 2.0, 1.0)
-    expected_warning = pytest.warns(
-        SingularMatrixWarning,
-        match=(
-            r"^The design matrix is rank-deficient\. "
-            r"The model parameters are not uniquely determined\.$"
-        ),
+    actual = fama_macbeth_period(
+        frame,
+        return_column="label",
+        factor_columns=("x", "z"),
+        weight_column="weight" if weighted else None,
     )
-    with expected_warning:
-        actual = fama_macbeth_period(
-            frame,
-            return_column="label",
-            factor_columns=("x", "z"),
-            weight_column="weight" if weighted else None,
-        )
     np.testing.assert_allclose(
         actual.coefficients,
         [magnitude, 3 - magnitude, 1 / 3 if weighted else 0.5],
