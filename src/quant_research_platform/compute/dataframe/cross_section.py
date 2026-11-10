@@ -12,6 +12,27 @@ from quant_research_platform.contracts.evaluations import (
 )
 
 
+def leave_one_out_mean(values, group_ids):
+    """Use centered peer means without subtracting self from a large total."""
+    sides = []
+    for step in (1, -1):
+        ordered, keys = values.iloc[::step], group_ids.iloc[::step]
+        groups = ordered.groupby(keys, sort=False)
+        prior = groups.shift()
+        count = prior.notna().groupby(keys, sort=False).cumsum()
+        anchor = groups.transform("first")
+        centered = (prior - anchor).fillna(0).groupby(keys, sort=False).cumsum()
+        sides.append(
+            (
+                (anchor + centered / count.where(count > 0)).iloc[::step],
+                count.iloc[::step],
+            )
+        )
+    (left, nleft), (right, nright) = sides
+    base = left.fillna(right)
+    return base + (right - base).fillna(0) * nright / (nleft + nright)
+
+
 def _compute_ic_and_grouped_label_values(
     frame,
     spec,
@@ -34,127 +55,20 @@ def _compute_ic_and_grouped_label_values(
     if n_groups < 2:
         raise ValueError("n_groups must be at least 2.")
 
-    ic_records: list[dict[str, object]] = []
-    grouped_records: list[dict[str, object]] = []
+    ic_records, grouped_records = [], []
     for timestamp, timestamp_frame in panel.groupby(spec.timestamp_column, sort=True):
-        signals = {}
-        for signal in spec.signal_columns:
-            source = timestamp_frame[signal]
-            values = source.to_numpy(dtype="float64", na_value=np.nan)
-            predicted = np.isfinite(values)
-            reverse = ordinal_signals is not None and signal in ordinal_signals
-            order = (
-                ordinal_signals.loc[timestamp_frame.index, signal]
-                if reverse
-                else source
-            )
-            codes = _rank_codes(order, predicted)
-            if include_groups:
-                ranks = _average_ranks_from_codes(codes[predicted])
-                if reverse:
-                    ranks = len(ranks) + 1 - ranks
-                groups = _assign_groups_from_ranks(ranks, n_groups)
-            else:
-                groups = np.empty(0, dtype="int64")
-            domains = {"all": (predicted, int(predicted.sum()))}
-            if top_quantile is not None:
-                for side, ascending in (("long", reverse), ("short", not reverse)):
-                    selected = np.zeros(len(predicted), dtype=bool)
-                    selected[predicted] = _select_quantile_boundary(
-                        codes[predicted], top_quantile, ascending=ascending
-                    )
-                    domains[side] = (selected, int(selected.sum()))
-            signals[signal] = (
-                values,
-                predicted,
-                codes,
-                groups,
-                np.unique(groups),
-                reverse,
-                domains,
-                {},
-            )
-        for label in spec.label_columns:
-            label_source = timestamp_frame[label]
-            label_values = label_source.to_numpy(dtype="float64", na_value=np.nan)
-            observed = np.isfinite(label_values)
-            label_codes = _rank_codes(label_source, observed)
-            label_ranks_by_mask = {}
-            for signal, (
-                values,
-                predicted,
-                codes,
-                groups,
-                group_ids,
-                reverse,
-                domains,
-                signal_ranks_by_mask,
-            ) in signals.items():
-                record = {"timestamp": timestamp, "signal": signal, "label": label}
-                for side, (selected, n_selected) in domains.items():
-                    valid_mask = selected & observed
-                    n_obs = int(valid_mask.sum())
-                    ic = rankic = np.nan
-                    ic_reason = rankic_reason = "insufficient_observations"
-                    if n_obs >= 2:
-                        ic, ic_reason = _pearson_correlation_result(
-                            values[valid_mask], label_values[valid_mask]
-                        )
-                        # Rerank on the paired side domain, retaining exact tie
-                        # classes. Selection never depends on label availability.
-                        mask_key = valid_mask.tobytes()
-                        if mask_key not in signal_ranks_by_mask:
-                            ranks = _average_ranks_from_codes(codes[valid_mask])
-                            signal_ranks_by_mask[mask_key] = (
-                                -ranks if reverse else ranks
-                            )
-                        if mask_key not in label_ranks_by_mask:
-                            label_ranks_by_mask[mask_key] = _average_ranks_from_codes(
-                                label_codes[valid_mask]
-                            )
-                        rankic, rankic_reason = _pearson_correlation_result(
-                            signal_ranks_by_mask[mask_key],
-                            label_ranks_by_mask[mask_key],
-                        )
-                    prefix = "" if side == "all" else f"{side}_"
-                    record.update(
-                        {
-                            f"{prefix}ic": ic,
-                            f"{prefix}rankic": rankic,
-                            f"{prefix}n_obs": n_obs,
-                            f"{prefix}ic_reason": ic_reason,
-                            f"{prefix}rankic_reason": rankic_reason,
-                        }
-                    )
-                    if prefix:
-                        record[f"{prefix}n_selected"] = n_selected
-                ic_records.append(record)
-                if include_groups:
-                    predicted_labels = label_values[predicted]
-                    observed_labels = np.isfinite(predicted_labels)
-                    observed_groups = groups[observed_labels]
-                    group_count = min(n_groups, len(groups)) + 1
-                    group_counts = np.bincount(observed_groups, minlength=group_count)
-                    group_sums = np.bincount(
-                        observed_groups,
-                        weights=predicted_labels[observed_labels],
-                        minlength=group_count,
-                    )
-                    for group in group_ids:
-                        grouped_records.append(
-                            {
-                                "timestamp": timestamp,
-                                "signal": signal,
-                                "label": label,
-                                "group": group,
-                                "mean_label_value": float(
-                                    group_sums[group] / group_counts[group]
-                                )
-                                if group_counts[group]
-                                else np.nan,
-                                "n_obs": int(group_counts[group]),
-                            }
-                        )
+        records, groups = _correlation_records(
+            timestamp_frame,
+            signal_columns=spec.signal_columns,
+            label_columns=spec.label_columns,
+            timestamp=timestamp,
+            n_groups=n_groups,
+            ordinal_signals=ordinal_signals,
+            top_quantile=top_quantile,
+            include_groups=include_groups,
+        )
+        ic_records.extend(records)
+        grouped_records.extend(groups)
     metrics = _correlation_metrics_frame(ic_records)
 
     grouped = pd.DataFrame.from_records(
@@ -168,6 +82,134 @@ def _compute_ic_and_grouped_label_values(
     grouped["mean_label_value"] = grouped["mean_label_value"].astype("float64")
     grouped["n_obs"] = grouped["n_obs"].astype("int64")
     return metrics, grouped
+
+
+def _correlation_records(
+    frame,
+    *,
+    signal_columns,
+    label_columns,
+    timestamp,
+    n_groups=5,
+    ordinal_signals=None,
+    top_quantile=None,
+    include_groups=True,
+):
+    """Correlate one declared sample block, sharing ranks across labels."""
+    ic_records, grouped_records = [], []
+    signals = {}
+    for signal in signal_columns:
+        source = frame[signal]
+        values = source.to_numpy(dtype="float64", na_value=np.nan)
+        predicted = np.isfinite(values)
+        reverse = ordinal_signals is not None and signal in ordinal_signals
+        order = ordinal_signals.loc[frame.index, signal] if reverse else source
+        codes = _rank_codes(order, predicted)
+        if include_groups:
+            ranks = _average_ranks_from_codes(codes[predicted])
+            if reverse:
+                ranks = len(ranks) + 1 - ranks
+            groups = _assign_groups_from_ranks(ranks, n_groups)
+        else:
+            groups = np.empty(0, dtype="int64")
+        domains = {"all": (predicted, int(predicted.sum()))}
+        if top_quantile is not None:
+            for side, ascending in (("long", reverse), ("short", not reverse)):
+                selected = np.zeros(len(predicted), dtype=bool)
+                selected[predicted] = _select_quantile_boundary(
+                    codes[predicted], top_quantile, ascending=ascending
+                )
+                domains[side] = (selected, int(selected.sum()))
+        signals[signal] = (
+            values,
+            predicted,
+            codes,
+            groups,
+            np.unique(groups),
+            reverse,
+            domains,
+            {},
+        )
+    for label in label_columns:
+        label_source = frame[label]
+        label_values = label_source.to_numpy(dtype="float64", na_value=np.nan)
+        observed = np.isfinite(label_values)
+        label_codes = _rank_codes(label_source, observed)
+        label_ranks_by_mask = {}
+        for signal, (
+            values,
+            predicted,
+            codes,
+            groups,
+            group_ids,
+            reverse,
+            domains,
+            signal_ranks_by_mask,
+        ) in signals.items():
+            record = {"timestamp": timestamp, "signal": signal, "label": label}
+            for side, (selected, n_selected) in domains.items():
+                valid_mask = selected & observed
+                n_obs = int(valid_mask.sum())
+                ic = rankic = np.nan
+                ic_reason = rankic_reason = "insufficient_observations"
+                if n_obs >= 2:
+                    ic, ic_reason = _pearson_correlation_result(
+                        values[valid_mask], label_values[valid_mask]
+                    )
+                    # Rerank on the paired side domain, retaining exact tie
+                    # classes. Selection never depends on label availability.
+                    mask_key = valid_mask.tobytes()
+                    if mask_key not in signal_ranks_by_mask:
+                        ranks = _average_ranks_from_codes(codes[valid_mask])
+                        signal_ranks_by_mask[mask_key] = -ranks if reverse else ranks
+                    if mask_key not in label_ranks_by_mask:
+                        label_ranks_by_mask[mask_key] = _average_ranks_from_codes(
+                            label_codes[valid_mask]
+                        )
+                    rankic, rankic_reason = _pearson_correlation_result(
+                        signal_ranks_by_mask[mask_key],
+                        label_ranks_by_mask[mask_key],
+                    )
+                prefix = "" if side == "all" else f"{side}_"
+                record.update(
+                    {
+                        f"{prefix}ic": ic,
+                        f"{prefix}rankic": rankic,
+                        f"{prefix}n_obs": n_obs,
+                        f"{prefix}ic_reason": ic_reason,
+                        f"{prefix}rankic_reason": rankic_reason,
+                    }
+                )
+                if prefix:
+                    record[f"{prefix}n_selected"] = n_selected
+            ic_records.append(record)
+            if include_groups:
+                predicted_labels = label_values[predicted]
+                observed_labels = np.isfinite(predicted_labels)
+                observed_groups = groups[observed_labels]
+                group_count = min(n_groups, len(groups)) + 1
+                group_counts = np.bincount(observed_groups, minlength=group_count)
+                group_sums = np.bincount(
+                    observed_groups,
+                    weights=predicted_labels[observed_labels],
+                    minlength=group_count,
+                )
+                for group in group_ids:
+                    grouped_records.append(
+                        {
+                            "timestamp": timestamp,
+                            "signal": signal,
+                            "label": label,
+                            "group": group,
+                            "mean_label_value": float(
+                                group_sums[group] / group_counts[group]
+                            )
+                            if group_counts[group]
+                            else np.nan,
+                            "n_obs": int(group_counts[group]),
+                        }
+                    )
+    return ic_records, grouped_records
 
 
 def _correlation_metrics_frame(records, *, side_reason="not_applicable"):

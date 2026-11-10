@@ -294,8 +294,41 @@ def test_side_default_is_portfolio_default_and_single_asset_stays_time_series(tm
     assert "top_quantile" not in manifest["metadata"]
     assert tables["metrics"].long_ic_reason.eq("not_applicable").all()
     assert tables["ic_summary"].short_rankic_reason.eq("not_applicable").all()
-    with pytest.raises(ValueError, match="requires_cross_sectional"):
-        _spec(evaluation_axis="single_asset_time_series", top_quantile=0.2)
+    explicit = _spec(evaluation_axis="single_asset_time_series", top_quantile=0.2)
+    _, tables = read_evaluation_outputs(_save(tmp_path / "time-sides", frame, explicit))
+    assert tables["metrics"].long_n_selected.tolist() == [1]
+    assert tables["metrics"].short_n_selected.tolist() == [1]
+
+
+def test_single_asset_sides_use_each_days_time_series_not_an_etf_cross_section(
+    tmp_path,
+):
+    frame = _frame(range(10), [0.0, 2.0, 1.0, 4.0, 3.0, 4.0, 2.0, 3.0, 0.0, 1.0])
+    frame["asset_id"] = "etf"
+    frame["timestamp"] = [
+        pd.Timestamp("2024-01-02") + pd.Timedelta(seconds=i) for i in range(5)
+    ] + [pd.Timestamp("2024-01-03") + pd.Timedelta(seconds=i) for i in range(5)]
+    spec = _spec(
+        evaluation_axis="single_asset_time_series",
+        correlation_clock="trading_day",
+        top_quantile=0.4,
+    )
+    manifest, tables = read_evaluation_outputs(_save(tmp_path / "daily", frame, spec))
+    metrics = tables["metrics"]
+    assert metrics.n_obs.tolist() == [5, 5]
+    np.testing.assert_allclose(metrics.ic, [0.8, -0.8])
+    np.testing.assert_allclose(metrics.rankic, [0.8, -0.8])
+    np.testing.assert_allclose(metrics.long_ic, [-1, 1])
+    np.testing.assert_allclose(metrics.short_ic, [1, -1])
+    assert metrics.long_n_selected.tolist() == [2, 2]
+    assert manifest["metadata"]["evaluation_axis"] == "single_asset_time_series"
+    missing = frame.copy()
+    missing.loc[4, "label"] = np.nan
+    _, tables = read_evaluation_outputs(_save(tmp_path / "missing", missing, spec))
+    row = tables["metrics"].iloc[0]
+    assert row.long_n_selected == 2 and row.long_n_obs == 1
+    assert pd.isna(row.long_ic) and row.long_ic_reason == "insufficient_observations"
+    assert row.short_n_obs == 2 and row.short_ic == pytest.approx(1)
 
 
 def test_default_side_statistics_and_plot_read_only_persisted_evaluation(

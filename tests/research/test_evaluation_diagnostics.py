@@ -26,7 +26,7 @@ def _assert_recomputed_evaluation_equal(left, right):
 
 
 @pytest.mark.parametrize("valid_pairs", (None, 0, 1))
-def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
+def test_single_asset_insufficient_pairs_publish_undefined_correlations(
     tmp_path: Path, valid_pairs: int | None
 ) -> None:
     from quant_research_platform.artifacts.outputs.evaluation import (
@@ -72,7 +72,8 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
         and metrics.ic_reason.eq("insufficient_observations").all()
     )
     assert (
-        metrics.rankic.isna().all() and metrics.rankic_reason.eq("not_applicable").all()
+        metrics.rankic.isna().all()
+        and metrics.rankic_reason.eq("insufficient_observations").all()
     )
 
 
@@ -233,10 +234,10 @@ def test_single_asset_time_series_evaluation_is_stable_across_chunks() -> None:
         assert metadata["timestamp_count"] == 4
         assert metrics.loc[0, "n_obs"] == 4
         assert metrics.loc[0, "ic"] == pytest.approx(1.0)
-        assert pd.isna(metrics.loc[0, "rankic"])
-        assert metrics.loc[0, "rankic_reason"] == "not_applicable"
+        assert metrics.loc[0, "rankic"] == pytest.approx(1.0)
+        assert pd.isna(metrics.loc[0, "rankic_reason"])
         assert summary.loc[0, "valid_ic_count"] == 1
-        assert summary.loc[0, "valid_rankic_count"] == 0
+        assert summary.loc[0, "valid_rankic_count"] == 1
         outputs.append(metrics)
     _assert_recomputed_evaluation_equal(outputs[0], outputs[1])
 
@@ -290,6 +291,9 @@ def test_single_asset_time_series_values_are_chunk_stable(case: str) -> None:
     x = feature[valid] - np.mean(feature[valid])
     y = label[valid] - np.mean(label[valid])
     expected_ic = np.dot(x, y) / np.sqrt(np.dot(x, x) * np.dot(y, y))
+    expected_rankic = pd.Series(feature[valid]).corr(
+        pd.Series(label[valid]), method="spearman"
+    )
     chunks_127 = evaluate(
         tuple(frame.iloc[start : start + 127] for start in range(0, row_count, 127))
     )
@@ -300,8 +304,8 @@ def test_single_asset_time_series_values_are_chunk_stable(case: str) -> None:
         assert metrics.n_obs.tolist() == [int(valid.sum())]
         assert metrics.ic.tolist() == pytest.approx([expected_ic], rel=1e-11, abs=1e-14)
         assert metrics.ic_reason.isna().all()
-        assert metrics.rankic.isna().all()
-        assert metrics.rankic_reason.tolist() == ["not_applicable"]
+        assert metrics.rankic.tolist() == pytest.approx([expected_rankic], abs=1e-14)
+        assert metrics.rankic_reason.isna().all()
     _assert_recomputed_evaluation_equal(chunks_127, chunks_251)
 
 

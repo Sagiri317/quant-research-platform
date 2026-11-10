@@ -15,6 +15,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
     _compute_ic_and_grouped_label_values,
     _correlation_metrics_frame,
+    _correlation_records,
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
 )
@@ -227,22 +228,6 @@ class _EvaluationStreamingState:
             prefix = "" if side == "all" else f"{side}_"
             for metric in ("ic", "rankic"):
                 result = _correlation_summary(stats, metric)
-                if (
-                    self._spec.evaluation_axis == "single_asset_time_series"
-                    and self._spec.correlation_clock == "observation"
-                    and metric == "rankic"
-                ):
-                    result = {
-                        **result,
-                        "mean": np.nan,
-                        "std": np.nan,
-                        "ratio": np.nan,
-                        "positive_rate": np.nan,
-                        "count": 0,
-                        "reason": "not_applicable",
-                        "std_reason": "not_applicable",
-                        "ratio_reason": "not_applicable",
-                    }
                 name = f"{prefix}{metric}"
                 row.update(
                     {
@@ -517,7 +502,7 @@ def _iter_single_asset_time_series_output_chunks(
                     timestamps.groupby(timestamps.dt.normalize()).max().to_dict()
                 )
             selected_frames.append(filtered.loc[:, ["timestamp", *numeric_columns]])
-            if response_diagnostics is not None and ordinal_signals is not None:
+            if ordinal_signals is not None:
                 ordinal_frames.append(ordinal_signals)
     frame = (
         pd.concat(selected_frames, ignore_index=True)
@@ -525,6 +510,15 @@ def _iter_single_asset_time_series_output_chunks(
         else pd.DataFrame(columns=["timestamp", *numeric_columns])
     )
     selected_frames.clear()
+    ordinal_signals = (
+        pd.concat(ordinal_frames, ignore_index=True)
+        .set_index("timestamp")
+        .reindex(frame.timestamp)
+        .reset_index()
+        if ordinal_frames
+        else None
+    )
+    ordinal_frames.clear()
     grouped_label_values = _empty_grouped_label_values()
     metadata = {
         "rows_input": rows_input,
@@ -547,56 +541,35 @@ def _iter_single_asset_time_series_output_chunks(
                 spec=spec,
                 config=response_diagnostics,
                 dates=response_dates,
-                ordinal_signals=pd.concat(ordinal_frames, ignore_index=True)
-                if ordinal_frames
-                else None,
+                ordinal_signals=ordinal_signals,
             )
         )
-        ordinal_frames.clear()
-        pooled = metadata["response_metrics"]
-        pooled = pooled.loc[pooled.period.eq("pooled") & pooled.sample_scope.eq("own")]
-        metrics = _time_series_metric_records(
-            [
-                {**row, "rankic": None, "rankic_reason": "not_applicable"}
-                for row in pooled.to_dict("records")
-            ]
-        )
+    if spec.correlation_clock == "trading_day":
+        by_day = {
+            day: block
+            for day, block in frame.groupby(frame.timestamp.dt.normalize(), sort=False)
+        }
+        records = []
+        for day in sorted(response_dates):
+            block = by_day.get(day, frame.iloc[:0])
+            current, _ = _correlation_records(
+                block,
+                signal_columns=signal_columns,
+                label_columns=label_columns,
+                timestamp=response_dates[day],
+                ordinal_signals=ordinal_signals,
+                top_quantile=spec.top_quantile,
+                include_groups=False,
+            )
+            records.extend(current)
+        metrics = _time_series_metric_records(records)
     else:
         metrics = _time_series_metrics_frame(
-            frame, spec=spec, timestamp=maximum_timestamp
+            frame,
+            spec=spec,
+            timestamp=maximum_timestamp,
+            ordinal_signals=ordinal_signals,
         )
-    if spec.correlation_clock == "trading_day":
-        from quant_research_platform.research.evaluations.time_series import (
-            daily_signal_metrics,
-        )
-
-        records = []
-        if response_dates:
-            for signal in signal_columns:
-                for label in label_columns:
-                    daily = daily_signal_metrics(
-                        frame[["timestamp", signal, label]]
-                        .rename(columns={signal: "signal", label: "label"})
-                        .assign(asset_id=asset),
-                        evaluation_axis=spec.evaluation_axis,
-                        sessions=sorted(response_dates),
-                        asset_ids=(asset,),
-                    )
-                    values = daily.pivot(index="timestamp", columns="metric")
-                    for day, row in values.iterrows():
-                        records.append(
-                            {
-                                "timestamp": response_dates[day],
-                                "signal": signal,
-                                "label": label,
-                                "ic": row["value", "ic"],
-                                "rankic": row["value", "rank_ic"],
-                                "n_obs": int(row["observation_count", "ic"]),
-                                "ic_reason": row["reason", "ic"],
-                                "rankic_reason": row["reason", "rank_ic"],
-                            }
-                        )
-        metrics = _time_series_metric_records(records)
     del frame
     output = (metrics, grouped_label_values, metadata)
     if summary_state is not None:
@@ -604,31 +577,18 @@ def _iter_single_asset_time_series_output_chunks(
     yield output
 
 
-def _time_series_metrics_frame(
-    frame: pd.DataFrame, *, spec: EvaluationSpec, timestamp: pd.Timestamp | None
-) -> pd.DataFrame:
-    records: list[dict[str, object]] = []
+def _time_series_metrics_frame(frame, *, spec, timestamp, ordinal_signals=None):
+    records = []
     if timestamp is not None:
-        for signal in sorted(signal.signal_id for signal in spec.signals):
-            left = frame[signal].to_numpy(dtype="float64")
-            for label in sorted(spec.label_columns):
-                right = frame[label].to_numpy(dtype="float64")
-                valid = np.isfinite(left) & np.isfinite(right)
-                correlation, reason = _pearson_correlation_result(
-                    left[valid], right[valid]
-                )
-                records.append(
-                    {
-                        "timestamp": timestamp,
-                        "signal": signal,
-                        "label": label,
-                        "ic": correlation,
-                        "rankic": None,
-                        "n_obs": int(valid.sum()),
-                        "ic_reason": reason,
-                        "rankic_reason": "not_applicable",
-                    }
-                )
+        records, _ = _correlation_records(
+            frame,
+            signal_columns=tuple(signal.signal_id for signal in spec.signals),
+            label_columns=spec.label_columns,
+            timestamp=timestamp,
+            ordinal_signals=ordinal_signals,
+            top_quantile=spec.top_quantile,
+            include_groups=False,
+        )
     return _time_series_metric_records(records)
 
 

@@ -204,12 +204,10 @@ class EvaluationSpec:
             "trading_day",
         }:
             raise ValueError("evaluation_correlation_clock_invalid")
-        if self.evaluation_axis == "cross_sectional":
+        if self.evaluation_axis == "cross_sectional" or self.top_quantile is not None:
             object.__setattr__(
                 self, "top_quantile", resolve_top_quantile(self.top_quantile)
             )
-        elif self.top_quantile is not None:
-            raise ValueError("evaluation_top_quantile_requires_cross_sectional")
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")
