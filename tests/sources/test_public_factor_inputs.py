@@ -1,5 +1,6 @@
 """New structured public inputs retain units, coordinates and filing identity."""
 
+import hashlib
 import json
 import zipfile
 
@@ -162,3 +163,44 @@ def test_extracted_13f_values_are_already_usd(tmp_path):
     assert frame.value_usd.tolist() == ["12500"]
     assert frame.asset_id.tolist() == ["a:7"]
     assert frame._clock_source.tolist() == ["sec_13f:a"]
+
+
+def test_nested_manifest_paths_are_resolved_from_their_declared_base(tmp_path):
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets import read_dataset
+
+    raw = tmp_path / "raw"
+    nested = raw / "supplement"
+    nested.mkdir(parents=True)
+    file = nested / "contracts.xml"
+    file.write_text(
+        "<tradeproperty><INDEX><TRADING_DAY>20240102</TRADING_DAY><PRODUCT_ID>IF</PRODUCT_ID><INSTRUMENT_ID>IF2401</INSTRUMENT_ID><OPEN_DATE>20231023</OPEN_DATE><END_TRADING_DAY>20240119</END_TRADING_DAY></INDEX></tradeproperty>"
+    )
+    manifest = {
+        "schema_version": 1,
+        "path_base": "manifest_directory",
+        "records": [
+            {
+                "path": "contracts.xml",
+                "source": "cffex_contract_parameters",
+                "status": "downloaded",
+                "url": "https://example.org/contract",
+                "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
+                "bytes": file.stat().st_size,
+                "retrieved_at": "2026-11-11T00:00:00Z",
+            }
+        ],
+    }
+    (nested / "manifest.json").write_text(json.dumps(manifest))
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(raw),
+            manifests=["supplement/manifest.json"],
+            outputs={"public_futures_contracts": str(output)},
+        )
+    )
+    actual = read_dataset(output)
+    assert actual.asset_id.tolist() == ["IF2401"]
+    assert actual.expiry_date.tolist() == [pd.Timestamp("2024-01-19")]

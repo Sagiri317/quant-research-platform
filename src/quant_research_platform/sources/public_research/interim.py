@@ -88,7 +88,17 @@ def materialize_interim_data(
         manifest = json.loads(payload)
         if manifest["schema_version"] != 1:
             raise ValueError("public_source_manifest_version_invalid")
-        records.extend(manifest["records"])
+        scope = manifest.get("path_base")
+        if scope not in (None, "manifest_directory", "data/raw/public_research"):
+            raise ValueError("public_source_path_base_invalid")
+        directory = path.parent if scope == "manifest_directory" else raw_root
+        for record in manifest["records"]:
+            source_path = (directory / record["path"]).resolve()
+            if not source_path.is_relative_to(raw_root):
+                raise ValueError("public_source_path_outside_root")
+            records.append(
+                {**record, "path": source_path.relative_to(raw_root).as_posix()}
+            )
         manifest_evidence.append(
             {"path": name, "sha256": hashlib.sha256(payload).hexdigest()}
         )
