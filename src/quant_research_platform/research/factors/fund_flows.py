@@ -481,7 +481,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
             columns={"timestamp": "_flow_available", "signal_session": "timestamp"}
         )
         state = shares.merge(flow, on=["asset_id", "timestamp"], how="inner")
-        state["available_at"] = state[["available_at", "_flow_available"]].max(axis=1)
+        state["available_at"] = state[["available_at", "_flow_available"]].max(
+            axis=1, skipna=False
+        )
         state[ETF[5]] = state.etf_share_change_1d - state.secondary_flow_imbalance
         result[ETF[5]] = latest_observations(state, work, columns=(ETF[5],))[
             ETF[5]
@@ -493,7 +495,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
         state = sources["public_fund_nav"][
             ["asset_id", "timestamp", "nav_cny", "available_at"]
         ].merge(prices, on=["asset_id", "timestamp"], how="inner")
-        state["available_at"] = state[["available_at", "_price_available"]].max(axis=1)
+        state["available_at"] = state[["available_at", "_price_available"]].max(
+            axis=1, skipna=False
+        )
         state[ETF[4]] = state.close / state.nav_cny.where(state.nav_cny > 0) - 1
         result[ETF[4]] = latest_observations(state, work, columns=(ETF[4],))[
             ETF[4]

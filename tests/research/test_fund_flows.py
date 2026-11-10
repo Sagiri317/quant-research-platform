@@ -114,6 +114,16 @@ def test_etf_share_growth_and_nav_premium_require_same_economic_day():
         columns=["domestic_etf_premium_discount"],
     )
     assert result.domestic_etf_premium_discount.iloc[0] == pytest.approx(0.1)
+    unknown = nav.assign(available_at=pd.NaT)
+    assert (
+        calculate(
+            d,
+            dict(public_fund_nav=unknown, public_domestic_etf_prices=prices),
+            columns=["domestic_etf_premium_discount"],
+        )
+        .domestic_etf_premium_discount.isna()
+        .all()
+    )
     nav["timestamp"] -= pd.Timedelta(days=1)
     assert (
         calculate(
