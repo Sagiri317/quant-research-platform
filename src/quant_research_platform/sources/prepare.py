@@ -26,6 +26,7 @@ def prepare_source(config: Mapping):
             "revision",
             "release_csv",
             "manifests",
+            "fund_identity_csv",
         }
     ):
         raise ValueError("source_prepare_fields_invalid")
@@ -92,6 +93,12 @@ def prepare_source(config: Mapping):
         or any(type(value) is not str or not value for value in config["manifests"])
     ):
         raise ValueError("source_prepare_manifests_invalid")
+    if "fund_identity_csv" in config and (
+        source != "public_research"
+        or type(config["fund_identity_csv"]) is not str
+        or not config["fund_identity_csv"]
+    ):
+        raise ValueError("source_prepare_fund_identity_csv_invalid")
     for key in ("fee_csv", "fee_sidecar"):
         if key in config and (
             source != "reference" or type(config[key]) is not str or not config[key]
@@ -109,6 +116,7 @@ def prepare_source(config: Mapping):
             "revision",
             "release_csv",
             "manifests",
+            "fund_identity_csv",
         )
         if key in config
     }

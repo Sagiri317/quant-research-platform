@@ -3,6 +3,7 @@
 import io
 import json
 import re
+import xml.etree.ElementTree as ET
 import zipfile
 
 import numpy as np
@@ -11,6 +12,53 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 
 DATASETS = {
+    "public_13f_filings": {
+        "accession": "identifier",
+        "manager_cik": "identifier",
+        "report_date": "date",
+        "filing_type": "identifier",
+        "is_amendment": "identifier",
+        "amendment_number": "count",
+        "amendment_type": "text",
+        "report_type": "text",
+        "reported_table_entry_total": "count",
+        "source_infotable_row_count": "count",
+        "target_holding_row_count": "count",
+    },
+    "public_fund_financial_cells": {
+        "fund_code": "identifier",
+        "economic_portfolio_id": "identifier",
+        "share_class_header": "text",
+        "report_period_end": "date",
+        "value_observation_date": "date",
+        "table_kind": "identifier",
+        "field": "identifier",
+        "unit": "identifier",
+        "denominator": "identifier",
+        "value": "reported_units",
+        "report_version_identity": "identifier",
+    },
+    "public_futures_contracts": {
+        "product": "identifier",
+        "open_date": "date",
+        "expiry_date": "date",
+    },
+    "public_futures_member_positions": {
+        "product": "identifier",
+        "contract_id": "identifier",
+        "member_id": "identifier",
+        "position_side": "identifier",
+        "rank": "rank",
+        "quantity": "contracts",
+        "quantity_change": "contracts",
+    },
+    "public_refinancing_balances": {
+        "beginning_quantity": "shares",
+        "lent_quantity": "shares",
+        "ending_quantity": "shares",
+        "ending_balance": "CNY",
+        "scope": "identifier",
+    },
     "public_finra_margin": {
         "margin_debit": "million_USD",
         "cash_free_credit": "million_USD",
@@ -63,8 +111,40 @@ DATASETS = {
         "lending_balance": "CNY",
         "lending_quantity": "shares_or_fund_units",
         "lending_sell_quantity": "shares_or_fund_units",
+        "lending_repayment_quantity": "shares_or_fund_units",
     },
     "public_fund_shares": {"shares_outstanding": "fund_units"},
+    "public_fund_nav": {
+        "fund_code": "identifier",
+        "nav_cny": "CNY_per_fund_unit",
+        "accumulated_nav_cny": "CNY_per_fund_unit",
+        "reported_return_percent": "percent",
+    },
+    "public_nport_funds": {
+        "accession": "identifier",
+        "series_id": "identifier",
+        "report_date": "date",
+        "filing_type": "identifier",
+        "total_assets_usd": "USD",
+        "net_assets_usd": "USD",
+        "liabilities_usd": "USD",
+        "cash_outside_holdings_usd": "USD",
+        **{
+            f"{flow}_month_{month}_usd": "USD"
+            for flow in ("sales", "reinvestment", "redemption")
+            for month in (1, 2, 3)
+        },
+    },
+    "public_security_identifiers": {
+        "accession": "identifier",
+        "holding_id": "identifier",
+        "series_id": "identifier",
+        "cusip": "identifier",
+        "isin": "identifier",
+        "ticker": "identifier",
+        "report_date": "date",
+        "filing_type": "identifier",
+    },
     "public_etf_pcf_baskets": {
         "fund_code": "identifier",
         "valuation_date": "date",
@@ -135,16 +215,27 @@ DATASETS = {
     },
 }
 SOURCES = {
+    "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
+    "public_fund_financial_cells": {"csrc_official_fund_financial_cells_extracted"},
+    "public_futures_contracts": {"cffex_contract_parameters"},
+    "public_futures_member_positions": {"cffex_member_rankings"},
+    "public_refinancing_balances": {
+        "csf_securities_refinancing_summary",
+        "csf_market_making_borrowing_summary",
+    },
     "public_finra_margin": {"finra_margin"},
     "public_option_put_call": {"cboe_put_call_extracted"},
     "public_fund_holdings": {
         "chinaamc_extracted_holdings",
         "cn_fund_report_holdings_extracted",
     },
-    "public_13f_holdings": {"sec_13f"},
+    "public_13f_holdings": {"sec_13f", "sec_13f_target_holdings_extracted"},
     "public_nport_holdings": {"sec_nport"},
     "public_margin_balances": {"sse_margin", "szse_margin"},
     "public_fund_shares": {"sse_etf_shares", "szse_etf_shares"},
+    "public_fund_nav": {"eastmoney_fund_history_extracted"},
+    "public_nport_funds": {"sec_nport"},
+    "public_security_identifiers": {"sec_nport"},
     "public_etf_pcf_baskets": {"etf_pcf_baskets_extracted"},
     "public_etf_pcf_components": {"etf_pcf_components_extracted"},
     "public_futures_daily": {"cffex_daily"},
@@ -160,12 +251,30 @@ def accepts(data_id, record):
     if record["source"] not in SOURCES[data_id]:
         return False
     path = record["path"]
+    if record["source"] in {
+        "sec_13f_submission_metadata_extracted",
+        "sec_13f_target_holdings_extracted",
+    }:
+        return path.endswith(".csv")
+    if data_id == "public_fund_financial_cells":
+        return path.endswith(".csv")
+    if data_id in {"public_futures_contracts", "public_futures_member_positions"}:
+        return path.endswith(".xml")
+    if data_id == "public_refinancing_balances":
+        return path.endswith(".json")
     if record["source"].startswith("etf_pcf_"):
         return path.endswith(".csv")
     if record["source"].startswith("yahoo_"):
         return path.endswith(".csv")
-    if data_id in {"public_13f_holdings", "public_nport_holdings"}:
+    if data_id in {
+        "public_13f_holdings",
+        "public_nport_holdings",
+        "public_nport_funds",
+        "public_security_identifiers",
+    }:
         return path.endswith(".zip")
+    if data_id == "public_fund_nav":
+        return path.endswith(".json")
     if data_id == "public_option_put_call":
         return path.endswith(".csv")
     if data_id == "public_fund_holdings":
@@ -212,7 +321,220 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
-    if source.startswith("etf_pcf_"):
+    if source in {
+        "sec_13f_submission_metadata_extracted",
+        "sec_13f_target_holdings_extracted",
+    }:
+        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
+            common = {
+                "accession": "accession",
+                "manager_cik": "manager_cik",
+                "report_period": "report_date",
+                "filing_type": "filing_type",
+                "is_amendment": "is_amendment",
+                "amendment_type": "amendment_type",
+                "filing_date": "publication_date",
+                "published_at": "published_at",
+                "source_zip_sha256": "source_sha256",
+            }
+            mapping = {
+                **common,
+                **(
+                    {
+                        "amendment_number": "amendment_number",
+                        "report_type": "report_type",
+                        "reported_table_entry_total": "reported_table_entry_total",
+                        "source_infotable_row_count": "source_infotable_row_count",
+                        "target_holding_row_count": "target_holding_row_count",
+                        "source_url": "source_url",
+                    }
+                    if data_id == "public_13f_filings"
+                    else {
+                        "cusip": "cusip",
+                        "value_usd": "value_usd",
+                        "shares_or_principal_as_provided": "shares_or_principal",
+                        "share_type": "share_type",
+                        "put_call": "put_call",
+                        "investment_discretion": "investment_discretion",
+                        "evidence_url": "source_url",
+                    }
+                ),
+            }
+            result = _rename(frame, mapping)
+            result["timestamp"] = result.report_date
+            result["asset_id"] = (
+                result.accession
+                if data_id == "public_13f_filings"
+                else result.accession + ":" + frame.infotable_sk
+            )
+            result["_clock_source"] = "sec_13f:" + result.accession
+            yield result
+    elif source == "csrc_official_fund_financial_cells_extracted":
+        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
+            result = _rename(
+                frame,
+                {
+                    "primary_fund_code": "fund_code",
+                    "economic_portfolio_id": "economic_portfolio_id",
+                    "share_class_header_as_provided": "share_class_header",
+                    "report_period_end": "report_period_end",
+                    "value_observation_date": "value_observation_date",
+                    "table_kind": "table_kind",
+                    "field": "field",
+                    "unit": "unit",
+                    "denominator": "denominator",
+                    "value_decimal": "value",
+                    "report_version_identity": "report_version_identity",
+                    "source_url": "source_url",
+                    "source_sha256": "source_sha256",
+                    "published_at": "published_at",
+                },
+            )
+            result["timestamp"] = result.report_period_end
+            result["publication_date"] = pd.concat(
+                [
+                    pd.to_datetime(frame.publication_date),
+                    pd.to_datetime(frame.report_declared_send_date),
+                ],
+                axis=1,
+            ).max(axis=1)
+            result["asset_id"] = (
+                result.economic_portfolio_id
+                + ":"
+                + result.table_kind
+                + ":"
+                + frame.leaf_table_index
+                + ":"
+                + frame.source_row_index
+                + ":"
+                + frame.expanded_column_index
+            )
+            yield result
+    elif source == "cffex_contract_parameters":
+        frame = pd.DataFrame(
+            [
+                {child.tag: child.text for child in node}
+                for node in ET.parse(path).getroot()
+            ]
+        )
+        result = _rename(
+            frame,
+            {
+                "TRADING_DAY": "timestamp",
+                "PRODUCT_ID": "product",
+                "INSTRUMENT_ID": "asset_id",
+                "OPEN_DATE": "open_date",
+                "END_TRADING_DAY": "expiry_date",
+            },
+        )
+        result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
+        result["publication_date"] = result.timestamp
+        yield result
+    elif source == "cffex_member_rankings":
+        frame = pd.DataFrame(
+            [
+                {child.tag.lower(): child.text for child in node}
+                for node in ET.parse(path).getroot()
+                if node.tag.lower() == "data"
+            ]
+        )
+        if frame.empty:
+            return
+        result = _rename(
+            frame,
+            {
+                "instrumentid": "contract_id",
+                "tradingday": "timestamp",
+                "datatypeid": "position_side",
+                "rank": "rank",
+                "partyid": "member_id",
+                "productid": "product",
+                "volume": "quantity",
+                "varvolume": "quantity_change",
+            },
+        )
+        result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
+        result["asset_id"] = (
+            result.contract_id + ":" + result.position_side + ":" + result["rank"]
+        )
+        result["publication_date"] = result.timestamp
+        yield result
+    elif source in SOURCES["public_refinancing_balances"]:
+        payload = json.loads(path.read_bytes())
+        rows = payload["data"]["list"]
+        frame = pd.DataFrame(rows)
+        if frame.empty:
+            return
+        result = _rename(
+            frame,
+            {
+                "date": "timestamp",
+                "b2": "asset_id",
+                "c2": "beginning_quantity",
+                "i2": "lent_quantity",
+                "l2": "ending_quantity",
+                "m2": "ending_balance",
+            },
+        )
+        result = result.loc[
+            result.asset_id.astype("str").str.fullmatch(r"\d{6}")
+        ].copy()
+        _numbers(
+            result,
+            (
+                "beginning_quantity",
+                "lent_quantity",
+                "ending_quantity",
+                "ending_balance",
+            ),
+        )
+        result[
+            ["beginning_quantity", "lent_quantity", "ending_quantity", "ending_balance"]
+        ] *= 10000
+        result["scope"] = (
+            "market_maker"
+            if source == "csf_market_making_borrowing_summary"
+            else "securities_refinancing"
+        )
+        yield result
+    elif source == "eastmoney_fund_history_extracted":
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        fields = payload["fields"]
+        frame = pd.DataFrame(fields["Data_netWorthTrend"])
+        if frame.empty:
+            return
+        result = pd.DataFrame(
+            {
+                "fund_code": str(payload["fund_code"]).zfill(6),
+                "timestamp": pd.to_datetime(frame.x, unit="ms", utc=True)
+                .dt.tz_convert("Asia/Shanghai")
+                .dt.tz_localize(None)
+                .dt.normalize(),
+                "nav_cny": frame.y,
+                "reported_return_percent": frame.get(
+                    "equityReturn", pd.Series(pd.NA, index=frame.index)
+                ),
+            }
+        )
+        accumulated = pd.DataFrame(
+            fields.get("Data_ACWorthTrend", []),
+            columns=["epoch_ms", "accumulated_nav_cny"],
+        )
+        accumulated["timestamp"] = (
+            pd.to_datetime(accumulated.epoch_ms, unit="ms", utc=True)
+            .dt.tz_convert("Asia/Shanghai")
+            .dt.tz_localize(None)
+            .dt.normalize()
+        )
+        result = result.merge(
+            accumulated[["timestamp", "accumulated_nav_cny"]],
+            on="timestamp",
+            how="left",
+            validate="one_to_one",
+        )
+        result["asset_id"] = result.fund_code
+        yield result
+    elif source.startswith("etf_pcf_"):
         frame = pd.read_csv(path, dtype="str")
         mapping = {
             "trading_date": "timestamp",
@@ -299,7 +621,7 @@ def normalize(data_id, path, record):
         result["asset_id"] = result.fund_code + ":" + result.stock_code
         yield result
     elif source in {"sec_13f", "sec_nport"}:
-        yield from _sec(path, source)
+        yield from _sec(path, source, data_id=data_id)
     elif source.startswith("sse_"):
         payload = json.loads(path.read_bytes())
         frame = pd.DataFrame(payload["result"])
@@ -331,6 +653,9 @@ def normalize(data_id, path, record):
                 },
             )
             result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y%m%d")
+            result["lending_repayment_quantity"] = (
+                frame["rqchl"] if "rqchl" in frame else pd.NA
+            )
             _numbers(result, DATASETS[data_id])
         result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
         yield result
@@ -365,6 +690,9 @@ def normalize(data_id, path, record):
                 else pd.to_datetime(path.stem, format="%Y%m%d")
             )
             result["financing_repayment_amount"] = pd.NA
+            result["lending_repayment_quantity"] = (
+                frame["融券偿还量(股/份)"] if "融券偿还量(股/份)" in frame else pd.NA
+            )
         _numbers(result, DATASETS[data_id])
         result["asset_id"] = result.asset_id.str.zfill(6)
         yield result
@@ -529,7 +857,7 @@ def _cffex(payload, date):
     return result
 
 
-def _sec(path, source):
+def _sec(path, source, *, data_id):
     """Keep filings separate; amendments are not independent aggregate positions."""
     with zipfile.ZipFile(path) as archive:
         submission = pd.read_csv(archive.open("SUBMISSION.tsv"), sep="\t", dtype="str")
@@ -549,11 +877,24 @@ def _sec(path, source):
         else:
             if not submission.SUB_TYPE.isin(("NPORT-P", "NPORT-P/A")).all():
                 raise ValueError("nport_public_filing_type_required")
+            fund_columns = ["ACCESSION_NUMBER", "SERIES_ID"]
+            if data_id == "public_nport_funds":
+                fund_columns += [
+                    "TOTAL_ASSETS",
+                    "NET_ASSETS",
+                    "TOTAL_LIABILITIES",
+                    "CASH_NOT_RPTD_IN_C_OR_D",
+                    *(
+                        f"{prefix}_FLOW_MON{month}"
+                        for prefix in ("SALES", "REINVESTMENT", "REDEMPTION")
+                        for month in (1, 2, 3)
+                    ),
+                ]
             funds = pd.read_csv(
                 archive.open("FUND_REPORTED_INFO.tsv"),
                 sep="\t",
                 dtype="str",
-                usecols=["ACCESSION_NUMBER", "SERIES_ID"],
+                usecols=fund_columns,
             )
             submission = submission.merge(
                 funds, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
@@ -562,8 +903,56 @@ def _sec(path, source):
         submission["FILING_DATE"] = pd.to_datetime(
             submission.FILING_DATE, format="mixed"
         )
+        if data_id == "public_nport_funds":
+            result = _rename(
+                submission,
+                {
+                    "ACCESSION_NUMBER": "accession",
+                    "SERIES_ID": "series_id",
+                    "REPORT_DATE": "report_date",
+                    "SUB_TYPE": "filing_type",
+                    "FILING_DATE": "publication_date",
+                    "TOTAL_ASSETS": "total_assets_usd",
+                    "NET_ASSETS": "net_assets_usd",
+                    "TOTAL_LIABILITIES": "liabilities_usd",
+                    "CASH_NOT_RPTD_IN_C_OR_D": "cash_outside_holdings_usd",
+                    **{
+                        f"{prefix}_FLOW_MON{month}": f"{flow}_month_{month}_usd"
+                        for prefix, flow in (
+                            ("SALES", "sales"),
+                            ("REINVESTMENT", "reinvestment"),
+                            ("REDEMPTION", "redemption"),
+                        )
+                        for month in (1, 2, 3)
+                    },
+                },
+            )
+            result["asset_id"] = result.accession
+            result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
+            result["report_date"] = result.timestamp
+            yield result
+            return
+        identifiers = None
+        if data_id == "public_security_identifiers":
+            identifiers = pd.read_csv(
+                archive.open("IDENTIFIERS.tsv"),
+                sep="\t",
+                dtype="str",
+                usecols=[
+                    "HOLDING_ID",
+                    "IDENTIFIERS_ID",
+                    "IDENTIFIER_ISIN",
+                    "IDENTIFIER_TICKER",
+                ],
+            )
         for chunk in pd.read_csv(
-            archive.open(member), sep="\t", dtype="str", chunksize=100000
+            archive.open(member),
+            sep="\t",
+            dtype="str",
+            chunksize=100000,
+            usecols=["ACCESSION_NUMBER", "HOLDING_ID", "ISSUER_CUSIP"]
+            if data_id == "public_security_identifiers"
+            else None,
         ):
             joined = chunk.merge(
                 submission,
@@ -574,7 +963,26 @@ def _sec(path, source):
             )
             if not joined._merge.eq("both").all():
                 raise ValueError("sec_holding_submission_missing")
-            if source == "sec_13f":
+            if data_id == "public_security_identifiers":
+                joined = joined.merge(
+                    identifiers, on="HOLDING_ID", how="inner", validate="one_to_many"
+                )
+                result = _rename(
+                    joined,
+                    {
+                        "ACCESSION_NUMBER": "accession",
+                        "HOLDING_ID": "holding_id",
+                        "SERIES_ID": "series_id",
+                        "ISSUER_CUSIP": "cusip",
+                        "IDENTIFIER_ISIN": "isin",
+                        "IDENTIFIER_TICKER": "ticker",
+                        "REPORT_DATE": "report_date",
+                        "SUB_TYPE": "filing_type",
+                        "FILING_DATE": "publication_date",
+                        "IDENTIFIERS_ID": "_holding_id",
+                    },
+                )
+            elif source == "sec_13f":
                 result = _rename(
                     joined,
                     {
@@ -618,6 +1026,8 @@ def _sec(path, source):
                     },
                 )
             result["asset_id"] = result.accession + ":" + result._holding_id
+            if source == "sec_13f":
+                result["_clock_source"] = "sec_13f:" + result.accession
             result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
             result["report_date"] = result.timestamp
             yield result

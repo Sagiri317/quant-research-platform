@@ -66,6 +66,7 @@ def materialize_interim_data(
     end_date=None,
     manifests=("manifest.json",),
     release_csv=None,
+    fund_identity_csv=None,
 ):
     """Normalize explicitly requested facts, preserving source-file versions.
 
@@ -95,6 +96,19 @@ def materialize_interim_data(
         raise ValueError("public_source_path_duplicate")
     catalog = interim_catalog()
     clocks, clock_hash = _release_clocks(release_csv)
+    fund_identities = None
+    if fund_identity_csv is not None and "public_fund_nav" in data_ids:
+        fund_identities = pd.read_csv(
+            fund_identity_csv,
+            dtype="str",
+            usecols=["fund_code", "clock_source_key", "clock_valid_from"],
+        )
+        if fund_identities.fund_code.duplicated().any():
+            raise ValueError("public_fund_identity_duplicate")
+        fund_identities["clock_valid_from"] = pd.to_datetime(
+            fund_identities.clock_valid_from
+        )
+        fund_identities = fund_identities.set_index("fund_code")
     roots = {}
     skipped = []
     for data_id in data_ids:
@@ -182,7 +196,12 @@ def materialize_interim_data(
                     frame["availability_basis"] = "unknown_historical_release"
                     frame.loc[frame.publication_date.notna(), "availability_basis"] = (
                         "public_nport_filing_date_rule_upper_bound"
-                        if data_id == "public_nport_holdings"
+                        if data_id
+                        in {
+                            "public_nport_holdings",
+                            "public_nport_funds",
+                            "public_security_identifiers",
+                        }
                         else "publication_date_upper_bound"
                     )
                     frame.loc[frame.published_at.notna(), "availability_basis"] = (
@@ -192,6 +211,17 @@ def materialize_interim_data(
                         pd.NA, index=frame.index, dtype="str"
                     )
                     if clocks is not None:
+                        if data_id == "public_fund_nav" and fund_identities is not None:
+                            identity = fund_identities.reindex(
+                                frame.fund_code
+                            ).set_axis(frame.index)
+                            visible = (
+                                identity.clock_source_key.notna()
+                                & frame.timestamp.ge(identity.clock_valid_from)
+                            )
+                            frame["_clock_source"] = frame.source.where(
+                                ~visible, identity.clock_source_key
+                            )
                         keys = pd.MultiIndex.from_arrays(
                             [
                                 frame.get("_clock_source", frame.source),
@@ -206,9 +236,9 @@ def materialize_interim_data(
                         frame.loc[actual, "available_at"] = clock.loc[
                             actual, "estimated_available_at"
                         ]
-                        estimated = (
+                        estimated = clock.estimated_available_at.notna() & (
                             frame.available_at.isna()
-                            & clock.estimated_available_at.notna()
+                            | clock.estimated_available_at.ge(frame.available_at)
                         )
                         applied = actual | estimated
                         frame.loc[estimated, "available_at"] = clock.loc[
@@ -282,6 +312,16 @@ def materialize_interim_data(
                         if clock_hash is not None
                         else {}
                     ),
+                    **(
+                        {
+                            "fund_identity_sha256": hashlib.sha256(
+                                Path(fund_identity_csv).read_bytes()
+                            ).hexdigest()
+                        }
+                        if fund_identity_csv is not None
+                        and "public_fund_nav" in data_ids
+                        else {}
+                    ),
                 },
                 "parameters": {
                     "timestamp_semantics": "observation_not_availability",
@@ -299,7 +339,17 @@ def _source_timezone(source):
     return (
         "Asia/Shanghai"
         if source.startswith(
-            ("chinaamc", "cn_fund_", "sse_", "szse_", "cffex", "etf_pcf_")
+            (
+                "chinaamc",
+                "cn_fund_",
+                "sse_",
+                "szse_",
+                "cffex",
+                "etf_pcf_",
+                "eastmoney_",
+                "csf_",
+                "csrc_",
+            )
         )
         else "America/New_York"
     )
