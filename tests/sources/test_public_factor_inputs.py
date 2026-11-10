@@ -204,3 +204,127 @@ def test_nested_manifest_paths_are_resolved_from_their_declared_base(tmp_path):
     actual = read_dataset(output)
     assert actual.asset_id.tolist() == ["IF2401"]
     assert actual.expiry_date.tolist() == [pd.Timestamp("2024-01-19")]
+
+
+def test_derived_manifest_without_aggregate_url_keeps_row_provenance(tmp_path):
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets import read_dataset
+
+    raw = tmp_path / "raw"
+    nested = raw / "supplement"
+    nested.mkdir(parents=True)
+    path = nested / "holdings.csv"
+    pd.DataFrame(
+        [
+            dict(
+                accession="a",
+                manager_cik="1",
+                report_period="2020-03-31",
+                filing_date="2020-05-15",
+                filing_type="13F-HR",
+                is_amendment="N",
+                amendment_type="",
+                published_at="",
+                source_zip_sha256="a" * 64,
+                cusip="c",
+                value_usd="12500",
+                shares_or_principal_as_provided="100",
+                share_type="SH",
+                put_call="",
+                investment_discretion="SOLE",
+                evidence_url="https://example.org/original",
+                infotable_sk="7",
+            )
+        ]
+    ).to_csv(path, index=False)
+    record = dict(
+        path="supplement/holdings.csv",
+        source="sec_13f_target_holdings_extracted",
+        status="downloaded",
+        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        bytes=path.stat().st_size,
+    )
+    (nested / "manifest.json").write_text(
+        json.dumps(
+            dict(
+                schema_version=1, path_base="public_research_raw_root", records=[record]
+            )
+        )
+    )
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(raw),
+            manifests=["supplement/manifest.json"],
+            outputs={"public_13f_holdings": str(output)},
+        )
+    )
+    frame = read_dataset(output)
+    assert frame.source_url.tolist() == ["https://example.org/original"]
+    assert frame.retrieved_at.isna().all()
+    assert frame.value_usd.tolist() == [12500]
+
+
+def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
+    path = tmp_path / "prices.json"
+    path.write_text(
+        json.dumps(
+            {
+                "data": {
+                    "code": "510300",
+                    "klines": ["2024-01-02,2,2.1,2.2,1.9,10,2050,1,2,0.1,3"],
+                }
+            }
+        )
+    )
+    frame = next(
+        normalize(
+            "public_domestic_etf_prices", path, {"source": "eastmoney_cn_etf_daily"}
+        )
+    )
+    assert frame.volume.tolist() == [1000]
+    assert frame.amount.tolist() == ["2050"]
+    assert frame.price_basis.tolist() == ["unadjusted_raw"]
+
+
+def test_nport_value_is_usd_and_investment_currency_is_separate(tmp_path):
+    from quant_research_platform.sources.public_research.interim import interim_catalog
+
+    path = tmp_path / "holding.csv"
+    pd.DataFrame(
+        [
+            dict(
+                accession="a",
+                series_id="s",
+                issuer_cusip="c",
+                report_date="2024-01-31",
+                sub_type="NPORT-P",
+                currency_value_as_provided="100",
+                currency_code_as_provided="JPY",
+                balance_as_provided="2",
+                balance_units_as_provided="NS",
+                asset_category="EC",
+                percentage_as_provided="5",
+                payoff_profile="Long",
+                derivative_category="",
+                filing_date="2024-03-01",
+                published_at="",
+                source_zip_sha256="a" * 64,
+                source_retrieved_at="2026-11-11T00:00:00Z",
+                evidence_url="https://example.org",
+                holding_id="1",
+            )
+        ]
+    ).to_csv(path, index=False)
+    frame = next(
+        normalize(
+            "public_nport_holdings",
+            path,
+            {"source": "sec_nport_target_holdings_extracted"},
+        )
+    )
+    assert frame.value.tolist() == ["100"]
+    assert frame.currency.tolist() == ["JPY"]
+    assert frame.payoff_profile.tolist() == ["Long"]
+    assert interim_catalog().get("public_nport_holdings").column_units["value"] == "USD"

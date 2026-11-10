@@ -12,6 +12,17 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 
 DATASETS = {
+    "public_domestic_etf_prices": {
+        "open": "CNY_per_fund_unit",
+        "close": "CNY_per_fund_unit",
+        "high": "CNY_per_fund_unit",
+        "low": "CNY_per_fund_unit",
+        "volume": "fund_units",
+        "amount": "CNY",
+        "return_percent": "percent",
+        "turnover_rate_percent": "percent",
+        "price_basis": "text",
+    },
     "public_13f_filings": {
         "accession": "identifier",
         "manager_cik": "identifier",
@@ -97,11 +108,13 @@ DATASETS = {
         "cusip": "identifier",
         "report_date": "date",
         "filing_type": "identifier",
-        "value": "reported_currency",
+        "value": "USD",
         "currency": "identifier",
         "balance": "reported_units",
         "balance_unit": "identifier",
         "asset_category": "identifier",
+        "payoff_profile": "identifier",
+        "derivative_category": "identifier",
         "portfolio_weight_percent": "percent",
     },
     "public_margin_balances": {
@@ -215,6 +228,7 @@ DATASETS = {
     },
 }
 SOURCES = {
+    "public_domestic_etf_prices": {"eastmoney_cn_etf_daily"},
     "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
     "public_fund_financial_cells": {"csrc_official_fund_financial_cells_extracted"},
     "public_futures_contracts": {"cffex_contract_parameters"},
@@ -230,7 +244,7 @@ SOURCES = {
         "cn_fund_report_holdings_extracted",
     },
     "public_13f_holdings": {"sec_13f", "sec_13f_target_holdings_extracted"},
-    "public_nport_holdings": {"sec_nport"},
+    "public_nport_holdings": {"sec_nport", "sec_nport_target_holdings_extracted"},
     "public_margin_balances": {"sse_margin", "szse_margin"},
     "public_fund_shares": {"sse_etf_shares", "szse_etf_shares"},
     "public_fund_nav": {"eastmoney_fund_history_extracted"},
@@ -251,6 +265,10 @@ def accepts(data_id, record):
     if record["source"] not in SOURCES[data_id]:
         return False
     path = record["path"]
+    if record["source"] == "sec_nport_target_holdings_extracted":
+        return path.endswith(".csv")
+    if data_id == "public_domestic_etf_prices":
+        return path.endswith(".json")
     if record["source"] in {
         "sec_13f_submission_metadata_extracted",
         "sec_13f_target_holdings_extracted",
@@ -321,7 +339,61 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
-    if source in {
+    if source == "sec_nport_target_holdings_extracted":
+        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
+            result = _rename(
+                frame,
+                {
+                    "accession": "accession",
+                    "series_id": "series_id",
+                    "issuer_cusip": "cusip",
+                    "report_date": "report_date",
+                    "sub_type": "filing_type",
+                    "currency_value_as_provided": "value",
+                    "currency_code_as_provided": "currency",
+                    "balance_as_provided": "balance",
+                    "balance_units_as_provided": "balance_unit",
+                    "asset_category": "asset_category",
+                    "percentage_as_provided": "portfolio_weight_percent",
+                    "payoff_profile": "payoff_profile",
+                    "derivative_category": "derivative_category",
+                    "filing_date": "publication_date",
+                    "published_at": "published_at",
+                    "source_zip_sha256": "source_sha256",
+                    "source_retrieved_at": "retrieved_at",
+                    "evidence_url": "source_url",
+                },
+            )
+            result["asset_id"] = result.accession + ":" + frame.holding_id
+            result["timestamp"] = result.report_date
+            yield result
+        return
+    if source == "eastmoney_cn_etf_daily":
+        payload = json.loads(path.read_bytes())["data"]
+        frame = pd.DataFrame(
+            [line.split(",") for line in payload["klines"]],
+            columns=[
+                "timestamp",
+                "open",
+                "close",
+                "high",
+                "low",
+                "volume",
+                "amount",
+                "amplitude_percent",
+                "return_percent",
+                "price_change",
+                "turnover_rate_percent",
+            ],
+        )
+        if frame.empty:
+            return
+        _numbers(frame, ("volume",))
+        frame["volume"] *= 100
+        frame["asset_id"] = str(payload["code"]).zfill(6)
+        frame["price_basis"] = "unadjusted_raw"
+        yield frame
+    elif source in {
         "sec_13f_submission_metadata_extracted",
         "sec_13f_target_holdings_extracted",
     }:
@@ -361,6 +433,8 @@ def normalize(data_id, path, record):
                 ),
             }
             result = _rename(frame, mapping)
+            if "source_retrieved_at" in frame:
+                result["retrieved_at"] = frame.source_retrieved_at
             result["timestamp"] = result.report_date
             result["asset_id"] = (
                 result.accession
@@ -385,6 +459,7 @@ def normalize(data_id, path, record):
                     "denominator": "denominator",
                     "value_decimal": "value",
                     "report_version_identity": "report_version_identity",
+                    "source_retrieved_at": "retrieved_at",
                     "source_url": "source_url",
                     "source_sha256": "source_sha256",
                     "published_at": "published_at",
@@ -1024,6 +1099,12 @@ def _sec(path, source, *, data_id):
                         "FILING_DATE": "publication_date",
                         "HOLDING_ID": "_holding_id",
                     },
+                )
+                result["payoff_profile"] = (
+                    joined["PAYOFF_PROFILE"] if "PAYOFF_PROFILE" in joined else pd.NA
+                )
+                result["derivative_category"] = (
+                    joined["DERIVATIVE_CAT"] if "DERIVATIVE_CAT" in joined else pd.NA
                 )
             result["asset_id"] = result.accession + ":" + result._holding_id
             if source == "sec_13f":

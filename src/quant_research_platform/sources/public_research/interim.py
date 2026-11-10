@@ -89,7 +89,12 @@ def materialize_interim_data(
         if manifest["schema_version"] != 1:
             raise ValueError("public_source_manifest_version_invalid")
         scope = manifest.get("path_base")
-        if scope not in (None, "manifest_directory", "data/raw/public_research"):
+        if scope not in (
+            None,
+            "manifest_directory",
+            "public_research_raw_root",
+            "data/raw/public_research",
+        ):
             raise ValueError("public_source_path_base_invalid")
         directory = path.parent if scope == "manifest_directory" else raw_root
         for record in manifest["records"]:
@@ -149,7 +154,11 @@ def materialize_interim_data(
                 if digest != record["sha256"] or path.stat().st_size != record["bytes"]:
                     raise ValueError("public_source_integrity_mismatch")
                 evidence.append(
-                    {k: record[k] for k in ("path", "url", "sha256", "retrieved_at")}
+                    {
+                        k: record[k]
+                        for k in ("path", "url", "sha256", "retrieved_at")
+                        if k in record
+                    }
                 )
                 if record["source"] == "cffex_daily" and path.suffix == ".zip":
                     if digest in complete_archives:
@@ -160,11 +169,17 @@ def materialize_interim_data(
                         continue
                     frame["source"] = record["source"]
                     if "source_url" not in frame:
-                        frame["source_url"] = record["url"]
+                        frame["source_url"] = pd.Series(
+                            record.get("url"), index=frame.index, dtype="str"
+                        )
                     if "source_sha256" not in frame:
                         frame["source_sha256"] = digest
                     if "retrieved_at" not in frame:
-                        frame["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
+                        frame["retrieved_at"] = (
+                            pd.Timestamp(record["retrieved_at"])
+                            if "retrieved_at" in record
+                            else pd.NaT
+                        )
                     if "publication_date" not in frame:
                         frame["publication_date"] = pd.NaT
                     publication_dates = frame.publication_date
