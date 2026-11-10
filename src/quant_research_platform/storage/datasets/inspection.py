@@ -19,6 +19,7 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.datasets.schema import (
     date_string,
     physical_schema_columns,
+    validate_dataset_manifest_payload,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -56,6 +57,10 @@ def _inspection_runtime_metadata(
     batch_rows: int = DEFAULT_BATCH_ROWS,
     frame_observer=None,
 ) -> dict[str, Any]:
+    if context.native:
+        validate_dataset_manifest_payload(
+            context.manifest, spec=context.spec, logical_columns=()
+        )
     spec = context.spec
     primary_key = tuple(str(column) for column in spec["primary_key"])
     column_roles = {
@@ -83,6 +88,7 @@ def _inspection_runtime_metadata(
             context,
             columns=tuple(context.arrow_schema.names),
             batch_rows=batch_rows,
+            validate_parts=True,
             batch_observer=lambda batch, logical_frame: observer.observe_batch(
                 batch, frame=logical_frame
             ),

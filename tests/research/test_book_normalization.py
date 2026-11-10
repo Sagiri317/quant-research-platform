@@ -157,3 +157,83 @@ def test_native_historical_book_normalization_and_deeplob(tmp_path):
                 "sessions": ["2020-01-02", "2020-01-01"],
             }
         )
+
+
+@pytest.mark.parametrize("transform", ["date_zscore", "risk_residual"])
+def test_book_normalization_preserves_custom_target_definition(tmp_path, transform):
+    from quant_research_platform.contracts.models import _target_definition
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+
+    columns = list(DEEPLOB_INPUT_COLUMNS)
+    times = pd.to_datetime(["2024-01-02T01:30:00", "2024-01-03T01:30:00"])
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "asset_id": "a",
+            "session_date": times.normalize(),
+            "model_target": [0.1, 0.2],
+            "mature_at": times + pd.Timedelta(seconds=30),
+            **dict.fromkeys(columns, 1.0),
+        }
+    )
+    roles = {
+        "timestamp": "timestamp",
+        "asset_id": "key",
+        "session_date": "context",
+        "mature_at": "context",
+        "model_target": "label",
+        **dict.fromkeys(columns, "feature"),
+    }
+    risk = FactorRiskModel() if transform == "risk_residual" else None
+    spec = ResearchDatasetSpec(
+        data_id="custom_book",
+        market_id="a_share",
+        frequency="tick",
+        grain="asset_timestamp",
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=(),
+        column_roles=roles,
+        column_units={"model_target": "decimal_return"},
+        label_availability_columns={"model_target": "mature_at"},
+        input_data_ids=("quotes",),
+        base_input_data_id="quotes",
+        feature_columns=tuple(columns),
+        label_columns=("model_target",),
+        target_label_column="future_mid_return_30s",
+        target_transform=transform,
+        target_clip="mad",
+        risk_model=risk,
+    )
+    source = tmp_path / "source"
+    write_dataset(
+        source,
+        frame,
+        spec=spec,
+        metadata={
+            "producer_diagnostics": {
+                "label_semantics": {"future_mid_return_30s": {"horizon": 30000}}
+            }
+        },
+    )
+    output = normalize_book(
+        {
+            "inputs": str(source),
+            "output": str(tmp_path / "normalized"),
+            "dataset_id": "normalized",
+            "sessions": ["2024-01-02", "2024-01-03"],
+            "lookback_sessions": 1,
+        }
+    )
+    session = open_dataset_session(output)
+    definition = _target_definition(session.spec, "model_target", session.manifest)
+    assert definition["source_label"] == "future_mid_return_30s"
+    assert definition["target_transform"] == transform
+    assert definition["target_clip"] == "mad"
+    assert definition["label_semantics"] == {"horizon": 30000}
+    if risk is not None:
+        assert definition["risk_model"] == risk.to_dict()
+    pd.testing.assert_frame_equal(
+        read_dataset(output)[["model_target", "mature_at"]],
+        frame[["model_target", "mature_at"]],
+    )

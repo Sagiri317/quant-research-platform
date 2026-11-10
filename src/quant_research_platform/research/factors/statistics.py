@@ -648,12 +648,7 @@ def _factor_statistics_from_evaluations(config):
     from contextlib import ExitStack
 
     from quant_research_platform.artifacts.outputs.evaluation import (
-        _evaluation_spec,
         _iter_evaluation_member_batches,
-    )
-    from quant_research_platform.artifacts.outputs.evaluation_daily import (
-        daily_frame,
-        validate_daily_counts,
     )
     from quant_research_platform.artifacts.outputs.manifest import (
         validate_output_bundle,
@@ -782,7 +777,7 @@ def _factor_statistics_from_evaluations(config):
                     "timestamps": [],
                 }
         members = ["metrics"]
-        if "stratified_ic" in analyses and metadata["optional_member_rows"]:
+        if "stratified_ic" in analyses and metadata["strata"] is not None:
             members += ["daily_coverage", "daily_strata"]
         validate_output_bundle(
             path,
@@ -838,17 +833,6 @@ def _factor_statistics_from_evaluations(config):
                 coverage = daily.get("daily_coverage")
                 if "daily_coverage" in members and coverage is None:
                     raise ValueError("evaluation_daily_dates_mismatch")
-                validate_daily_counts(
-                    metrics,
-                    coverage,
-                    daily.get("daily_strata")
-                    if daily.get("daily_strata") is not None
-                    else daily_frame([], "daily_strata")
-                    if "daily_strata" in members
-                    else None,
-                    spec=_evaluation_spec(metadata),
-                    science=metadata,
-                )
                 for name, frame in (
                     ("metrics", metrics),
                     ("daily_strata", daily.get("daily_strata")),

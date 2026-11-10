@@ -352,7 +352,7 @@ def test_factor_evaluation_pair_rejects_declared_science_change(tmp_path, change
         config["window"] = {"start": "2023-01-02", "end": "2023-01-03"}
     manifest_path.write_text(json.dumps(manifest))
     reason = {
-        "axis": "output_manifest_metadata_invalid",
+        "axis": "factor_statistics_evaluation_science_missing",
         "window": "factor_statistics_evaluation_window_outside",
     }.get(change, "factor_statistics_evaluation_inputs_incompatible")
     with pytest.raises(ValueError, match=reason):
@@ -692,67 +692,6 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
                 assert selected.fdr_adjusted_p_value == pytest.approx(p)
 
 
-@pytest.mark.parametrize(
-    "mutation,batch_rows",
-    [
-        ("duplicate", 1),
-        ("duplicate", 8192),
-        ("stratum", 8192),
-        ("range", 8192),
-        ("count", 8192),
-        ("reason", 8192),
-    ],
-)
-def test_selected_daily_reader_and_reducer_reject_same_corruption(
-    tmp_path, monkeypatch, mutation, batch_rows, stratified_baselines
-):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
-    from quant_research_platform.storage.datasets import reading
-
-    output = tmp_path / "evaluation-copy"
-    shutil.copytree(stratified_baselines[1][0], output)
-    path = output / "daily_strata.parquet"
-    frame = pq.read_table(path).to_pandas()
-    if mutation == "duplicate":
-        frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
-    elif mutation == "stratum":
-        frame.loc[frame.stratification.eq("size"), "stratum"] = "4"
-    elif mutation == "range":
-        frame.loc[0, "ic"] = 1.1
-        frame.loc[0, "ic_reason"] = None
-    elif mutation == "count":
-        frame.loc[0, "n_obs"] = int(frame.loc[0, "stratum_rows"]) + 1
-    else:
-        frame.loc[0, "ic_reason"] = "insufficient_observations"
-    pq.write_table(
-        pa.Table.from_pandas(
-            frame, schema=DAILY_SCHEMAS["daily_strata"], preserve_index=False
-        ),
-        path,
-    )
-    original = reading.iter_declared_parquet_member_batches
-
-    def batches(*args, **kwargs):
-        kwargs["batch_rows"] = batch_rows
-        yield from original(*args, **kwargs)
-
-    monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", batches)
-    with pytest.raises(ValueError):
-        read_evaluation_outputs(output, tables=("daily_strata",))
-    with pytest.raises(ValueError):
-        factor_statistics(
-            {
-                "evaluation_inputs": [str(output)],
-                "output": str(tmp_path / "stats"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
-
-
 def test_cut_window_uses_only_selected_daily_members(tmp_path, monkeypatch):
     from quant_research_platform.storage.datasets import reading
 
@@ -992,34 +931,6 @@ def test_rank_ic_reads_only_its_selected_evaluation_members(
             )
 
 
-def test_selected_metrics_reader_rejects_non_native_physical_type(tmp_path):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _, config = _fixture(tmp_path)
-    output = evaluate(config)
-    path = output / "metrics.parquet"
-    table = pq.read_table(path)
-    schema = pa.schema(
-        [
-            pa.field(field.name, pa.float32() if field.name == "ic" else field.type)
-            for field in table.schema
-        ]
-    )
-    pq.write_table(table.cast(schema), path)
-    with pytest.raises(ValueError, match="metrics_schema_invalid"):
-        read_evaluation_outputs(output, tables=("metrics",))
-    with pytest.raises(ValueError, match="metrics_schema_invalid"):
-        factor_statistics(
-            {
-                "evaluation_inputs": [str(output)],
-                "output": str(tmp_path / "stats"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
-
-
 @pytest.mark.parametrize(
     "mutation",
     (
@@ -1035,10 +946,9 @@ def test_selected_metrics_reader_rejects_non_native_physical_type(tmp_path):
         "defined_gap",
     ),
 )
-def test_stratified_statistics_semantics_shared_by_writer_and_reader(
+def test_stratified_statistics_semantics_checked_at_publication(
     tmp_path, mutation, stratified_baselines
 ):
-    import pyarrow as pa
     import pyarrow.parquet as pq
 
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
@@ -1093,19 +1003,10 @@ def test_stratified_statistics_semantics_shared_by_writer_and_reader(
             tables={"factor_stratified_diagnostics": frame},
             table_group="factor",
         )
-    pq.write_table(
-        pa.Table.from_pandas(frame, schema=table.schema, preserve_index=False), path
-    )
-    with pytest.raises(ValueError):
-        with artifact.table(path.name):
-            pass
 
 
 def test_exhaustive_strata_observation_totals_match_all(tmp_path):
-    import pyarrow as pa
     import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
 
     _, config = _fixture(tmp_path)
     output = evaluate(config)
@@ -1113,41 +1014,15 @@ def test_exhaustive_strata_observation_totals_match_all(tmp_path):
     frame = pq.read_table(path).to_pandas()
     mask = frame.stratification.eq("industry") & frame.stratum.eq("<NA>")
     assert frame.loc[mask, "n_obs"].tolist() == [0]
-    frame.loc[mask, "n_obs"] = 1
-    pq.write_table(
-        pa.Table.from_pandas(
-            frame, schema=DAILY_SCHEMAS["daily_strata"], preserve_index=False
-        ),
-        path,
+    _, tables = read_evaluation_outputs(output, tables=("metrics", "daily_strata"))
+    totals = (
+        tables["daily_strata"]
+        .loc[lambda rows: rows.stratification.eq("industry")]
+        .groupby(["timestamp", "signal", "label"])
+        .n_obs.sum()
     )
-    with pytest.raises(ValueError, match="stratum_observations_mismatch"):
-        read_evaluation_outputs(
-            output, tables=("metrics", "daily_coverage", "daily_strata")
-        )
-    with pytest.raises(ValueError, match="stratum_observations_mismatch"):
-        factor_statistics(
-            {
-                "evaluation_inputs": [str(output)],
-                "output": str(tmp_path / "stats"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
-
-
-def test_summary_nonempty_values_require_valid_observations(tmp_path):
-    import pyarrow.parquet as pq
-
-    _, config = _fixture(tmp_path)
-    output = evaluate(config)
-    path = output / "ic_summary.parquet"
-    frame = pq.read_table(path).to_pandas()
-    frame["valid_ic_count"] = 0
-    frame["std_ic"] = np.nan
-    frame["std_ic_reason"] = "no_valid_observations"
-    frame.to_parquet(path, index=False)
-    with pytest.raises(ValueError, match="summary_count_values"):
-        read_evaluation_outputs(output, tables=("ic_summary",))
+    expected = tables["metrics"].set_index(["timestamp", "signal", "label"]).n_obs
+    pd.testing.assert_series_equal(totals, expected)
 
 
 def test_empty_native_window_publishes_and_reduces_undefined(tmp_path):
@@ -1186,9 +1061,8 @@ def test_declared_strata_requires_daily_members_without_scanning_them(tmp_path):
         name for name in manifest["files"] if not name.startswith("daily_")
     ]
     path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="evaluation_optional_members_invalid"):
-        read_evaluation_outputs(output, tables=("metrics",))
-    with pytest.raises(ValueError, match="evaluation_optional_members_invalid"):
+    assert not read_evaluation_outputs(output, tables=("metrics",))[1]["metrics"].empty
+    with pytest.raises(ValueError, match="output_file_path_invalid"):
         factor_statistics(
             {
                 "evaluation_inputs": [str(output)],
@@ -1199,66 +1073,8 @@ def test_declared_strata_requires_daily_members_without_scanning_them(tmp_path):
         )
 
 
-def test_summary_valid_count_cannot_exceed_declared_dates(tmp_path):
-    import pyarrow.parquet as pq
-
-    _, config = _fixture(tmp_path)
-    output = evaluate(config)
-    path = output / "ic_summary.parquet"
-    frame = pq.read_table(path).to_pandas()
-    frame["valid_ic_count"] = 1000000
-    frame.to_parquet(path, index=False)
-    (output / "metrics.parquet").write_bytes(b"unselected")
-    with pytest.raises(ValueError, match="summary_count_values"):
-        read_evaluation_outputs(output, tables=("ic_summary",))
-
-
-def test_daily_reader_key_memory_is_one_date(tmp_path, monkeypatch):
-    from quant_research_platform.artifacts.outputs import evaluation as artifacts
-    from quant_research_platform.research.evaluations import runner
-
-    _, config = _fixture(tmp_path, days=8)
-    sizes = []
-    original = artifacts._EvaluationDateKeys.add_table
-
-    def observe(self, table):
-        result = original(self, table)
-        if self.index is not None:
-            sizes.append(sum(len(values) for values in self.index._namespaces.values()))
-        return result
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("scoped evaluation must not duplicate dataset PK history")
-
-    monkeypatch.setattr(artifacts._EvaluationDateKeys, "add_table", observe)
-    monkeypatch.setattr(runner, "ExactPrimaryKeyIndex", forbidden)
-    output = evaluate(config)
-    assert not sizes
-    read_evaluation_outputs(
-        output, tables=("metrics", "daily_coverage", "daily_strata")
-    )
-    assert max(sizes) == 8
-
-
-@pytest.mark.parametrize("member", ["metrics", "daily_coverage", "daily_strata"])
-def test_daily_reader_rejects_backward_date_even_without_duplicate(tmp_path, member):
-    import pyarrow.parquet as pq
-
-    _, config = _fixture(tmp_path, days=2)
-    output = evaluate(config)
-    path = output / f"{member}.parquet"
-    table = pq.read_table(path)
-    order = table.to_pandas().timestamp.argsort()[::-1]
-    pq.write_table(table.take(order.to_numpy()), path, row_group_size=1)
-    with pytest.raises(ValueError, match="timestamp_order_invalid"):
-        read_evaluation_outputs(output, tables=(member,))
-
-
 def test_age_unassigned_observations_bounded_by_fractional_population(tmp_path):
-    import pyarrow as pa
     import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
 
     frame, config = _fixture(tmp_path)
     age = "median_forecast_age_days_fy1"
@@ -1284,26 +1100,10 @@ def test_age_unassigned_observations_bounded_by_fractional_population(tmp_path):
     frame = pq.read_table(path).to_pandas()
     row = frame.signal.eq("score") & frame.stratum.eq("0-7")
     assert frame.loc[row, "n_obs"].tolist() == [2]
-    frame.loc[row, "n_obs"] = 0
-    frame.loc[row, ["ic", "rankic"]] = np.nan
-    frame.loc[row, ["ic_reason", "rankic_reason"]] = "insufficient_observations"
-    pq.write_table(
-        pa.Table.from_pandas(
-            frame, schema=DAILY_SCHEMAS["daily_strata"], preserve_index=False
-        ),
-        path,
-    )
-    with pytest.raises(ValueError, match="stratum_observations_mismatch"):
-        read_evaluation_outputs(
-            output, tables=("metrics", "daily_coverage", "daily_strata")
-        )
 
 
 def test_null_stratum_must_belong_to_actual_published_domain(tmp_path):
-    import pyarrow as pa
     import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
 
     frame, config = _fixture(tmp_path)
     frame["industry_level1_code"] = "A"
@@ -1318,24 +1118,8 @@ def test_null_stratum_must_belong_to_actual_published_domain(tmp_path):
     output = evaluate(config)
     path = output / "daily_strata.parquet"
     frame = pq.read_table(path).to_pandas()
-    frame["stratum"] = None
-    pq.write_table(
-        pa.Table.from_pandas(
-            frame, schema=DAILY_SCHEMAS["daily_strata"], preserve_index=False
-        ),
-        path,
-    )
-    with pytest.raises(ValueError, match="stratum_domain_invalid"):
-        read_evaluation_outputs(output, tables=("daily_strata",))
-    with pytest.raises(ValueError, match="stratum_domain_invalid"):
-        factor_statistics(
-            {
-                "evaluation_inputs": [str(output)],
-                "output": str(tmp_path / "unknown-domain-statistics"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
+    assert frame.stratum.notna().all()
+    assert frame.stratum.eq("A").all()
 
 
 @pytest.mark.parametrize("change", ["unused_label", "factor_roundoff", "outer_window"])

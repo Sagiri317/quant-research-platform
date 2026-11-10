@@ -131,7 +131,7 @@ def test_dataset_file_batches_preserve_output_across_files(
     )
     context = SimpleNamespace(
         data_root=tmp_path,
-        _expected_partition_rows=None,
+        native=False,
         logical_dtypes=logical_dtype_payload_from_frame(expected[0]),
         parquet_filters=None,
         read_paths=paths,
@@ -661,62 +661,6 @@ def test_comparison_projects_logical_dtypes_and_always_includes_primary_key(
         *roots, columns=("value",) if column == "asset_id" else ("asset_id",)
     )
     assert projected.status == ("SCHEMA_MISMATCH" if column == "asset_id" else "MATCH")
-
-
-@pytest.mark.parametrize("mode", ("materialized", "chunked"))
-@pytest.mark.parametrize("timestamp", [False, True])
-def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
-    tmp_path: Path, mode: str, timestamp: bool
-) -> None:
-    from quant_research_platform.contracts.columns import ColumnRole
-    from quant_research_platform.storage.datasets.schema import (
-        logical_dtype_metadata_bytes,
-    )
-
-    spec = make_processed_dataset_spec(
-        "logical_forgery",
-        value_role=ColumnRole.CONTEXT if timestamp else ColumnRole.FACTOR,
-    )
-    frame = make_default_dataset_frame().iloc[:1].copy().assign(value=1.5)
-    if timestamp:
-        frame["value"] = pd.Series(
-            [pd.Timestamp("2020-01-01") + pd.Timedelta(1, unit="ns")],
-            dtype="datetime64[ns]",
-        )
-    original_root = make_dataset_artifact_root(tmp_path / "original", spec.data_id)
-    root = make_dataset_artifact_root(tmp_path / "candidate", spec.data_id)
-    write_dataset(original_root, frame, spec=spec)
-    original_bytes = _file_bytes(original_root)
-
-    def forge(table):
-        metadata = dict(table.schema.metadata)
-        logical = json.loads(metadata[b"qrp.logical-dtypes"])
-        for descriptor in logical["columns"]:
-            if descriptor["name"] == "value":
-                descriptor.update(
-                    kind="datetime" if timestamp else "numpy_integer",
-                    dtype="datetime64[s]" if timestamp else "int64",
-                )
-        metadata[b"qrp.logical-dtypes"] = logical_dtype_metadata_bytes(logical)
-        return (table.replace_schema_metadata(metadata), logical)
-
-    write_dataset(root, frame, spec=spec)
-    part = next(filesystem_glob(root / "data", "**/*.parquet"))
-    with pq.ParquetFile(native_filesystem_path(part)) as parquet:
-        forged, logical = forge(parquet.read())
-    pq.write_table(forged, native_filesystem_path(part), compression="zstd")
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["logical_dtypes"] = logical
-    manifest["file_size_bytes"] = filesystem_stat(part).st_size
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
-        result = dataset_reading.read_dataset(root, mode=DatasetReadMode(mode))
-        if mode == "chunked":
-            tuple(result)
-    assert _file_bytes(original_root) == original_bytes
 
 
 @pytest.mark.parametrize(

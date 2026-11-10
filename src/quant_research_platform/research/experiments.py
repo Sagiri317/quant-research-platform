@@ -26,7 +26,6 @@ class TrialRecorder:
         self, *, result: dict | None = None, error: BaseException | None = None
     ) -> dict:
         terminal = {
-            **self.record,
             "status": "completed"
             if error is None
             else "failed"
@@ -38,7 +37,7 @@ class TrialRecorder:
         if error is not None:
             terminal["error"] = type(error).__name__
         append_trial_record(self.root, terminal)
-        return terminal
+        return {**self.record, **terminal}
 
     def fail(self, error: BaseException) -> None:
         """Record failure without replacing an exception already being handled."""

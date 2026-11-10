@@ -105,6 +105,7 @@ def calibrate_uncertainty(config):
             "calibration_rows": len(paired),
             "calibration_blocks": len(residuals),
             "model_id": metadata["model_id"],
+            "model": metadata["model"],
             "frequency": spec["frequency"],
             "model_facts": metadata["model_facts"],
             "assumption": (
@@ -138,7 +139,10 @@ def apply_uncertainty(config):
     frame, metadata = read_predictions(
         Path(config["predictions"]), time_window=TimeWindow(**config["window"])
     )
-    if metadata["model_facts"] != calibration["model_facts"]:
+    if (
+        metadata["model"] != calibration["model"]
+        or metadata["model_facts"] != calibration["model_facts"]
+    ):
         raise ValueError("uncertainty_predictor_changed")
     frame = frame[["timestamp", "asset_id", "prediction_score"]].copy()
     frame["prediction_lower"] = frame.prediction_score - radius

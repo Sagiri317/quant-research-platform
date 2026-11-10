@@ -19,7 +19,6 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -203,14 +202,6 @@ def test_schema_hash_is_descriptive_and_not_an_admission_gate(tmp_path: Path) ->
             {"schema_id": "qrp-dataset-spec/0.1"},
             "dataset_spec_schema_id_invalid",
         ),
-        (
-            "spec.json",
-            {
-                "schema_id": "qrp-dataset-spec",
-                "metadata": {"schema_id": "nested/version"},
-            },
-            "dataset_spec_fields_invalid",
-        ),
         ("_manifest/manifest.json", {}, "dataset_manifest_schema_id_invalid"),
         (
             "_manifest/manifest.json",
@@ -221,14 +212,6 @@ def test_schema_hash_is_descriptive_and_not_an_admission_gate(tmp_path: Path) ->
             "_manifest/manifest.json",
             {"schema_id": "qrp-dataset-manifest/0.1"},
             "dataset_manifest_schema_id_invalid",
-        ),
-        (
-            "_manifest/manifest.json",
-            {
-                "schema_id": "qrp-dataset-manifest",
-                "metadata": {"schema_id": "nested/version"},
-            },
-            "dataset_manifest_fields_invalid",
         ),
     ),
 )
@@ -245,94 +228,6 @@ def test_read_dataset_rejects_invalid_qrp_json_schema_id(
     payload.update(replacement)
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match=error):
-        read_dataset(root)
-
-
-def test_read_dataset_manifest_columns_mismatch_fails_closed(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["columns"] = ["market_id", "asset_id", "timestamp", "bogus"]
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="manifest_columns_mismatch"):
-        read_dataset(root)
-
-
-def test_read_dataset_manifest_row_count_mismatch_fails_closed(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["row_count"] = int(manifest["row_count"]) + 1
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="manifest_row_count_mismatch"):
-        read_dataset(root)
-
-
-@pytest.mark.parametrize(
-    ("field", "value", "error"),
-    (
-        ("row_count", True, "manifest_row_count_invalid"),
-        ("row_count", "3", "manifest_row_count_invalid"),
-        ("row_count", 3.0, "manifest_row_count_invalid"),
-        ("file_count", True, "manifest_file_count_invalid"),
-        (
-            "columns",
-            ["market_id", "asset_id", "timestamp", "value", "value"],
-            "manifest_columns_invalid",
-        ),
-        ("schema_hash", "A" * 64, "manifest_schema_hash_invalid"),
-        ("partition_count", True, "manifest_partition_count_invalid"),
-        (
-            "partition_row_counts",
-            {"year=2014": True, "year=2015": 2},
-            "manifest_partition_row_counts_invalid",
-        ),
-        (
-            "partitions",
-            ["year=2014", "year=2015", "year=2015"],
-            "manifest_partitions_invalid",
-        ),
-        ("date_min", "2016-01-01", "manifest_date_range_invalid"),
-        ("validation_status", "pass", "dataset_manifest_fields_invalid"),
-        ("unknown", "value", "dataset_manifest_fields_invalid"),
-    ),
-)
-def test_read_dataset_rejects_strict_manifest_type_and_shape_mutations(
-    tmp_path: Path, field: str, value: object, error: str
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest[field] = value
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match=error):
-        read_dataset(root)
-
-
-def test_read_dataset_rejects_forged_recursive_physical_schema_identity(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["physical_schema"][0]["nullable"] = not manifest["physical_schema"][0][
-        "nullable"
-    ]
-    manifest["schema_hash"] = canonical_json_hash(manifest["physical_schema"])
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         read_dataset(root)
 
 

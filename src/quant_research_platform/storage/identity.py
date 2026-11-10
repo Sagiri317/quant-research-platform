@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import gzip
 import hashlib
 import os
 import shutil
@@ -164,10 +163,6 @@ def filesystem_open_descriptor(path: Path, flags: int, mode: int = 511) -> int:
 
 def filesystem_remove_tree(path: Path, *, onexc=None) -> None:
     shutil.rmtree(native_filesystem_path(path), onexc=onexc)
-
-
-def filesystem_gzip_open(path: Path, mode: str, *, encoding: str):
-    return gzip.open(native_filesystem_path(path), mode, encoding=encoding)
 
 
 def require_artifact_root(root: Path) -> Path:

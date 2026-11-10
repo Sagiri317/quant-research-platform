@@ -125,6 +125,7 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
 
     monkeypatch.setattr(dataset_inspection, "iter_dataset_file_batches", batches)
     context = SimpleNamespace(
+        native=False,
         timestamp_column="timestamp",
         time_window=TimeWindow("2026-01-01", "2026-01-02"),
         spec={"primary_key": ["timestamp"], "column_roles": {"timestamp": "timestamp"}},

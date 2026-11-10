@@ -31,6 +31,17 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
+def _calendar(sessions):
+    dates = pd.date_range(sessions[0], sessions[-1], freq="D")
+    return pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.isin(sessions),
+        }
+    )
+
+
 def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
     sessions = pd.bdate_range("2024-01-04", periods=8)
     frame = pd.DataFrame(
@@ -68,9 +79,7 @@ def test_native_preopen_macro_assembly_fit_predict_and_account_keys(tmp_path):
     )
     daily = tmp_path / "daily"
     write_dataset(daily, frame, spec=spec)
-    calendar = pd.DataFrame(
-        {"calendar_date": sessions, "source_market_type": 1, "is_trading_day": True}
-    )
+    calendar = _calendar(sessions)
     calendar_path = tmp_path / "calendar.parquet"
     calendar.to_parquet(calendar_path, index=False)
     calendar_input = {
@@ -233,11 +242,13 @@ def test_decision_clock_rejects_information_after_opening_price_formation():
         with pytest.raises(ValueError, match="before_opening_auction"):
             decision_panel(
                 frame,
-                sessions,
+                _calendar(sessions),
                 {"mode": "preopen", "local_time": clock, "latency_seconds": latency},
             )
     close = decision_panel(
-        frame, sessions, {"mode": "close", "local_time": "16:00", "latency_seconds": 1}
+        frame,
+        _calendar(sessions),
+        {"mode": "close", "local_time": "16:00", "latency_seconds": 1},
     )
     assert close.timestamp.iloc[0] == pd.Timestamp("2024-01-05T08:00")
 
@@ -273,7 +284,7 @@ def test_native_macro_beta_resets_listing_history_without_blocking_levels(
         frame = frame.drop(columns=missing_column)
     frame = decision_panel(
         frame,
-        sessions,
+        _calendar(sessions),
         {"mode": "preopen", "local_time": "09:00", "latency_seconds": 0},
     )
     roles = dict.fromkeys(frame.columns, "context")
@@ -401,7 +412,7 @@ def test_macro_factor_prepare_rejects_conflicting_panel_market(tmp_path):
         pd.DataFrame(
             {"market_id": ["crypto"], "asset_id": ["A"], "timestamp": sessions[:1]}
         ),
-        sessions,
+        _calendar(sessions),
         {"mode": "preopen", "local_time": "09:00", "latency_seconds": 0},
     )
     roles = dict.fromkeys(frame.columns, "context")
@@ -575,7 +586,14 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
     extra["calendar_date"] = pd.Timestamp("2023-01-09")
     extra["timestamp"] = pd.Timestamp("2023-01-09")
     extra["is_trading_day"] = True
-    calendar = pd.concat([calendar, extra], ignore_index=True)
+    closed = []
+    for day in ("2023-01-07", "2023-01-08"):
+        row = extra.copy()
+        row["calendar_date"] = pd.Timestamp(day)
+        row["timestamp"] = pd.Timestamp(day)
+        row["is_trading_day"] = False
+        closed.append(row)
+    calendar = pd.concat([calendar, *closed, extra], ignore_index=True)
     source_spec = inspect_dataset(roots["trading_calendar"]).spec
     from quant_research_platform.contracts.data import InterimDataSpec
 
@@ -732,3 +750,26 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
     )
     assert len(enhanced) == 4
     assert min(seen) == pd.Timestamp("2023-01-02T01:00")
+
+
+def test_decision_calendar_unknown_is_not_a_closed_day_and_keeps_labels():
+    frame = pd.DataFrame(
+        {"timestamp": pd.to_datetime(["2024-01-02", "2024-01-04"]), "label": [0.1, 0.2]}
+    )
+    calendar = _calendar(pd.date_range("2024-01-02", "2024-01-05"))
+    config = {"mode": "preopen", "local_time": "09:00", "latency_seconds": 0}
+    full = decision_panel(frame, calendar, config)
+    assert full.timestamp.tolist() == [
+        pd.Timestamp("2024-01-03T01:00"),
+        pd.Timestamp("2024-01-05T01:00"),
+    ]
+    assert full.label.tolist() == [0.1, 0.2]
+    gap = calendar.loc[calendar.calendar_date.ne("2024-01-03")]
+    known = decision_panel(frame, gap, config)
+    assert known.label.tolist() == [0.2]
+    assert known.timestamp.tolist() == [pd.Timestamp("2024-01-05T01:00")]
+    closed = calendar.copy()
+    closed.loc[closed.calendar_date.eq("2024-01-03"), "is_trading_day"] = False
+    assert decision_panel(frame, closed, config).timestamp.iloc[0] == pd.Timestamp(
+        "2024-01-04T01:00"
+    )

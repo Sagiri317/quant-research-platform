@@ -5,6 +5,9 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.validation import strict_finite_float
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    continuous_session,
+)
 
 
 def signal_processing_parameters(pipeline):
@@ -101,18 +104,53 @@ def _filter(values, times, stage):
     return output
 
 
-def process_prediction_signals(predictions, quotes, pipeline):
+def process_prediction_signals(
+    predictions, quotes, pipeline, *, quote_visibility_delay_ms=0
+):
     """Use full supplied history before the caller crops its execution window.
 
     Missing filtered values do not submit a target. Each asset/session/segment is
     independent; rolling windows count observed predictions, not quote slots.
     """
-    work = predictions.merge(
-        quotes[["timestamp", "asset_id", "segment_id", "session_date", "eligible"]],
-        on=["timestamp", "asset_id"],
-        how="inner",
-        validate="one_to_one",
+    context = quotes[
+        [
+            name
+            for name in (
+                "timestamp",
+                "asset_id",
+                "segment_id",
+                "session_date",
+                "eligible",
+                "exchange",
+                "instrument_type",
+            )
+            if name in quotes
+        ]
+    ].copy()
+    context["asset_id"] = context.asset_id.astype(predictions.asset_id.dtype)
+    context["_session"] = continuous_session(
+        context.timestamp, context.exchange, context.get("instrument_type")
+    )
+    context["_visible_at"] = context.pop("timestamp") + pd.Timedelta(
+        milliseconds=quote_visibility_delay_ms
+    )
+    work = pd.merge_asof(
+        predictions.sort_values("timestamp", kind="stable"),
+        context.sort_values("_visible_at", kind="stable"),
+        left_on="timestamp",
+        right_on="_visible_at",
+        by="asset_id",
+        direction="backward",
     ).sort_values(["asset_id", "timestamp"], kind="stable")
+    current_session = continuous_session(
+        work.timestamp, work.exchange, work.get("instrument_type")
+    )
+    valid = (
+        work.timestamp.dt.normalize().eq(work.session_date)
+        & current_session.ne("")
+        & current_session.eq(work._session)
+    )
+    work["eligible"] = work.eligible.fillna(False) & valid
     work["prediction_score"] = work.prediction_score.where(work.eligible)
     for _, group in work.groupby(
         ["asset_id", "session_date", "segment_id"], sort=False

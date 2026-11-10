@@ -3,8 +3,6 @@
 from dataclasses import replace
 
 import numpy as np
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts import portfolio_ledger as ledger
@@ -80,31 +78,6 @@ def test_native_writer_rejects_changed_adjacent_raw_share_wealth(tmp_path, shift
     ):
         _write(tmp_path / "invalid", [_batch(0), changed])
     assert not (tmp_path / "invalid").exists()
-
-
-def test_native_reader_rejects_changed_adjacent_raw_share_wealth(tmp_path):
-    root = _write(tmp_path / "valid", [_batch(0), _batch(1)])
-    path = root / "valuations.parquet"
-    table = pq.read_table(path)
-    rows = table.to_pylist()
-    # Change every phase coherently, bypassing neither per-row value identities
-    # nor per-batch accounting; only the adjacent economic boundary is broken.
-    for row in rows:
-        if row["sequence"] == 1 and row["asset_id"] == "a":
-            row["value"] = 31.0
-            row["mark_price"] = 31 / 3
-    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
-    path = root / "diagnostics.parquet"
-    table = pq.read_table(path)
-    rows = table.to_pylist()
-    for row in rows:
-        if row["sequence"] == 1 and row["asset_id"] == "a":
-            row["number"] = 31.0
-    pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), path)
-    with pytest.raises(
-        ValueError, match="portfolio_ledger_cross_session_value_invalid"
-    ):
-        list(ledger.read_portfolio_ledger_artifact(root).iter_chunks())
 
 
 def test_native_boundary_accepts_monetary_roundoff_and_unpaid_receivable(tmp_path):

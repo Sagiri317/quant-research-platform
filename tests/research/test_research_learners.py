@@ -171,6 +171,27 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
             "output": str(tmp_path / "intervals"),
         }
     )
+    changed_training = frame.loc[frame.timestamp.lt("2020-01-04")].copy()
+    changed_training["label"] *= 2
+    changed_case = fit_frame(
+        tmp_path / "refitted",
+        changed_training,
+        model,
+        cutoff=pd.Timestamp("2020-01-04"),
+    )
+    _, other_predictions, _ = predict_frame(
+        tmp_path / "other-pred", future, changed_case, window=window
+    )
+    with pytest.raises(ValueError, match="uncertainty_predictor_changed"):
+        apply_uncertainty(
+            {
+                "calibration": str(calibration),
+                "predictions": str(other_predictions),
+                "window": window,
+                "cost": 0.01,
+                "output": str(tmp_path / "misbound"),
+            }
+        )
     values = read_dataset(intervals)
     assert values.conservative_score.tolist() == pytest.approx([0.05, 0.15, 0.25] * 3)
     write_dataset(tmp_path / "future-labels", future, spec=spec)

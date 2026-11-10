@@ -181,13 +181,47 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
             raise ValueError("hawkes_prediction_not_out_of_sample")
 
     def frames():
+        factor_columns = tuple(
+            name for name, role in spec.column_roles.items() if role == "factor"
+        )
+        panel_columns = None
+        if spec.data_id == "hft_factors":
+            panel_columns = tuple(
+                dict.fromkeys(
+                    (
+                        *protocol.KEY,
+                        "segment_id",
+                        *(
+                            column
+                            for name in factor_columns
+                            for column in protocol.FACTOR_INPUTS[name]
+                        ),
+                    )
+                )
+            )
+        elif spec.data_id == "hft_event_factors":
+            panel_columns = (*protocol.KEY, "session_date", "exchange", "segment_id")
+        used_inputs = set(sessions)
+        if spec.data_id == "hft_event_factors":
+            used_inputs = {"hft_panel"} | set().union(
+                *(
+                    protocol.event_factor_streams(name, exchange)
+                    for name in factor_columns
+                    for exchange in ("SSE", "SZSE")
+                )
+            )
         for day in pd.date_range(
             pd.Timestamp(lower).normalize(), pd.Timestamp(upper).normalize(), freq="D"
         ):
             window = TimeWindow(day.date(), day.date())
             data = {
-                name: materialize_dataset_session(session.filtered_view(window))
+                name: materialize_dataset_session(
+                    session.filtered_view(window).projected_view(panel_columns)
+                    if name == "hft_panel" and panel_columns is not None
+                    else session.filtered_view(window)
+                )
                 for name, session in sessions.items()
+                if name in used_inputs
             }
             data.update(absent)
             if spec.data_id == "hft_panel":
@@ -212,8 +246,8 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
             elif spec.data_id == "hft_event_factors":
                 frame = compute_event_factors(
                     data["hft_panel"],
-                    data["hft_orders"],
-                    data["hft_trades"],
+                    data.get("hft_orders"),
+                    data.get("hft_trades"),
                     columns=tuple(
                         name
                         for name, role in spec.column_roles.items()

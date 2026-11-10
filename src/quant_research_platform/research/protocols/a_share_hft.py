@@ -75,13 +75,24 @@ FACTOR_INPUTS = {
 DEFAULT_FACTORS = tuple(FACTOR_INPUTS)
 FACTOR_INPUTS.update(
     {
-        **{f"book_ofi_{level}": BOOK_COLUMNS for level in (5, 10)},
-        **{f"depth_normalized_ofi_{level}": BOOK_COLUMNS for level in (5, 10)},
+        **{
+            f"{prefix}_{level}": tuple(
+                f"{side}_{kind}{i}"
+                for side in ("bid", "ask")
+                for kind in ("px", "vol")
+                for i in range(1, level + 1)
+            )
+            for prefix in ("book_ofi", "depth_normalized_ofi")
+            for level in (5, 10)
+        },
         "book_ofi_near_far": BOOK_COLUMNS,
         "book_ofi_10_30s": BOOK_COLUMNS,
         "book_ofi_10_ewma": BOOK_COLUMNS,
         **{
-            f"{side}_{metric}": BOOK_COLUMNS
+            f"{side}_{metric}": (
+                *(name for name in BOOK_COLUMNS if name.startswith(side + "_")),
+                *(("mid",) if "slope" in metric else ()),
+            )
             for side in ("bid", "ask")
             for metric in (
                 "depth_concentration",
@@ -91,7 +102,7 @@ FACTOR_INPUTS.update(
                 "replenishment_30s",
             )
         },
-        "depth_slope_difference": BOOK_COLUMNS,
+        "depth_slope_difference": (*BOOK_COLUMNS, "mid"),
     }
 )
 INTRADAY_THEME_FACTORS = {
@@ -185,6 +196,30 @@ EVENT_FACTORS = {
     "observed_completed_lifetime_seconds": "seconds",
     "observed_lifecycle_match_fraction": "dimensionless",
 }
+CANCEL_EVENT_FACTORS = frozenset(
+    {
+        "observed_cancel_order_ratio",
+        "observed_cancel_count_fraction",
+        "observed_cancel_pressure_change",
+    }
+)
+TRADE_EVENT_FACTORS = frozenset(
+    name
+    for name in EVENT_FACTORS
+    if name.startswith("trade_")
+    or name in {"large_trade_pressure", "small_trade_pressure"}
+)
+LIFECYCLE_FACTORS = EVENT_FACTORS.keys() - TRADE_EVENT_FACTORS - CANCEL_EVENT_FACTORS
+
+
+def event_factor_streams(column, exchange):
+    if column in TRADE_EVENT_FACTORS:
+        return {"hft_trades"}
+    if column in CANCEL_EVENT_FACTORS and exchange == "SSE":
+        return {"hft_orders"}
+    return {"hft_orders", "hft_trades"}
+
+
 HAWKES_FACTORS = {
     "hawkes_buy_intensity": "events_per_second",
     "hawkes_sell_intensity": "events_per_second",

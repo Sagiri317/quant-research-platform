@@ -701,6 +701,7 @@ def test_sampling_native_batches_match_whole_window_and_preserve_timestamp_order
     original = pd.concat(
         [quotes(range(1, 244, 3), asset=asset) for asset in ("A", "B")]
     )
+    original["asset_id"] = original.asset_id.astype(object)
     source = save_quotes(tmp_path, original)
     whole = read_dataset(
         sample_hft(config(tmp_path, source, end=180, label_tolerance_seconds=None))
@@ -728,5 +729,5 @@ def test_sampling_native_batches_match_whole_window_and_preserve_timestamp_order
     )
     pd.testing.assert_frame_equal(streamed, whole)
     assert streamed.timestamp.is_monotonic_increasing
-    assert len(calls) > 1 and max(calls) <= 26
-    assert sum(calls) <= len(original) + 2 * len(calls)
+    # Wide input is read once per half-session, independent of output batch size.
+    assert calls == [len(original)]

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.factors.macro_liquidity.calculations import (
+    _history_features,
     calculate_macro_factors,
     liquidity_beta,
     macro_states,
@@ -435,3 +436,31 @@ def test_macro_beta_unknown_calendar_does_not_compress_windows_or_block_levels(
         calculate_macro_factors(
             observations, one, columns=columns, config=config, calendar=closed
         )
+
+
+@pytest.mark.parametrize(
+    "frequency,prior,current",
+    [("M", "2024-02-29", "2025-02-28"), ("Q", "2024-03-31", "2025-01-31")],
+)
+def test_year_growth_matches_economic_period_and_preserves_revision_clock(
+    frequency, prior, current
+):
+    history = _observations(
+        [
+            ("x", prior, "2024-04-01", 101),
+            ("x", current, "2025-04-01", 113),
+            ("x", prior, "2025-05-01", 103),
+        ]
+    )
+    values = _history_features(
+        history, ("yoy_growth",), "currency", frequency, 3, _config()
+    )
+    assert np.isnan(values.yoy_growth.iloc[0])
+    assert values.yoy_growth.iloc[1] == pytest.approx(113 / 101 - 1)
+    assert values.yoy_growth.iloc[2] == pytest.approx(113 / 103 - 1)
+    missing = history.iloc[[1]]
+    assert (
+        _history_features(missing, ("yoy_growth",), "currency", frequency, 3, _config())
+        .yoy_growth.isna()
+        .all()
+    )

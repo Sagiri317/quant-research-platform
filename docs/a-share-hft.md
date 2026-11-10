@@ -59,7 +59,7 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 
 回归预测另给 MSE、RMSE、MAE 及 `r2_baselines` 指定的样本外R²；`zero` 是零预测，其他名称引用明确的已保存预测候选（如OLS）。基准缺测只缩小该基准配对损失域，不缩小自身IC或误差覆盖。最终RMSE为日均MSE的平方根，R²为 `1-配对模型日均MSE/配对基准日均MSE`，不平均每日RMSE或每日R²。目标定义或经济单位不可比时误差保持未定义；分类方向分数不能当成收益预测或收益基准。标准 EVAL/score 的概率指标仍保留原逐观测汇总；逐日概率结果见日级评价产物。
 
-`evaluate` 可保存完整 `sessions`，`statistics-factor`、`statistics-model` 的日内正式推断需要显式完整交易日轴，或继承 EVAL 保存的轴。缺日保持空值，不按观察日期压紧或猜测休市；HAC lag 的单位是交易日。日级评价直接要求这条轴，并输出daily、summary与inference表。
+`evaluate` 可保存完整 `sessions`，`statistics-factors`、`statistics-model` 的日内正式推断需要显式完整交易日轴，或继承 EVAL 保存的轴。缺日保持空值，不按观察日期压紧或猜测休市；HAC lag 的单位是交易日。日级评价直接要求这条轴，并输出daily、summary与inference表。
 
 高频 `score` 同样使用日级 IC/RankIC 和误差权重，明确提供验证窗口内的 `sessions`。仅滚动向前训练、验证选型及后续预测，不另设独立最终留出集；训练、选型和之后预测的时间边界仍按原生模型事实检验。
 
@@ -68,6 +68,9 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 股票截面默认每 3 秒决策，30 秒保留为采样对照。预测期限独立保留 3、30、60 秒，主要比较期限为 30 秒。它们不设定实际调仓频率、交易门槛或 ETF/股票执行策略。
 
 `sample-hft` 调用 `research.datasets.high_frequency.sample_hft`，示例见 [sample-hft-common.json](../configs/high-frequency/sample-hft-common.json)。输入是一份原始报价时间轴上的面板或已组装因子数据集，必须包含 `session_date,exchange,instrument_type,segment_id,eligible,mid`。原 `a_share_hft` 配方保留这些上下文。输出为新原生研究数据集，原始 `hft_panel`、单股时序与 ETF 链路不变，执行仍读取原始行情。单个因子或盘口字段缺失保持空值，不添加专用缺失字段，也不抹去不依赖该字段的其他输入、标签或结果。
+
+采样每半日读取一次所需宽列，共享价格索引并执行批量按资产 as-of，输出继续使用原生批大小。
+其内存随半日输入与采样结果增长；当前文件布局仍需每半日打开所选年份的成员 footer，未声称全历史只扫描一次。
 
 这个入口只负责改变决策时间轴，不重算原始事件流或因子。`assemble` 仍只按精确键合并；如果直接把原始 `hft_panel` 改成规则网格，会改变 OFI/流量含义并污染执行输入。因此先在实际报价上计算因子、再采样；截面标准化、中性化等变换应在共同截面上另行 `assemble`。已带这些截面变换的输入不可再次采样。因果的历史盘口归一化仍可在原报价轴上进行。
 

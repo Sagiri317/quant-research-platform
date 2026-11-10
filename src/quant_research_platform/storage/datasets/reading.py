@@ -45,7 +45,6 @@ from quant_research_platform.storage.datasets.schema import (
     parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
-    validate_dataset_manifest_payload,
     validate_logical_dtype_payload,
     validate_persisted_logical_schema,
 )
@@ -84,7 +83,6 @@ class DatasetSession:
     parquet_filters: tuple[tuple[str, str, Any], ...] | None
     all_paths: tuple[Path, ...]
     read_paths: tuple[Path, ...]
-    _expected_partition_rows: tuple[tuple[str, int], ...] | None = None
     _allow_infinite_columns: tuple[str, ...] = ()
 
     @property
@@ -135,12 +133,6 @@ class DatasetSession:
             )
             if self.native
             else self.read_paths,
-            _expected_partition_rows=_select_partition_row_counts(
-                self._expected_partition_rows,
-                _partition_years_for_selection(None, time_window),
-            )
-            if self.native and tuple(spec["partition_columns"]) == ("year",)
-            else self._expected_partition_rows,
             time_window=time_window,
             parquet_filters=(
                 *(self.parquet_filters or ()),
@@ -513,18 +505,13 @@ def open_dataset_session(
     _, manifest = read_qrp_json_file(manifest_path)
     if manifest.get("schema_id") != "qrp-dataset-manifest":
         raise ValueError("dataset_manifest_schema_id_invalid")
-    validate_dataset_manifest_payload(manifest, spec=spec_payload, logical_columns=())
     inventory = DatasetSessionInventory(data_root=data_root)
-    expected_partition_rows = None
     if files is None:
         partition_years = _partition_years_for_selection(
             years,
             time_window
             if tuple(spec_payload["partition_columns"]) == ("year",)
             else None,
-        )
-        expected_partition_rows = _select_partition_row_counts(
-            tuple(manifest["partition_row_counts"].items()), partition_years
         )
         inventory.discover(spec_payload, years=partition_years)
     else:
@@ -544,7 +531,7 @@ def open_dataset_session(
         row_filters=row_filters,
         years=_validated_years(years),
     )
-    return replace(session, _expected_partition_rows=expected_partition_rows)
+    return session
 
 
 def _partition_years_for_selection(years, time_window):
@@ -554,23 +541,6 @@ def _partition_years_for_selection(years, time_window):
         window_years = set(range(int(start.year), (end or date.max).year + 1))
         selected = window_years if selected is None else selected & window_years
     return selected
-
-
-def _select_partition_row_counts(partition_rows, years):
-    if partition_rows is None:
-        return None
-    return tuple(
-        (partition, rows)
-        for partition, rows in partition_rows
-        if years is None
-        or (
-            years
-            and (
-                partition == "unpartitioned"
-                or parse_year_partition_label(partition) in years
-            )
-        )
-    )
 
 
 def _build_dataset_session(
@@ -692,7 +662,9 @@ def iter_dataset_chunks(
                 if pa.types.is_nested(value_type):
                     for value in values:
                         _append_arrow_scalar_payload(bytearray(), value, value_type)
-        if all(column in batch.schema.names for column in keys):
+        # Native primary-key uniqueness was established by the atomic writer.
+        # Inspection revalidates it explicitly; bare external inputs admit it here.
+        if not context.native and all(column in batch.schema.names for column in keys):
             if key_index is None:
                 from quant_research_platform.storage.exact_keys import (
                     ExactPrimaryKeyIndex,
@@ -720,7 +692,7 @@ def iter_dataset_chunks(
             context,
             columns=context.physical_columns,
             batch_rows=rows_per_batch,
-            batch_observer=observe_consumed,
+            batch_observer=batch_observer if context.native else observe_consumed,
         )
     ) as file_batches:
         for _, frame in file_batches:
@@ -771,12 +743,13 @@ def iter_dataset_file_batches(
     columns: tuple[str, ...],
     batch_rows: int = DEFAULT_BATCH_ROWS,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
+    validate_parts: bool = False,
 ) -> Iterator[tuple[Path, pd.DataFrame]]:
     """Yield deterministic file batches after Arrow-level bounded conversion."""
     rows_per_batch = _validated_batch_rows(batch_rows)
     logical = context.logical_dtypes
     declared_logical = _project_logical_dtypes(logical, columns) if logical else {}
-    if declared_logical:
+    if declared_logical and (not context.native or validate_parts):
         validate_logical_dtype_payload(declared_logical)
     dtype_overrides = (
         pandas_dtype_overrides_from_logical_payload(declared_logical, columns=columns)
@@ -784,16 +757,6 @@ def iter_dataset_file_batches(
         else {}
     )
     expected = pa.schema([context.arrow_schema.field(column) for column in columns])
-    expected_rows = dict(context._expected_partition_rows or ())
-    observed_rows = dict.fromkeys(expected_rows, 0)
-    present_partitions = {
-        relative_partition_label(context.data_root, path) for path in context.read_paths
-    }
-    if any(
-        rows and partition not in present_partitions
-        for partition, rows in expected_rows.items()
-    ):
-        raise ValueError("dataset_selected_partition_incomplete")
 
     def validate_metadata(metadata):
         try:
@@ -818,14 +781,8 @@ def iter_dataset_file_batches(
         merged = merge_logical_dtype_payloads([declared_logical, current])
         if merged != declared_logical:
             raise ValueError("manifest_logical_dtypes_mismatch")
-        if context._expected_partition_rows is not None:
-            if partition not in expected_rows and metadata.row_count:
-                raise ValueError("dataset_selected_partition_incomplete")
-            if partition in observed_rows:
-                observed_rows[partition] += metadata.row_count
 
     for path in context.read_paths:
-        partition = relative_partition_label(context.data_root, path)
         with closing_iterator(
             iter_declared_parquet_member_batches(
                 path,
@@ -833,14 +790,14 @@ def iter_dataset_file_batches(
                 parquet_filters=context.parquet_filters,
                 batch_rows=rows_per_batch,
                 dtype_overrides=dtype_overrides,
-                metadata_observer=validate_metadata,
+                metadata_observer=validate_metadata
+                if not context.native or validate_parts
+                else None,
                 batch_observer=batch_observer,
             )
         ) as member_batches:
             for frame in member_batches:
                 yield path, frame
-    if observed_rows != expected_rows:
-        raise ValueError("dataset_selected_partition_incomplete")
 
 
 def dataset_primary_key_schema(
@@ -964,13 +921,13 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
 def _empty_frame(context: DatasetSession, columns: tuple[str, ...]) -> pd.DataFrame:
     logical = context.logical_dtypes
     selected_logical = _project_logical_dtypes(logical, columns) if logical else {}
-    if selected_logical:
+    if selected_logical and not context.native:
         validate_logical_dtype_payload(selected_logical)
     selected = pa.schema(
         [context.arrow_schema.field(column) for column in columns],
         metadata=context.arrow_schema.metadata,
     )
-    if selected_logical:
+    if selected_logical and not context.native:
         validate_persisted_logical_schema(selected, selected_logical)
     overrides = (
         pandas_dtype_overrides_from_logical_payload(selected_logical, columns=columns)

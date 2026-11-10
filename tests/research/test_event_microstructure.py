@@ -13,7 +13,10 @@ from quant_research_platform.research.factors.event_microstructure import (
     trade_statistics,
 )
 from quant_research_platform.research.factors.microstructure import compute_factors
-from quant_research_platform.research.protocols.a_share_hft import EVENT_FACTORS
+from quant_research_platform.research.protocols.a_share_hft import (
+    EVENT_FACTORS,
+    FACTOR_INPUTS,
+)
 from quant_research_platform.sources.venvoo import normalize
 from tests.markets.a_share.test_high_frequency import (
     INSTRUMENTS,
@@ -199,3 +202,61 @@ def test_event_factor_prepare_and_native_assembly(tmp_path):
     result = read_dataset(dataset)
     assert result.trade_signed_run.tolist() == [1, 1, 2, 2]
     assert result.trade_volume_flow_imbalance.iloc[2] == 1
+
+
+@pytest.mark.parametrize("column", tuple(FACTOR_INPUTS))
+def test_selected_snapshot_factor_uses_only_declared_inputs(column):
+    from quant_research_platform.research.protocols import a_share_hft as protocol
+
+    quotes = normalize(raw_quotes(), "hft_quotes", INSTRUMENTS)
+    orders = normalize(raw_events("hft_orders"), "hft_orders", INSTRUMENTS)
+    trades = normalize(raw_events("hft_trades"), "hft_trades", INSTRUMENTS)
+    panel = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    minimal = panel.loc[
+        :,
+        list(
+            dict.fromkeys(
+                (*protocol.KEY, "segment_id", *protocol.FACTOR_INPUTS[column])
+            )
+        ),
+    ]
+    actual = compute_factors(minimal, columns=[column])
+    expected = compute_factors(panel, columns=tuple(protocol.FACTOR_INPUTS))
+    pd.testing.assert_frame_equal(
+        actual.reset_index(drop=True),
+        expected.loc[:, [*protocol.KEY, column]].reset_index(drop=True),
+    )
+
+
+def test_selected_trade_interval_needs_no_order_stream_or_price_volume():
+    from quant_research_platform.research.protocols import a_share_hft as protocol
+
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "a",
+            "timestamp": pd.to_datetime(["2024-01-02T01:30:00", "2024-01-02T01:30:03"]),
+            "segment_id": "am",
+            "session_date": pd.Timestamp("2024-01-02"),
+            "exchange": "SSE",
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": panel.timestamp,
+            "source_row": [0, 1],
+            "event_kind": "trade",
+        }
+    )
+    result = compute_event_factors(
+        panel,
+        None,
+        trades,
+        columns=["trade_interval_seconds"],
+        config={},
+        missing_streams={"hft_orders"},
+    )
+    assert np.isnan(result.trade_interval_seconds.iloc[0])
+    assert result.trade_interval_seconds.iloc[1] == 3
+    assert list(result) == [*protocol.KEY, "trade_interval_seconds"]

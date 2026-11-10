@@ -23,7 +23,10 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     projection_columns_for_window,
 )
-from quant_research_platform.storage.datasets.schema import physical_schema_from_schema
+from quant_research_platform.storage.datasets.schema import (
+    physical_schema_from_schema,
+    validate_dataset_manifest_payload,
+)
 from quant_research_platform.storage.datasets.types import DatasetFingerprint
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
@@ -72,6 +75,10 @@ def comparison_schema(context: DatasetSession) -> dict[str, Any]:
 
 
 def fingerprint_dataset_session(context: DatasetSession) -> DatasetFingerprint:
+    if context.native:
+        validate_dataset_manifest_payload(
+            context.manifest, spec=context.spec, logical_columns=()
+        )
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
     hash_physical_columns = projection_columns_for_window(
@@ -92,6 +99,7 @@ def fingerprint_dataset_session(context: DatasetSession) -> DatasetFingerprint:
             context,
             columns=hash_physical_columns,
             batch_rows=DEFAULT_BATCH_ROWS,
+            validate_parts=True,
         )
     ) as batches:
         for path, chunk in batches:

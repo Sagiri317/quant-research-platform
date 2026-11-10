@@ -271,36 +271,12 @@ def test_terminal_failure_and_timeout_are_real(tmp_path):
         )
 
 
-def test_complex_files_and_images_enter_model_context(tmp_path):
-    fitz = pytest.importorskip("fitz")
+def test_images_enter_model_context(tmp_path):
     Image = pytest.importorskip("PIL.Image")
-    openpyxl = pytest.importorskip("openpyxl")
     state, root = state_and_event(tmp_path)
     Image.new("RGB", (12, 9), "red").save(tmp_path / "chart.png")
     image_result = read_local({"path": "chart.png"}, state, root)
     assert image_result["size"] == [12, 9]
-    with fitz.open() as document:
-        page = document.new_page()
-        page.insert_text((30, 30), "Quantitative evidence")
-        document.save(tmp_path / "report.pdf")
-    result = read_local({"path": "report.pdf"}, state, root)
-    assert "Quantitative evidence" in result["text"]
-    assert result["page_count"] == 1 and len(result["images"]) == 1
-    workbook = openpyxl.Workbook()
-    workbook.active.append(["factor", "score"])
-    workbook.active.append(["PRIVATE-FACTOR", 123])
-    workbook.save(tmp_path / "scores.xlsx")
-    result = read_local({"path": "scores.xlsx"}, state, root)
-    assert result["sheets"][0]["headers"] == ["factor", "score"]
-    assert "PRIVATE-FACTOR" not in json.dumps(result)
-    with ZipFile(tmp_path / "report.docx", "w") as archive:
-        archive.writestr(
-            "word/document.xml",
-            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-            "<w:body><w:p><w:r><w:t>Factor report</w:t></w:r>"
-            "</w:p></w:body></w:document>",
-        )
-    assert "Factor report" in read_local({"path": "report.docx"}, state, root)["text"]
     # Use the real controller context builder; no base64 is persisted in checkpoints.
     config = state["config"]
     config["output"] = str(tmp_path / "vision")
@@ -320,6 +296,42 @@ def test_complex_files_and_images_enter_model_context(tmp_path):
         b"\x89PNG"
     )
     assert "base64" not in (saved / "session.json").read_text(encoding="utf-8")
+
+
+def test_pdf_workspace_text_and_page_image(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    state, root = state_and_event(tmp_path)
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((30, 30), "Quantitative evidence")
+        document.save(tmp_path / "report.pdf")
+    result = read_local({"path": "report.pdf"}, state, root)
+    assert "Quantitative evidence" in result["text"]
+    assert result["page_count"] == 1 and len(result["images"]) == 1
+
+
+def test_workbook_workspace_exposes_headers_without_private_cells(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    state, root = state_and_event(tmp_path)
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["factor", "score"])
+    workbook.active.append(["PRIVATE-FACTOR", 123])
+    workbook.save(tmp_path / "scores.xlsx")
+    result = read_local({"path": "scores.xlsx"}, state, root)
+    assert result["sheets"][0]["headers"] == ["factor", "score"]
+    assert "PRIVATE-FACTOR" not in json.dumps(result)
+
+
+def test_docx_workspace_text(tmp_path):
+    state, root = state_and_event(tmp_path)
+    with ZipFile(tmp_path / "report.docx", "w") as archive:
+        archive.writestr(
+            "word/document.xml",
+            '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            "<w:body><w:p><w:r><w:t>Factor report</w:t></w:r>"
+            "</w:p></w:body></w:document>",
+        )
+    assert "Factor report" in read_local({"path": "report.docx"}, state, root)["text"]
 
 
 def test_local_web_search_is_enabled_and_request_is_query_only(tmp_path):

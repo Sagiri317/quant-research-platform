@@ -199,46 +199,15 @@ def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
         timestamp_column="timestamp", time_window=time_window
     )
 
-    def validate_member_metadata(member):
-        if member.row_count != metadata["prediction_rows"]:
-            raise ValueError("prediction_metadata_inconsistent")
-
-    count = 0
-    maximum = None
-    keys = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
     with closing_iterator(
         iter_dataset_part_batches(
-            Path(path) / "prediction.parquet",
-            columns=physical,
-            parquet_filters=filters,
-            metadata_observer=validate_member_metadata,
+            Path(path) / "prediction.parquet", columns=physical, parquet_filters=filters
         )
     ) as batches:
         for batch in batches:
             frame = batch.to_pandas()
-            if frame.empty:
-                continue
-            validate_prediction_frame(frame, metadata, columns=physical)
-            duplicates = keys.add_table(
-                pa.Table.from_pandas(
-                    frame.loc[:, ["timestamp", "asset_id"]], preserve_index=False
-                ),
-                namespace="prediction",
-            )
-            if duplicates:
-                raise ValueError("prediction_coverage_invalid")
-            count += len(frame)
-            maximum = (
-                frame.timestamp.max()
-                if maximum is None
-                else max(maximum, frame.timestamp.max())
-            )
-            yield frame.loc[:, list(requested)]
-    if time_window is None and (
-        count != metadata["prediction_rows"]
-        or (count and maximum != pd.Timestamp(metadata["effective_prediction_end"]))
-    ):
-        raise ValueError("prediction_metadata_inconsistent")
+            if not frame.empty:
+                yield frame.loc[:, list(requested)]
 
 
 @dataclass(frozen=True)

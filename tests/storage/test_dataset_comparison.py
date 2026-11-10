@@ -100,7 +100,7 @@ def test_reader_propagates_decode_failure(
 
     class Context:
         data_root = Path(".")
-        _expected_partition_rows = ()
+        native = False
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)
@@ -144,7 +144,7 @@ def test_dataset_iterator_context_preserves_caller_primary(
 
     class Context:
         data_root = Path(".")
-        _expected_partition_rows = ()
+        native = False
         read_paths = (Path("part.parquet"),)
         physical_columns = ("value",)
         logical_columns = ("value",)

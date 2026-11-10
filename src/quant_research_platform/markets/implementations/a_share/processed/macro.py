@@ -18,7 +18,7 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
-    unified_trading_sessions,
+    next_trading_sessions,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors.macro_liquidity.calculations import (
@@ -172,18 +172,24 @@ def configured_spec(spec, config):
     )
 
 
-def decision_panel(frame, sessions, config):
+def decision_panel(frame, calendar, config):
     """Replace session keys with decision instants; retain next-session labels."""
     offset = decision_parameters(config)
     dates = pd.DatetimeIndex(frame.timestamp)
-    positions = sessions.get_indexer(dates)
-    if (
-        not dates.equals(dates.normalize())
-        or (positions < 0).any()
-        or (positions + 1 >= len(sessions)).any()
-    ):
-        raise ValueError("decision_panel_calendar_requires_current_and_next_session")
-    execution = sessions.take(positions + 1)
+    if not dates.equals(dates.normalize()):
+        raise ValueError("decision_panel_requires_session_dates")
+    if "market_type" in frame:
+        execution = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
+        for market, group in frame.groupby("market_type", sort=False):
+            execution.loc[group.index] = next_trading_sessions(
+                calendar.loc[calendar.source_market_type.eq(market)],
+                pd.DatetimeIndex(group.timestamp),
+            )
+        execution = pd.DatetimeIndex(execution)
+    else:
+        execution = next_trading_sessions(calendar, dates)
+    valid = execution.notna()
+    frame, dates, execution = frame.loc[valid], dates[valid], execution[valid]
     actual_dates = dates if config["mode"] == "close" else execution
     actual = (
         (actual_dates + offset)
@@ -245,12 +251,11 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         calendar = materialize_dataset_session(
             open_dataset_session(**_dataset_input_options(inputs["trading_calendar"]))
         )
-        sessions = unified_trading_sessions(calendar)
         # Select original signal sessions; the calendar includes their successors.
         source = session.filtered_view(time_window)
         with closing_iterator(iter_dataset_chunks(source)) as chunks:
             yield (
-                (decision_panel(frame, sessions, config) for frame in chunks),
+                (decision_panel(frame, calendar, config) for frame in chunks),
                 metadata,
             )
     else:

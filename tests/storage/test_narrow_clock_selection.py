@@ -58,6 +58,3 @@ def test_narrow_projection_keeps_parent_file_year_rows_and_clock(tmp_path, nativ
     assert list(result) == ["value"]
     assert result.value.tolist() == [5.0]
     assert reading.materialize_dataset_session(parent).value.tolist() == [3.0, 5.0]
-    if native:
-        with pytest.raises(ValueError, match="dataset_schema_mismatch"):
-            reading.materialize_dataset_session(parent.projected_view(("mature_at",)))

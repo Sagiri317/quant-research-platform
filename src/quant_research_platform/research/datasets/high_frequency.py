@@ -26,26 +26,20 @@ from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
-    iter_dataset_chunks,
+    iter_frame_chunks,
     materialize_dataset_session,
     open_dataset_session,
 )
 
 
 def _sample_block(
-    frame, domains, grid, roles, max_age, lookup, *, book_status, visibility_delay
+    frame, domains, grid, roles, max_age, *, book_status, visibility_delay
 ):
-    output, grids = [], {}
-    groups = dict(tuple(frame.groupby("asset_id", sort=False)))
+    """Align the shared grid in one grouped as-of, retaining each asset's domain."""
+    observations, grids = [], {}
     for asset, segments in domains.items():
-        quotes = groups.get(asset, frame.iloc[:0]).sort_values(
-            "timestamp", kind="stable"
-        )
-        quotes = quotes.rename(columns={"timestamp": "quote_timestamp"}).copy()
-        quotes["quote_timestamp"] = quotes.quote_timestamp.astype("datetime64[ns]")
-        quotes["_quote_visible_at"] = quotes.quote_timestamp + visibility_delay
-        ordered = sorted(segments.items(), key=lambda item: item[1][0])
-        exchange, instrument = ordered[0][1][2:]
+        ordered = sorted(segments.values(), key=lambda item: item[0])
+        exchange, instrument = ordered[0][2:]
         key = (exchange, instrument)
         if key not in grids:
             grids[key] = (
@@ -58,71 +52,60 @@ def _sample_block(
                 .to_numpy()
             )
         observed = np.zeros(len(grid), dtype=bool)
-        for i, (_, (start, end, _, _)) in enumerate(ordered):
-            # A known segment break does not establish observations in its gap.
-            if i == len(ordered) - 1:
-                end += pd.Timedelta(seconds=max_age)
-            else:
-                end += visibility_delay
+        for i, (start, end, _, _) in enumerate(ordered):
+            end += (
+                pd.Timedelta(seconds=max_age)
+                if i == len(ordered) - 1
+                else visibility_delay
+            )
             observed |= (grid >= start + visibility_delay) & (grid <= end)
         times = grid[observed & grids[key]]
-        if not len(times):
-            continue
-        block = pd.merge_asof(
-            pd.DataFrame({"timestamp": times}),
-            quotes,
-            left_on="timestamp",
-            right_on="_quote_visible_at",
-            direction="backward",
-            allow_exact_matches=True,
-        ).drop(columns="_quote_visible_at")
-        block["market_id"] = "a_share"
-        block["asset_id"] = asset
-        block["session_date"] = times[0].normalize()
-        block["exchange"] = exchange
-        block["instrument_type"] = instrument
-        # Retain stale source clocks even when their wide payload was not read.
-        for segment, (start, _end, _, _) in reversed(ordered):
-            times = lookup.observed_times[(asset, segment)]
-            missing = block.quote_timestamp.isna() & block.timestamp.ge(
-                start + visibility_delay
-            )
-            positions = (
-                np.searchsorted(
-                    times,
-                    (block.loc[missing, "timestamp"] - visibility_delay).to_numpy(
-                        dtype="datetime64[ns]"
-                    ),
-                    side="right",
-                )
-                - 1
-            )
-            rows = block.index[missing][positions >= 0]
-            block.loc[rows, "quote_timestamp"] = times[positions[positions >= 0]]
-            block.loc[rows, "segment_id"] = segment
-        block["quote_age_seconds"] = (
-            block.timestamp - block.quote_timestamp
-        ).dt.total_seconds()
-        fresh = block.quote_age_seconds.le(max_age) & block.segment_id.notna()
-        payload = [
-            name
-            for name, role in roles.items()
-            if role in {"factor", "feature"} or name == "mid"
-        ]
-        block.loc[~fresh, payload] = np.nan
-        # The legacy panel flag is book status, never research membership.
-        if book_status:
-            block["eligible"] = True
-        for name, role in roles.items():
-            if role in {"universe", "mask"}:
-                block[name] = block[name].astype("boolean")
-        output.append(block)
-    return (
-        pd.concat(output, ignore_index=True)
-        .sort_values(["timestamp", "asset_id"], kind="stable")
-        .reset_index(drop=True)
-        if output
-        else pd.DataFrame()
+        if len(times):
+            observations.append((asset, times))
+    if not observations:
+        return pd.DataFrame()
+    quotes = frame.rename(columns={"timestamp": "quote_timestamp"}).copy()
+    quotes["quote_timestamp"] = quotes.quote_timestamp.astype("datetime64[ns]")
+    quotes["_quote_visible_at"] = quotes.quote_timestamp + visibility_delay
+    decisions = pd.DataFrame(
+        {
+            "timestamp": np.concatenate(
+                [times.to_numpy() for _, times in observations]
+            ),
+            "asset_id": pd.Series(
+                np.repeat(
+                    [asset for asset, _ in observations],
+                    [len(times) for _, times in observations],
+                ),
+                dtype=frame.asset_id.dtype,
+            ),
+        }
+    )
+    block = pd.merge_asof(
+        decisions.sort_values("timestamp", kind="stable"),
+        quotes.sort_values("_quote_visible_at", kind="stable"),
+        left_on="timestamp",
+        right_on="_quote_visible_at",
+        by="asset_id",
+        direction="backward",
+    ).drop(columns="_quote_visible_at")
+    block["quote_age_seconds"] = (
+        block.timestamp - block.quote_timestamp
+    ).dt.total_seconds()
+    fresh = block.quote_age_seconds.le(max_age) & block.segment_id.notna()
+    payload = [
+        name
+        for name, role in roles.items()
+        if role in {"factor", "feature"} or name == "mid"
+    ]
+    block.loc[~fresh, payload] = np.nan
+    if book_status:
+        block["eligible"] = True
+    for name, role in roles.items():
+        if role in {"universe", "mask"}:
+            block[name] = block[name].astype("boolean")
+    return block.sort_values(["timestamp", "asset_id"], kind="stable").reset_index(
+        drop=True
     )
 
 
@@ -270,13 +253,6 @@ def sample_hft(config):
         last_day = pd.Timestamp(upper) - (
             pd.Timedelta(0) if closed else pd.Timedelta(1, "ns")
         )
-        price_columns = (
-            *protocol.KEY,
-            "segment_id",
-            "mid",
-            "exchange",
-            "instrument_type",
-        )
         for day in pd.date_range(
             pd.Timestamp(lower).normalize(), last_day.normalize(), freq="D"
         ):
@@ -292,125 +268,77 @@ def sample_hft(config):
                 session = source.filtered_view(
                     TimeWindow(begin, end - pd.Timedelta(1, "ns"))
                 )
+                # Native members may be unordered. Read the half-session once,
+                # sharing its payload with the price lookup and grouped as-of.
+                quotes = materialize_dataset_session(session.projected_view(inputs))
+                quotes = quotes.loc[
+                    continuous_session(
+                        quotes.timestamp, quotes.exchange, quotes.instrument_type
+                    ).ne("")
+                ]
                 domains = {}
-
-                def prices(session=session, domains=domains):
-                    for panel in iter_dataset_chunks(
-                        session.projected_view(price_columns)
-                    ):
-                        panel = panel.loc[
-                            continuous_session(
-                                panel.timestamp, panel.exchange, panel.instrument_type
-                            ).ne("")
-                        ]
-                        for (asset, segment), group in panel.groupby(
-                            ["asset_id", "segment_id"], sort=False
-                        ):
-                            bounds = domains.setdefault(asset, {})
-                            first, last = group.timestamp.min(), group.timestamp.max()
-                            exchange, instrument = group.iloc[0][
-                                ["exchange", "instrument_type"]
-                            ]
-                            if segment in bounds:
-                                previous = bounds[segment]
-                                first, last = (
-                                    min(first, previous[0]),
-                                    max(last, previous[1]),
-                                )
-                            bounds[segment] = (first, last, exchange, instrument)
-                        yield panel
-
-                lookup = QuoteReturnLookup(prices(), definitions)
+                bounds = quotes.groupby(["asset_id", "segment_id"], sort=False).agg(
+                    first=("timestamp", "min"),
+                    last=("timestamp", "max"),
+                    exchange=("exchange", "first"),
+                    instrument_type=("instrument_type", "first"),
+                )
+                for (
+                    asset,
+                    segment,
+                ), first, last, exchange, instrument in bounds.itertuples(name=None):
+                    domains.setdefault(asset, {})[segment] = (
+                        first,
+                        last,
+                        exchange,
+                        instrument,
+                    )
                 if not domains and pool is None:
                     continue
-                # Reuse storage batch sizing; this batches work without limiting rows.
-                block_duration = pd.Timedelta(
-                    seconds=interval
-                    * max(
-                        1,
-                        DEFAULT_BATCH_ROWS
-                        // max(
-                            1,
-                            len(domains),
-                            pool["stocks"].asset_id.nunique()
-                            if pool is not None
-                            else 0,
-                        ),
-                    )
+                lookup = QuoteReturnLookup(
+                    (quotes.loc[:, ["asset_id", "segment_id", "timestamp", "mid"]],),
+                    definitions,
                 )
-                for block_start in pd.date_range(
-                    begin, end, freq=block_duration, inclusive="left"
-                ):
-                    block_end = min(block_start + block_duration, end)
-                    grid = pd.date_range(
-                        block_start, block_end, freq=f"{interval}s", inclusive="left"
-                    ).as_unit("ns")
-                    grid = grid[
-                        (grid >= lower)
-                        & ((grid <= upper) if closed else (grid < upper))
-                    ]
-                    if not len(grid):
-                        continue
-                    active = {
-                        asset: segments
-                        for asset, segments in domains.items()
-                        if any(
-                            first + visibility_delay <= grid[-1]
-                            and last
-                            + (
-                                pd.Timedelta(seconds=max_age)
-                                if last == max(item[1] for item in segments.values())
-                                else visibility_delay
-                            )
-                            >= grid[0]
-                            for first, last, _, _ in segments.values()
-                        )
-                    }
-                    if not active and pool is None:
-                        continue
-                    # Read only the wide inputs needed by this block's backward as-of.
-                    read_start = max(
-                        begin,
-                        grid[0] - max(pd.Timedelta(seconds=max_age), visibility_delay),
-                    )
-                    read_end = grid[-1] - visibility_delay
-                    quotes = materialize_dataset_session(
-                        session.filtered_view(
-                            TimeWindow(min(read_start, read_end), read_end)
-                        ).projected_view(inputs)
-                    )
-                    frame = _sample_block(
-                        quotes,
-                        active,
-                        grid,
-                        roles,
-                        max_age,
-                        lookup,
-                        book_status=book_status,
-                        visibility_delay=visibility_delay,
-                    )
-                    if pool is not None:
-                        if frame.empty:
-                            frame = (
-                                quotes.iloc[:0]
-                                .rename(columns={"timestamp": "quote_timestamp"})
-                                .assign(
-                                    timestamp=pd.Series(dtype="datetime64[ns]"),
-                                    quote_age_seconds=pd.Series(dtype=float),
-                                )
-                            )
-                        frame = _with_stock_pool(frame, stock_pool_rows(grid, **pool))
+                grid = pd.date_range(
+                    begin, end, freq=f"{interval}s", inclusive="left"
+                ).as_unit("ns")
+                grid = grid[
+                    (grid >= lower) & ((grid <= upper) if closed else (grid < upper))
+                ]
+                if not len(grid):
+                    continue
+                frame = _sample_block(
+                    quotes,
+                    domains,
+                    grid,
+                    roles,
+                    max_age,
+                    book_status=book_status,
+                    visibility_delay=visibility_delay,
+                )
+                if pool is not None:
                     if frame.empty:
-                        continue
-                    labels = lookup.labels(
-                        frame,
-                        sampled=True,
-                        max_lateness_seconds=tolerance,
-                        visibility_delay=visibility_delay,
-                    )
-                    yield frame.merge(
-                        labels, on=list(protocol.KEY), validate="one_to_one"
-                    ).loc[:, spec.required_columns]
+                        frame = (
+                            quotes.iloc[:0]
+                            .rename(columns={"timestamp": "quote_timestamp"})
+                            .assign(
+                                timestamp=pd.Series(dtype="datetime64[ns]"),
+                                quote_age_seconds=pd.Series(dtype=float),
+                            )
+                        )
+                    frame = _with_stock_pool(frame, stock_pool_rows(grid, **pool))
+                if frame.empty:
+                    continue
+                labels = lookup.labels(
+                    frame,
+                    sampled=True,
+                    max_lateness_seconds=tolerance,
+                    visibility_delay=visibility_delay,
+                )
+                completed = frame.merge(
+                    labels, on=list(protocol.KEY), validate="one_to_one"
+                ).loc[:, spec.required_columns]
+                yield from iter_frame_chunks(completed, batch_rows=DEFAULT_BATCH_ROWS)
 
     write_dataset(
         output,

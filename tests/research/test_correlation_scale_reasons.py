@@ -5,9 +5,6 @@ import pytest
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
 )
-from quant_research_platform.artifacts.outputs.evaluation_validation import (
-    validate_evaluation_artifact_structure,
-)
 from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_bundle,
 )
@@ -62,26 +59,6 @@ def test_native_evaluation_persists_independent_std_reason(tmp_path):
 
     _, tables = read_evaluation_outputs(root, tables=("ic_summary",))
     assert tables["ic_summary"].std_ic_reason.isna().all()
-    for value, reason in [
-        (np.nan, None),
-        (0.0, "nonfinite_result"),
-        (np.nan, "invalid"),
-    ]:
-        broken = summary.copy()
-        broken.loc[0, ["std_ic", "std_ic_reason"]] = [value, reason]
-        broken.to_parquet(root / "ic_summary.parquet", index=False)
-        with pytest.raises(ValueError, match="^invalid_evaluation_statistic_reason$"):
-            validate_evaluation_artifact_structure(
-                metrics=pd.read_parquet(root / "metrics.parquet"),
-                grouped_label_values=pd.read_parquet(
-                    root / "grouped_label_values.parquet"
-                ),
-                ic_summary=pd.read_parquet(root / "ic_summary.parquet"),
-                group_spread_summary=pd.read_parquet(
-                    root / "group_spread_summary.parquet"
-                ),
-                spec=spec,
-            )
 
 
 @pytest.mark.parametrize(

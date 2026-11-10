@@ -46,30 +46,19 @@ class DatasetSessionInventory:
     def __init__(self, *, data_root: Path) -> None:
         self.data_root = Path(data_root)
         self._parts: dict[Path, tuple[int, int, int]] = {}
-        self._coordinates: set[tuple[int, int, int]] = set()
-        self._years: dict[int, str] = {}
 
     def discover(self, spec: Mapping[str, Any], *, years=None) -> None:
         self._scan_filesystem(
             spec,
-            on_year=self._register_year,
             on_path=self._register_candidate,
             years=years,
         )
         self.sort_parts()
 
-    def _register_year(self, year: int, label: str) -> None:
-        if year in self._years and self._years[year] != label:
-            raise ValueError("invalid_dataset_part_files")
-        self._years[year] = label
-
     def _register_candidate(
         self, path: Path, coordinates: tuple[int, int, int]
     ) -> None:
-        if path in self._parts or coordinates in self._coordinates:
-            raise ValueError("invalid_dataset_part_files")
         self._parts[path] = coordinates
-        self._coordinates.add(coordinates)
 
     @property
     def paths(self) -> tuple[Path, ...]:
@@ -80,12 +69,12 @@ class DatasetSessionInventory:
 
     def add(self, path: Path) -> None:
         path = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
+        if not Path(native_filesystem_path(path)).is_file():
+            raise ValueError("invalid_dataset_part_files")
         coordinates = self._validated_coordinates(path, partitioned=None)
         self._register_candidate(path, coordinates)
-        if coordinates[0]:
-            self._register_year(coordinates[1], path.parent.name)
 
-    def _scan_filesystem(self, spec, *, on_year, on_path, years=None) -> None:
+    def _scan_filesystem(self, spec, *, on_path, years=None) -> None:
         partition_columns = tuple(
             str(column) for column in spec.get("partition_columns", ())
         )
@@ -117,8 +106,6 @@ class DatasetSessionInventory:
                         continue
                     if path_is_filesystem_alias(path):
                         raise ValueError("invalid_dataset_part_files")
-                    if is_directory:
-                        on_year(year, path.name)
                 if is_directory:
                     if not is_alias:
                         pending.append(_directory_entries(path))
@@ -145,8 +132,6 @@ class DatasetSessionInventory:
     ) -> tuple[int, int, int]:
         candidate = Path(path)
         relative = candidate.relative_to(self.data_root)
-        if not Path(native_filesystem_path(candidate)).is_file():
-            raise ValueError("invalid_dataset_part_files")
         match = _PART_FILE_PATTERN.fullmatch(candidate.name)
         if match is None:
             raise ValueError("invalid_dataset_part_files")

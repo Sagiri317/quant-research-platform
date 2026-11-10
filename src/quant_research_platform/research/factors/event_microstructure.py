@@ -56,7 +56,8 @@ def _at_quotes(values, event_times, quote_times):
     return result
 
 
-def trade_statistics(trades, config):
+def trade_statistics(trades, config, *, columns=None):
+    columns = protocol.TRADE_EVENT_FACTORS if columns is None else set(columns)
     work = (
         trades.loc[trades.event_kind.isin(("trade", "unknown"))]
         .sort_values(["timestamp", "source_row"], kind="stable")
@@ -64,84 +65,106 @@ def trade_statistics(trades, config):
     )
     window, history = config["event_window"], config["history_window"]
     known = work.event_kind.eq("trade")
-    side = work.side.map({"buy": 1.0, "sell": -1.0}).where(known)
-    volume = work.volume.where(work.volume.gt(0) & known)
-    price = work.price.where(known)
-    signed = side * volume
-    interval = (
-        work.timestamp.diff()
-        .dt.total_seconds()
-        .where(known & known.shift(fill_value=False))
-    )
-    mean = interval.rolling(window, min_periods=window).mean()
-    elapsed = (work.timestamp - work.timestamp.shift(window - 1)).dt.total_seconds()
-    result = pd.DataFrame(
-        {
-            "trade_interval_seconds": interval,
-            "trade_interval_mean_seconds": mean,
-            "trade_interval_cv": interval.rolling(window, min_periods=window).std(
-                ddof=1
+    result = pd.DataFrame(index=work.index)
+    interval_columns = {
+        "trade_interval_seconds",
+        "trade_interval_mean_seconds",
+        "trade_interval_cv",
+        "trade_activity_ratio",
+        "trade_interval_return_interaction",
+    }
+    if columns & interval_columns:
+        interval = (
+            work.timestamp.diff()
+            .dt.total_seconds()
+            .where(known & known.shift(fill_value=False))
+        )
+        if "trade_interval_seconds" in columns:
+            result["trade_interval_seconds"] = interval
+        if columns & (interval_columns - {"trade_interval_seconds"}):
+            mean = interval.rolling(window, min_periods=window).mean()
+            if "trade_interval_mean_seconds" in columns:
+                result["trade_interval_mean_seconds"] = mean
+            if "trade_interval_cv" in columns:
+                result["trade_interval_cv"] = interval.rolling(
+                    window, min_periods=window
+                ).std(ddof=1) / mean.where(mean.gt(0))
+            if "trade_activity_ratio" in columns:
+                result["trade_activity_ratio"] = interval.shift(1).rolling(
+                    history, min_periods=history
+                ).mean() / mean.where(mean.gt(0))
+            if "trade_interval_return_interaction" in columns:
+                price = work.price.where(known)
+                result["trade_interval_return_interaction"] = (
+                    price / price.shift(window - 1) - 1
+                ) * mean
+    if "trade_intensity" in columns:
+        elapsed = (work.timestamp - work.timestamp.shift(window - 1)).dt.total_seconds()
+        result["trade_intensity"] = ((window - 1) / elapsed.where(elapsed.gt(0))).where(
+            known.rolling(window).sum().eq(window)
+        )
+    flow_columns = columns - interval_columns - {"trade_intensity"}
+    if flow_columns:
+        side = work.side.map({"buy": 1.0, "sell": -1.0}).where(known)
+        volume = work.volume.where(work.volume.gt(0) & known)
+        signed = side * volume
+        if "trade_event_flow_imbalance" in columns:
+            result["trade_event_flow_imbalance"] = (
+                signed.rolling(window, min_periods=window).sum()
+                / volume.rolling(window, min_periods=window).sum()
             )
-            / mean.where(mean.gt(0)),
-            "trade_intensity": ((window - 1) / elapsed.where(elapsed.gt(0))).where(
-                known.rolling(window).sum().eq(window)
-            ),
-            "trade_activity_ratio": interval.shift(1)
-            .rolling(history, min_periods=history)
-            .mean()
-            / mean.where(mean.gt(0)),
-            "trade_event_flow_imbalance": signed.rolling(
-                window, min_periods=window
-            ).sum()
-            / volume.rolling(window, min_periods=window).sum(),
-            "trade_interval_return_interaction": (price / price.shift(window - 1) - 1)
-            * mean,
-        }
-    )
-    observed = side.notna() & volume.notna()
-    run = (
-        side.ne(side.shift()) | ~observed | ~observed.shift(fill_value=False)
-    ).cumsum()
-    result["trade_signed_run"] = ((side.groupby(run).cumcount() + 1) * side).where(
-        observed
-    )
-    result["trade_signed_run_volume"] = (volume.groupby(run).cumsum() * side).where(
-        observed
-    )
-    for name, quantile, large in (
-        ("large_trade_pressure", config["large_quantile"], True),
-        ("small_trade_pressure", 1 - config["large_quantile"], False),
-    ):
-        threshold = (
-            volume.shift(1).rolling(history, min_periods=history).quantile(quantile)
-        )
-        selected = volume.ge(threshold) if large else volume.le(threshold)
-        pressure = signed.where(selected, 0).where(threshold.notna() & signed.notna())
-        result[name] = (
-            pressure.rolling(window, min_periods=window).sum()
-            / volume.rolling(window, min_periods=window).sum()
-        )
-    amounts = volume.to_numpy()
-    cumulative = np.r_[0.0, np.nancumsum(amounts)]
-    signed_sum = np.r_[0.0, np.nancumsum(signed.to_numpy())]
-    bad = np.r_[0, np.cumsum(~np.isfinite(signed.to_numpy()))]
-    target = config["volume_window"]
-    starts = np.maximum(0, cumulative[1:] - target)
-    first = np.minimum(
-        np.searchsorted(cumulative, starts, side="right") - 1, len(work) - 1
-    )
-    if len(work):
-        pressure = (
-            signed_sum[1:]
-            - signed_sum[first]
-            - (starts - cumulative[first]) * side.to_numpy()[first]
-        )
-        valid = (cumulative[1:] >= target) & ((bad[1:] - bad[first]) == 0)
-        result["trade_volume_flow_imbalance"] = np.where(
-            valid, pressure / target, np.nan
-        )
-    else:
-        result["trade_volume_flow_imbalance"] = pd.Series(dtype=float)
+        if columns & {"trade_signed_run", "trade_signed_run_volume"}:
+            observed = side.notna() & volume.notna()
+            run = (
+                side.ne(side.shift()) | ~observed | ~observed.shift(fill_value=False)
+            ).cumsum()
+            if "trade_signed_run" in columns:
+                result["trade_signed_run"] = (
+                    (side.groupby(run).cumcount() + 1) * side
+                ).where(observed)
+            if "trade_signed_run_volume" in columns:
+                result["trade_signed_run_volume"] = (
+                    volume.groupby(run).cumsum() * side
+                ).where(observed)
+        for name, quantile, large in (
+            ("large_trade_pressure", config["large_quantile"], True),
+            ("small_trade_pressure", 1 - config["large_quantile"], False),
+        ):
+            if name in columns:
+                threshold = (
+                    volume.shift(1)
+                    .rolling(history, min_periods=history)
+                    .quantile(quantile)
+                )
+                selected = volume.ge(threshold) if large else volume.le(threshold)
+                pressure = signed.where(selected, 0).where(
+                    threshold.notna() & signed.notna()
+                )
+                result[name] = (
+                    pressure.rolling(window, min_periods=window).sum()
+                    / volume.rolling(window, min_periods=window).sum()
+                )
+        if "trade_volume_flow_imbalance" in columns:
+            cumulative = np.r_[0.0, np.nancumsum(volume.to_numpy())]
+            signed_sum = np.r_[0.0, np.nancumsum(signed.to_numpy())]
+            bad = np.r_[0, np.cumsum(~np.isfinite(signed.to_numpy()))]
+            target = config["volume_window"]
+            starts = np.maximum(0, cumulative[1:] - target)
+            first = np.minimum(
+                np.searchsorted(cumulative, starts, side="right") - 1, len(work) - 1
+            )
+            if len(work):
+                pressure = (
+                    signed_sum[1:]
+                    - signed_sum[first]
+                    - (starts - cumulative[first]) * side.to_numpy()[first]
+                )
+                valid = (cumulative[1:] >= target) & ((bad[1:] - bad[first]) == 0)
+                result["trade_volume_flow_imbalance"] = np.where(
+                    valid, pressure / target, np.nan
+                )
+            else:
+                result["trade_volume_flow_imbalance"] = pd.Series(dtype=float)
     result.loc[~known] = np.nan
     return work.timestamp, result
 
@@ -267,87 +290,107 @@ def compute_event_factors(
     panel, orders, trades, *, columns, config, missing_streams=()
 ):
     config = parameters(config)
+    selected_columns = set(columns)
+    trade_columns = selected_columns & protocol.TRADE_EVENT_FACTORS
+    cancel_columns = selected_columns & protocol.CANCEL_EVENT_FACTORS
+    lifecycle_columns = selected_columns & protocol.LIFECYCLE_FACTORS
     output = []
-    for work, selected in observed_segments(panel, orders=orders, trades=trades):
-        event_times, values = trade_statistics(selected["trades"], config)
-        aligned = _at_quotes(values, event_times, work.timestamp)
-        additions = selected["orders"]
-        cancellations = (
-            selected["trades"].loc[
-                selected["trades"].event_kind.isin(("cancel", "unknown"))
-            ]
-            if work.exchange.iloc[0] == "SZSE"
-            else selected["trades"].iloc[:0]
-        )
-        messages = (
-            pd.concat(
-                [
-                    additions[["timestamp", "source_row", "volume"]].assign(
-                        cancel=additions.event_kind.map({"order": 0.0, "cancel": 1.0}),
-                        stream_priority=1,
-                    ),
-                    cancellations[["timestamp", "source_row", "volume"]].assign(
-                        cancel=cancellations.event_kind.map({"cancel": 1.0}),
-                        stream_priority=1 if work.exchange.iloc[0] == "SSE" else 0,
-                    ),
+    streams = {}
+    needs_cancel_trades = bool(cancel_columns) and panel.exchange.eq("SZSE").any()
+    if trade_columns or needs_cancel_trades or lifecycle_columns:
+        streams["trades"] = trades
+    if cancel_columns or lifecycle_columns:
+        streams["orders"] = orders
+    for work, selected in observed_segments(panel, **streams):
+        aligned = pd.DataFrame(index=range(len(work)))
+        if trade_columns:
+            event_times, values = trade_statistics(
+                selected["trades"], config, columns=trade_columns
+            )
+            aligned = _at_quotes(values, event_times, work.timestamp)
+        if cancel_columns:
+            additions = selected["orders"]
+            cancellations = (
+                selected["trades"].loc[
+                    selected["trades"].event_kind.isin(("cancel", "unknown"))
                 ]
+                if work.exchange.iloc[0] == "SZSE"
+                else additions.iloc[:0]
             )
-            .sort_values(["timestamp", "stream_priority", "source_row"], kind="stable")
-            .reset_index(drop=True)
-        )
-        n = config["event_window"]
-        cancel_volume = (
-            messages.volume.where(messages.cancel.eq(1), 0)
-            .where(messages.cancel.notna())
-            .rolling(n, min_periods=n)
-            .sum()
-        )
-        order_volume = (
-            messages.volume.where(messages.cancel.eq(0), 0)
-            .where(messages.cancel.notna())
-            .rolling(n, min_periods=n)
-            .sum()
-        )
-        ratio = cancel_volume / order_volume.where(order_volume.gt(0))
-        cancellation_values = pd.DataFrame(
-            {
-                "observed_cancel_order_ratio": ratio,
-                "observed_cancel_count_fraction": messages.cancel.astype(float)
-                .rolling(n, min_periods=n)
-                .mean(),
-                "observed_cancel_pressure_change": ratio.diff(),
-            }
-        )
-        aligned = pd.concat(
-            [
-                aligned,
-                _at_quotes(cancellation_values, messages.timestamp, work.timestamp),
-                lifecycle_features(
-                    work,
-                    selected["orders"],
-                    selected["trades"],
-                    link_field=config["order_link_field"],
-                    window=n,
-                ),
-            ],
-            axis=1,
-        )
+            messages = (
+                pd.concat(
+                    [
+                        additions[["timestamp", "source_row", "volume"]].assign(
+                            cancel=additions.event_kind.map(
+                                {"order": 0.0, "cancel": 1.0}
+                            ),
+                            stream_priority=1,
+                        ),
+                        cancellations[["timestamp", "source_row", "volume"]].assign(
+                            cancel=cancellations.event_kind.map({"cancel": 1.0}),
+                            stream_priority=1 if work.exchange.iloc[0] == "SSE" else 0,
+                        ),
+                    ]
+                )
+                .sort_values(
+                    ["timestamp", "stream_priority", "source_row"], kind="stable"
+                )
+                .reset_index(drop=True)
+            )
+            n = config["event_window"]
+            cancellation_values = pd.DataFrame(index=messages.index)
+            if cancel_columns & {
+                "observed_cancel_order_ratio",
+                "observed_cancel_pressure_change",
+            }:
+                cancel_volume = (
+                    messages.volume.where(messages.cancel.eq(1), 0)
+                    .where(messages.cancel.notna())
+                    .rolling(n, min_periods=n)
+                    .sum()
+                )
+                order_volume = (
+                    messages.volume.where(messages.cancel.eq(0), 0)
+                    .where(messages.cancel.notna())
+                    .rolling(n, min_periods=n)
+                    .sum()
+                )
+                ratio = cancel_volume / order_volume.where(order_volume.gt(0))
+                if "observed_cancel_order_ratio" in cancel_columns:
+                    cancellation_values["observed_cancel_order_ratio"] = ratio
+                if "observed_cancel_pressure_change" in cancel_columns:
+                    cancellation_values["observed_cancel_pressure_change"] = (
+                        ratio.diff()
+                    )
+            if "observed_cancel_count_fraction" in cancel_columns:
+                cancellation_values["observed_cancel_count_fraction"] = (
+                    messages.cancel.astype(float).rolling(n, min_periods=n).mean()
+                )
+            aligned = pd.concat(
+                [
+                    aligned,
+                    _at_quotes(cancellation_values, messages.timestamp, work.timestamp),
+                ],
+                axis=1,
+            )
+        if lifecycle_columns:
+            aligned = pd.concat(
+                [
+                    aligned,
+                    lifecycle_features(
+                        work,
+                        selected["orders"],
+                        selected["trades"],
+                        link_field=config["order_link_field"],
+                        window=config["event_window"],
+                    ).loc[:, list(lifecycle_columns)],
+                ],
+                axis=1,
+            )
         for column in columns:
-            required = (
-                {"hft_trades"}
-                if column.startswith("trade_")
-                or column in {"large_trade_pressure", "small_trade_pressure"}
-                else {"hft_orders"}
-                if column
-                in {
-                    "observed_cancel_order_ratio",
-                    "observed_cancel_count_fraction",
-                    "observed_cancel_pressure_change",
-                }
-                and work.exchange.iloc[0] == "SSE"
-                else {"hft_orders", "hft_trades"}
-            )
-            if required.intersection(missing_streams):
+            if protocol.event_factor_streams(
+                column, work.exchange.iloc[0]
+            ).intersection(missing_streams):
                 aligned[column] = np.nan
         output.append(
             pd.concat([work.loc[:, protocol.KEY], aligned.loc[:, columns]], axis=1)

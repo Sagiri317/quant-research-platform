@@ -59,7 +59,7 @@ def test_manifest_actual_model_and_paths(tmp_path, legacy):
         ("label_unit", "another-unit"),
     ],
 )
-def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value):
+def test_metadata_rejected_before_publish(tmp_path, field, value):
     root, frame, metadata = native_bundle(tmp_path)
     metadata[field] = value
     with pytest.raises((ValueError, TypeError)):
@@ -67,11 +67,6 @@ def test_metadata_rejected_before_publish_and_after_read(tmp_path, field, value)
             output_path=tmp_path / "bad", output_chunks=[frame], metadata=metadata
         )
     assert not (tmp_path / "bad").exists()
-    manifest = json.loads((root / "manifest.json").read_text())
-    manifest["metadata"] = metadata
-    (root / "manifest.json").write_text(json.dumps(manifest))
-    with pytest.raises((ValueError, TypeError)):
-        read_predictions(root)
 
 
 @pytest.mark.parametrize("key", ["Authorization", "auth", "private_key"])

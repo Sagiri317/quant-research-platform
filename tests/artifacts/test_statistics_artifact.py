@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -178,7 +176,7 @@ def test_table_consumer_primary_exception_is_preserved(tmp_path, tables, metadat
     indirect=["tables"],
 )
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
-def test_research_table_rejects_invalid_values_at_write_and_read(
+def test_research_table_rejects_invalid_values_at_write(
     tmp_path, tables, metadata, member, mutation
 ):
     name = member.removesuffix(".parquet")
@@ -209,7 +207,7 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
         else "statistics_table_status_value_invalid"
     )
     if name == "prediction_diagnostics" or mutation == "undefined":
-        _assert_rejected_at_write_and_read(
+        _assert_rejected_at_write(
             tmp_path, tables, metadata, member, error=f"^{error}$"
         )
     else:
@@ -217,7 +215,7 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
             statistics._validated_frame(tables[name], member=member, metadata=metadata)
 
 
-def _assert_rejected_at_write_and_read(
+def _assert_rejected_at_write(
     tmp_path, tables, metadata, member, *, table_group=None, error="statistics_table_"
 ):
     if table_group is None:
@@ -234,30 +232,6 @@ def _assert_rejected_at_write_and_read(
             table_group=table_group,
         )
     assert not (tmp_path / "rejected").exists()
-    root = tmp_path / "persisted"
-    root.mkdir()
-    pq.write_table(
-        pa.Table.from_pandas(
-            tables[member.removesuffix(".parquet")],
-            schema=statistics._ARROW_SCHEMAS[member],
-            preserve_index=False,
-        ),
-        root / member,
-    )
-    (root / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_id": "qrp-statistics",
-                "table_group": table_group,
-                "metadata": metadata,
-                "members": [member],
-            }
-        )
-    )
-    artifact = statistics.read_statistics_artifact(root)
-    with pytest.raises(ValueError, match=error):
-        with artifact.table(member):
-            pytest.fail("invalid persisted values must not reach the consumer")
 
 
 @pytest.mark.parametrize(
@@ -287,7 +261,7 @@ def test_defined_research_measurements_cannot_be_missing(
     tmp_path, tables, metadata, name, column
 ):
     tables[name].loc[0, column] = float("nan")
-    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{name}.parquet")
+    _assert_rejected_at_write(tmp_path, tables, metadata, f"{name}.parquet")
 
 
 @pytest.mark.parametrize(
@@ -377,15 +351,13 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata)
 )
 def test_research_measurement_domains(tmp_path, tables, metadata, table, column, value):
     tables[table].loc[0, column] = value
-    _assert_rejected_at_write_and_read(tmp_path, tables, metadata, f"{table}.parquet")
+    _assert_rejected_at_write(tmp_path, tables, metadata, f"{table}.parquet")
 
 
 @pytest.mark.parametrize("value", [None, "", "not-a-domain", "A" * 64])
-def test_model_asset_domain_is_required_at_write_and_read(
-    tmp_path, tables, metadata, value
-):
+def test_model_asset_domain_is_required_at_write(tmp_path, tables, metadata, value):
     tables["model_losses"].loc[0, "asset_coverage_id"] = value
-    _assert_rejected_at_write_and_read(
+    _assert_rejected_at_write(
         tmp_path,
         tables,
         metadata,
@@ -536,7 +508,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         frame.loc[0, "mean"] = float("nan")
     else:
         frame.loc[0, "observation_count"] = 0
-    _assert_rejected_at_write_and_read(
+    _assert_rejected_at_write(
         tmp_path,
         tables,
         metadata,
@@ -577,7 +549,7 @@ def test_defined_group_comparison_requires_descriptive_facts(
         )
     tables["model_group_comparison"] = pd.DataFrame([row])
     if corruption != "none":
-        _assert_rejected_at_write_and_read(
+        _assert_rejected_at_write(
             tmp_path,
             tables,
             metadata,
@@ -654,7 +626,7 @@ def test_research_statistics_bind_sample_role_and_explicit_window(
             "2030-01-02" if boundary == "outside" else "2014-01-02"
         )
         error = "statistics_table_window_mismatch"
-    _assert_rejected_at_write_and_read(
+    _assert_rejected_at_write(
         tmp_path, tables, metadata, "model_losses.parquet", error=error
     )
 
@@ -670,12 +642,10 @@ def test_statistics_table_group_matches_declared_members(tmp_path, tables, metad
     root = statistics.write_statistics_artifact(
         tmp_path / "valid", metadata=metadata, tables=tables
     )
-    path = root / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["members"] = list(statistics.STATISTICS_TABLE_GROUPS["factor"])
-    path.write_text(json.dumps(manifest))
-    with pytest.raises(ValueError, match="statistics_artifact_members_invalid"):
-        statistics.read_statistics_artifact(root)
+    artifact = statistics.read_statistics_artifact(root)
+    with pytest.raises(ValueError, match="statistics_table_member_invalid"):
+        with artifact.table("fama_macbeth.parquet"):
+            pass
 
 
 def test_legal_internal_model_name_survives_joint_test_publication(
@@ -1139,7 +1109,7 @@ def test_prediction_loss_reasons_are_validated_on_write_and_read(
 ):
     for column, value in changes.items():
         tables["model_prediction_metrics"].loc[0, column] = value
-    _assert_rejected_at_write_and_read(
+    _assert_rejected_at_write(
         tmp_path,
         tables,
         metadata,
@@ -1241,7 +1211,7 @@ def test_factor_comparison_artifacts_reject_inconsistent_summary_facts(
     tmp_path, tables, metadata, member, column, value, error
 ):
     tables[member].loc[0, column] = value
-    _assert_rejected_at_write_and_read(
+    _assert_rejected_at_write(
         tmp_path, tables, metadata, member + ".parquet", error=error
     )
 

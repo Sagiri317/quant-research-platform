@@ -1,6 +1,7 @@
 """Independent filter arithmetic and execution through the shared native account."""
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
@@ -196,3 +197,43 @@ def test_execution_schedules_reject_unproved_history_before_writing(
     with pytest.raises(ValueError, match="not_historical"):
         backtest_policy(config)
     assert not (tmp_path / "invalid").exists()
+
+
+def test_off_quote_signals_use_visible_context_without_crossing_session():
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:06", "05:00:00", "05:00:06"),
+    )
+    panel["asset_id"] = panel.asset_id.astype(object)
+    panel["eligible"] = [True, False, True, True]
+    panel["segment_id"] = [0, 0, 1, 1]
+    predictions = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-02T01:30:03",
+                    "2024-01-02T01:30:06",
+                    "2024-01-02T04:59:59",
+                    "2024-01-02T05:00:03",
+                ]
+            ),
+            "asset_id": "a",
+            "prediction_score": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    stage = signal_processing_parameters([{"method": "threshold", "threshold": 0.5}])
+    result = process_prediction_signals(
+        predictions, panel, stage, quote_visibility_delay_ms=1
+    )
+    assert result.prediction_score.tolist() == [1.0, 2.0, 4.0]
+    assert result.timestamp.tolist() == predictions.timestamp.iloc[[0, 1, 3]].tolist()
+    assert process_prediction_signals(predictions.iloc[[1]], panel, stage).empty
+    # Filtering leaves the off-quote clock for the existing execution mapper.
+    from quant_research_platform.research.portfolios.high_frequency import _decisions
+
+    mapped = _decisions(panel, result, 0)
+    assert (
+        mapped[(predictions.timestamp.iloc[0].value, "a")][0]
+        == panel.timestamp.iloc[1].value
+    )

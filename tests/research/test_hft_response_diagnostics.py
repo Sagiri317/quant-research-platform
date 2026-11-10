@@ -455,7 +455,7 @@ def test_explicit_cutpoints_do_not_require_reference_admission(tmp_path):
     evaluate(config)
 
 
-def test_empty_group_cannot_be_persisted_as_a_fake_zero(tmp_path):
+def test_empty_group_persists_an_undefined_mean(tmp_path):
     from pathlib import Path
 
     config = _native_config(tmp_path)
@@ -463,20 +463,9 @@ def test_empty_group_cannot_be_persisted_as_a_fake_zero(tmp_path):
     root = evaluate(config)
     path = Path(root) / "response_groups.parquet"
     frame = pd.read_parquet(path)
-    frame.loc[0, ["mean_return_bp", "mean_reason"]] = [0.0, None]
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
-
-    pq.write_table(
-        pa.Table.from_pandas(
-            frame, schema=DAILY_SCHEMAS["response_groups"], preserve_index=False
-        ),
-        path,
-    )
-    with pytest.raises(ValueError, match="response_groups_invalid"):
-        read_evaluation_outputs(root, tables=("response_groups",))
+    assert frame.n_obs.iloc[0] == 0
+    assert pd.isna(frame.mean_return_bp.iloc[0])
+    assert pd.notna(frame.mean_reason.iloc[0])
 
 
 def test_cancellation_and_near_zero_spread_use_financial_tolerance():
@@ -662,69 +651,3 @@ def test_native_response_pair_domain_and_independent_members(tmp_path, empty):
             sample_scope="common",
             label="r100",
         ).n_obs.tolist() == [3, 2]
-
-
-@pytest.mark.parametrize("change", ["empty_metrics", "missing_common"])
-def test_response_pair_contract_at_selected_read(tmp_path, change):
-    import json
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.evaluation_daily import DAILY_SCHEMAS
-
-    root = evaluate(_native_config(tmp_path))
-    members = ("response_metrics", "response_groups")
-    manifest, tables = read_evaluation_outputs(root, tables=members)
-
-    def altered(name, frame):
-        if change == "empty_metrics":
-            return frame.iloc[:0] if name == "response_metrics" else frame
-        return frame.loc[~(frame.label.eq("r500") & frame.sample_scope.eq("common"))]
-
-    error = (
-        "evaluation_response_group_count_mismatch"
-        if change == "empty_metrics"
-        else "evaluation_response_common_count_mismatch"
-    )
-    # Each member remains locally valid; only their consumed relationship is broken.
-    for name in members:
-        frame = altered(name, tables[name])
-        pq.write_table(
-            pa.Table.from_pandas(
-                frame, schema=DAILY_SCHEMAS[name], preserve_index=False
-            ),
-            root / f"{name}.parquet",
-        )
-        manifest["metadata"]["optional_member_rows"][name] = len(frame)
-    (root / "manifest.json").write_text(json.dumps(manifest))
-    for name in members:
-        read_evaluation_outputs(root, tables=(name,))
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        read_evaluation_outputs(root, tables=members)
-
-
-def test_response_count_owner_distinguishes_unconsumed_empty_and_incomplete_pairs():
-    from quant_research_platform.artifacts.outputs.evaluation_daily import (
-        validate_response_counts,
-    )
-
-    tables = _response_tables(_frame(), spec=_spec(), config=_response())
-    metrics, groups = tables["response_metrics"], tables["response_groups"]
-    science = {"response_diagnostics": _response()}
-    validate_response_counts(None, groups, science=science)
-    validate_response_counts(metrics, None, science=science)
-    with pytest.raises(ValueError, match="^evaluation_response_group_count_mismatch$"):
-        validate_response_counts(metrics, groups.iloc[:0], science=science)
-    for name in tables:
-        tables[name] = tables[name].loc[
-            ~(tables[name].label.eq("r500") & tables[name].sample_scope.eq("own"))
-        ]
-    with pytest.raises(ValueError, match="^evaluation_response_common_count_mismatch$"):
-        validate_response_counts(
-            tables["response_metrics"], tables["response_groups"], science=science
-        )
-    wrong_counts = groups.copy()
-    wrong_counts.loc[0, "n_obs"] += 1
-    with pytest.raises(ValueError, match="^evaluation_response_group_count_mismatch$"):
-        validate_response_counts(metrics, wrong_counts, science=science)

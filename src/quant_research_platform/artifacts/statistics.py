@@ -22,13 +22,11 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.datasets.reading import (
-    iter_declared_parquet_member_batches,
-)
 from quant_research_platform.storage.identity import open_filesystem_file
 from quant_research_platform.storage.manifests import read_qrp_json_file, write_manifest
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
+    iter_dataset_part_batches,
     parquet_table_writer,
 )
 
@@ -637,9 +635,22 @@ _TIMESTAMP_COLUMNS = {
 STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
 
 
-def _validate_table_schema(schema, member):
-    if schema != _ARROW_SCHEMAS[member]:
-        raise ValueError("statistics_table_schema_invalid")
+def _nullable_count(member, column):
+    return member in {
+        "prediction_diagnostics.parquet",
+        "model_comparison.parquet",
+    } and column in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
+
+
+def _restored_frame(table, member):
+    frame = table.to_pandas(integer_object_nulls=True)
+    for column in _COUNT_COLUMNS[member]:
+        frame[column] = frame[column].astype(
+            "Int64" if _nullable_count(member, column) else "int64"
+        )
+    if member == "factor_stratified_diagnostics.parquet":
+        frame["stratum"] = frame.stratum.astype("string")
+    return frame
 
 
 @dataclass(frozen=True, slots=True)
@@ -653,25 +664,18 @@ class StatisticsArtifact:
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         with closing_iterator(
-            iter_declared_parquet_member_batches(
-                self.root / member,
-                parquet_filters=filters,
-                metadata_observer=lambda metadata: _validate_table_schema(
-                    metadata.schema, member
-                ),
-            )
-        ) as frames:
-            for frame in frames:
-                yield _validated_frame(frame, member=member, metadata=self.metadata)
+            iter_dataset_part_batches(self.root / member, parquet_filters=filters)
+        ) as batches:
+            for batch in batches:
+                yield _restored_frame(batch, member)
 
     @contextmanager
     def table(self, member: str):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         with _opened_parquet(self.root / member) as (parquet, _handle):
-            _validate_table_schema(parquet.schema_arrow, member)
-            frame = parquet.read().to_pandas(integer_object_nulls=True)
-        yield _validated_frame(frame, member=member, metadata=self.metadata)
+            frame = _restored_frame(parquet.read(), member)
+        yield frame
 
 
 def write_statistics_artifact(
@@ -739,21 +743,8 @@ def read_statistics_artifact(path: Path) -> StatisticsArtifact:
         or group not in STATISTICS_TABLE_GROUPS
     ):
         raise ValueError("statistics_artifact_contract_invalid")
-    known = STATISTICS_TABLE_GROUPS[group]
-    declared = manifest.get("members")
-    if (
-        not isinstance(declared, list)
-        or not declared
-        or any(
-            not isinstance(member, str) or member not in known for member in declared
-        )
-        or len(set(declared)) != len(declared)
-        or declared != [member for member in known if member in declared]
-    ):
-        raise ValueError("statistics_artifact_members_invalid")
-    members = tuple(declared)
-    metadata = manifest.get("metadata")
-    _validate_metadata(metadata)
+    members = tuple(manifest["members"])
+    metadata = manifest["metadata"]
     artifact = StatisticsArtifact(metadata, root, group, members)
     return artifact
 
@@ -837,11 +828,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         values = strict_integer_series(
             result[column],
             error="statistics_table_count_invalid",
-            allow_null=(
-                member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
-                and column
-                in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
-            ),
+            allow_null=_nullable_count(member, column),
         )
         if values.lt(0).any():
             raise ValueError("statistics_table_count_invalid")

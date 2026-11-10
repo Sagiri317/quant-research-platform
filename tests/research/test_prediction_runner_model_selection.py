@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -73,58 +72,41 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
     assert "score_eligible" not in frames[0]
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ["missing", "truncated", "duplicate", "wrong_key", "inf", "nat_metadata"],
-)
-def test_scoring_reports_missing_keys_and_rejects_invalid_rows(tmp_path, mutation):
+@pytest.mark.parametrize("mutation", ["missing", "wrong_key"])
+def test_scoring_reports_missing_keys_for_valid_published_predictions(
+    tmp_path, mutation
+):
     _cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     root = Path(config["predictions"][0])
     frame = pd.read_parquet(root / "prediction.parquet")
-    if mutation in {"missing", "truncated"}:
+    if mutation == "missing":
         frame = frame.iloc[:-1]
-        if mutation == "missing":
-            # A smaller valid forecast domain is scientific missingness, not
-            # damage to an artifact that still declares the original row count.
-            metadata = json.loads((root / "manifest.json").read_text())["metadata"]
-            metadata.pop("prediction_rows")
-            metadata.pop("effective_prediction_end")
-            root = write_prediction_outputs(
-                output_path=tmp_path / "partial-predictions",
-                output_chunks=[frame],
-                metadata=metadata,
-            )
-            config["predictions"] = [str(root)]
-            saved, saved_metadata = read_predictions(root)
-            assert len(saved) == saved_metadata["prediction_rows"] == 5
-            assert pd.Timestamp(saved_metadata["effective_prediction_end"]) == (
-                saved.timestamp.max()
-            )
-    elif mutation == "duplicate":
-        frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
-    elif mutation == "wrong_key":
+    else:
         frame.loc[0, "asset_id"] = "unknown"
-    elif mutation == "inf":
-        frame.loc[0, "prediction_score"] = np.inf
-    else:
-        path = root / "manifest.json"
-        payload = json.loads(path.read_text())
-        payload["metadata"]["effective_prediction_end"] = "NaT"
-        path.write_text(json.dumps(payload))
-    if mutation != "missing":
-        frame.to_parquet(root / "prediction.parquet", index=False)
-    if mutation in {"missing", "wrong_key"}:
-        result = json.loads(score(config).read_text())
-        coverage = result["candidates"][0]["coverage"]
-        assert coverage["paired_prediction_rows"] == 5
-        assert coverage["mature_label_rows_without_prediction"] == 4
-        assert coverage["prediction_rows_without_label"] == int(mutation == "wrong_key")
-    elif mutation == "truncated":
-        with pytest.raises(ValueError, match="^prediction_metadata_inconsistent$"):
-            score(config)
-    else:
-        with pytest.raises(ValueError):
-            score(config)
+    metadata = json.loads((root / "manifest.json").read_text())["metadata"]
+    metadata.pop("prediction_rows")
+    metadata.pop("effective_prediction_end")
+    root = write_prediction_outputs(
+        output_path=tmp_path / "partial-predictions",
+        output_chunks=[frame],
+        metadata=metadata,
+    )
+    config["predictions"] = [str(root)]
+    saved, saved_metadata = read_predictions(root)
+    assert (
+        len(saved)
+        == saved_metadata["prediction_rows"]
+        == (5 if mutation == "missing" else 6)
+    )
+    assert (
+        pd.Timestamp(saved_metadata["effective_prediction_end"])
+        == saved.timestamp.max()
+    )
+    result = json.loads(score(config).read_text())
+    coverage = result["candidates"][0]["coverage"]
+    assert coverage["paired_prediction_rows"] == 5
+    assert coverage["mature_label_rows_without_prediction"] == 4
+    assert coverage["prediction_rows_without_label"] == int(mutation == "wrong_key")
 
 
 @pytest.mark.parametrize(

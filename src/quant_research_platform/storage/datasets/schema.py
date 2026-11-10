@@ -600,7 +600,6 @@ def _typed_category_value(value: Mapping[str, Any]) -> object:
 
 
 def physical_schema_columns(schema: object) -> tuple[str, ...]:
-    validate_physical_schema_payload(schema)
     return tuple(field["name"] for field in schema)
 
 

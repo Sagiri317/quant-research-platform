@@ -23,6 +23,15 @@ from quant_research_platform.contracts.validation import (
 PREDICTION_FACT_ALIASES = ("model_id", "family_id", "label_unit")
 
 
+def prediction_fact_aliases(facts):
+    """Derive the public metadata view from its single persisted owner."""
+    return {
+        "model_id": facts["model"]["model_id"],
+        "family_id": facts["family_id"],
+        "label_unit": facts["label_unit"],
+    }
+
+
 def validate_prediction_output_metadata_shape(metadata):
     """Validate either persisted shape and restore the public metadata view."""
     required = {
@@ -84,11 +93,7 @@ def validate_prediction_output_metadata_shape(metadata):
     facts = metadata["model_facts"]
     model = metadata["model_metadata"]
     _validate_prediction_training_facts(facts, model)
-    aliases = {
-        "model_id": facts["model"]["model_id"],
-        "family_id": facts["family_id"],
-        "label_unit": facts["label_unit"],
-    }
+    aliases = prediction_fact_aliases(facts)
     if any(
         name in metadata and metadata[name] != value for name, value in aliases.items()
     ):

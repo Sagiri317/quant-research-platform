@@ -499,7 +499,10 @@ def inventory_batches(
         if (decision_columns is None or prediction_decisions) and not predictions.empty:
             if "signal_processing" in params:
                 predictions = process_prediction_signals(
-                    predictions, quotes, params["signal_processing"]
+                    predictions,
+                    quotes,
+                    params["signal_processing"],
+                    quote_visibility_delay_ms=quote_visibility_delay_ms,
                 )
             predictions = predictions.loc[
                 predictions.timestamp.ge(lower)

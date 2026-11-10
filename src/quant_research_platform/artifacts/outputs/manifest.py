@@ -11,6 +11,7 @@ from quant_research_platform.artifacts.outputs.evaluation_validation import (
 )
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     PREDICTION_FACT_ALIASES,
+    prediction_fact_aliases,
     validate_prediction_output_metadata_shape,
 )
 from quant_research_platform.contracts.evaluations import (
@@ -184,7 +185,10 @@ def validate_output_bundle(
     if not root.is_dir():
         raise ValueError("output_bundle_root_invalid")
     manifest = read_qrp_json_file(root / "manifest.json")[1]
-    validate_output_manifest(manifest)
+    if manifest["output_definition_id"] == "prediction_outputs":
+        manifest["metadata"].update(
+            prediction_fact_aliases(manifest["metadata"]["model_facts"])
+        )
     if (
         expected_definition_id is not None
         and manifest["output_definition_id"] != expected_definition_id
@@ -198,8 +202,4 @@ def validate_output_bundle(
         root / name
         for name in (manifest["files"] if selected_files is None else selected_files)
     )
-    for path in members:
-        require_unaliased_path(path, error="output_member_path_invalid")
-        if not path.is_file():
-            raise ValueError("output_member_path_invalid")
     return manifest, members

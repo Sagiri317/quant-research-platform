@@ -150,13 +150,19 @@ def _history_features(history, transforms, unit, frequency, window, config):
         finite = np.isfinite(current)
         previous = tail[-2] if len(tail) >= 2 else np.nan
         year_target = latest - pd.DateOffset(years=1)
-        year_index = bisect_right(dates, year_target) - 1
-        tolerance = {"D": 7, "W": 7, "M": 0, "Q": 0, "event": 0}[frequency]
-        year_value = (
-            state[dates[year_index]]
-            if (year_index >= 0 and (year_target - dates[year_index]).days <= tolerance)
-            else np.nan
-        )
+        if frequency in {"M", "Q"}:
+            period = year_target.to_period(frequency)
+            year_index = bisect_right(dates, period.end_time) - 1
+            same_period = (
+                year_index >= 0 and dates[year_index].to_period(frequency) == period
+            )
+        else:
+            year_index = bisect_right(dates, year_target) - 1
+            tolerance = {"D": 7, "W": 7, "event": 0}[frequency]
+            same_period = (
+                year_index >= 0 and (year_target - dates[year_index]).days <= tolerance
+            )
+        year_value = state[dates[year_index]] if same_period else np.nan
         change = (x - previous) * scale
         values = {
             "level": x,

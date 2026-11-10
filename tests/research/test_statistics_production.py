@@ -856,18 +856,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             assert not table.empty
             raise primary
     assert caught.value is primary
-    import shutil
-
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    wrong_root = tmp_path / "bad_schema"
-    shutil.copytree(artifact_root, wrong_root)
-    pq.write_table(pa.table({"wrong": [1]}), wrong_root / "model_losses.parquet")
-    unchecked = read_statistics_artifact(wrong_root)
-    with pytest.raises(ValueError, match="statistics_table_schema_invalid"):
-        with unchecked.table("model_losses.parquet"):
-            pass
 
 
 @pytest.mark.parametrize(

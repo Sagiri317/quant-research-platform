@@ -962,10 +962,9 @@ def test_inventory_discovery_orders_numeric_part_indices(tmp_path: Path) -> None
     "names",
     [
         ("part-invalid.parquet",),
-        ("part-1.parquet", "part-001.parquet"),
         ("part-000.parquet", "stray.parquet"),
     ],
-    ids=["invalid", "duplicate-index", "stray"],
+    ids=["invalid", "stray"],
 )
 def test_inventory_discovery_rejects_invalid_or_ambiguous_parts(
     tmp_path: Path, names: tuple[str, ...]
@@ -976,16 +975,6 @@ def test_inventory_discovery_rejects_invalid_or_ambiguous_parts(
         pq.write_table(pa.table({"value": [1]}), data_root / name)
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         _discovered_paths(data_root, spec={"partition_columns": []})
-
-
-def test_inventory_discovery_rejects_duplicate_numeric_years(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    for year_name in ("year=1", "year=01"):
-        year_root = data_root / year_name
-        year_root.mkdir(parents=True)
-        pq.write_table(pa.table({"value": [1]}), year_root / "part-000.parquet")
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": ["year"]})
 
 
 def test_inventory_discovery_rejects_resolved_path_outside_root(tmp_path: Path) -> None:

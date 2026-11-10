@@ -62,6 +62,34 @@ def market_type_calendar_state(calendar: pd.DataFrame, market_type: int) -> pd.S
     return pd.Series(trading.loc[selected].to_numpy(), index=dates, dtype="boolean")
 
 
+def next_trading_sessions(
+    calendar: pd.DataFrame, dates: pd.DatetimeIndex
+) -> pd.DatetimeIndex:
+    """Prove next sessions within the supplied A-share calendar market scope."""
+    normalized = _require_normalized_calendar(calendar)
+    selected = normalized.loc[normalized.source_market_type.isin(CURRENT_MARKET_TYPES)]
+    if selected.duplicated(["calendar_date", "source_market_type"]).any():
+        raise ValueError("duplicate_trading_calendar_key")
+    states = selected.pivot(
+        index="calendar_date", columns="source_market_type", values="is_trading_day"
+    ).astype("boolean")
+    opened = states.any(axis=1)
+    known = opened | states.notna().all(axis=1)
+    sessions = states.index[opened]
+    positions = sessions.get_indexer(dates)
+    result = np.full(len(dates), np.datetime64("NaT"), dtype="datetime64[ns]")
+    valid = (positions >= 0) & (positions + 1 < len(sessions))
+    rows = np.flatnonzero(valid)
+    successors = sessions.take(positions[valid] + 1)
+    known_dates = states.index[known]
+    count = known_dates.searchsorted(
+        successors, side="right"
+    ) - known_dates.searchsorted(dates[valid], side="left")
+    proved = count == ((successors - dates[valid]).days + 1)
+    result[rows[proved]] = successors[proved].to_numpy(dtype="datetime64[ns]")
+    return pd.DatetimeIndex(result)
+
+
 def compute_listing_session_facts(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,

@@ -69,7 +69,8 @@
     ".run/weekend-etf/etf-combined-v1/protocol.json": "df4484bb3958f0162ecda4a60787f014bafddb22444147a6b4bafa1003812545",
     ".run/weekend-etf/etf-combined-v1/summary/accounts.csv": "5397021f704a50c03d775f284cd27db886dadb9dd7e64ba272d9c5b6e521fc06",
     ".run/weekend-etf/etf-combined-v1/summary/account_inference.csv": "c7748f9fe0aab30957502fc3238c65b93b16736fbbb7e1c7c1faeb14783000ad",
-    ".run/weekend-etf/etf-combined-v1/summary/prediction_inference.csv": "562bd705c779b1f085bd7479fa88bd657f3482d80da4df22575184904778dfb4"
+    ".run/weekend-etf/etf-combined-v1/summary/prediction_inference.csv": "562bd705c779b1f085bd7479fa88bd657f3482d80da4df22575184904778dfb4",
+    ".run/weekend-etf/etf-w1-summary-v1/protocol.json": "8c5fae1dbbb5be80abb5af41c273dd77888a126c6c14733d19f378e6459e2f7c"
   },
   "window_numbering": {
     "w1": 1,
@@ -77,5 +78,23 @@
     "w3": 3,
     "continuous": 4,
     "w4": 5
+  },
+  "code_provenance": {
+    "preparation": {
+      "commit": "9b0551f6e1efbce68bdf7c2a32a05aeef9f48da6",
+      "evidence": ".run/weekend-etf/etf-w1-summary-v1/protocol.json"
+    },
+    "w1": {
+      "commit": "9b0551f6e1efbce68bdf7c2a32a05aeef9f48da6",
+      "evidence": ".run/weekend-etf/etf-w1-summary-v1/protocol.json"
+    },
+    "remaining_windows_and_combination": {
+      "commit": "985a51e84aafca238c2d1c880de5ca1a2a3010c6",
+      "evidence": ".run/weekend-etf/etf-combined-v1/protocol.json"
+    },
+    "later_repairs": {
+      "commit": null,
+      "reason": "现有最终汇总未逐项绑定后续修复的代码版本，不能用当前 main 代替。"
+    }
   }
 }

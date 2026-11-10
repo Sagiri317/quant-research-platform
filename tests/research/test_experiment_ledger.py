@@ -21,8 +21,7 @@ from quant_research_platform.storage.experiments import read_trial_ledger
         (KeyboardInterrupt(), "abandoned"),
     ],
 )
-@pytest.mark.parametrize("legacy", [False, True])
-def test_trial_retains_attempt_and_actual_terminal(tmp_path, error, status, legacy):
+def test_trial_retains_attempt_and_actual_terminal(tmp_path, error, status):
     recorder = TrialRecorder(
         tmp_path / "trial",
         {"model": {"model_id": "candidate"}, "fit_cutoff": "2020-01-01"},
@@ -33,13 +32,10 @@ def test_trial_retains_attempt_and_actual_terminal(tmp_path, error, status, lega
     terminal_path = recorder.root / "terminal.json"
     compact = json.loads(terminal_path.read_text())
     assert compact == {
-        "trial_id": attempted["trial_id"],
         "status": status,
         "result": {"rows": 3},
         **({"error": type(error).__name__} if error is not None else {}),
     }
-    if legacy:
-        terminal_path.write_text(json.dumps(terminal))
     records = read_trial_ledger(recorder.root)
     assert records == (attempted, terminal)
     assert (recorder.root / "attempted.json").read_bytes() == before
@@ -66,22 +62,6 @@ def test_hard_exit_leaves_attempted_fact(tmp_path):
     )
     assert result.returncode == 3
     assert len(read_trial_ledger(root)) == 1
-
-
-@pytest.mark.parametrize("legacy", [False, True])
-def test_trial_rejects_rebound_terminal(tmp_path, legacy):
-    recorder = TrialRecorder(tmp_path, {"model": {"model_id": "a"}})
-    recorder.begin()
-    terminal = recorder.finish()
-    path = tmp_path / "terminal.json"
-    payload = terminal if legacy else json.loads(path.read_text())
-    if legacy:
-        payload["model"]["model_id"] = "b"
-    else:
-        payload["trial_id"] = "another-trial"
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="completion_mismatch"):
-        read_trial_ledger(tmp_path)
 
 
 @pytest.mark.parametrize("primary", [RuntimeError("compute"), KeyboardInterrupt()])

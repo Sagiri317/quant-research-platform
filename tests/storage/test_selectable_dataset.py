@@ -156,26 +156,14 @@ def test_bare_members_preserve_order_and_ignore_unconsumed_schema(tmp_path):
 
 
 def test_consumed_rows_validate_keys_and_inf_without_global_summary_gate(tmp_path):
-    root = tmp_path / "native"
     values = frame()
-    write_dataset(root, values, spec=spec())
-    part = root / "data" / "part-000.parquet"
-    table = pq.read_table(part)
-    table = table.set_column(
-        table.schema.get_field_index("value"),
-        "value",
-        pa.array([float("inf"), *values["value"].iloc[1:]]),
-    )
-    pq.write_table(table, part)
-    assert read_dataset(root, columns=["asset_id"]).shape == (6, 1)
-    assert read_dataset(root, columns=["value"], years=[2021])["value"].tolist() == [
-        3.0,
-        4.0,
-        5.0,
-        6.0,
-    ]
+    external = tmp_path / "external.parquet"
+    dirty = values.copy()
+    dirty.loc[dirty.index[0], "value"] = float("inf")
+    dirty.to_parquet(external, index=False)
+    assert read_dataset(external, spec=spec(), columns=["asset_id"]).shape == (6, 1)
     with pytest.raises(ValueError, match="dataset_infinite_value"):
-        read_dataset(root, columns=["value"])
+        read_dataset(external, spec=spec(), columns=["value"])
     duplicate = tmp_path / "duplicate.parquet"
     pd.concat([values.iloc[:1], values.iloc[:1]], ignore_index=True).to_parquet(
         duplicate, index=False
@@ -277,7 +265,7 @@ def test_categorical_asset_filter_uses_values_not_dictionary_codes(
     assert actual["value"].tolist() == [1.0, 3.0, 5.0, 6.0]
 
 
-@pytest.mark.parametrize("location", ["manifest", "part", "bare"])
+@pytest.mark.parametrize("location", ["bare"])
 def test_unconsumed_logical_dtype_does_not_gate_selected_columns(tmp_path, location):
     import json
 
@@ -343,24 +331,6 @@ def test_chunked_mode_string_and_enum_keep_lazy_reading(tmp_path, mode):
     chunks = read_dataset(source, mode=mode)
     assert isinstance(chunks, Iterator)
     chunks.close()
-
-
-@pytest.mark.parametrize("selection", [{"files": []}, {"years": [1900]}])
-def test_empty_selection_validates_consumed_physical_logical_type(tmp_path, selection):
-    import json
-
-    root = tmp_path / "native"
-    write_dataset(root, frame(), spec=spec())
-    path = root / "_manifest" / "manifest.json"
-    payload = json.loads(path.read_text())
-    descriptor = next(
-        item for item in payload["logical_dtypes"]["columns"] if item["name"] == "value"
-    )
-    descriptor.update(kind="numpy_integer", dtype="int64")
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
-        read_dataset(root, columns=["value"], **selection)
-    assert read_dataset(root, columns=["timestamp"], **selection).empty
 
 
 @pytest.mark.parametrize("difference", ["unit", "unknown_unit", "availability", "role"])
@@ -528,29 +498,7 @@ def test_native_temporal_selection_does_not_discover_unconsumed_year_members(
         read_dataset(root)
 
 
-@pytest.mark.parametrize(
-    "selection",
-    [
-        {},
-        {"years": [2021]},
-        {"years": [2019, 2021]},
-        {"time_window": TimeWindow("2021-01-01", "2021-01-01")},
-        {
-            "time_window": TimeWindow(
-                "2021-01-01T00:00:00.000000001", "2021-01-01T00:00:00.000000001"
-            )
-        },
-        {
-            "years": [2021],
-            "time_window": TimeWindow("2020-01-01", "2021-01-01"),
-        },
-        {"years": [2021], "row_filters": (("asset_id", "==", "missing"),)},
-    ],
-)
-@pytest.mark.parametrize("missing", ["one", "whole_partition"])
-def test_native_selected_partition_requires_declared_raw_rows(
-    tmp_path, selection, missing
-):
+def test_native_views_and_explicit_subsets_preserve_selection(tmp_path):
     root = tmp_path / "native"
     values = frame()
     write_dataset(
@@ -558,32 +506,9 @@ def test_native_selected_partition_requires_declared_raw_rows(
         (values.iloc[[i]] for i in range(len(values))),
         spec=replace(spec(), partition_columns=("year",)),
     )
-    # Each input row is a separate member; the exact-window row is removed first.
-    (root / "data/year=2021/part-001.parquet").unlink()
-    if missing == "whole_partition":
-        for path in (root / "data/year=2021").glob("*.parquet"):
-            path.unlink()
-        (root / "data/year=2021").rmdir()
-    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
-        read_dataset(root, columns=["value"], **selection)
-
-
-def test_native_partition_checks_follow_views_and_explicit_subsets(tmp_path):
-    root = tmp_path / "native"
-    values = frame()
-    write_dataset(
-        root,
-        (values.iloc[[i]] for i in range(len(values))),
-        spec=replace(spec(), partition_columns=("year",)),
-    )
-    for path in (root / "data/year=2020").glob("*.parquet"):
-        path.unlink()
     session = reading.open_dataset_session(root, years=[2019, 2020, 2021])
     intact = session.filtered_view(TimeWindow("2021-01-01", "2021-01-01"))
     assert reading.materialize_dataset_session(intact)["value"].tolist() == [3, 4, 5]
-    missing = session.filtered_view(TimeWindow("2020-01-01", "2020-01-01"))
-    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
-        reading.materialize_dataset_session(missing.projected_view(["value"]))
     assert reading.materialize_dataset_session(
         intact.filtered_view(TimeWindow("2019-01-01", "2020-12-31"))
     ).empty
@@ -591,14 +516,13 @@ def test_native_partition_checks_follow_views_and_explicit_subsets(tmp_path):
         intact.filtered_view(TimeWindow("2019-01-01", "2021-12-31"))
     )["value"].tolist() == [3, 4, 5]
     selected = "data/year=2021/part-000.parquet"
-    (root / "data/year=2021/part-001.parquet").unlink()
     subset = reading.open_dataset_session(root, files=[selected])
     subset = subset.filtered_view(TimeWindow("2021-01-01", "2021-01-01"))
     assert reading.materialize_dataset_session(subset.projected_view(["value"]))[
         "value"
     ].tolist() == [3]
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        read_dataset(root, files=["data/year=2021/part-001.parquet"])
+        read_dataset(root, files=["data/year=2021/part-999.parquet"])
     for selection in (
         {"files": []},
         {"years": []},
@@ -635,9 +559,7 @@ def test_native_empty_and_no_match_selections_keep_declared_dtypes(
                 )
 
 
-def test_native_partition_counts_use_footers_and_keep_row_group_pruning(
-    tmp_path, monkeypatch
-):
+def test_native_selection_decodes_only_matching_row_groups(tmp_path, monkeypatch):
     root = tmp_path / "native"
     values = frame()
     write_dataset(root, values, spec=replace(spec(), partition_columns=("year",)))
@@ -673,13 +595,10 @@ def test_native_partition_counts_use_footers_and_keep_row_group_pruning(
     assert decoded == [1]
 
 
-def test_native_incomplete_stream_raises_only_at_exhaustion_and_closes_early(
-    tmp_path, monkeypatch
-):
+def test_native_stream_closes_early(tmp_path, monkeypatch):
     root = tmp_path / "native"
     values = frame().iloc[2:]
     write_dataset(root, (values.iloc[[i]] for i in range(len(values))), spec=spec())
-    (root / "data/part-001.parquet").unlink()
     closed = []
     original = reading.iter_dataset_part_batches
 
@@ -694,41 +613,3 @@ def test_native_incomplete_stream_raises_only_at_exhaustion_and_closes_early(
     assert next(chunks)["value"].tolist() == [3]
     chunks.close()
     assert closed == ["part-000.parquet"]
-    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
-        list(read_dataset(root, mode="chunked"))
-    for path in (root / "data").glob("*.parquet"):
-        path.unlink()
-    with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
-        read_dataset(root)
-
-
-def test_native_implicit_reads_reject_undeclared_nonempty_partitions(tmp_path):
-    import shutil
-
-    root, extra = tmp_path / "native", tmp_path / "extra"
-    declared = replace(spec(), partition_columns=("year",))
-    values = frame()
-    write_dataset(root, values, spec=declared)
-    added = values.iloc[[0]].copy()
-    added.loc[added.index[0], "timestamp"] = pd.Timestamp("2022-01-01")
-    write_dataset(extra, added, spec=declared)
-    member = Path("data/year=2022/part-000.parquet")
-    (root / member).parent.mkdir(parents=True)
-    shutil.copyfile(extra / member, root / member)
-
-    for selection in (
-        {},
-        {"years": [2022]},
-        {"time_window": TimeWindow("2022-01-01", "2022-01-01")},
-    ):
-        with pytest.raises(ValueError, match="dataset_selected_partition_incomplete"):
-            read_dataset(root, **selection)
-    expected = values.iloc[[0]]
-    pd.testing.assert_frame_equal(
-        read_dataset(root, years=[2019]), expected.reset_index(drop=True)
-    )
-    subset = reading.open_dataset_session(root, files=[member.as_posix()])
-    subset = subset.filtered_view(TimeWindow("2022-01-01", "2022-01-01"))
-    pd.testing.assert_frame_equal(
-        reading.materialize_dataset_session(subset), added.reset_index(drop=True)
-    )

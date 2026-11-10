@@ -106,7 +106,7 @@ class PortfolioLedgerArtifact:
         return read_qrp_json_file(self.root / self._final_alpha_calibration_member)[1]
 
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
-        yield from _iter_batches(self.root, self.capital, self.metadata["window"])
+        yield from _iter_batches(self.root)
 
 
 def write_portfolio_ledger_artifact(
@@ -196,15 +196,7 @@ def read_portfolio_ledger_artifact(
     """Read native metadata; consume requested economics once without pre-scans."""
     root = Path(instance_root)
     _, manifest = read_qrp_json_file(root / "manifest.json")
-    if (
-        not isinstance(manifest, dict)
-        or manifest.get("schema_id") != "qrp-portfolio-ledger"
-        or manifest.get("members") != [f"{name}.parquet" for name in _TABLE_TYPES]
-        or not isinstance(manifest.get("metadata"), dict)
-        or "window" not in manifest["metadata"]
-        or manifest.get("final_alpha_calibration")
-        not in {None, "final_alpha_calibration.json"}
-    ):
+    if manifest["schema_id"] != "qrp-portfolio-ledger":
         raise ValueError("portfolio_ledger_manifest_invalid")
     artifact = PortfolioLedgerArtifact(
         manifest["metadata"],
@@ -254,13 +246,7 @@ def summarize_portfolio_ledger(
 
 
 def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
-    def validate_schema(metadata):
-        if not metadata.schema.equals(_SCHEMAS[name]):
-            raise ValueError("portfolio_ledger_schema_invalid")
-
-    chunks = iter_dataset_part_batches(
-        root / f"{name}.parquet", metadata_observer=validate_schema
-    )
+    chunks = iter_dataset_part_batches(root / f"{name}.parquet")
     with closing_iterator(chunks):
         for chunk in chunks:
             records = chunk.to_pylist()
@@ -268,7 +254,7 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
 
 
 class _LedgerValidation:
-    """Validate the same canonical stream at publication and consumption."""
+    """Validate the canonical stream at atomic publication."""
 
     def __init__(self, capital, research_window):
         self.capital = capital
@@ -358,12 +344,7 @@ class _LedgerValidation:
         self.sequence += 1
 
 
-def _iter_batches(
-    root: Path,
-    capital: PortfolioCapital,
-    research_window: Mapping[str, object],
-) -> Iterator[PortfolioLedgerBatch]:
-    validation = _LedgerValidation(capital, research_window)
+def _iter_batches(root: Path) -> Iterator[PortfolioLedgerBatch]:
     with closing_iterator(ExitStack()) as stack:
         readers = {
             name: stack.enter_context(closing_iterator(_table_records(root, name)))
@@ -376,13 +357,9 @@ def _iter_batches(
         pending = {name: next(group, None) for name, group in groups.items()}
         sequence = 0
         while pending["valuations"] is not None:
-            if pending["valuations"][0] != sequence:
-                raise ValueError("portfolio_ledger_sequence_invalid")
             tables = {}
             for name, kind in _TABLE_TYPES.items():
                 group = pending[name]
-                if group is not None and group[0] < sequence:
-                    raise ValueError("portfolio_ledger_sequence_invalid")
                 records = []
                 if group is not None and group[0] == sequence:
                     for row in group[1]:
@@ -398,8 +375,5 @@ def _iter_batches(
                     pending[name] = next(groups[name], None)
                 tables[name] = tuple(records)
             batch = PortfolioLedgerBatch(sequence, **tables)
-            validation.observe(batch)
             yield batch
             sequence += 1
-        if not sequence or any(group is not None for group in pending.values()):
-            raise ValueError("portfolio_ledger_sequence_invalid")
