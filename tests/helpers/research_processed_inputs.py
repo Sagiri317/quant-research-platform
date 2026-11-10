@@ -336,7 +336,7 @@ def assembly_source(
         {
             column: ColumnRole.FACTOR
             for column in (
-                "momentum_20d",
+                "reversal_20d",
                 "log_total_market_cap",
                 "log_float_market_cap",
             )
@@ -372,7 +372,7 @@ def assembly_config(tmp_path, root, **choices):
         "market_id": "a_share",
         "dataset_id": "external_research",
         "inputs": {root.name: str(root)},
-        "factor_columns": ["momentum_20d"],
+        "factor_columns": ["reversal_20d"],
         "label_columns": [],
         "feature_recipe": None,
         "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
@@ -387,6 +387,6 @@ def assembly_frame(n=120):
             "market_id": "a_share",
             "asset_id": [f"asset_{i:03d}" for i in range(n)],
             "timestamp": pd.Timestamp("2024-01-02"),
-            "momentum_20d": np.sin(np.arange(n)),
+            "reversal_20d": np.sin(np.arange(n)),
         }
     )

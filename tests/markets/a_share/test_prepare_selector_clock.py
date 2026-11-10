@@ -183,11 +183,11 @@ def test_price_history_uses_real_lag_and_selected_signal_keys(tmp_path):
         "price_volume_facts",
         panel,
         {"market_panel_1d": source},
-        factor_columns=["momentum_20d"],
+        factor_columns=["reversal_20d"],
     ).set_index("timestamp")
     assert panel.timestamp.iloc[5] not in result.index
-    assert result.loc[panel.timestamp.iloc[24], "momentum_20d"] == 4.0
-    assert pd.isna(result.loc[panel.timestamp.iloc[25], "momentum_20d"])
+    assert result.loc[panel.timestamp.iloc[24], "reversal_20d"] == 4.0
+    assert pd.isna(result.loc[panel.timestamp.iloc[25], "reversal_20d"])
 
 
 def test_market_model_input_completeness_resets_current_and_next_weighted_session():

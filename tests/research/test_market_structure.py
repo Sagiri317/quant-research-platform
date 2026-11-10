@@ -34,6 +34,8 @@ def market_panel():
                     "turnover": turnover,
                     "amount": amount,
                     "float_market_cap": 100,
+                    "total_market_cap": 120,
+                    "limit_status": 0,
                     "filling_flag": 0,
                     "is_a_share_scope": True,
                 }

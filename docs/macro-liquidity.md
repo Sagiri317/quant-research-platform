@@ -71,8 +71,8 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 VIX 扩展沿用上述变换，并增加：
 
 - `ml_us_vix3m_vix_ratio_*`、`ml_us_vix9d_vix_ratio_*`、`ml_us_vxn_vix_ratio_*`、`ml_us_vxeem_vix_ratio_*`：分子与 VIX 必须属于同一美国观测日。新会话任一成分尚未发布／缺失或 VIX 非正时为空；不会用两天价格混成一个比率。修订只在修订可用之后生效。前两项是不同期限的隐含波动率比率，后两项是不同标的的相对风险，不称期货升贴水。
-- `ml_us_vix_implied_variance` 等：`(指数 / 100)^2`，以小数收益的年化方差表示。不同指数对应不同标的，VVIX 是 VIX 的波动率风险，不能当成另一份 S&P 500 方差。没有同一标的、同一期限的实际／预期方差时不生成 VRP；本次未获取 ETF 或美国股价。
-- `ml_us_skew_risk_neutral_skewness`：按 Cboe 的 `SKEW = 100 − 10 × S` 还原 `S = (100 − SKEW) / 10`。SKEW 越高，该风险中性偏度越负；不是 A 股已实现偏度，也不是直接的暴跌概率。
+- `ml_us_vix_implied_variance` 等：`(指数 / 100)^2`，以小数收益的年化方差表示。不同指数对应不同标的，VVIX 是 VIX 的波动率风险，不能当成另一份 S&P 500 方差。没有同一标的、同一期限的实际／预期方差时不生成 VRP；ETF 与美国行情接入及相应限制见 [因子扩展](factor-expansion.md)。
+- SKEW 保留 `ml_us_skew_level` 和历史变换；仅由 `(100 − SKEW) / 10` 得到的仿射换算不再重复列为独立因子。SKEW 不是 A 股已实现偏度或直接的暴跌概率。
 - `ml_us_vix_skew_zscore_product`、`ml_us_vix_vvix_zscore_product`、`ml_us_liquidity_vix_zscore_product`：各自最新已知历史 zscore 的乘积。它们用于检验状态调节效应；乘积同为正可来自两项同时高或同时低，分析时必须保留两个主效应，不能把乘积直接命名为危机状态。
 - `ml_<state>_x_industry_<exposure>`：先按合格股票截面计算暴露 zscore，再求当时 `(industry_standard_id, industry_level1_code)` 内等权均值，最后乘宏观状态。支持波动率、Amihud、市场 Beta；分类标准或代码未知为空，不从未来分类补回。该列描述行业风险特征，不是行业虚拟变量或行业收益率。
 

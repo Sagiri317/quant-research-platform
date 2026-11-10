@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from pandas.api.indexers import BaseIndexer
 
+from quant_research_platform.compute.dataframe.cross_section import leave_one_out_mean
+from quant_research_platform.compute.dataframe.history import HistoryWindow
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
@@ -30,9 +31,42 @@ INPUTS = {
     "leader_breadth_fragility": ("adj_close",),
     "industry_isolation_20d": ("adj_close", *_INDUSTRY),
 }
+for _window in (20, 60):
+    INPUTS[f"breadth_price_divergence_{_window}d"] = (
+        "period_return",
+        "float_market_cap",
+    )
+for _years in (3, 5):
+    INPUTS[f"breadth_historical_percentile_{_years}y"] = ("period_return",)
+for _width in (1, 5, 20):
+    for _kind in ("return_relative", "catchup", "catchdown"):
+        INPUTS[f"industry_{_kind}_{_width}d"] = ("adj_close", *_INDUSTRY)
+INPUTS.update(
+    {
+        "speculative_stock_turnover_share": ("turnover", "amount", "total_market_cap"),
+        "market_positive_return_concentration": ("period_return", "float_market_cap"),
+        "market_limit_up_participation": ("limit_status",),
+        "market_limit_down_participation": ("limit_status",),
+        "industry_trading_crowding_x_drawdown": ("amount", "adj_close", *_INDUSTRY),
+    }
+)
 
 
 def _lookback(name):
+    if name.startswith(
+        ("industry_return_relative_", "industry_catchup_", "industry_catchdown_")
+    ):
+        return int(name.rsplit("_", 1)[1][:-1])
+    if name.startswith("breadth_historical_percentile_"):
+        return int(name.rsplit("_", 1)[1][:-1]) * 252 - 1
+    if name.startswith("breadth_price_divergence_"):
+        return int(name.rsplit("_", 1)[1][:-1])
+    if name == "market_positive_return_concentration":
+        return 1
+    if name == "speculative_stock_turnover_share":
+        return 20
+    if name == "industry_trading_crowding_x_drawdown":
+        return 60
     if name == "market_high_low_balance_60d":
         return 60
     if name.startswith("market_above_ma"):
@@ -116,9 +150,76 @@ DESCRIPTIONS = {
     ),
 }
 
-MARKET_CONTEXT_FACTORS = frozenset(
-    name for name in DESCRIPTIONS if name.startswith("market_")
-) | {"industry_return_dispersion_20d", "industry_positive_return_hhi_20d"}
+DESCRIPTIONS.update(
+    {
+        **{
+            f"breadth_price_divergence_{w}d": (
+                "Market state: compounded prior-float-cap-weighted market return "
+                f"over {w} sessions minus the change in fresh positive-return "
+                "breadth over the same span."
+            )
+            for w in (20, 60)
+        },
+        **{
+            f"breadth_historical_percentile_{y}y": (
+                "Market state: current fresh positive-return breadth's "
+                f"average-tie percentile in its trailing {252 * y} declared "
+                "sessions, including today."
+            )
+            for y in (3, 5)
+        },
+        "speculative_stock_turnover_share": (
+            "Market activity proxy: share of observed amount in stocks jointly in"
+            " the bottom size quintile and top current/prior-20-mean-turnover "
+            "quintile; size is lagged, thresholds are contemporaneous. No "
+            "investor identity is inferred."
+        ),
+        "market_positive_return_concentration": (
+            "Market state: HHI of positive prior-float-cap-weighted daily return "
+            "contributions; no positive contribution is undefined."
+        ),
+        "market_limit_up_participation": (
+            "Fresh A-share fraction with CSMAR LimitStatus=1; unknown limit "
+            "status stays outside the denominator."
+        ),
+        "market_limit_down_participation": (
+            "Fresh A-share fraction with CSMAR LimitStatus=-1; unknown limit "
+            "status stays outside the denominator."
+        ),
+        "industry_trading_crowding_x_drawdown": (
+            "Stock interaction: industry amount HHI times current drawdown from "
+            "the preceding 60 adjusted closes' maximum; not a holdings "
+            "concentration measure."
+        ),
+    }
+)
+
+for _width in (1, 5, 20):
+    DESCRIPTIONS.setdefault(
+        f"industry_return_relative_{_width}d",
+        f"Own {_width}-session adjusted-close return minus the contemporaneous "
+        "PIT-industry leave-one-out mean return.",
+    )
+    DESCRIPTIONS[f"industry_catchup_{_width}d"] = (
+        "User lead-lag hypothesis: max(peer return-own return,0) when the "
+        f"leave-one-out industry's {_width}-session return is positive; "
+        "zero outside that state."
+    )
+    DESCRIPTIONS[f"industry_catchdown_{_width}d"] = (
+        "User lead-lag hypothesis: max(own return-peer return,0) when the "
+        f"leave-one-out industry's {_width}-session return is negative; "
+        "zero outside that state."
+    )
+
+MARKET_CONTEXT_FACTORS = (
+    frozenset(name for name in DESCRIPTIONS if name.startswith("market_"))
+    | {
+        "industry_return_dispersion_20d",
+        "industry_positive_return_hhi_20d",
+        "speculative_stock_turnover_share",
+    }
+    | {name for name in DESCRIPTIONS if name.startswith("breadth_")}
+)
 INDUSTRY_CONTEXT_FACTORS = frozenset(
     {
         "industry_amount_hhi",
@@ -131,6 +232,15 @@ PRESERVE_AMPLITUDE_FACTORS = (
     MARKET_CONTEXT_FACTORS | INDUSTRY_CONTEXT_FACTORS | {"leader_breadth_fragility"}
 )
 FACTOR_UNITS = dict.fromkeys(DESCRIPTIONS, "dimensionless")
+FACTOR_UNITS.update(
+    {
+        name: "decimal_return"
+        for name in DESCRIPTIONS
+        if name.startswith(
+            ("industry_return_relative_", "industry_catchup_", "industry_catchdown_")
+        )
+    }
+)
 FACTOR_UNITS.update(
     dict.fromkeys(
         ("industry_return_dispersion_20d", "industry_return_relative_20d"),
@@ -159,20 +269,6 @@ def factor_definitions():
         )
         for name, description in DESCRIPTIONS.items()
     )
-
-
-class _HistoryWindow(BaseIndexer):
-    """Bound native rolling kernels to contiguous, sorted lifecycle histories."""
-
-    def __init__(self, history_start, window_size):
-        super().__init__(window_size=window_size)
-        self.history_start = history_start
-
-    def get_window_bounds(
-        self, num_values=0, min_periods=None, center=None, closed=None, step=None
-    ):
-        end = np.arange(1, num_values + 1, dtype=np.int64)
-        return np.maximum(end - self.window_size, self.history_start), end
 
 
 def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
@@ -220,12 +316,22 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
     if "adj_close" in inputs:
         frame["_c"] = frame.adj_close.where(frame.adj_close.gt(0))
         frame["_mom"] = (frame._c / history._c.shift(20) - 1).where(fresh)
+        for width in (1, 5):
+            if any(
+                f"industry_{kind}_{width}d" in requested
+                for kind in ("return_relative", "catchup", "catchdown")
+            ):
+                frame[f"_mom{width}"] = (frame._c / history._c.shift(width) - 1).where(
+                    fresh
+                )
     rolling_factors = {
         "market_above_ma20_fraction",
         "market_above_ma60_fraction",
         "market_high_low_balance_60d",
         "industry_comovement_20d",
         "leader_breadth_fragility",
+        "speculative_stock_turnover_share",
+        "industry_trading_crowding_x_drawdown",
     }
     history_start = (
         np.arange(len(frame), dtype=np.int64) - history.cumcount().to_numpy()
@@ -238,7 +344,19 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
     def market_mean(values):
         return values.groupby(timestamps, sort=False).transform("mean")
 
-    if {"market_up_fraction", "market_breadth_change_5d"}.intersection(requested):
+    for name, status in (
+        ("market_limit_up_participation", 1),
+        ("market_limit_down_participation", -1),
+    ):
+        if name in requested:
+            valid = fresh & frame.limit_status.isin((-1, 0, 1))
+            out[name] = market_mean(
+                frame.limit_status.eq(status).astype(float).where(valid)
+            )
+
+    if {"market_up_fraction", "market_breadth_change_5d"}.intersection(
+        requested
+    ) or any(name.startswith("breadth_") for name in requested):
         out["market_up_fraction"] = market_mean(
             frame._r.gt(0).astype(float).where(frame._r.notna())
         )
@@ -248,7 +366,7 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
         ):
             continue
         mean = frame._c.rolling(
-            _HistoryWindow(history_start, window), min_periods=window
+            HistoryWindow(history_start, window), min_periods=window
         ).mean()
         valid = fresh & mean.notna() & frame._c.notna()
         above = frame._c.gt(mean).astype(float).where(valid)
@@ -256,7 +374,7 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
         del mean, valid, above
     if "market_high_low_balance_60d" in requested:
         prior = history._c.shift()
-        prior_window = prior.rolling(_HistoryWindow(history_start, 60), min_periods=60)
+        prior_window = prior.rolling(HistoryWindow(history_start, 60), min_periods=60)
         high, low = prior_window.max(), prior_window.min()
         valid = fresh & frame._c.notna() & high.notna() & low.notna()
         high_low = frame._c.gt(high).astype(float) - frame._c.lt(low).astype(float)
@@ -270,6 +388,65 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
             1 - out.market_above_ma20_fraction
         )
 
+    if any(name.startswith("breadth_") for name in requested):
+        breadth = out.groupby("timestamp", sort=True).market_up_fraction.first()
+        for years in (3, 5):
+            name = f"breadth_historical_percentile_{years}y"
+            if name in requested:
+                out[name] = timestamps.map(breadth.rolling(252 * years).rank(pct=True))
+    if "market_positive_return_concentration" in requested or any(
+        name.startswith("breadth_price_divergence_") for name in requested
+    ):
+        weight = history.float_market_cap.shift().where(lambda x: x > 0)
+        contributions = (weight * frame._r).where(weight.notna() & frame._r.notna())
+        if any(name.startswith("breadth_price_divergence_") for name in requested):
+            paired_weight = (
+                weight.where(contributions.notna()).groupby(timestamps).sum(min_count=1)
+            )
+            market_return = (
+                contributions.groupby(timestamps).sum(min_count=1) / paired_weight
+            )
+            for width in (20, 60):
+                name = f"breadth_price_divergence_{width}d"
+                if name in requested:
+                    # Log sums retain the complete market-session span.
+                    market_change = np.expm1(
+                        np.log1p(market_return).rolling(width).sum()
+                    )
+                    out[name] = timestamps.map(
+                        market_change - (breadth - breadth.shift(width))
+                    )
+        if "market_positive_return_concentration" in requested:
+            positive = contributions.clip(lower=0)
+            total = positive.groupby(timestamps).transform("sum")
+            hhi = (
+                (positive / total.where(total > 0))
+                .pow(2)
+                .groupby(timestamps)
+                .sum(min_count=1)
+            )
+            out["market_positive_return_concentration"] = timestamps.map(hhi)
+    if "speculative_stock_turnover_share" in requested:
+        prior_turnover = (
+            history._t.shift().rolling(HistoryWindow(history_start, 20)).mean()
+        )
+        relative = frame._t / prior_turnover.where(prior_turnover > 0)
+        size = history.total_market_cap.shift().where(lambda x: x > 0)
+        paired = relative.notna() & size.notna() & frame._a.notna()
+        small = size.where(paired).groupby(timestamps).rank(pct=True).le(0.2)
+        active = relative.where(paired).groupby(timestamps).rank(pct=True).ge(0.8)
+        amount = frame._a.where(paired)
+        denominator = amount.groupby(timestamps).transform("sum", min_count=1)
+        out["speculative_stock_turnover_share"] = amount.where(small & active, 0).where(
+            paired
+        ).groupby(timestamps).transform("sum", min_count=1) / denominator.where(
+            denominator > 0
+        )
+
+    if "industry_trading_crowding_x_drawdown" in requested:
+        peak = history._c.shift().rolling(HistoryWindow(history_start, 60)).max()
+        frame["_drawdown"] = (1 - frame._c / peak).clip(lower=0)
+
     del history, fresh
     if any(name.startswith("industry_") for name in requested):
         _industry_context(frame, out, requested, history_start)
@@ -278,24 +455,6 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
     for name in requested:
         out[name] = out[name].replace([np.inf, -np.inf], np.nan)
     return out.reset_index(drop=True)
-
-
-def _leave_one_out_mean(values, group_ids):
-    """Merge centered prefix/suffix means without subtracting self from a total."""
-    sides = []
-    for step in (1, -1):
-        ordered, keys = values.iloc[::step], group_ids.iloc[::step]
-        groups = ordered.groupby(keys, sort=False)
-        prior = groups.shift()
-        count = prior.notna().groupby(keys, sort=False).cumsum()
-        # A nonempty side's anchor is a peer, never the excluded current row.
-        anchor = groups.transform("first")
-        centered = (prior - anchor).fillna(0).groupby(keys, sort=False).cumsum()
-        mean = anchor + centered / count.where(count > 0)
-        sides.append((mean.iloc[::step], count.iloc[::step]))
-    (left, nleft), (right, nright) = sides
-    base = left.fillna(right)
-    return base + (right - base).fillna(0) * nright / (nleft + nright)
 
 
 def _industry_context(frame, out, requested, history_start):
@@ -347,10 +506,39 @@ def _industry_context(frame, out, requested, history_start):
             "industry_turnover_relative",
             "industry_comovement_20d",
         }.intersection(requested)
+        or any(
+            name.startswith(
+                (
+                    "industry_return_relative_",
+                    "industry_catchup_",
+                    "industry_catchdown_",
+                )
+            )
+            for name in requested
+        )
         else None
     )
+    for width in (1, 5, 20):
+        names = {
+            kind: f"industry_{kind}_{width}d"
+            for kind in ("return_relative", "catchup", "catchdown")
+        }
+        if not set(names.values()).intersection(requested):
+            continue
+        values = frame["_mom" if width == 20 else f"_mom{width}"]
+        peers = leave_one_out_mean(values, peer_ids)
+        if names["return_relative"] in requested:
+            out[names["return_relative"]] = values - peers
+        valid = values.notna() & peers.notna()
+        if names["catchup"] in requested:
+            out[names["catchup"]] = (
+                (peers - values).clip(lower=0).where(peers > 0, 0).where(valid)
+            )
+        if names["catchdown"] in requested:
+            out[names["catchdown"]] = (
+                (values - peers).clip(lower=0).where(peers < 0, 0).where(valid)
+            )
     for source, target, ratio in (
-        ("_mom", "industry_return_relative_20d", False),
         ("_t", "industry_turnover_relative", True),
         ("_r", "_loo_r", None),
     ):
@@ -359,26 +547,36 @@ def _industry_context(frame, out, requested, history_start):
         ):
             continue
         values = frame[source]
-        peers = _leave_one_out_mean(values, peer_ids)
+        peers = leave_one_out_mean(values, peer_ids)
         if ratio is None:
             frame[target] = peers
         else:
             out[target] = values / peers.where(peers > 0) if ratio else values - peers
-    if {"industry_amount_share", "industry_amount_hhi"}.intersection(requested):
+    if {
+        "industry_amount_share",
+        "industry_amount_hhi",
+        "industry_trading_crowding_x_drawdown",
+    }.intersection(requested):
         amount_total = groups._a.transform("sum")
         shares = frame._a / amount_total.where(amount_total > 0)
         if "industry_amount_share" in requested:
             out["industry_amount_share"] = shares
-        if "industry_amount_hhi" in requested:
-            n = groups._a.transform("count")
-            squares = (
-                shares.pow(2)
-                .groupby([timestamps, *sector_keys], sort=False)
-                .transform("sum")
-            )
-            out["industry_amount_hhi"] = ((squares - 1 / n) / (1 - 1 / n)).where(
-                (n > 1) & (amount_total > 0)
-            )
+    if {"industry_amount_hhi", "industry_trading_crowding_x_drawdown"}.intersection(
+        requested
+    ):
+        n = groups._a.transform("count")
+        squares = (
+            shares.pow(2)
+            .groupby([timestamps, *sector_keys], sort=False)
+            .transform("sum")
+        )
+        out["industry_amount_hhi"] = ((squares - 1 / n) / (1 - 1 / n)).where(
+            (n > 1) & (amount_total > 0)
+        )
+    if "industry_trading_crowding_x_drawdown" in requested:
+        out["industry_trading_crowding_x_drawdown"] = (
+            out.industry_amount_hhi * frame._drawdown
+        )
     if "industry_activity_pressure" in requested:
         paired = known & frame._a.notna() & frame.float_market_cap.gt(0)
         paired_amount = frame._a.where(paired)
@@ -396,5 +594,5 @@ def _industry_context(frame, out, requested, history_start):
         ) / (sector_cap / market_cap.where(market_cap > 0)).where(sector_cap > 0)
     if "industry_comovement_20d" in requested:
         out["industry_comovement_20d"] = frame._r.rolling(
-            _HistoryWindow(history_start, 20), min_periods=20
+            HistoryWindow(history_start, 20), min_periods=20
         ).corr(frame._loo_r)

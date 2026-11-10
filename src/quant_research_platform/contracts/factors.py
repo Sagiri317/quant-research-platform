@@ -33,6 +33,7 @@ class FactorDefinition:
     family: str = "unknown"
     required_windows: tuple[int, ...] = ()
     lookback_window: int | None = None
+    full_history: bool = False
     grain: DataGrain = DataGrain.ASSET_TIMESTAMP
     timing_semantics: str = "as_of_timestamp"
     null_policy: str = "preserve_nulls"
@@ -40,6 +41,8 @@ class FactorDefinition:
     required_input_data_id: str = ""
 
     def __post_init__(self) -> None:
+        if type(self.full_history) is not bool:
+            raise ValueError("factor_full_history_must_be_boolean")
         _validate_non_empty_string(self.factor_id, "factor_id_required")
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         try:
@@ -93,6 +96,7 @@ class FactorDefinition:
             "output_column": self.output_column,
             "required_windows": list(self.required_windows),
             "lookback_window": self.lookback_window,
+            "full_history": self.full_history,
             "grain": self.grain.value,
             "timing_semantics": self.timing_semantics,
             "null_policy": self.null_policy,

@@ -230,6 +230,25 @@ def test_breadth_counts_market_sessions_not_each_stocks_sessions(tmp_path):
 def test_all_structure_factors_keep_own_60_and_peer_19_windows_separate(tmp_path):
     from tests.markets.a_share.test_calendar_dependency_scope import _prepare as native
 
+    # Keep the original 15 owners explicit: new multi-year states have wider halos.
+    factors = [
+        "market_up_fraction",
+        "market_above_ma20_fraction",
+        "market_above_ma60_fraction",
+        "market_high_low_balance_60d",
+        "market_breadth_change_5d",
+        "industry_return_dispersion_20d",
+        "industry_positive_return_hhi_20d",
+        "industry_return_relative_20d",
+        "industry_turnover_relative",
+        "industry_amount_share",
+        "industry_amount_hhi",
+        "industry_activity_pressure",
+        "industry_comovement_20d",
+        "leader_breadth_fragility",
+        "industry_isolation_20d",
+    ]
+
     dates = pd.bdate_range("2023-01-02", periods=241).as_unit("ns")
     frame = pd.concat([_panel(dates[::2]), _panel(dates, "b", 4)]).assign(
         is_a_share_scope=True,
@@ -245,6 +264,7 @@ def test_all_structure_factors_keep_own_60_and_peer_19_windows_separate(tmp_path
         frame,
         _calendar({1: dates[::2], 4: dates}),
         "market_structure_factors",
+        factor_columns=factors,
     )
     # Slow-market prices need 60 own sessions; common peer returns need only 19.
     # Thus the fast market's complete 60-session price calendar is sufficient.
@@ -255,6 +275,7 @@ def test_all_structure_factors_keep_own_60_and_peer_19_windows_separate(tmp_path
         "market_structure_factors",
         start=dates[-1],
         end=dates[-1],
+        factor_columns=factors,
     )
     expected = full.loc[full.timestamp.eq(dates[-1])].reset_index(drop=True)
     pd.testing.assert_frame_equal(narrow, expected, rtol=1e-10, atol=1e-12)

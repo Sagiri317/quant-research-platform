@@ -15,6 +15,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.research.factors.financing import (
     BALANCE_CHANGE_WINDOWS,
+    FACTOR_UNITS,
     RECIPES,
     calculate,
     decision_columns,
@@ -41,9 +42,10 @@ def processed_spec():
             "timestamp": "timestamp",
             **dict.fromkeys(RECIPES, "factor"),
         },
-        column_units=dict.fromkeys(RECIPES, "dimensionless"),
+        column_units=FACTOR_UNITS,
         processed_input_data_ids=("decision_panel",),
         source_input_data_ids=("public_margin_balances", "trading_calendar"),
+        optional_source_input_data_ids=("trading_calendar",),
         parameters_json=json.dumps({"observation_lag_sessions": 1}),
     )
 
@@ -72,7 +74,10 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         )
     )
     sessions = None
-    if "trading_calendar" in inputs:
+    calendar_needed = config["observation_lag_sessions"] or any(
+        name in BALANCE_CHANGE_WINDOWS for name in selected
+    )
+    if calendar_needed and "trading_calendar" in inputs:
         sessions = unified_trading_sessions(
             materialize_dataset_session(
                 open_dataset_session(

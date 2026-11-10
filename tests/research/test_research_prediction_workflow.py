@@ -19,13 +19,13 @@ from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -> None:
     frame = _demo_research_rows().assign(
-        instant_target=lambda value: value["momentum_20d"] * 0.01,
+        instant_target=lambda value: value["reversal_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
     )
     model_spec = ModelSpec(
         model_id="linear_demo",
         model_algorithm="linear_regression",
-        input_factor_columns=("momentum_20d",),
+        input_factor_columns=("reversal_20d",),
         target_column="instant_target",
     )
     case = fit_frame(
@@ -99,13 +99,13 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
 def test_prediction_keeps_only_consumed_model_facts(tmp_path) -> None:
     model_algorithm = "linear_regression"
     frame = _demo_research_rows().assign(
-        instant_target=lambda value: value["momentum_20d"] * 0.01,
+        instant_target=lambda value: value["reversal_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
     )
     model_spec = ModelSpec(
         model_id=f"{model_algorithm}_demo",
         model_algorithm=model_algorithm,
-        input_factor_columns=("momentum_20d",),
+        input_factor_columns=("reversal_20d",),
         target_column="instant_target",
     )
     import json
@@ -143,7 +143,7 @@ def test_prediction_keeps_only_consumed_model_facts(tmp_path) -> None:
 @pytest.mark.parametrize("start", ["2014-01-01", "2014-01-02"])
 def test_native_prediction_must_follow_saved_fit_cutoff(tmp_path, start):
     frame = _demo_research_rows().assign(
-        instant_target=lambda value: value["momentum_20d"] * 0.01,
+        instant_target=lambda value: value["reversal_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
     )
     case = fit_frame(
@@ -152,7 +152,7 @@ def test_native_prediction_must_follow_saved_fit_cutoff(tmp_path, start):
         ModelSpec(
             model_id="cutoff",
             model_algorithm="linear_regression",
-            input_factor_columns=("momentum_20d",),
+            input_factor_columns=("reversal_20d",),
             target_column="instant_target",
         ),
         market_id="a_share",

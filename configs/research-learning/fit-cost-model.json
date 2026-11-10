@@ -1,7 +1,7 @@
 {
   "dataset": "data/research/nonoverlapping_returns",
   "feature_columns": [
-    "feature_momentum_20d",
+    "feature_reversal_20d",
     "feature_volatility_20d"
   ],
   "asset_ids": [

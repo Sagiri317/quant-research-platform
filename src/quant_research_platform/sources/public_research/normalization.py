@@ -12,6 +12,28 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 
 DATASETS = {
+    "public_option_risk": {
+        "underlying_id": "identifier",
+        "contract_id": "identifier",
+        "option_type": "identifier",
+        "implied_volatility": "annualized_decimal_volatility",
+        "delta": "dimensionless",
+        "gamma": "per_CNY",
+        "vega": "reported_units",
+    },
+    "public_option_contracts": {
+        "underlying_id": "identifier",
+        "security_id": "identifier",
+        "contract_id": "identifier",
+        "option_type": "identifier",
+        "expiry_date": "date",
+        "start_date": "date",
+        "exercise_price": "CNY_per_fund_unit",
+        "contract_unit": "fund_units",
+        "original_contract_id": "identifier",
+        "original_exercise_price": "CNY_per_fund_unit",
+        "original_contract_unit": "fund_units",
+    },
     "public_domestic_etf_prices": {
         "open": "CNY_per_fund_unit",
         "close": "CNY_per_fund_unit",
@@ -235,6 +257,8 @@ DATASETS = {
     },
 }
 SOURCES = {
+    "public_option_risk": {"sse_option_risk_indicators"},
+    "public_option_contracts": {"sse_option_contract_updates"},
     "public_domestic_etf_actions": {"eastmoney_cn_etf_corporate_actions_extracted"},
     "public_domestic_etf_prices": {"eastmoney_cn_etf_daily"},
     "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
@@ -273,6 +297,10 @@ def accepts(data_id, record):
     if record["source"] not in SOURCES[data_id]:
         return False
     path = record["path"]
+    if data_id in {"public_option_risk", "public_option_contracts"}:
+        return path.endswith(".json") and record.get("artifact_role", "").startswith(
+            "official_"
+        )
     if record["source"] == "sec_nport_target_holdings_extracted":
         return path.endswith(".csv")
     if data_id == "public_domestic_etf_prices":
@@ -350,6 +378,50 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
+    if source in {"sse_option_risk_indicators", "sse_option_contract_updates"}:
+        frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["result"])
+        if frame.empty:
+            return
+        if data_id == "public_option_risk":
+            result = _rename(
+                frame,
+                {
+                    "SECURITY_ID": "asset_id",
+                    "CONTRACT_ID": "contract_id",
+                    "TRADE_DATE": "timestamp",
+                    "CONTRACT_TYPE": "option_type",
+                    "IMPLC_VOLATLTY": "implied_volatility",
+                    "DELTA_VALUE": "delta",
+                    "GAMMA_VALUE": "gamma",
+                    "VEGA_VALUE": "vega",
+                },
+            )
+            result["underlying_id"] = result.contract_id.str[:6]
+        else:
+            mapping = {
+                "UNDERLYING_SECURITY_ID": "underlying_id",
+                "SECURITY_ID": "security_id",
+                "CONTRACT_ID": "contract_id",
+                "CALL_OR_PUT": "option_type",
+                "EXPIRE_DATE": "expiry_date",
+                "START_DATE": "start_date",
+                "EXERCISE_PRICE": "exercise_price",
+                "CONTRACT_UNIT": "contract_unit",
+                "ORG_CONTRACT_ID": "original_contract_id",
+                "ORG_EXERCISE_PRICE": "original_exercise_price",
+                "ORG_CONTRACT_UNIT": "original_contract_unit",
+                "ADJUST_DATE": "timestamp",
+            }
+            result = _rename(frame, mapping)
+            result["asset_id"] = (
+                result.security_id
+                + ":"
+                + result.contract_id
+                + ":"
+                + frame.index.astype("str")
+            )
+        yield result
+        return
     if source == "sec_nport_target_holdings_extracted":
         for frame in pd.read_csv(path, dtype="str", chunksize=50000):
             result = _rename(

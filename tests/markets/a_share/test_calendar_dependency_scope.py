@@ -316,7 +316,7 @@ def test_requested_observation_after_known_exit_remains_invalid(tmp_path):
         )
 
 
-@pytest.mark.parametrize("factor", ("momentum_20d", "amount_shock_20d"))
+@pytest.mark.parametrize("factor", ("reversal_20d", "amount_shock_20d"))
 def test_endpoint_and_shifted_windows_still_require_prior_twenty_sessions(
     tmp_path, factor
 ):
@@ -338,7 +338,18 @@ def test_endpoint_and_shifted_windows_still_require_prior_twenty_sessions(
         )
 
 
-@pytest.mark.parametrize("factor", (*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS))
+@pytest.mark.parametrize(
+    "factor",
+    tuple(
+        d.output_column
+        for d in price_volume_factor_definitions(
+            market_id=MarketId("a_share"),
+            required_input_data_id="market_panel_1d",
+            factor_columns=(*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS),
+        )
+        if not d.full_history
+    ),
+)
 def test_every_price_volume_definition_uses_its_actual_minimum_window(tmp_path, factor):
     dates = pd.bdate_range("2023-01-02", periods=320)
     x = np.arange(len(dates), dtype=float)
@@ -379,6 +390,40 @@ def test_every_price_volume_definition_uses_its_actual_minimum_window(tmp_path, 
         factor_columns=[factor],
     )
     assert native[factor].iloc[0] == pytest.approx(full, rel=1e-12, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    "factor",
+    [
+        "return_acceleration_6m6m",
+        "failed_close_up_breakout_3_20d",
+        "signed_breakout_duration_20d",
+    ],
+)
+def test_recursive_factor_narrow_output_keeps_observed_prefix(tmp_path, factor):
+    dates = pd.bdate_range("2023-01-02", periods=320)
+    panel = _panel(dates, market=4)
+    calendar = _calendar({4: dates})
+    full = _prepare(
+        tmp_path / "full",
+        panel,
+        calendar,
+        "price_volume_facts",
+        factor_columns=[factor],
+    )
+    narrow = _prepare(
+        tmp_path / "narrow",
+        panel,
+        calendar,
+        "price_volume_facts",
+        start=dates[-1],
+        end=dates[-1],
+        factor_columns=[factor],
+    )
+    assert pd.notna(full[factor].iloc[-1])
+    assert narrow[factor].iloc[0] == pytest.approx(
+        full[factor].iloc[-1], rel=1e-12, abs=1e-15
+    )
 
 
 def test_narrow_factor_keeps_market_boundary_state_without_older_calendar(tmp_path):

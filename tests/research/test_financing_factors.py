@@ -25,6 +25,12 @@ def inputs():
             "peak_drawdown_20d": 0.2,
             "amihud_20d": 2.0,
             "amihud_60d": 1.0,
+            "a_float_shares": 1000.0,
+            "volume": 200.0,
+            "avg_volume_20d": 100.0,
+            "avg_amount_20d": 200.0,
+            "reversal_5d": -0.1,
+            "price_up_acceleration_20d": 0.02,
         }
     )
     observations = pd.DataFrame(
@@ -36,6 +42,8 @@ def inputs():
             "financing_buy_amount": 20.0,
             "financing_repayment_amount": np.nan,
             "lending_balance": 10.0,
+            "lending_quantity": [100.0, 90, 80, 70, 60, 50],
+            "lending_repayment_quantity": 4.0,
         }
     )
     return decisions, observations, sessions
@@ -51,6 +59,15 @@ def test_financing_level_activity_change_and_liquidity_pressure_by_hand():
         "financing_balance_change_1d": 100 / 90 - 1,
         "financing_balance_change_5d": 1.0,
         "leveraged_liquidity_pressure": 0.02,
+        "short_interest_to_float_shares": 0.05,
+        "lending_days_to_cover_20d": 0.5,
+        "lending_repayment_intensity": 0.02,
+        "lending_net_cover_fraction_1d": 1 / 6,
+        "lending_net_cover_fraction_5d": 0.5,
+        "short_squeeze_pressure": 0.025,
+        "long_deleveraging_pressure": 0.0,
+        "financing_buy_after_drawdown": 0.02,
+        "price_acceleration_x_leverage_expansion": 0.02,
     }.items():
         assert result[factor].tolist() == pytest.approx([expected] * 2)
     assert result.financing_repayment_intensity.isna().all()

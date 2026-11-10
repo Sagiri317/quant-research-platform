@@ -76,7 +76,7 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
         "market_id",
         "asset_id",
         "timestamp",
-        "momentum_20d",
+        "reversal_20d",
         "forward_return_20d",
         "eligible",
         "can_enter",
@@ -809,7 +809,7 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
         }
     )
     output = assembler_module._add_a_share_semantic_columns(frame, base)
-    output["momentum_20d"] = [1.0, 2.0, 3.0]
+    output["reversal_20d"] = [1.0, 2.0, 3.0]
     pd.testing.assert_series_equal(
         output.forward_return_20d_available_at, frame.forward_return_20d_available_at
     )
@@ -826,11 +826,11 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
         "model_target",
         "model_target_available_at",
         "eligible",
-        "momentum_20d",
+        "reversal_20d",
     )
     spec = replace(
         base,
-        factor_columns=("momentum_20d",),
+        factor_columns=("reversal_20d",),
         feature_columns=(),
         feature_transforms=(),
         context_columns=(
@@ -1020,7 +1020,7 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
                     "market_id": "a_share",
                     "asset_id": asset_id,
                     "timestamp": timestamp,
-                    "momentum_20d": float(date_index + asset_index),
+                    "reversal_20d": float(date_index + asset_index),
                     "forward_return_20d": 0.01 * (date_index + asset_index),
                     "eligible": True,
                     "can_enter": True,

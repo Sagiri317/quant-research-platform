@@ -13,7 +13,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-PRICE_VOLUME_SIGNAL_COLUMN = "momentum_20d"
+PRICE_VOLUME_SIGNAL_COLUMN = "reversal_20d"
 FORWARD_RETURN_LABEL_COLUMN = forward_return_label_column(20)
 
 

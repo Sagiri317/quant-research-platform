@@ -539,7 +539,7 @@ def test_decision_panel_carries_consumed_label_definition_and_feature_lineage(tm
     facts = inspect_dataset(output).manifest["producer_diagnostics"]
     assert facts["label_semantics"]["forward_return_20d"] == semantics
     assert (
-        facts["reused_feature_transforms"]["feature_momentum_20d"]
+        facts["reused_feature_transforms"]["feature_reversal_20d"]
         == (inspect_dataset(daily).spec["feature_transforms"][0])
     )
     model = fit(
@@ -550,7 +550,7 @@ def test_decision_panel_carries_consumed_label_definition_and_feature_lineage(tm
             "model": {
                 "model_id": "carried",
                 "model_algorithm": "linear_regression",
-                "input_feature_columns": ["feature_momentum_20d"],
+                "input_feature_columns": ["feature_reversal_20d"],
                 "target_column": "model_target",
             },
             "fit_windows": [{"start": "2024-01-03", "end": "2024-01-03"}],

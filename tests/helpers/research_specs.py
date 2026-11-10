@@ -14,7 +14,7 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-DEMO_FACTOR_COLUMN = "momentum_20d"
+DEMO_FACTOR_COLUMN = "reversal_20d"
 DEMO_LABEL_COLUMN = forward_return_label_column(20)
 
 

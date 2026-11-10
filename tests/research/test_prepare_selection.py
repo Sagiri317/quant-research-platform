@@ -346,14 +346,14 @@ def test_selected_factor_keeps_actual_history_before_output_window(
                 },
                 str(dates[-1].date()),
                 str(dates[-1].date()),
-                factor_columns=["momentum_20d"],
+                factor_columns=["reversal_20d"],
             )
         )
     )
     if history_start:
-        assert result.momentum_20d.isna().all()
+        assert result.reversal_20d.isna().all()
     else:
-        assert result.momentum_20d.tolist() == [4.0]
+        assert result.reversal_20d.tolist() == [-4.0]
 
 
 @pytest.mark.parametrize("batch_rows", [3, producer.DEFAULT_BATCH_ROWS])

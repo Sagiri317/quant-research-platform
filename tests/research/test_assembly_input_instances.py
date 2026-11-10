@@ -18,7 +18,7 @@ def test_same_native_identity_supports_complementary_input_instances(tmp_path):
     left, _ = _source(tmp_path / "left", frame, data_id="batch")
     right, _ = _source(
         tmp_path / "right",
-        frame.drop(columns="momentum_20d").assign(log_float_market_cap=2.0),
+        frame.drop(columns="reversal_20d").assign(log_float_market_cap=2.0),
         data_id="batch",
     )
     output = assembler.assemble(
@@ -26,11 +26,11 @@ def test_same_native_identity_supports_complementary_input_instances(tmp_path):
             tmp_path,
             left,
             inputs={"left": str(left), "right": str(right)},
-            factor_columns=["momentum_20d", "log_float_market_cap"],
+            factor_columns=["reversal_20d", "log_float_market_cap"],
         )
     )
     actual = read_dataset(output)
-    np.testing.assert_array_equal(actual.momentum_20d, frame.momentum_20d)
+    np.testing.assert_array_equal(actual.reversal_20d, frame.reversal_20d)
     assert actual.log_float_market_cap.eq(2).all()
     facts = inspect_dataset(output)
     assert facts.spec["input_data_ids"] == ["left", "right"]
@@ -48,13 +48,13 @@ def test_projection_selects_unique_support_producer_without_order_preference(
     left, _ = _source(tmp_path / "left", frame, data_id="batch")
     right, _ = _source(
         tmp_path / "right",
-        frame.drop(columns="momentum_20d").assign(eligible=False),
+        frame.drop(columns="reversal_20d").assign(eligible=False),
         data_id="batch",
     )
     inputs = {
         "left": {
             "path": str(left),
-            "columns": ["momentum_20d"] + (["eligible"] if selected else []),
+            "columns": ["reversal_20d"] + (["eligible"] if selected else []),
         },
         "right": {"path": str(right), "columns": ["asset_id"]},
     }
@@ -72,7 +72,7 @@ def test_projection_selects_unique_support_producer_without_order_preference(
             assembler.assemble(config)
         return
     actual = read_dataset(assembler.assemble(config))
-    assert actual.feature_momentum_20d.notna().all()
+    assert actual.feature_reversal_20d.notna().all()
     config.update(
         inputs=dict(reversed(list(inputs.items()))),
         base_input_data_id="left",
@@ -85,7 +85,7 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     tmp_path, monkeypatch
 ):
     frame = _frame(4).assign(
-        momentum_20d=[1.0, np.nan, 3.0, 4.0],
+        reversal_20d=[1.0, np.nan, 3.0, 4.0],
         eligible=True,
         return_next=[0.1, 0.2, 0.3, 0.4],
         matured_at=pd.Timestamp("2024-01-03"),
@@ -93,7 +93,7 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     source, _ = _source(
         tmp_path,
         frame,
-        units={"momentum_20d": "fraction", "return_next": "decimal_return"},
+        units={"reversal_20d": "fraction", "return_next": "decimal_return"},
         availability={"return_next": "matured_at"},
     )
     produced = assembler.assemble(
@@ -115,11 +115,11 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
         inputs={
             "features": {
                 "path": str(produced),
-                "columns": ["feature_momentum_20d", "return_next", "eligible"],
+                "columns": ["feature_reversal_20d", "return_next", "eligible"],
             }
         },
         factor_columns=[],
-        feature_columns=["feature_momentum_20d"],
+        feature_columns=["feature_reversal_20d"],
         label_columns=["return_next"],
         filter_columns=["eligible"],
         output_root=str(tmp_path / "reused"),
@@ -128,20 +128,20 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     reused = assembler.assemble(config)
     actual = read_dataset(reused)
     columns = [
-        "feature_momentum_20d",
+        "feature_reversal_20d",
     ]
     pd.testing.assert_frame_equal(
         actual[columns], read_dataset(produced)[columns], check_exact=True
     )
-    assert actual.feature_momentum_20d.isna().tolist() == [False, True, False, False]
+    assert actual.feature_reversal_20d.isna().tolist() == [False, True, False, False]
     facts = inspect_dataset(reused)
     assert facts.spec["factor_columns"] == []
     assert facts.spec["feature_transforms"] == []
-    assert facts.spec["column_units"]["feature_momentum_20d"] == "dimensionless"
+    assert facts.spec["column_units"]["feature_reversal_20d"] == "dimensionless"
     assert facts.spec["label_availability_columns"] == {"return_next": "matured_at"}
     assert (
         facts.manifest["producer_diagnostics"]["reused_feature_transforms"][
-            "feature_momentum_20d"
+            "feature_reversal_20d"
         ]["scale"]
         is True
     )
@@ -178,7 +178,7 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
                         {
                             "signal_id": "feature",
                             "source_kind": "feature",
-                            "source_column": "feature_momentum_20d",
+                            "source_column": "feature_reversal_20d",
                             "transform": "identity",
                         }
                     ],
@@ -207,7 +207,7 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
             "model": {
                 "model_id": "reuse",
                 "model_algorithm": "linear_regression",
-                "input_feature_columns": ["feature_momentum_20d"],
+                "input_feature_columns": ["feature_reversal_20d"],
                 "target_column": "return_next",
                 "random_seed": 17,
             },
@@ -217,14 +217,14 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     )
     fitted, model_facts = load_model(model)
     # A row with no observed model input cannot enter training.
-    assert actual.feature_momentum_20d.isna().tolist() == [
+    assert actual.feature_reversal_20d.isna().tolist() == [
         False,
         True,
         False,
         False,
     ]
     assert fitted.metadata["rows_after_input_label_dropna"] == 3
-    assert model_facts["input_units"] == {"feature_momentum_20d": "dimensionless"}
+    assert model_facts["input_units"] == {"feature_reversal_20d": "dimensionless"}
 
 
 def test_selected_feature_cannot_collide_with_new_transform(tmp_path):
@@ -243,7 +243,7 @@ def test_selected_feature_cannot_collide_with_new_transform(tmp_path):
                 tmp_path,
                 produced,
                 feature_recipe="a_share_canonical",
-                feature_columns=["feature_momentum_20d"],
+                feature_columns=["feature_reversal_20d"],
                 output_root=str(tmp_path / "collision"),
             )
         )
@@ -264,7 +264,7 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
     tmp_path, reverse, source_unit, scale, groups
 ):
     frame = _frame(4).assign(
-        momentum_20d=[1.0, 2.0, 3.0, 4.0],
+        reversal_20d=[1.0, 2.0, 3.0, 4.0],
         eligible=True,
         return_next=[0.1, 0.2, 0.3, 0.4],
         matured_at=pd.Timestamp("2024-01-03"),
@@ -274,7 +274,7 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
         frame,
         data_id="batch",
         units={
-            **({"momentum_20d": source_unit} if source_unit is not None else {}),
+            **({"reversal_20d": source_unit} if source_unit is not None else {}),
             "return_next": "decimal_return",
         },
         availability={"return_next": "matured_at"},
@@ -283,13 +283,13 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
         tmp_path / "right",
         frame.assign(matured_at=pd.Timestamp("2030-01-01")),
         data_id="batch",
-        units={"momentum_20d": "percent", "return_next": "percent"},
+        units={"reversal_20d": "percent", "return_next": "percent"},
         availability={"return_next": "matured_at"},
     )
     inputs = {
         "left": {
             "path": str(left),
-            "columns": ["momentum_20d", "return_next", "eligible"],
+            "columns": ["reversal_20d", "return_next", "eligible"],
         },
         "right": {"path": str(right), "columns": ["asset_id"]},
     }
@@ -314,21 +314,21 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
     )
     spec = inspect_dataset(output).spec
     actual = read_dataset(output)
-    assert ("momentum_20d" in actual) is ("raw" in groups)
-    expected = frame.momentum_20d.to_numpy()
+    assert ("reversal_20d" in actual) is ("raw" in groups)
+    expected = frame.reversal_20d.to_numpy()
     if scale == "default":
         expected = expected - expected.mean()
     if scale is not False:
-        expected = expected / frame.momentum_20d.to_numpy().std()
+        expected = expected / frame.reversal_20d.to_numpy().std()
     for group in (group for group in groups if group != "raw"):
-        suffix = ("pre_neutral_" if group == "pre_neutral" else "") + "momentum_20d"
+        suffix = ("pre_neutral_" if group == "pre_neutral" else "") + "reversal_20d"
         assert spec["column_units"].get("feature_" + suffix) == (
             "dimensionless" if scale is not False else source_unit
         )
         np.testing.assert_allclose(actual["feature_" + suffix], expected)
     if "raw" in groups:
-        assert spec["column_units"].get("momentum_20d") == source_unit
-        np.testing.assert_array_equal(actual.momentum_20d, frame.momentum_20d)
+        assert spec["column_units"].get("reversal_20d") == source_unit
+        np.testing.assert_array_equal(actual.reversal_20d, frame.reversal_20d)
     assert spec["column_units"]["return_next"] == "decimal_return"
     assert actual.matured_at.eq(pd.Timestamp("2024-01-03")).all()
 
@@ -336,17 +336,17 @@ def test_projection_preserves_selected_units_and_label_clock_authority(
 def test_same_native_identity_never_allows_conflicting_business_columns(tmp_path):
     left, _ = _source(tmp_path / "left", _frame(3), data_id="batch")
     right, _ = _source(
-        tmp_path / "right", _frame(3).assign(momentum_20d=999.0), data_id="batch"
+        tmp_path / "right", _frame(3).assign(reversal_20d=999.0), data_id="batch"
     )
     with pytest.raises(
-        ValueError, match="duplicate_research_output_columns: momentum_20d"
+        ValueError, match="duplicate_research_output_columns: reversal_20d"
     ):
         assembler.assemble(
             _config(tmp_path, left, inputs={"left": str(left), "right": str(right)})
         )
 
 
-@pytest.mark.parametrize("feature", ["previous_feature", "feature_momentum_20d"])
+@pytest.mark.parametrize("feature", ["previous_feature", "feature_reversal_20d"])
 def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, feature):
     from dataclasses import replace
 
@@ -371,7 +371,7 @@ def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, fe
     )
     config = _config(tmp_path, source, feature_columns=[feature])
     config.pop("feature_recipe")
-    if feature == "feature_momentum_20d":
+    if feature == "feature_reversal_20d":
         output = assembler.assemble(config)
         np.testing.assert_array_equal(read_dataset(output)[feature], frame[feature])
         config["feature_recipe"] = "a_share_canonical"
@@ -382,7 +382,7 @@ def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, fe
     output = assembler.assemble(config)
     actual = read_dataset(output)
     np.testing.assert_array_equal(actual[feature], frame[feature])
-    assert actual.feature_momentum_20d.notna().all()
+    assert actual.feature_reversal_20d.notna().all()
     assert (
         inspect_dataset(output).spec["feature_transforms"][0]["recipe_id"]
         == "a_share_canonical"

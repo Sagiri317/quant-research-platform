@@ -20,7 +20,6 @@ from quant_research_platform.research.factors.price_volume.definitions import (
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 UNIQUE_FACTORS = (
-    "momentum_20d",
     "momentum_60d",
     "upside_volatility_20d",
     "min_return_20d",
@@ -86,7 +85,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs(timestamp
     )
     names = (*PV25_FACTORS, *UNIQUE_FACTORS)
     definitions = price_volume_factor_definitions(**binding, factor_columns=names)
-    assert len(definitions) == 41
+    assert len(definitions) == 40
     window = TimeWindow(
         panel.timestamp.iloc[280].date(), panel.timestamp.iloc[-1].date()
     )
@@ -158,7 +157,6 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
         59.0 / (58.0 * 57.0) * (61.0 * (np.mean(centered**4) / variance**2 - 3.0) + 6.0)
     )
     expected = {
-        "momentum_20d": 61.0 / 41.0 - 1.0,
         "momentum_60d": 60.0,
         "upside_volatility_20d": np.sqrt((0.01**2 + 0.03**2) / 5.0),
         "min_return_20d": -0.02,
@@ -195,7 +193,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
                 else 20
                 if name
                 in {
-                    "momentum_20d",
+                    "reversal_20d",
                     "amount_change_20d",
                     "volume_change_20d",
                     "turnover_change_20d",
@@ -223,7 +221,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
         .isna()
         .all()
     )
-    assert missing_result.loc[60, "momentum_20d"] == result.loc[60, "momentum_20d"]
+    assert missing_result.loc[60, "momentum_60d"] == result.loc[60, "momentum_60d"]
     constant = panel.assign(
         amount=0.0, volume=0.0, turnover=0.0, period_return=0.0, total_market_cap=0.0
     )

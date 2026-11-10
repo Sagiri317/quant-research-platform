@@ -9,6 +9,15 @@ from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
+from quant_research_platform.research.factors.intraday_path import (
+    DESCRIPTION as PATH_DESCRIPTION,
+)
+from quant_research_platform.research.factors.intraday_path import (
+    INPUTS as PATH_INPUTS,
+)
+from quant_research_platform.research.factors.intraday_path import (
+    UNITS as PATH_UNITS,
+)
 
 KEY = ("market_id", "asset_id", "timestamp")
 DATA_IDS = (
@@ -17,6 +26,7 @@ DATA_IDS = (
     "hft_labels",
     "hft_event_factors",
     "hft_hawkes_factors",
+    "hft_research_factors",
 )
 BOOK_COLUMNS = tuple(
     f"{side}_{kind}{level}"
@@ -139,6 +149,7 @@ INTRADAY_THEME_FACTORS = {
     ),
 }
 FACTOR_INPUTS.update(INTRADAY_THEME_FACTORS)
+FACTOR_INPUTS.update(PATH_INPUTS)
 
 INTRADAY_THEME_DESCRIPTIONS = {
     "price_position_300s": (
@@ -287,41 +298,50 @@ HAWKES_FACTORS = {
 
 
 def factor_catalog():
+    from quant_research_platform.research.factors.intraday_context import definitions
+
     return FactorCatalog(
-        FactorDefinition(
-            factor_id=name,
-            market_id="a_share",
-            factor_set="standard",
-            family="level2_microstructure",
-            input_columns=inputs,
-            output_column=name,
-            required_input_data_id="hft_hawkes_factors"
-            if name in HAWKES_FACTORS
-            else "hft_event_factors"
-            if name in EVENT_FACTORS
-            else "hft_panel",
-            timing_semantics="observed_at_or_before_vendor_quote_time_same_segment",
-            description=INTRADAY_THEME_DESCRIPTIONS.get(name, ""),
-        )
-        for name, inputs in {
-            **FACTOR_INPUTS,
-            **{
-                name: tuple(
-                    dict.fromkeys(
-                        (
-                            *EVENT_KEY_FIELDS,
-                            *(
-                                field
-                                for fields in EVENT_INPUTS[name].values()
-                                for field in fields
-                            ),
-                        )
-                    )
+        (
+            *definitions(),
+            *(
+                FactorDefinition(
+                    factor_id=name,
+                    market_id="a_share",
+                    factor_set="standard",
+                    family="level2_microstructure",
+                    input_columns=inputs,
+                    output_column=name,
+                    required_input_data_id="hft_hawkes_factors"
+                    if name in HAWKES_FACTORS
+                    else "hft_event_factors"
+                    if name in EVENT_FACTORS
+                    else "hft_panel",
+                    timing_semantics="observed_at_or_before_vendor_quote_time_same_segment",
+                    description=PATH_DESCRIPTION
+                    if name in PATH_INPUTS
+                    else INTRADAY_THEME_DESCRIPTIONS.get(name, ""),
                 )
-                for name in EVENT_FACTORS
-            },
-            **dict.fromkeys(HAWKES_FACTORS, ("timestamp", "side")),
-        }.items()
+                for name, inputs in {
+                    **FACTOR_INPUTS,
+                    **{
+                        name: tuple(
+                            dict.fromkeys(
+                                (
+                                    *EVENT_KEY_FIELDS,
+                                    *(
+                                        field
+                                        for fields in EVENT_INPUTS[name].values()
+                                        for field in fields
+                                    ),
+                                )
+                            )
+                        )
+                        for name in EVENT_FACTORS
+                    },
+                    **dict.fromkeys(HAWKES_FACTORS, ("timestamp", "side")),
+                }.items()
+            ),
+        )
     )
 
 
@@ -363,6 +383,10 @@ def _roles(columns, *, factors=(), labels=()):
 
 
 def processed_specs():
+    from ...markets.implementations.a_share.processed.intraday import (
+        processed_spec,
+    )
+
     labels = label_catalog().list()
     label_columns = tuple(item.output_column for item in labels)
     maturity = {item.output_column: item.available_at_column for item in labels}
@@ -388,7 +412,9 @@ def processed_specs():
             partition_columns=("year",),
             column_roles=_roles(columns, factors=factors, labels=selected_labels),
             column_units={
-                column: "log_return"
+                column: PATH_UNITS[column]
+                if column in PATH_UNITS
+                else "log_return"
                 if column == "realized_volatility_60s"
                 else "decimal_return"
                 if "return" in column or column == "peak_drawdown_300s"
@@ -433,6 +459,7 @@ def processed_specs():
         for name, kind, columns, factors, selected_labels in definitions
     )
     return (
+        processed_spec(),
         *specs,
         ProcessedDataSpec(
             data_id="hft_event_factors",

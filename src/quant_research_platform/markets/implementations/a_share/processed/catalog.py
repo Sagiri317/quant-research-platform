@@ -43,6 +43,9 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_UNITS,
 )
 from quant_research_platform.research.factors.residual import RESIDUAL_FACTOR_WINDOWS
+from quant_research_platform.research.factors.style_structure import (
+    FACTOR_UNITS as STYLE_UNITS,
+)
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
     forward_return_label_column,
@@ -159,11 +162,29 @@ def processed_catalog() -> ProcessedDataCatalog:
     )
     from quant_research_platform.research.protocols.a_share_hft import processed_specs
 
+    from .daily_quotes import processed_specs as daily_quote_specs
+    from .public_factors import processed_spec as public_spec
+
     return ProcessedDataCatalog(
         (
             financing_spec(),
+            public_spec("linked_market_factors"),
+            public_spec("fund_flow_factors"),
+            *daily_quote_specs(),
             *processed_specs(),
             *macro_specs(),
+            _spec(
+                "style_structure_factors",
+                ProcessedDataKind.FACTOR,
+                (*PLATFORM_ASSET_TIME_KEY, *STYLE_UNITS),
+                processed_input_data_ids=(
+                    MARKET_PANEL_ID,
+                    PRICE_VOLUME_DATA_ID,
+                    "market_model_factors",
+                ),
+                source_input_data_ids=("trading_calendar",),
+                factor_columns=tuple(STYLE_UNITS),
+            ),
             _spec(
                 MARKET_PANEL_ID,
                 ProcessedDataKind.PANEL,
@@ -224,7 +245,7 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "market_model_factors",
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ASSET_TIME_KEY, *MARKET_MODEL_FACTORS),
+                (*PLATFORM_ASSET_TIME_KEY, *MARKET_MODEL_FACTORS, "market_return"),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 source_input_data_ids=(
                     "trading_calendar",
@@ -340,6 +361,7 @@ def _spec(
     known_units = {
         **PRICE_VOLUME_UNITS,
         **MARKET_STRUCTURE_UNITS,
+        **STYLE_UNITS,
         **dict.fromkeys(
             ("open", "high", "low", "close", "adj_open", "adj_close", "prev_close"),
             "CNY_per_share",
@@ -356,11 +378,17 @@ def _spec(
         "listing_age_trading_days": "trading_sessions",
         "beta_252d": "dimensionless",
         "residual_volatility_60d": "decimal_return",
+        "market_return": "decimal_return",
     }
     units = {column: unit for column, unit in known_units.items() if column in roles}
     units.update({column: "decimal_return" for column in availability})
     if data_id == "risk_residual_factors":
-        units.update({column: "decimal_return" for column in factor_columns})
+        units.update(
+            {
+                column: "dimensionless" if "comovement" in column else "decimal_return"
+                for column in factor_columns
+            }
+        )
     if "median_forecast_age_days_fy1" in roles:
         units["median_forecast_age_days_fy1"] = "days"
     return ProcessedDataSpec(

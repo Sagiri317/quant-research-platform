@@ -46,7 +46,7 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
     )
     assert len(calls) == 1
     assert set(calls[0][1]) == set(PLATFORM_ASSET_TIME_KEY) | {
-        "momentum_20d",
+        "reversal_20d",
         "eligible",
         "industry_standard_id",
         "industry_level1_code",
@@ -57,24 +57,24 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
     spec = inspect_dataset(output).spec
     assert spec["label_columns"] == []
     assert spec["context_columns"] == []
-    assert spec["factor_columns"] == ["momentum_20d"]
+    assert spec["factor_columns"] == ["reversal_20d"]
     assert "log_total_market_cap" not in actual
     assert "eligible" not in actual
-    expected = a_share_feature_pipeline(frame, factor_columns=("momentum_20d",))
+    expected = a_share_feature_pipeline(frame, factor_columns=("reversal_20d",))
     np.testing.assert_allclose(
-        actual.feature_momentum_20d,
-        expected.feature_momentum_20d,
+        actual.feature_reversal_20d,
+        expected.feature_reversal_20d,
         rtol=1e-13,
         atol=1e-14,
     )
-    assert actual.feature_momentum_20d.notna().all()
+    assert actual.feature_reversal_20d.notna().all()
 
 
 def test_disabled_steps_accept_input_without_unneeded_context_and_persist_options(
     tmp_path,
 ):
     frame = _frame(3).assign(eligible=True)
-    root, _ = _source(tmp_path, frame, units={"momentum_20d": "return"})
+    root, _ = _source(tmp_path, frame, units={"reversal_20d": "return"})
     options = {
         "clip": "none",
         "industry_neutralize": False,
@@ -91,12 +91,12 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
         )
     )
     actual = read_dataset(output)
-    np.testing.assert_array_equal(actual.feature_momentum_20d, frame.momentum_20d)
+    np.testing.assert_array_equal(actual.feature_reversal_20d, frame.reversal_20d)
     spec = inspect_dataset(output).spec
     assert all(
         spec["feature_transforms"][0][name] == value for name, value in options.items()
     )
-    assert spec["column_units"]["feature_momentum_20d"] == "return"
+    assert spec["column_units"]["feature_reversal_20d"] == "return"
 
 
 def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_path):
@@ -131,16 +131,16 @@ def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_pat
             },
         ),
     )
-    config = _config(tmp_path, root, factor_columns=["momentum_20d", macro])
+    config = _config(tmp_path, root, factor_columns=["reversal_20d", macro])
     config.pop("feature_recipe")
     config["inputs"]["macro"] = str(macro_root)
     result = assembler.assemble(config)
     data = read_dataset(result)
     assert data[macro].eq(1.7).all()
     assert "feature_" + macro not in data
-    assert "feature_momentum_20d" in data
+    assert "feature_reversal_20d" in data
     assert inspect_dataset(result).spec["feature_transforms"][0]["source_columns"] == [
-        "momentum_20d"
+        "reversal_20d"
     ]
 
 
@@ -154,7 +154,7 @@ def test_declared_industry_pairs_have_independent_native_feature_and_target_resi
         eligible=True,
         industry_standard_id=np.where(group == 0, "research:sector", "research"),
         industry_level1_code=np.where(group == 0, "A", "sector:A"),
-        momentum_20d=10 + 10 * group + residual,
+        reversal_20d=10 + 10 * group + residual,
         log_total_market_cap=10 + size,
         forward_return_20d=0.1 + 0.1 * group + 0.01 * size + 0.001 * residual,
         matured_at=pd.Timestamp("2024-02-01"),
@@ -183,9 +183,9 @@ def test_declared_industry_pairs_have_independent_native_feature_and_target_resi
     ).sort_values("asset_id")
     # Separate industry intercepts remove both offsets. The size pattern is
     # orthogonal to +/-1, and residual targets retain their return units.
-    np.testing.assert_allclose(actual.feature_momentum_20d, residual, atol=1e-12)
+    np.testing.assert_allclose(actual.feature_reversal_20d, residual, atol=1e-12)
     np.testing.assert_allclose(actual.model_target, 0.001 * residual, atol=1e-14)
-    assert actual.feature_momentum_20d.notna().all()
+    assert actual.feature_reversal_20d.notna().all()
     assert actual.model_target_available_at.eq(pd.Timestamp("2024-02-01")).all()
 
 
@@ -222,7 +222,7 @@ def test_actual_label_clock_and_units_survive_selection(tmp_path):
     root, _ = _source(
         tmp_path,
         frame,
-        units={"return_next": "fraction", "momentum_20d": "fraction"},
+        units={"return_next": "fraction", "reversal_20d": "fraction"},
         availability={"return_next": "matured_at"},
     )
     output = assembler.assemble(_config(tmp_path, root, label_columns=["return_next"]))
@@ -232,7 +232,7 @@ def test_actual_label_clock_and_units_survive_selection(tmp_path):
     assert spec["context_columns"] == ["matured_at"]
     assert spec["column_units"] == {
         "return_next": "fraction",
-        "momentum_20d": "fraction",
+        "reversal_20d": "fraction",
     }
     assert "unrelated_context" not in actual
     assert actual.matured_at.eq(pd.Timestamp("2024-01-03")).all()
@@ -261,7 +261,7 @@ def test_native_prepared_label_clock_remains_context_through_assembly(tmp_path):
     assert prepared["column_roles"][clock] == "context"
     factors, _ = _source(
         tmp_path,
-        panel[list(PLATFORM_ASSET_TIME_KEY)].assign(momentum_20d=np.arange(5.0)),
+        panel[list(PLATFORM_ASSET_TIME_KEY)].assign(reversal_20d=np.arange(5.0)),
     )
     output = assembler.assemble(
         _config(
@@ -302,7 +302,7 @@ def test_bare_input_uses_supplied_actual_semantics_without_catalog_membership(tm
             "market_id": "key",
             "asset_id": "key",
             "timestamp": "timestamp",
-            "momentum_20d": "factor",
+            "reversal_20d": "factor",
         },
     )
     config = _config(tmp_path, path)
@@ -412,7 +412,7 @@ def test_declared_lifecycle_key_is_kept_and_auxiliary_key_order_is_irrelevant(tm
     )
     roots = {}
     for name, column, values, primary_key in (
-        ("base", "momentum_20d", [1.0, 2.0], ("asset_id", "lifecycle", "timestamp")),
+        ("base", "reversal_20d", [1.0, 2.0], ("asset_id", "lifecycle", "timestamp")),
         ("aux", "context_value", [20.0, 10.0], ("timestamp", "asset_id", "lifecycle")),
     ):
         frame = keys if name == "base" else keys.iloc[::-1]
@@ -440,7 +440,7 @@ def test_declared_lifecycle_key_is_kept_and_auxiliary_key_order_is_irrelevant(tm
     )
     output = assembler.assemble(config)
     actual = read_dataset(output).sort_values("lifecycle")
-    assert actual.momentum_20d.tolist() == [1.0, 2.0]
+    assert actual.reversal_20d.tolist() == [1.0, 2.0]
     assert actual.context_value.tolist() == [10.0, 20.0]
     assert inspect_dataset(output).spec["primary_key"] == [
         "asset_id",
@@ -468,20 +468,20 @@ def test_input_column_selection_bounds_business_candidates_but_keeps_dependencie
     )
     root, _ = _source(tmp_path, frame)
     config = _config(tmp_path, root, feature_recipe="a_share_canonical")
-    config["inputs"] = {root.name: {"path": str(root), "columns": ["momentum_20d"]}}
+    config["inputs"] = {root.name: {"path": str(root), "columns": ["reversal_20d"]}}
     config.pop("factor_columns")
     config.pop("label_columns")
     output = assembler.assemble(config)
     spec = inspect_dataset(output).spec
-    assert spec["factor_columns"] == ["momentum_20d"]
+    assert spec["factor_columns"] == ["reversal_20d"]
     assert spec["label_columns"] == []
     assert spec["context_columns"] == []
-    assert read_dataset(output).feature_momentum_20d.notna().all()
+    assert read_dataset(output).feature_reversal_20d.notna().all()
     config["factor_columns"] = ["log_total_market_cap"]
     config["output_root"] = str(tmp_path / "invalid_factor")
     with pytest.raises(ValueError, match="assemble_factor_not_selected"):
         assembler.assemble(config)
-    config["factor_columns"] = ["momentum_20d"]
+    config["factor_columns"] = ["reversal_20d"]
     config["label_columns"] = ["return_next"]
     with pytest.raises(ValueError, match="assemble_label_not_selected"):
         assembler.assemble(config)
@@ -505,7 +505,7 @@ def test_interleaved_file_order_cannot_silently_change_complete_sections(tmp_pat
             "market_id": "key",
             "asset_id": "key",
             "timestamp": "timestamp",
-            "momentum_20d": "factor",
+            "reversal_20d": "factor",
         },
     )
     config = _config(
@@ -693,17 +693,17 @@ def test_size_choice_projects_and_persists_exact_dependency(tmp_path, size_colum
     assert parameters["feature_transform"]["size_column"] == size_column
     assert set(parameters["input_columns"][root.name]) == {
         *PLATFORM_ASSET_TIME_KEY,
-        "momentum_20d",
+        "reversal_20d",
         "eligible",
         size_column,
     }
     expected = a_share_feature_pipeline(
         frame,
-        factor_columns=("momentum_20d",),
+        factor_columns=("reversal_20d",),
         industry_neutralize=False,
         clip="none",
         size_column=size_column,
     )
     np.testing.assert_allclose(
-        read_dataset(output).feature_momentum_20d, expected.feature_momentum_20d
+        read_dataset(output).feature_reversal_20d, expected.feature_reversal_20d
     )

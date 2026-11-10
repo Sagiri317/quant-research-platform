@@ -251,20 +251,7 @@ def continuous_session(timestamps, exchange, instrument_types=None):
         + local.dt.second
         + local.dt.microsecond / 1e6
     )
-    etf = (
-        False
-        if instrument_types is None
-        else instrument_types.isin(("equity_etf", "gold_etf"))
-    )
-    closing = np.where(
-        exchange.eq("SSE")
-        & (
-            local.dt.date.lt(pd.Timestamp("2018-08-20").date())
-            | (etf & local.dt.date.lt(pd.Timestamp("2026-07-06").date()))
-        ),
-        15 * 3600,
-        14 * 3600 + 57 * 60,
-    )
+    closing = _continuous_closing_seconds(local, exchange, instrument_types)
     return pd.Series(
         np.select(
             [
@@ -275,4 +262,34 @@ def continuous_session(timestamps, exchange, instrument_types=None):
             default="",
         ),
         index=timestamps.index,
+    )
+
+
+def continuous_session_end(timestamps, exchange, instrument_types):
+    """Return the historical continuous-session closing instants in UTC."""
+    local = (
+        pd.to_datetime(timestamps).dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")
+    )
+    seconds = _continuous_closing_seconds(local, exchange, instrument_types)
+    return (
+        (local.dt.normalize() + pd.to_timedelta(seconds, unit="s"))
+        .dt.tz_convert("UTC")
+        .dt.tz_localize(None)
+    )
+
+
+def _continuous_closing_seconds(local, exchange, instrument_types):
+    etf = (
+        False
+        if instrument_types is None
+        else instrument_types.isin(("equity_etf", "gold_etf"))
+    )
+    return np.where(
+        exchange.eq("SSE")
+        & (
+            local.dt.date.lt(pd.Timestamp("2018-08-20").date())
+            | (etf & local.dt.date.lt(pd.Timestamp("2026-07-06").date()))
+        ),
+        15 * 3600,
+        14 * 3600 + 57 * 60,
     )

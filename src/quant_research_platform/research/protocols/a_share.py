@@ -96,18 +96,30 @@ def factor_catalog() -> FactorCatalog:
     from quant_research_platform.research.factors.financing import (
         factor_definitions as financing_definitions,
     )
+    from quant_research_platform.research.factors.fund_flows import (
+        definitions as fund_definitions,
+    )
+    from quant_research_platform.research.factors.linked_markets import (
+        definitions as linked_definitions,
+    )
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
         factor_definitions,
     )
     from quant_research_platform.research.factors.market_structure import (
         factor_definitions as market_structure_definitions,
     )
+    from quant_research_platform.research.factors.style_structure import (
+        factor_definitions as style_definitions,
+    )
 
     return FactorCatalog(
         (
             *financing_definitions(),
+            *linked_definitions(),
+            *fund_definitions(),
             *factor_definitions(),
             *market_structure_definitions(),
+            *style_definitions(),
             *price_volume_factor_definitions(
                 market_id=market_ids.MARKET_ID,
                 required_input_data_id=market_ids.PRICE_VOLUME_DATA_ID,
@@ -132,6 +144,7 @@ def factor_catalog() -> FactorCatalog:
                     grain=DataGrain.ASSET_TIMESTAMP,
                     required_input_data_id="market_model_factors",
                     lookback_window=312,
+                    full_history=True,
                     required_windows=(252, 60),
                     description=(
                         "Prior-cap weighted eligible market; causal 252-session OLS "
@@ -172,7 +185,14 @@ def factor_catalog() -> FactorCatalog:
                     lookback_window=window,
                     required_windows=(window,),
                     description=(
-                        "Current drawdown from the peak of a complete additive "
+                        (
+                            "Trailing correlation of own residual and "
+                            "contemporaneous-industry leave-one-out peer "
+                            "residual; prior industry/style exposures, no future "
+                            "residuals."
+                        )
+                        if "comovement" in column
+                        else "Current drawdown from the peak of a complete additive "
                         "daily residual path, including its initial zero; units "
                         "are accumulated decimal residual returns, not compounded "
                         "investable wealth. Prior industry and style exposures."

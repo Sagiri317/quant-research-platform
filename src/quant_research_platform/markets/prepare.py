@@ -53,12 +53,6 @@ def prepare(config: Mapping) -> Path:
         if source is not None:
             raise ValueError("a_share_prepare_source_not_consumed")
         from quant_research_platform.catalog.processed import InterimDataCatalog
-        from quant_research_platform.markets.implementations.a_share.processed.catalog import (  # noqa: E501
-            processed_catalog,
-        )
-        from quant_research_platform.markets.implementations.a_share.processed.producer import (  # noqa: E501
-            produce_a_share_processed_data,
-        )
         from quant_research_platform.sources.choice.interim import (
             interim_catalog as choice,
         )
@@ -67,6 +61,13 @@ def prepare(config: Mapping) -> Path:
         )
         from quant_research_platform.sources.reference.interim import (
             interim_catalog as reference,
+        )
+
+        from .implementations.a_share.processed.catalog import (  # noqa: E501
+            processed_catalog,
+        )
+        from .implementations.a_share.processed.producer import (  # noqa: E501
+            produce_a_share_processed_data,
         )
 
         # The canonical source schema is the same for shared financial fields.
@@ -81,11 +82,22 @@ def prepare(config: Mapping) -> Path:
         kwargs = {"source_catalog": InterimDataCatalog(specs.values())}
         from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
-        if spec.data_id in DATA_IDS:
-            from quant_research_platform.markets.implementations.a_share.processed.high_frequency import (  # noqa: E501
+        if spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
+            from .implementations.a_share.processed.daily_quotes import produce
+
+            producer, kwargs = produce, {}
+        elif spec.data_id == "hft_research_factors":
+            from .implementations.a_share.processed.intraday import (
                 produce,
             )
+
+            producer, kwargs = produce, {}
+        elif spec.data_id in DATA_IDS:
             from quant_research_platform.sources.venvoo import interim_spec
+
+            from .implementations.a_share.processed.high_frequency import (  # noqa: E501
+                produce,
+            )
 
             producer, kwargs = (
                 produce,
@@ -96,14 +108,20 @@ def prepare(config: Mapping) -> Path:
                     )
                 },
             )
+        elif spec.data_id in {"linked_market_factors", "fund_flow_factors"}:
+            from .implementations.a_share.processed.public_factors import (
+                produce,
+            )
+
+            producer, kwargs = produce, {}
         elif spec.data_id == "financing_factors":
-            from quant_research_platform.markets.implementations.a_share.processed.financing import (  # noqa: E501
+            from .implementations.a_share.processed.financing import (  # noqa: E501
                 produce,
             )
 
             producer, kwargs = produce, {}
         elif spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
-            from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
+            from .implementations.a_share.processed.macro import (  # noqa: E501
                 produce,
             )
 
@@ -141,8 +159,27 @@ def _configured_spec(spec, config):
     """Apply only options consumed by this explicitly requested mathematical recipe."""
     from quant_research_platform.contracts.columns import ColumnRole
 
+    if spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
+        from .implementations.a_share.processed.daily_quotes import configured_spec
+
+        return configured_spec(spec, config)
+
+    if spec.data_id == "hft_research_factors":
+        from .implementations.a_share.processed.intraday import (
+            configured_spec,
+        )
+
+        return configured_spec(spec, config)
+
+    if spec.data_id in {"linked_market_factors", "fund_flow_factors"}:
+        from .implementations.a_share.processed.public_factors import (
+            configured_spec,
+        )
+
+        return configured_spec(spec, config)
+
     if spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
-        from quant_research_platform.markets.implementations.a_share.processed.macro import (  # noqa: E501
+        from .implementations.a_share.processed.macro import (  # noqa: E501
             configured_spec,
         )
 
@@ -152,7 +189,7 @@ def _configured_spec(spec, config):
     if type(parameters) is not dict:
         raise ValueError("data_operation_parameters_invalid")
     if spec.market_id == "a_share" and spec.data_id == "on_id_decomposition":
-        from quant_research_platform.markets.implementations.a_share.processed.catalog import (  # noqa: E501
+        from .implementations.a_share.processed.catalog import (  # noqa: E501
             on_id_decomposition_spec,
         )
 
@@ -294,6 +331,34 @@ def _configured_spec(spec, config):
                     "total_market_cap" in fundamental_inputs(name) for name in factors
                 ):
                     spec = replace(spec, processed_input_data_ids=("fundamental_pit",))
+    if spec.data_id == "style_structure_factors":
+        from quant_research_platform.research.factors.style_structure import (
+            factor_definitions,
+        )
+
+        from .implementations.a_share.processed.catalog import (
+            processed_catalog,
+        )
+
+        consumed = {
+            field
+            for definition in factor_definitions()
+            if definition.output_column in spec.column_roles
+            for field in definition.input_columns
+        }
+        catalog = processed_catalog()
+        spec = replace(
+            spec,
+            processed_input_data_ids=tuple(
+                name
+                for name in spec.processed_input_data_ids
+                if name == "market_panel_1d"
+                or consumed.intersection(
+                    set(catalog.get(name).required_columns)
+                    - {"market_id", "asset_id", "timestamp"}
+                )
+            ),
+        )
     if "label_columns" in config:
         labels = config["label_columns"]
         if (

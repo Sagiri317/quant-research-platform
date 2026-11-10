@@ -86,6 +86,9 @@ def test_residual_windows_use_prior_exposures_and_actual_lifecycle():
         if "drawdown" in column:
             # Each synthetic residual path is monotone with its asset's sign.
             expected = np.maximum(-signs * amplitude[-window:].sum(), 0)
+        if "comovement" in column:
+            # Zero-sum residuals imply each leave-one-out mean is -self/(n-1).
+            expected = np.full(128, -1.0)
         np.testing.assert_allclose(last[column], expected, rtol=1e-11, atol=1e-13)
     future = panel.copy()
     future.loc[future.timestamp >= dates[65], list(RISK_STYLE_COLUMNS)] = np.nan
@@ -169,7 +172,8 @@ def test_residual_factors_prepare_and_native_read_keep_window_and_units(tmp_path
     )
     saved = read_dataset(output).sort_values("asset_id").reset_index(drop=True)
     assert inspect_dataset(output).spec["column_units"] == {
-        column: "decimal_return" for column in RESIDUAL_FACTOR_WINDOWS
+        column: "dimensionless" if "comovement" in column else "decimal_return"
+        for column in RESIDUAL_FACTOR_WINDOWS
     }
     expected = _calculate(panel)
     expected = (

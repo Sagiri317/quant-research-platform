@@ -22,6 +22,7 @@ from quant_research_platform.contracts.validation import (
 class MarketModelRiskStyles:
     beta: pd.Series
     residual_volatility: pd.Series
+    market_return: float
 
 
 class MarketModelRiskState:
@@ -390,6 +391,7 @@ class MarketModelRiskState:
         }
 
         return MarketModelRiskStyles(
+            market_return=market_return,
             beta=pd.Series(betas, index=assets, dtype="float64", name="beta_252d"),
             residual_volatility=pd.Series(
                 volatilities,

@@ -212,7 +212,7 @@ def test_assembled_selected_label_semantics_and_real_evaluate_cutoffs(tmp_path):
     signal = frame.loc[
         frame.timestamp.eq(first_date), ["market_id", "asset_id", "timestamp"]
     ].copy()
-    signal["momentum_20d"] = np.arange(len(signal), dtype=float)
+    signal["reversal_20d"] = np.arange(len(signal), dtype=float)
     signal_root, _ = _source(tmp_path, signal)
     labels = [
         "on_id_pre_entry_log_return",
@@ -230,7 +230,7 @@ def test_assembled_selected_label_semantics_and_real_evaluate_cutoffs(tmp_path):
                 "on_id_decomposition": str(labels_root),
             },
             "base_input_data_id": "external_table",
-            "factor_columns": ["momentum_20d"],
+            "factor_columns": ["reversal_20d"],
             "label_columns": labels,
             "feature_recipe": None,
             "time_window": window,
@@ -266,7 +266,7 @@ def test_assembled_selected_label_semantics_and_real_evaluate_cutoffs(tmp_path):
                             {
                                 "signal_id": "frozen",
                                 "source_kind": "factor",
-                                "source_column": "momentum_20d",
+                                "source_column": "reversal_20d",
                             }
                         ],
                         "label_columns": [label],

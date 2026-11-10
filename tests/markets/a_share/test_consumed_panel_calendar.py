@@ -70,12 +70,12 @@ def test_missing_panel_day_retains_price_lag(tmp_path):
         dates=dates,
         panel=panel,
         target="price_volume_facts",
-        columns={"factor_columns": ["momentum_20d"]},
+        columns={"factor_columns": ["reversal_20d"]},
     )
     last = result.set_index("timestamp").loc[dates[25]]
-    assert pd.isna(last.momentum_20d)
+    assert pd.isna(last.reversal_20d)
     earlier = result.set_index("timestamp").loc[dates[24]]
-    assert earlier.momentum_20d == pytest.approx(124 / 104 - 1)
+    assert earlier.reversal_20d == pytest.approx(124 / 104 - 1)
 
 
 def test_missing_calendar_day_is_evidence_error_not_quote_gap():

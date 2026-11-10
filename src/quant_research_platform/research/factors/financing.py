@@ -53,13 +53,104 @@ BALANCE_CHANGE_WINDOWS = {
     "financing_balance_change_1d": 1,
     "financing_balance_change_5d": 5,
 }
+RECIPES.update(
+    {
+        "price_acceleration_x_leverage_expansion": (
+            "financing_balance",
+            "",
+            (
+                "Positive log-price up-acceleration over 20 sessions times "
+                "positive 5-session growth in disclosed financing balance; "
+                "scale-free leverage expansion, not a nominal balance comparison."
+            ),
+        ),
+        "short_interest_to_float_shares": (
+            "lending_quantity",
+            "a_float_shares",
+            (
+                "Reported stock-lending quantity / same-observation float shares;"
+                " covers disclosed margin lending, not every short position."
+            ),
+        ),
+        "lending_days_to_cover_20d": (
+            "lending_quantity",
+            "avg_volume_20d",
+            (
+                "Reported lending quantity / same-observation trailing-20 mean "
+                "daily share volume; days of observed trading capacity, not "
+                "actual liquidation time."
+            ),
+        ),
+        "lending_repayment_intensity": (
+            "lending_repayment_quantity",
+            "volume",
+            (
+                "Reported returned lending units / same-observation share volume;"
+                " direct returns and market purchases are not distinguished."
+            ),
+        ),
+        **{
+            f"lending_net_cover_fraction_{w}d": (
+                "lending_quantity",
+                "",
+                "max(prior lending quantity-current lending quantity,0) / "
+                f"quantity {w} market sessions earlier; net quantity reduction, "
+                "not gross buying.",
+            )
+            for w in (1, 5)
+        },
+        "short_squeeze_pressure": (
+            "lending_quantity",
+            "avg_volume_20d",
+            (
+                "Disclosed days-to-cover times positive observed 5-session return"
+                " times net 5-session lending reduction; a squeeze proxy, not "
+                "observed margin calls."
+            ),
+        ),
+        "long_deleveraging_pressure": (
+            "financing_balance",
+            "avg_amount_20d",
+            (
+                "Positive 5-session reduction in disclosed financing balance / "
+                "average daily amount, times negative observed 5-session return; "
+                "a deleveraging proxy, not identified forced sales."
+            ),
+        ),
+        "financing_buy_after_drawdown": (
+            "financing_buy_amount",
+            "amount",
+            (
+                "Financing buying / same-observation amount times positive "
+                "20-session drawdown; no account-level reentry is inferred."
+            ),
+        ),
+    }
+)
+BALANCE_CHANGE_WINDOWS.update(
+    {
+        "lending_net_cover_fraction_1d": 1,
+        "lending_net_cover_fraction_5d": 5,
+        "short_squeeze_pressure": 5,
+        "long_deleveraging_pressure": 5,
+        "price_acceleration_x_leverage_expansion": 5,
+    }
+)
+FACTOR_UNITS = dict.fromkeys(RECIPES, "dimensionless")
+FACTOR_UNITS["lending_days_to_cover_20d"] = "trading_days"
 
 
 def decision_columns(columns):
     required = {"signal_session", "listing_date", "eligible"}
+    if "price_acceleration_x_leverage_expansion" in columns:
+        required.add("price_up_acceleration_20d")
     required.update(RECIPES[name][1] for name in columns if RECIPES[name][1])
     if "leveraged_liquidity_pressure" in columns:
         required.update(("peak_drawdown_20d", "amihud_20d", "amihud_60d"))
+    if {"short_squeeze_pressure", "long_deleveraging_pressure"}.intersection(columns):
+        required.add("reversal_5d")
+    if "financing_buy_after_drawdown" in columns:
+        required.add("peak_drawdown_20d")
     return tuple(sorted(required))
 
 
@@ -129,7 +220,9 @@ def calculate(
         numeric = strict_real_numeric_series(
             raw, error="financing_numeric_invalid", errors="coerce"
         )
-        valid = np.isfinite(numeric) & numeric.ge(0)
+        valid = np.isfinite(numeric)
+        if field != "reversal_5d":
+            valid &= numeric.ge(0)
         counts[field] = int((raw.notna() & ~valid).sum())
         frame[field] = numeric.where(valid)
     cutoffs = (
@@ -210,7 +303,7 @@ def calculate(
     def known(field, lag=0):
         if lag in cache:
             return cache[lag][field]
-        selected = fields if lag == 0 else ("financing_balance",)
+        selected = fields
         target = observation_dates(lag + observation_lag_sessions)
         valid = target.notna() & listed.notna() & target.ge(listed)
         left = (
@@ -257,6 +350,29 @@ def calculate(
             lag = BALANCE_CHANGE_WINDOWS[name]
             baseline = known(field, lag)
             result = known(field) / baseline.where(baseline.gt(0)) - 1
+        if name.startswith("lending_net_cover_fraction_"):
+            result = (-result).clip(lower=0)
+        elif name == "short_squeeze_pressure":
+            baseline = known(field, 5)
+            reduction = ((baseline - known(field)) / baseline.where(baseline > 0)).clip(
+                lower=0
+            )
+            result *= (-frame.reversal_5d).clip(lower=0) * reduction
+        elif name == "long_deleveraging_pressure":
+            divisor = (
+                historical[denominator]
+                if historical is not None
+                else frame[denominator]
+            )
+            result = (
+                (known(field, 5) - known(field)).clip(lower=0)
+                / divisor.where(divisor > 0)
+                * frame.reversal_5d.clip(lower=0)
+            )
+        elif name == "financing_buy_after_drawdown":
+            result *= frame.peak_drawdown_20d
+        elif name == "price_acceleration_x_leverage_expansion":
+            result = result.clip(lower=0) * frame.price_up_acceleration_20d
         if name == "leveraged_liquidity_pressure":
             descriptors = {
                 field: frame[field]

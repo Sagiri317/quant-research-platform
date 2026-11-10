@@ -13,6 +13,11 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _centered_values,
     _pearson_correlations,
 )
+from quant_research_platform.compute.dataframe.history import (
+    completed_month_return_acceleration,
+    path_efficiency,
+    quadratic_log_trend,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -125,6 +130,10 @@ def calculate_price_volume_factors(
                 )
             )
         sums, statistical_sums = {}, {}
+        if "return_acceleration_6m6m" in requested:
+            sums["return_acceleration_6m6m"] = completed_month_return_acceleration(
+                values["adj_close"], group.timestamp
+            )
         for column, factor in enumerate(requested):
             partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
             output[offset : offset + stop - start, column] = _calculate_values(
@@ -155,6 +164,46 @@ def _calculate_values(
     min_fresh_fraction: float = 0.75,
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    if factor == "return_acceleration_6m6m":
+        return sums[factor][start:stop].copy()
+    if factor.startswith(("price_up_acceleration_", "price_down_acceleration_")):
+        width = windows[0]
+        key = ("quadratic_log_trend", width)
+        if key not in sums:
+            prices = values["adj_close"]
+            trend = np.full((len(prices), 2), np.nan)
+            if len(prices) >= width:
+                matrix = sliding_window_view(prices, width)
+                valid = np.isfinite(matrix).all(axis=1) & (matrix > 0).all(axis=1)
+                slope, curvature = quadratic_log_trend(matrix[valid])
+                trend[width - 1 :][valid] = np.column_stack((slope, curvature))
+            sums[key] = trend
+        slope, curvature = sums[key].T
+        direction = 1 if factor.startswith("price_up_") else -1
+        known = np.isfinite(slope) & np.isfinite(curvature)
+        result = np.where(
+            known,
+            np.where(direction * slope > 0, np.maximum(direction * curvature, 0), 0),
+            np.nan,
+        )
+        return result[start:stop].copy()
+    if factor.startswith(("signed_breakout_", "breakout_activity_confirmation_")):
+        width = windows[0] - 1
+        # The episode is shared by price-only selections and the activity view.
+        key = ("breakout_episode", width)
+        if key not in sums:
+            sums[key] = _breakout_episode(values["adj_close"], width)
+        direction, duration, followthrough = sums[key]
+        if factor.startswith("signed_breakout_duration_"):
+            result = duration
+        elif factor.startswith("signed_breakout_followthrough_"):
+            result = followthrough
+        else:
+            amount = pd.Series(values["amount"]).where(lambda x: x >= 0)
+            mean = amount.shift().rolling(width, min_periods=width).mean()
+            activity = np.log(amount.where(amount > 0) / mean.where(mean > 0))
+            result = np.where(direction == 0, 0, direction * activity)
+        return np.asarray(result)[start:stop].copy()
     if factor in PRICE_VOLUME_PROFILE_DESCRIPTIONS:
         if "amount_profile_60d" not in sums:
             sums["amount_profile_60d"] = _calculate_amount_profile(values)
@@ -288,6 +337,7 @@ def _calculate_values(
     if shift or factor in {
         "log_avg_amount_20d",
         "avg_amount_20d",
+        "avg_volume_20d",
         "avg_amount_126d",
         "turnover_250d",
         "turnover_20d",
@@ -378,13 +428,8 @@ def _calculate_values(
         denominator = extra["close"] if factor == "amplitude_20d" else extra["amount"]
         result = np.nanmean(numerator / denominator, axis=1)
     elif factor == "trend_efficiency_60d":
-        denominator = np.sum(np.abs(current), axis=1)
-        numerator = np.sum(current, axis=1)
-        result = np.divide(
-            np.abs(numerator),
-            denominator,
-            out=np.full(len(current), np.nan),
-            where=denominator != 0,
+        result = np.abs(
+            path_efficiency(current.sum(axis=1), np.abs(current).sum(axis=1))
         )
     elif factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}:
         flow = extra["amount"]
@@ -404,16 +449,10 @@ def _calculate_values(
         result = np.mean(current > 0.0, axis=1)
     elif factor in {"largest_daily_contribution_20d", "path_roughness_20d"}:
         denominator = np.sum(np.abs(current), axis=1)
-        numerator = (
-            np.max(np.abs(current), axis=1)
+        result = (
+            path_efficiency(np.max(np.abs(current), axis=1), denominator)
             if factor == "largest_daily_contribution_20d"
-            else np.abs(np.sum(current, axis=1))
-        )
-        result = np.divide(
-            numerator,
-            denominator,
-            out=np.full(len(current), np.nan),
-            where=denominator > 0,
+            else np.abs(path_efficiency(current.sum(axis=1), denominator))
         )
         if factor == "path_roughness_20d":
             result = 1.0 - result
@@ -423,6 +462,30 @@ def _calculate_values(
         raise ValueError("price_volume_calculation_missing")
     output[first - start :][valid] = result
     return output
+
+
+def _breakout_episode(price, width):
+    """Track a frozen range boundary in linear time without look-ahead."""
+    price = np.asarray(price, dtype=float)
+    history = pd.Series(price).where(lambda x: x > 0).shift().rolling(width)
+    high, low = history.max().to_numpy(), history.min().to_numpy()
+    known = np.isfinite(price) & (price > 0) & np.isfinite(high) & np.isfinite(low)
+    direction, duration, followthrough = np.full((3, len(price)), np.nan)
+    side, level, origin, started = 0, np.nan, np.nan, 0
+    for i, current in enumerate(price):
+        if not known[i]:
+            side = 0
+            continue
+        if side and side * (current - level) <= 0:
+            side = 0
+        if side == 0:
+            side = int(current > high[i]) - int(current < low[i])
+            if side:
+                level, origin, started = high[i] if side > 0 else low[i], current, i
+        direction[i] = side
+        duration[i] = side * (i - started + 1) if side else 0
+        followthrough[i] = current / origin - 1 if side else 0
+    return direction, duration, followthrough
 
 
 def _calculate_theme_values(values, factor, start, stop):
@@ -701,6 +764,14 @@ def _price_reference(values, sums, side, width):
 
 
 def _calculate_level_values(values, sums, factor, start, stop):
+    if factor.startswith("failed_close_"):
+        side = "high" if factor.startswith("failed_close_up_") else "low"
+        horizon, width = map(int, factor.removesuffix("d").split("_")[-2:])
+        key = ("failed_close_episode", side, width)
+        if key not in sums:
+            sums[key] = _closing_breakout_failure(values, sums, side, width)
+        age, distance = sums[key]
+        return np.where(age > horizon, 0, distance)[start:stop].copy()
     if "_break_retest_" in factor:
         return _calculate_retest_values(values, sums, factor, start, stop)
     width = _PRICE_VOLUME_INPUT_WINDOWS[factor][1][0] - 1
@@ -713,7 +784,7 @@ def _calculate_level_values(values, sums, factor, start, stop):
             "adj_close"
             if factor.startswith("peak_drawdown_")
             else "low"
-            if factor.startswith("support_") or factor == "failed_down_breakout_20d"
+            if factor.startswith(("support_", "failed_down_breakout_"))
             else "high"
         )
         references, complete = _price_reference(values, sums, side, width)
@@ -735,7 +806,7 @@ def _calculate_level_values(values, sums, factor, start, stop):
                 touch = (extreme >= 0.99 * level) & (extreme <= level)
                 result = np.where(touch, (extreme - current) / level, 0)
                 valid &= extreme >= current
-            elif factor == "failed_up_breakout_20d":
+            elif factor.startswith("failed_up_breakout_"):
                 result = np.where(
                     current <= level, np.maximum(extreme / level - 1, 0), 0
                 )
@@ -771,6 +842,32 @@ def _calculate_level_values(values, sums, factor, start, stop):
         )
     output[first - start :][valid] = result
     return output
+
+
+def _closing_breakout_failure(values, sums, side, width):
+    """Keep an episode's original boundary, including beyond its test horizon."""
+    reference, complete = _price_reference(values, sums, side, width)
+    price = _price_extreme(values, sums, "adj_close")
+    age, distance = np.full((2, len(price)), np.nan)
+    sign = 1 if side == "high" else -1
+    active, level, began = False, np.nan, 0
+    for i in range(1, len(price)):
+        if not np.isfinite(price[i]):
+            active = False
+            continue
+        if active:
+            age[i], distance[i] = 0, 0
+            if sign * (price[i] - level) < 0:
+                age[i] = i - began
+                distance[i] = sign * (1 - price[i] / level)
+                active = False
+        elif i >= width and (
+            complete[i - 1] or sign * (price[i] - reference[i - 1]) <= 0
+        ):
+            age[i], distance[i] = 0, 0
+            if complete[i - 1] and sign * (price[i] - reference[i - 1]) > 0:
+                active, level, began = True, reference[i - 1], i
+    return age, distance
 
 
 def _calculate_retest_values(values, sums, factor, start, stop):

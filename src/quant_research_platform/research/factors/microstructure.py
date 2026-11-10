@@ -30,6 +30,21 @@ def _level_flow(prices, quantity, prior_price, prior_quantity, sign):
 
 def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
     columns = protocol.DEFAULT_FACTORS if columns is None else tuple(columns)
+    paths = tuple(name for name in columns if name in protocol.PATH_INPUTS)
+    if paths:
+        from .intraday_path import calculate
+
+        calculated = calculate(panel, columns=paths)
+        ordinary = tuple(name for name in columns if name not in paths)
+        if ordinary:
+            calculated = compute_factors(
+                panel, columns=ordinary, ofi_halflife_seconds=ofi_halflife_seconds
+            ).merge(calculated, on=list(protocol.KEY), validate="one_to_one")
+        return (
+            calculated.loc[:, [*protocol.KEY, *columns]]
+            .sort_values(["timestamp", "asset_id"], kind="stable")
+            .reset_index(drop=True)
+        )
     requested = set(columns)
     needed = requested.copy()
     if "trade_activity_ratio_30_300s" in requested:

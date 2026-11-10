@@ -149,7 +149,7 @@ def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_p
             "industry_level1_code": "A",
             "total_market_cap": np.where(signs[:, 6] > 0, 4e8, 1e8),
             **dict(zip(RISK_STYLE_COLUMNS, signs[:, :5].T, strict=True)),
-            "momentum_20d": signs[:, 5],
+            "reversal_20d": signs[:, 5],
             "forward_return_20d": 0.02
             + signs[:, :5] @ (np.arange(5) / 1000)
             + residual,
@@ -232,7 +232,7 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
             "industry_level1_code": "A",
             "total_market_cap": 1e8,
             **dict(zip(RISK_STYLE_COLUMNS, signs[:, :5].T, strict=True)),
-            "momentum_20d": signs[:, 5],
+            "reversal_20d": signs[:, 5],
             "forward_return_20d": returns,
             "return_maturity": pd.Timestamp("2024-02-01"),
         }
@@ -308,7 +308,7 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
         "model": {
             "model_id": "linear",
             "model_algorithm": "linear_regression",
-            "input_factor_columns": ["momentum_20d"],
+            "input_factor_columns": ["reversal_20d"],
             "target_column": "model_target",
         },
         "fit_windows": [{"start": "2024-01-02", "end": "2024-01-02"}],
@@ -541,7 +541,7 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
                     "asset_id": [f"a{i:04d}" for i in range(100 * repetitions)],
                     "timestamp": pd.Timestamp(day),
                     "eligible": True,
-                    "momentum_20d": np.tile(raw, repetitions),
+                    "reversal_20d": np.tile(raw, repetitions),
                     "log_total_market_cap": np.tile(sizes, repetitions),
                     "industry_standard_id": "test",
                     "industry_level1_code": "A",
@@ -574,12 +574,12 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
     for day, group in saved.groupby("timestamp"):
         expected_sign = np.tile(signs, len(group) // 100)
         np.testing.assert_allclose(
-            group.feature_momentum_20d, expected_sign, rtol=1e-12, atol=1e-12
+            group.feature_reversal_20d, expected_sign, rtol=1e-12, atol=1e-12
         )
         np.testing.assert_allclose(
             group.model_target, expected_sign * residual / 64, rtol=1e-12, atol=1e-17
         )
-        assert group.feature_momentum_20d.notna().all()
+        assert group.feature_reversal_20d.notna().all()
         assert group.model_target_available_at.eq(day + pd.Timedelta(days=1)).all()
     model = fit(
         {
@@ -589,7 +589,7 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
             "model": {
                 "model_id": "linear",
                 "model_algorithm": "linear_regression",
-                "input_feature_columns": ["feature_momentum_20d"],
+                "input_feature_columns": ["feature_reversal_20d"],
                 "target_column": "model_target",
             },
             "fit_windows": [{"start": "2024-01-02", "end": "2024-01-02"}],
@@ -633,7 +633,7 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
         }
     )
     frame = _frame().assign(
-        momentum_20d=lambda rows: rows.factor,
+        reversal_20d=lambda rows: rows.factor,
         float_market_cap=np.exp(np.linspace(-2.0, 2.0, 120)),
     )
     source, _ = assembly_source(
@@ -683,13 +683,13 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
         saved.model_target, returns - design @ coefficients, atol=1e-14
     )
     np.testing.assert_allclose(
-        saved.feature_momentum_20d, 100 * saved.model_target, atol=1e-12
+        saved.feature_reversal_20d, 100 * saved.model_target, atol=1e-12
     )
     declared = inspect_dataset(root).spec
     assert declared["risk_model"] == model.to_dict()
     assert declared["feature_transforms"][0]["risk_model"] == model.to_dict()
     with pytest.raises(ValueError, match="feature_risk_neutralization_conflict"):
-        FeatureTransformSpec("a_share_canonical", ("momentum_20d",), risk_model=model)
+        FeatureTransformSpec("a_share_canonical", ("reversal_20d",), risk_model=model)
     assert "total_market_cap" not in saved
     model_root = fit(
         {
@@ -699,7 +699,7 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
             "model": {
                 "model_id": "linear",
                 "model_algorithm": "linear_regression",
-                "input_feature_columns": ["feature_momentum_20d"],
+                "input_feature_columns": ["feature_reversal_20d"],
                 "target_column": "model_target",
             },
             "fit_windows": [{"start": "2020-01-02", "end": "2020-01-02"}],
@@ -788,7 +788,7 @@ def test_shared_risk_missing_values_only_affect_dependent_outputs(tmp_path):
             "log_total_market_cap",
             "total_market_cap",
         ]
-    ).assign(momentum_20d=frame.factor)
+    ).assign(reversal_20d=frame.factor)
     source, _ = assembly_source(
         tmp_path,
         raw,
@@ -814,9 +814,9 @@ def test_shared_risk_missing_values_only_affect_dependent_outputs(tmp_path):
         )
     )
     saved = read_dataset(root)
-    np.testing.assert_array_equal(saved.momentum_20d, raw.momentum_20d)
+    np.testing.assert_array_equal(saved.reversal_20d, raw.reversal_20d)
     np.testing.assert_array_equal(
-        saved.feature_pre_neutral_momentum_20d, raw.momentum_20d
+        saved.feature_pre_neutral_reversal_20d, raw.reversal_20d
     )
     np.testing.assert_array_equal(saved.model_target, raw.forward_return_20d)
 
@@ -919,7 +919,7 @@ def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw
             "asset_id": daily.asset_id,
             "eligible": True,
             "listing_date": pd.Timestamp("2010-01-01"),
-            "momentum_20d": signs[:, 5] + signs[:, :5] @ np.arange(1, 6),
+            "reversal_20d": signs[:, 5] + signs[:, :5] @ np.arange(1, 6),
             # The imported risk design must not overwrite a raw alpha with this name.
             "log_total_market_cap": np.arange(128) / 7,
         }
@@ -941,7 +941,7 @@ def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw
         sampled,
         inputs={"sampled": str(sampled), "daily_risk": str(risk_root)},
         time_window={"start": "2024-01-03", "end": "2024-01-03"},
-        factor_columns=["momentum_20d", "log_total_market_cap"],
+        factor_columns=["reversal_20d", "log_total_market_cap"],
         filter_columns=["eligible"],
         feature_recipe="a_share_canonical",
         feature_groups=["raw", "processed", "pre_neutral"],
@@ -993,23 +993,23 @@ def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw
                 *normalized,
             )
         )
-        response = observations.momentum_20d.iloc[valid].to_numpy()
+        response = observations.reversal_20d.iloc[valid].to_numpy()
         weights = complete.total_market_cap.to_numpy() ** 0.25
         coefficients = np.linalg.lstsq(
             design * weights[:, None], response * weights, rcond=None
         )[0]
         np.testing.assert_allclose(
-            rows.feature_momentum_20d.iloc[valid],
+            rows.feature_reversal_20d.iloc[valid],
             response - design @ coefficients,
             atol=1e-12,
         )
-        assert rows.feature_momentum_20d.iloc[sorted(unavailable)].isna().all()
-        np.testing.assert_array_equal(rows.momentum_20d, observations.momentum_20d)
+        assert rows.feature_reversal_20d.iloc[sorted(unavailable)].isna().all()
+        np.testing.assert_array_equal(rows.reversal_20d, observations.reversal_20d)
         np.testing.assert_array_equal(
             rows.log_total_market_cap, observations.log_total_market_cap
         )
         np.testing.assert_array_equal(
-            rows.feature_pre_neutral_momentum_20d, observations.momentum_20d
+            rows.feature_pre_neutral_reversal_20d, observations.reversal_20d
         )
     manifest = inspect_dataset(tmp_path / "assembled").manifest
     assert (
@@ -1028,8 +1028,8 @@ def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw
             }
         )
     )
-    assert missing.feature_momentum_20d.isna().all()
-    np.testing.assert_array_equal(missing.momentum_20d, saved.momentum_20d)
+    assert missing.feature_reversal_20d.isna().all()
+    np.testing.assert_array_equal(missing.reversal_20d, saved.reversal_20d)
     np.testing.assert_array_equal(
-        missing.feature_pre_neutral_momentum_20d, saved.feature_pre_neutral_momentum_20d
+        missing.feature_pre_neutral_reversal_20d, saved.feature_pre_neutral_reversal_20d
     )

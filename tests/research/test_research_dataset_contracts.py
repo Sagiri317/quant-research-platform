@@ -323,7 +323,7 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
                 "market_id": "a_share",
                 "asset_id": f"asset_{asset:03d}",
                 "timestamp": timestamp,
-                "momentum_20d": float(asset + date),
+                "reversal_20d": float(asset + date),
                 "forward_return_20d": float(asset - date),
                 "eligible": True,
                 "can_enter": True,

@@ -9,6 +9,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     _industry_group_codes,
 )
+from quant_research_platform.compute.dataframe.history import liquidity_beta
 from quant_research_platform.markets.implementations.a_share.calendar import (
     market_type_calendar_state,
 )
@@ -209,8 +210,6 @@ def _history_features(history, transforms, unit, frequency, window, config):
                 )
         if "implied_variance" in selected:
             values["implied_variance"] = (x / 100) ** 2 if x >= 0 else np.nan
-        if "risk_neutral_skewness" in selected:
-            values["risk_neutral_skewness"] = (100 - x) / 10
         if current_transforms or prior_transforms or volatility:
             tail = np.asarray(
                 [state[day] for day in dates[-(window + 1) :]], dtype=float
@@ -376,43 +375,6 @@ def macro_states(observations, cutoffs, *, columns, config):
                 / denominator
             )
     return pd.DataFrame(output)
-
-
-def liquidity_beta(
-    returns,
-    shocks,
-    *,
-    market_returns=None,
-    window=252,
-    min_observations=126,
-    min_changes=20,
-):
-    """Estimate historical sensitivity with explicit effective shock counts."""
-    data = pd.DataFrame(
-        {"x": np.asarray(shocks, float), "y": np.asarray(returns, float)}
-    )
-    if market_returns is not None:
-        data["m"] = np.asarray(market_returns, float)
-    data.loc[~np.isfinite(data).all(axis=1)] = np.nan
-    x, y = data.x, data.y
-    rolling = x.rolling(window, min_periods=min_observations)
-    variance = rolling.var()
-    covariance = rolling.cov(y)
-    valid = data.x.notna() & data.x.ne(0)
-    enough = valid.rolling(window, min_periods=1).sum().ge(min_changes)
-    if market_returns is None:
-        result = covariance / variance.where(variance.gt(0))
-    else:
-        market_variance = data.m.rolling(window, min_periods=min_observations).var()
-        xm = rolling.cov(data.m)
-        ym = y.rolling(window, min_periods=min_observations).cov(data.m)
-        product = variance * market_variance
-        determinant = product - xm * xm
-        invertible = determinant.gt(16 * np.finfo(float).eps * product) & product.gt(0)
-        result = (covariance * market_variance - ym * xm) / determinant.where(
-            invertible
-        )
-    return result.where(enough).to_numpy()
 
 
 def calculate_macro_factors(

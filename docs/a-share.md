@@ -705,12 +705,12 @@ momentum_252_20 = P_{t-20} / P_{t-252} - 1
 ##### 可选价量因子
 
 PV25 与六项 CORE 由普通研究配置保存，不是代码中的隐式默认选择。
-库通过同一 `price_volume_factor_definitions(..., factor_columns=...)` 选择以下独有16项；
+库通过同一 `price_volume_factor_definitions(..., factor_columns=...)` 选择以下可选项；
 没有新增实验输出组，也没有周期笛卡尔展开：
 
 | 因子 | 定义 |
 |---|---|
-| momentum_20d / momentum_60d | P_t/P_{t-k}-1，不跳过近期区间；只要求真实端点 |
+| momentum_60d | P_t/P_{t-k}-1，不跳过近期区间；只要求真实端点 |
 | upside_volatility_20d | sqrt(mean(max(r,0)^2))，完整20日 |
 | min_return_20d | 完整20日收益最小值 |
 | kurtosis_60d | 完整60日无偏超额峰度；常数窗保持原NULL |
@@ -2555,3 +2555,6 @@ ON/ID 准备表只通过 parameters.horizons 选择期限，各期限的分量�
 `price_volume_facts` 与 `market_model_factors` 接受 `parameters.min_fresh_fraction`，默认 0.75，可显式指定 (0,1] 并保存实际参数。适用统计窗口须走满名义会话跨度，达到 ceil(fraction × w) fresh；`filling_flag=0` 才计 fresh，停牌数值和未知报价按各计算公式区别处理。端点、路径与极值不自动套用部分窗口规则。
 
 `risk_residual_factors` 同样接受 `min_fresh_fraction`，fresh 指用前一会话已知行业和五风格成功拟合的当日收益残差；停牌不作为有效残差。5 日反转、20 日动量和 60 日波动的公式及输入见 [研究选择](research.md#数据与目标)。
+
+
+量价、资金持仓、跨市场与高频扩展的定义、处理和真实输入限制见 [因子扩展](factor-expansion.md)。

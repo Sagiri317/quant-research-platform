@@ -6,7 +6,7 @@
     "momentum_batch": {
       "path": "results/momentum-batch",
       "columns": [
-        "momentum_20d"
+        "reversal_20d"
       ]
     },
     "volatility_batch": {
@@ -25,7 +25,7 @@
   },
   "base_input_data_id": "panel",
   "factor_columns": [
-    "momentum_20d",
+    "reversal_20d",
     "volatility_20d"
   ],
   "feature_columns": [

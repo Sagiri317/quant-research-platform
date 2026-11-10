@@ -45,7 +45,7 @@ def test_assembly_persists_scientific_input_selection(tmp_path, storage):
             rows.to_parquet(root / f"{year}.parquet", index=False)
         source["path"] = str(root)
     source.update(
-        columns=["momentum_20d"],
+        columns=["reversal_20d"],
         files=sorted(str(path.relative_to(root)) for path in root.rglob("*.parquet")),
         years=[2024],
         time_window={"start": "2024-01-01", "end": "2024-01-03"},
@@ -64,7 +64,7 @@ def test_assembly_persists_scientific_input_selection(tmp_path, storage):
     facts = inspect_dataset(output)
     assert facts.manifest["inputs"] == config["inputs"]
     assert facts.manifest["parameters"]["time_window"] == config["time_window"]
-    columns = ["market_id", "asset_id", "timestamp", "momentum_20d"]
+    columns = ["market_id", "asset_id", "timestamp", "reversal_20d"]
     assert facts.manifest["parameters"]["input_columns"] == {"selected": columns}
     expected = (
         frame.loc[
@@ -110,14 +110,14 @@ def test_assembly_applies_overall_window_once_to_each_reader(
     )
     frame = pd.concat(
         [
-            _frame(1).assign(timestamp=stamp, momentum_20d=float(index))
+            _frame(1).assign(timestamp=stamp, reversal_20d=float(index))
             for index, stamp in enumerate(stamps)
         ],
         ignore_index=True,
     )
     base, _ = _source(tmp_path / "base", frame)
     auxiliary, _ = _source(
-        tmp_path / "auxiliary", frame.rename(columns={"momentum_20d": "context"})
+        tmp_path / "auxiliary", frame.rename(columns={"reversal_20d": "context"})
     )
     overall = {"start": "2024-01-02", "end": "2024-01-04"}
     if intraday:
@@ -166,7 +166,7 @@ def test_assembly_applies_overall_window_once_to_each_reader(
     monkeypatch.setattr(reading, "iter_dataset_file_batches", original)
     actual = read_dataset(output)
     expected = (
-        selected.assign(context=selected.momentum_20d)
+        selected.assign(context=selected.reversal_20d)
         .astype({"timestamp": "datetime64[ns]"})
         .reset_index(drop=True)
     )

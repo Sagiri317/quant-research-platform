@@ -5,6 +5,8 @@ from math import ceil
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import leave_one_out_mean
+from quant_research_platform.compute.dataframe.history import HistoryWindow
 from quant_research_platform.research.filtering import a_share_eligibility
 from quant_research_platform.research.risk import (
     FactorExposureSession,
@@ -18,6 +20,8 @@ RESIDUAL_FACTOR_WINDOWS = {
     "risk_residual_volatility_60d": 60,
     "risk_residual_drawdown_20d": 20,
     "risk_residual_drawdown_60d": 60,
+    "industry_residual_comovement_20d": 20,
+    "industry_residual_comovement_60d": 60,
 }
 
 
@@ -71,8 +75,28 @@ def calculate_residual_factors(
     frame["_residual"] = residuals
     age = groups.cumcount()
     output = frame.loc[:, ["asset_id", "timestamp"]].copy()
+    if any(
+        column.startswith("industry_residual_comovement_") for column in factor_columns
+    ):
+        industry = frame.groupby(
+            ["timestamp", "industry_standard_id", "industry_level1_code"], sort=False
+        ).ngroup()
+        peers = leave_one_out_mean(frame._residual, industry)
+        history_start = (
+            np.arange(len(frame), dtype=np.int64) - groups.cumcount().to_numpy()
+        )
     for column in factor_columns:
         window = RESIDUAL_FACTOR_WINDOWS[column]
+        if column.startswith("industry_residual_comovement_"):
+            output[column] = (
+                frame._residual.rolling(
+                    HistoryWindow(history_start, window),
+                    min_periods=ceil(window * min_fresh_fraction),
+                )
+                .corr(peers)
+                .where(age >= window)
+            )
+            continue
         if "drawdown" in column:
             values = groups._residual.transform(
                 lambda x, window=window: _residual_drawdown(x.to_numpy(), window)

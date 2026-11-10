@@ -40,6 +40,18 @@ def calculate_factors_for_panel(
         ]
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families == ("style_structure",):
+        from .style_structure import calculate
+
+        return _with_keys(
+            output_source,
+            calculate(
+                panel_frame,
+                factor_columns=tuple(d.output_column for d in requested),
+                history_keys=history_keys,
+            ),
+            output_columns=tuple(d.output_column for d in requested),
+        )
     if families == ("market_structure",):
         from .market_structure import calculate
 
@@ -167,6 +179,7 @@ def _market_model_frames(
             piece["residual_volatility_60d"] = piece.asset_id.map(
                 styles.residual_volatility
             )
+            piece["market_return"] = styles.market_return
             if "_panel_observed" in cross:
                 piece = piece.loc[cross["_panel_observed"].to_numpy()]
             pieces.append(piece)
@@ -208,7 +221,7 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
             ),
             default=0,
         )
-        if definition.family == "market_structure":
+        if definition.family in {"market_structure", "style_structure"}:
             # Structure definitions already declare preceding sessions explicitly.
             current = definition.lookback_window or 0
         column = definition.output_column

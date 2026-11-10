@@ -14,7 +14,7 @@ def test_market_and_industry_contexts_are_not_cross_sectionally_rescaled(tmp_pat
         "market_up_fraction",
         "industry_amount_hhi",
         "leader_breadth_fragility",
-        "momentum_20d",
+        "reversal_20d",
     )
     frame = pd.DataFrame(
         {
@@ -25,7 +25,7 @@ def test_market_and_industry_contexts_are_not_cross_sectionally_rescaled(tmp_pat
             "market_up_fraction": 0.7,
             "industry_amount_hhi": [0.2, 0.2, 0.8],
             "leader_breadth_fragility": [0.03, 0.06, 0.09],
-            "momentum_20d": [-0.1, 0.0, 0.1],
+            "reversal_20d": [-0.1, 0.0, 0.1],
         }
     )
     source = tmp_path / "source"
@@ -70,9 +70,9 @@ def test_market_and_industry_contexts_are_not_cross_sectionally_rescaled(tmp_pat
         actual.loc[:, list(factors)], frame.loc[:, list(factors)]
     )
     assert open_dataset_session(result).spec["feature_columns"] == [
-        "feature_momentum_20d"
+        "feature_reversal_20d"
     ]
-    assert actual.feature_momentum_20d.mean() == pytest.approx(0)
+    assert actual.feature_reversal_20d.mean() == pytest.approx(0)
     with pytest.raises(ValueError, match="amplitude_factors_require_raw_group"):
         assemble(
             {

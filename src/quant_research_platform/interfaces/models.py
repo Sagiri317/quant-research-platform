@@ -20,6 +20,7 @@ class FactorCatalogItem(_PublicModel):
     output_column: str
     required_windows: list[int]
     lookback_window: int | None
+    full_history: bool
     grain: str
     timing_semantics: str
     null_policy: str

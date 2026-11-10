@@ -102,7 +102,6 @@ def test_individually_requested_transforms_keep_revisions_and_partial_ewma_weigh
         "growth": 26 / 18 - 1,
         "yoy_growth": np.nan,
         "implied_variance": 0.26**2,
-        "risk_neutral_skewness": 7.4,
     }
     combined = _history_features(history, expected, "index", "D", 4, config)
     for transform, value in expected.items():
@@ -207,26 +206,26 @@ def test_volatility_ratios_pair_sessions_and_wait_for_both_releases():
     pd.testing.assert_frame_equal(prefix, result.iloc[:4])
 
 
-def test_implied_variance_skewness_and_joint_state_have_explicit_scales():
+def test_implied_variance_skew_level_and_joint_state_have_explicit_scales():
     rows = []
     for day, vix, skew in [(1, 10, 110), (2, 20, 130), (3, 30, 120)]:
         for name, value in [("us_vix", vix), ("us_skew", skew)]:
             rows.append((name, f"2024-01-0{day}", f"2024-01-0{day}T23:00", value))
     columns = [
         "ml_us_vix_implied_variance",
-        "ml_us_skew_risk_neutral_skewness",
+        "ml_us_skew_level",
         "ml_us_vix_skew_zscore_product",
     ]
     result = macro_states(
         _observations(rows), ["2024-01-03T23:00"], columns=columns, config=_config()
     )
-    np.testing.assert_allclose(result[columns].iloc[0], [0.09, -2, 0])
+    np.testing.assert_allclose(result[columns].iloc[0], [0.09, 120, 0])
     from quant_research_platform.research.factors.macro_liquidity.definitions import (
         factor_unit,
     )
 
     assert factor_unit(columns[0]) == "annualized_variance"
-    assert factor_unit(columns[1]) == "dimensionless"
+    assert factor_unit(columns[1]) == "index"
     assert factor_unit("ml_us_vix_change_x_volatility_60d") == "index"
     assert factor_unit("ml_us_real_treasury_10y_change_x_industry_beta_252d") == "bp"
 

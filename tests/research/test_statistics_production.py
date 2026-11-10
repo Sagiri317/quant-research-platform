@@ -1003,12 +1003,12 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
 
 @pytest.mark.parametrize("access", ("validation", "test"))
 @pytest.mark.parametrize(
-    "family_id", ("momentum_20d", "__prediction_alpha__", "timestamp")
+    "family_id", ("reversal_20d", "__prediction_alpha__", "timestamp")
 )
 def test_model_family_names_preserve_factor_statistics_and_native_names(
     tmp_path: Path, family_id: str, access: str
 ) -> None:
-    factor = "momentum_20d"
+    factor = "reversal_20d"
     dates = pd.bdate_range(
         "2024-01-02" if access == "test" else "2019-01-02", periods=3
     )

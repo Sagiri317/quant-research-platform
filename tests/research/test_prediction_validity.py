@@ -105,7 +105,7 @@ def test_mixed_feature_families_keep_nulls_and_partial_samples(
     from tests.helpers.research_processed_inputs import assembly_frame as _frame
     from tests.helpers.research_processed_inputs import assembly_source as _source
 
-    x, y = "momentum_20d", "log_float_market_cap"
+    x, y = "reversal_20d", "log_float_market_cap"
     raw = _frame(106).assign(
         eligible=True,
         industry_standard_id="test",

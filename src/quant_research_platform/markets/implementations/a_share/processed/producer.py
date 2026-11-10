@@ -165,6 +165,7 @@ def produce_a_share_processed_data(
             if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask"
             else _preceding_input_window(time_window)
             if factor_engine.factor_lookback_bars(factor_definitions)
+            or any(definition.full_history for definition in factor_definitions)
             else time_window
         )
         options = _dataset_input_options(root, time_window=input_window)
@@ -180,7 +181,13 @@ def produce_a_share_processed_data(
             }
             if any(
                 definition.family
-                in {"price_volume", "market_model", "risk_residual", "market_structure"}
+                in {
+                    "price_volume",
+                    "market_model",
+                    "risk_residual",
+                    "market_structure",
+                    "style_structure",
+                }
                 for definition in factor_definitions
             ):
                 requested.add("listing_date")
@@ -437,11 +444,13 @@ def _processed_frames(
         else ()
     )
     lookback = factor_engine.factor_lookback_bars(definitions)
+    full_history = any(definition.full_history for definition in definitions)
     market_model = any(
         definition.family == "market_model" for definition in definitions
     )
     full_cross_section = market_model or any(
-        definition.family == "market_structure" for definition in definitions
+        definition.family in {"market_structure", "style_structure", "risk_residual"}
+        for definition in definitions
     )
     lookahead = (
         label_engine.label_lookahead_bars(
@@ -496,9 +505,9 @@ def _processed_frames(
             materialize_dataset_session(panel_axis),
             calendar,
             panel_end=panel_end,
-            # Only the recursive market model replays all past membership.
+            # Recursive definitions retain their observed historical state.
             time_window=_preceding_input_window(time_window)
-            if market_model
+            if full_history
             else time_window,
             lookback=factor_engine.factor_lookback_bars(
                 tuple(
@@ -513,6 +522,7 @@ def _processed_frames(
                     definition
                     for definition in definitions
                     if definition.output_column == "market_breadth_change_5d"
+                    or definition.output_column.startswith("breadth_")
                 )
             ),
             peer_lookback=factor_engine.factor_lookback_bars(
@@ -520,6 +530,7 @@ def _processed_frames(
                     definition
                     for definition in definitions
                     if definition.output_column == "industry_comovement_20d"
+                    or definition.family in {"style_structure", "risk_residual"}
                 )
             ),
         )
@@ -636,8 +647,8 @@ def _processed_frames(
                 ),
                 default=read_end,
             )
-        read_start = sessions[max(0, start - lookback)]
-        if lookback:
+        read_start = sessions[0] if full_history else sessions[max(0, start - lookback)]
+        if lookback and not full_history:
             read_start = min(
                 (
                     axis[max(0, bisect_left(axis, core[0]) - lookback)]
@@ -1346,7 +1357,7 @@ def _compute_processed_frame(
                 .loc[:, list(spec.required_columns)]
             )
         input_frame = dependencies[next(iter(spec.processed_input_data_ids))]
-        if spec.data_id == "risk_residual_factors":
+        if spec.data_id in {"risk_residual_factors", "style_structure_factors"}:
             keys = ["market_id", "asset_id", "timestamp"]
             for name in spec.processed_input_data_ids[1:]:
                 input_frame = input_frame.merge(

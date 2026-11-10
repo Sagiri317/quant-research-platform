@@ -1,7 +1,7 @@
 {
   "dataset": "data/research/factor_search",
   "columns": [
-    "momentum_20d",
+    "reversal_20d",
     "volatility_20d"
   ],
   "baseline_columns": [],

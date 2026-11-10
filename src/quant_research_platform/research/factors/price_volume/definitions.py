@@ -18,6 +18,7 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "momentum_60_20": (("adj_close",), (60, 20)),
     "momentum_120_20": (("adj_close",), (120, 20)),
     "momentum_252_20": (("adj_close",), (252, 20)),
+    "return_acceleration_6m6m": (("adj_close",), (1,)),
     "volatility_20d": (("period_return",), (20,)),
     "volatility_60d": (("period_return",), (60,)),
     "downside_volatility_20d": (("period_return",), (20,)),
@@ -37,12 +38,12 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "trend_efficiency_60d": (("period_return",), (60,)),
     "signed_amount_flow_20d": (("period_return", "amount"), (20,)),
     "log_float_market_cap": (("float_market_cap",), ()),
-    "momentum_20d": (("adj_close",), (20,)),
     "momentum_60d": (("adj_close",), (60,)),
     "upside_volatility_20d": (("period_return",), (20,)),
     "min_return_20d": (("period_return",), (20,)),
     "kurtosis_60d": (("period_return",), (60,)),
     "avg_amount_20d": (("amount",), (20,)),
+    "avg_volume_20d": (("volume",), (20,)),
     "amount_change_20d": (("amount",), (20,)),
     "volume_change_20d": (("volume",), (20,)),
     "turnover_change_20d": (("turnover",), (20,)),
@@ -221,25 +222,36 @@ for _window in (20, 60, 252):
             "is distinct from maximum drawdown during a historical path."
         )
 
-for _name, _description in {
-    "failed_up_breakout_20d": (
-        "max(current adjusted high/prior-20 adjusted high maximum-1,0) "
-        "when current adjusted close is at or below that prior resistance, else zero"
-    ),
-    "failed_down_breakout_20d": (
-        "max(1-current adjusted low/prior-20 adjusted low minimum,0) "
-        "when current adjusted close is at or above that prior support, else zero"
-    ),
-}.items():
-    _PRICE_VOLUME_INPUT_WINDOWS[_name] = (
-        ("adj_close", "high" if _name == "failed_up_breakout_20d" else "low", "close"),
-        (21,),
-    )
-    PRICE_VOLUME_LEVEL_DESCRIPTIONS[_name] = (
-        f"QRP candidate: {_description}. A same-session failed breach is known only "
-        "after the close and released next session, never at the initial breach. "
-        "Adjusted high/low use the same bar's adj_close/close."
-    )
+for _window in (20, 60, 252):
+    for _side, _extreme in (("up", "high"), ("down", "low")):
+        _name = f"failed_{_side}_breakout_{_window}d"
+        _PRICE_VOLUME_INPUT_WINDOWS[_name] = (
+            ("adj_close", _extreme, "close"),
+            (_window + 1,),
+        )
+        PRICE_VOLUME_LEVEL_DESCRIPTIONS[_name] = (
+            f"Same-session failed {_side} breach of the preceding "
+            f"{_window} adjusted {_extreme} range. "
+            "Nonnegative intraday excursion beyond the reference, conditional"
+            " on closing back at or inside it; zero otherwise. "
+            "Known after the close only. Adjusted extremes use the same bar's"
+            " adj_close/close."
+        )
+        for _horizon in (3, 5):
+            _name = f"failed_close_{_side}_breakout_{_horizon}_{_window}d"
+            _PRICE_VOLUME_INPUT_WINDOWS[_name] = (
+                ("adj_close", _extreme, "close"),
+                (_window + 1,),
+            )
+            PRICE_VOLUME_LEVEL_DESCRIPTIONS[_name] = (
+                "User hypothesis: first strict closing reentry within "
+                f"{_horizon} sessions of a closing-confirmed {_side} breakout "
+                f"of the preceding {_window} adjusted {_extreme} range. "
+                "Freeze the original boundary until reentry; intraday retests"
+                " and closes at the boundary do not trigger failure. "
+                "Value is nonnegative closing penetration into the original "
+                "range, zero off the event, and known only at reentry close."
+            )
 for _window in (20, 60, 252):
     for _side in ("up", "down"):
         _name = f"{_side}_break_retest_5_{_window}d"
@@ -282,6 +294,16 @@ for _name, _formula in PRICE_VOLUME_PROFILE_DESCRIPTIONS.items():
     )
 
 _PUBLISHED_PRICE_VOLUME_DESCRIPTIONS = {
+    "return_acceleration_6m6m": (
+        "Xiong-Ibbotson-inspired monthly acceleration: mean simple returns in "
+        "the latest six fully completed calendar months minus the preceding six; "
+        "last session prices preserve missing month-end prices, never skip months. "
+        "The current unfinished month is excluded. This implements the described "
+        "six-versus-six comparison, without the paper example threshold or "
+        "portfolio rule. "
+        "Source: "
+        "https://insights.som.yale.edu/insights/should-investors-look-for-stocks-with-momentum"
+    ),
     "alpha101_054": (
         "Alpha101 #54: -((low-close)*open^5)/((low-high)*close^5). "
         "Uses same-session raw OHLC; a common price adjustment cancels. "
@@ -319,6 +341,53 @@ _PUBLISHED_PRICE_VOLUME_DESCRIPTIONS = {
     ),
 }
 
+for _width in (20, 60, 252):
+    for _kind, _description in (
+        (
+            "signed_breakout_duration",
+            (
+                "Signed age of an active close breakout; the preceding range "
+                "boundary is frozen at the first breakout and the episode ends on"
+                " reentry."
+            ),
+        ),
+        (
+            "signed_breakout_followthrough",
+            (
+                "Close return since the first active breakout, retaining its "
+                "natural return sign; zero outside an active episode."
+            ),
+        ),
+        (
+            "breakout_activity_confirmation",
+            (
+                "Active breakout direction times log(current amount / "
+                "preceding-window mean amount); zero outside an active episode."
+            ),
+        ),
+    ):
+        _column = f"{_kind}_{_width}d"
+        _PRICE_VOLUME_INPUT_WINDOWS[_column] = (
+            ("adj_close", "amount")
+            if _kind == "breakout_activity_confirmation"
+            else ("adj_close",),
+            (_width + 1,),
+        )
+        PRICE_VOLUME_THEME_DESCRIPTIONS[_column] = _description
+
+for _width in (20, 60):
+    for _side in ("up", "down"):
+        _name = f"price_{_side}_acceleration_{_width}d"
+        _PRICE_VOLUME_INPUT_WINDOWS[_name] = (("adj_close",), (_width,))
+        PRICE_VOLUME_THEME_DESCRIPTIONS[_name] = (
+            "QRP acceleration hypothesis: quadratic OLS of log adjusted prices "
+            "on session time; twice quadratic coefficient / RMS log returns. "
+            "Positive curvature with positive endpoint slope for up, negative "
+            "curvature with negative endpoint slope for down; otherwise zero. "
+            "Complete positive prices, flat paths undefined; not chart angles "
+            "or the monthly Xiong-Ibbotson 6-versus-6 definition."
+        )
+
 PRICE_VOLUME_LIBRARY = tuple(_PRICE_VOLUME_INPUT_WINDOWS)
 PRICE_VOLUME_PATH_FACTORS = (
     "positive_return_fraction_20d",
@@ -330,6 +399,19 @@ _PRICE_VOLUME_INPUT_WINDOWS.update(
 )
 
 PRICE_VOLUME_UNITS = dict.fromkeys(_PRICE_VOLUME_INPUT_WINDOWS, "dimensionless")
+PRICE_VOLUME_UNITS["return_acceleration_6m6m"] = "decimal_return"
+PRICE_VOLUME_UNITS.update(
+    {
+        f"signed_breakout_duration_{width}d": "signed_trading_sessions"
+        for width in (20, 60, 252)
+    }
+)
+PRICE_VOLUME_UNITS.update(
+    {
+        f"signed_breakout_followthrough_{width}d": "decimal_return"
+        for width in (20, 60, 252)
+    }
+)
 for _name in PRICE_VOLUME_UNITS:
     if _name.startswith(
         (
@@ -358,6 +440,8 @@ for _name in PRICE_VOLUME_UNITS:
         PRICE_VOLUME_UNITS[_name] = "trading_sessions"
     elif _name.startswith("avg_amount_") or _name == "amount_volatility_20d":
         PRICE_VOLUME_UNITS[_name] = "CNY"
+    elif _name == "avg_volume_20d":
+        PRICE_VOLUME_UNITS[_name] = "shares"
     elif _name in {"share_price"}:
         PRICE_VOLUME_UNITS[_name] = "CNY_per_share"
     elif _name in {
@@ -385,6 +469,7 @@ PRICE_VOLUME_PARTIAL_STATISTICS = frozenset(
         or factor.startswith(
             (
                 "avg_amount_",
+                "avg_volume_",
                 "volatility_",
                 "downside_volatility_",
                 "amihud_",
@@ -476,6 +561,14 @@ def price_volume_factor_definitions(
                 family=PRICE_VOLUME_FACTOR_FAMILY,
                 required_windows=windows,
                 lookback_window=lookback,
+                full_history=column == "return_acceleration_6m6m"
+                or column.startswith(
+                    (
+                        "signed_breakout_",
+                        "breakout_activity_confirmation_",
+                        "failed_close_",
+                    )
+                ),
                 grain=DataGrain.ASSET_TIMESTAMP,
                 timing_semantics="same_session_close_available_at_next_session",
                 null_policy="preserve_nulls_after_min_periods",

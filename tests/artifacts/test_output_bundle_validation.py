@@ -151,7 +151,7 @@ def test_prediction_publication_rejects_invalid_training_facts(
     elif mutation == "fitting_state":
         metadata["model_metadata"]["scaler"] = None
     else:
-        metadata["model_metadata"]["input_columns"] = ["momentum_20d"]
+        metadata["model_metadata"]["input_columns"] = ["reversal_20d"]
     with pytest.raises(ValueError, match=error):
         write_prediction_outputs(
             output_path=tmp_path / "invalid",

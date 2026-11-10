@@ -192,8 +192,6 @@ def recipes():
             transforms += ("log_level", "growth", "yoy_growth")
         if name in VOLATILITY_INDICES:
             transforms += ("implied_variance",)
-        if name == "us_skew":
-            transforms += ("risk_neutral_skewness",)
         for transform in transforms:
             output[f"ml_{name}_{transform}"] = ("series", name, transform)
     for name in (
@@ -292,7 +290,6 @@ def factor_unit(name):
             "growth",
             "yoy_growth",
             "log_level",
-            "risk_neutral_skewness",
         }:
             return "dimensionless"
         return "bp" if unit == "percent" and transform != "level" else unit
