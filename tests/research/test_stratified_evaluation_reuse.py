@@ -1267,10 +1267,16 @@ def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, de
 
 
 @pytest.mark.parametrize("scope", ["own", "common"])
-def test_parallel_dates_preserve_native_tables_and_empty_domains(tmp_path, scope):
+@pytest.mark.parametrize("filter_mode", ["eligible", "unfiltered"])
+def test_parallel_dates_preserve_native_tables_and_empty_domains(
+    tmp_path, scope, filter_mode
+):
     import multiprocessing
 
     frame, config = _fixture(tmp_path, days=5)
+    config["evaluation"]["filter_mode"] = filter_mode
+    if filter_mode == "unfiltered":
+        config.pop("strata")
     dates = frame.timestamp.drop_duplicates().tolist()
     frame.loc[frame.timestamp.eq(dates[1]), "eligible"] = False
     frame.loc[frame.timestamp.eq(dates[2]), "label_available_at"] = pd.Timestamp(
@@ -1307,6 +1313,8 @@ def test_parallel_dates_preserve_native_tables_and_empty_domains(tmp_path, scope
     assert {child.pid for child in multiprocessing.active_children()} == children
     assert manifest["metadata"] == actual_manifest["metadata"]
     expected = [3, 0, 0, 3, 3] if scope == "own" else [2, 0, 0, 0, 2]
+    if filter_mode == "unfiltered":
+        expected[1] = 3 if scope == "own" else 2
     assert actual["metrics"].n_obs.tolist() == expected
     assert actual["metrics"].timestamp.tolist() == dates
     for name in names:

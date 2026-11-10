@@ -208,7 +208,6 @@ def evaluate(config):
     supports_daily = (
         str(spec.market_id) == "a_share"
         and spec.evaluation_axis == "cross_sectional"
-        and spec.filter_mode == "eligible"
         and not prediction_sources
     )
     if prediction_sources.intersection(columns):
@@ -639,7 +638,6 @@ def _scoped_evaluate(
     if (
         str(spec.market_id) != "a_share"
         or spec.evaluation_axis != "cross_sectional"
-        or spec.filter_mode != "eligible"
         or any(
             signal.source_kind not in {"factor", "feature", "prediction"}
             for signal in spec.signals
