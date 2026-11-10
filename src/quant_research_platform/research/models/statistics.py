@@ -11,7 +11,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+from quant_research_platform.artifacts.statistics import (
+    PREDICTION_CORRELATION_FIELDS,
+    STATISTICS_TABLE_COLUMNS,
+)
+from quant_research_platform.contracts.evaluations import CORRELATION_METRICS
 from quant_research_platform.contracts.experiments import (
     DEFAULT_ROOT_SEED,
     legal_training_rows,
@@ -22,6 +26,7 @@ from quant_research_platform.contracts.models import (
     CLASSIFICATION_METRICS,
     _prediction_loss_reason,
 )
+from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import (
     TimeWindow,
 )
@@ -40,6 +45,7 @@ from quant_research_platform.research.statistics import (
     _paired_mean_inference,
     _selected_analyses,
     _validate_bootstrap_configuration,
+    cross_sectional_correlations,
     cross_sectional_rank_ic,
     daily_mean_frame,
     hac_mean,
@@ -135,6 +141,7 @@ def build_a_share_statistics_tables(
     head_fraction = config["evaluation"].get("head_fraction", 0.2)
     if type(head_fraction) not in (int, float) or not 0 < head_fraction <= 1:
         raise ValueError("model_statistics_head_fraction_invalid")
+    top_quantile = resolve_top_quantile(config["evaluation"].get("top_quantile"))
     raw_label = config["evaluation"].get(
         "raw_return_label",
         "forward_return_20d"
@@ -196,7 +203,7 @@ def build_a_share_statistics_tables(
     needs_comparison = bool(
         set(analyses) & {"model_comparison", *_MODEL_ROBUSTNESS_TESTS}
     )
-    rank_records: list[dict[str, object]] = []
+    correlation_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
     predictive_records: list[dict[str, object]] = []
@@ -255,11 +262,25 @@ def build_a_share_statistics_tables(
                     if raw_label is not None
                     else pd.Series(dtype="float64")
                 )
+                correlation_input = session.loc[
+                    session.eligible.fillna(False), ["timestamp", "asset_id"]
+                ].copy()
+                labels = mature[primary_label]
+                if pd.api.types.is_integer_dtype(labels.dtype):
+                    labels = labels.astype(
+                        "UInt64"
+                        if pd.api.types.is_unsigned_integer_dtype(labels.dtype)
+                        else "Int64"
+                    )
+                correlation_input[primary_label] = labels.reindex(
+                    correlation_input.index
+                )
                 for family_id in family_ids:
                     entry = model_entries[period_id, family_id]
                     metadata = entry["model_metadata"]
                     if metadata is None:
                         mature[family_columns[family_id]] = np.nan
+                        correlation_input[family_columns[family_id]] = np.nan
                         if "model_losses" in analyses:
                             predictive_records.append(
                                 dict(
@@ -288,6 +309,9 @@ def build_a_share_statistics_tables(
                         np.asarray(values, dtype="float64"), index=keys.index
                     )
                     mature[family_columns[family_id]] = scores.reindex(mature.index)
+                    correlation_input[family_columns[family_id]] = scores.reindex(
+                        correlation_input.index
+                    )
                     if "model_losses" in analyses:
                         eligible_scores = scores.reindex(
                             session.index[session.eligible.fillna(False)]
@@ -380,29 +404,32 @@ def build_a_share_statistics_tables(
                         )
                 if selection is not None:
                     winner = selection["selected_family_id"]
-                    mature[_PREDICTION_COLUMN] = (
-                        mature[family_columns[winner]] if winner is not None else np.nan
+                    correlation_input[_PREDICTION_COLUMN] = (
+                        correlation_input[family_columns[winner]]
+                        if winner is not None
+                        else np.nan
                     )
-                rank = cross_sectional_rank_ic(
-                    mature,
-                    value_columns=(
-                        *((_PREDICTION_COLUMN,) if selection is not None else ()),
-                        *prediction_columns,
-                    ),
-                    label_column=primary_label,
+                correlation_columns = (
+                    *((_PREDICTION_COLUMN,) if selection is not None else ()),
+                    *prediction_columns,
                 )
-                if mature.empty:
-                    rank = pd.DataFrame(
-                        [
-                            {
-                                "timestamp": timestamp,
-                                **dict.fromkeys(
-                                    (_PREDICTION_COLUMN, *prediction_columns), np.nan
-                                ),
-                            }
-                        ]
+                correlations = (
+                    cross_sectional_correlations(
+                        correlation_input,
+                        value_columns=correlation_columns,
+                        label_column=primary_label,
+                        top_quantile=top_quantile,
                     )
-                rank_records.extend(rank.to_dict("records"))
+                    .set_index("signal")
+                    .reindex(correlation_columns)
+                )
+                correlations["timestamp"] = timestamp
+                correlation_records.extend(
+                    correlations.reset_index().to_dict("records")
+                )
+                rank = pd.DataFrame(
+                    [{"timestamp": timestamp, **correlations["rankic"].to_dict()}]
+                )
                 daily = rank.iloc[0]
                 if needs_losses or needs_comparison:
                     paired_rank, paired_count = (
@@ -459,13 +486,12 @@ def build_a_share_statistics_tables(
                             "common_observation_count": paired_count,
                         }
                     )
-    if not rank_records:
+    if not correlation_records:
         raise ValueError("statistics_model_observations_empty")
     prediction_summaries = []
     if set(analyses) & {"prediction_hac", "prediction_bootstrap"}:
-        rank_by_date = daily_mean_frame(
-            pd.DataFrame.from_records(rank_records).set_index("timestamp"),
-            sessions=config.get("sessions"),
+        correlations = pd.DataFrame.from_records(correlation_records).set_index(
+            ["signal", "timestamp"]
         )
         summaries = (
             [(prediction_id, _PREDICTION_COLUMN)]
@@ -473,35 +499,56 @@ def build_a_share_statistics_tables(
             else list(family_columns.items())
         )
         for identity, column in summaries:
-            prediction_summaries.append(
-                _prediction_summary(
-                    rank_by_date.loc[:, [column]].rename(
-                        columns={column: _PREDICTION_COLUMN}
-                    ),
-                    prediction_id=identity,
-                    inference_blocker=(
-                        selected_path_blocker
-                        if selections
-                        else selection_reason
-                        if any(
-                            family == identity for _, family in retrospective_entries
-                        )
-                        else None
-                    ),
-                    max_lags=max_lags if "prediction_hac" in analyses else None,
-                    block_size=block_size
-                    if "prediction_bootstrap" in analyses
-                    else None,
-                    repetitions=repetitions
-                    if "prediction_bootstrap" in analyses
-                    else None,
-                    seed=derive_seed(
-                        root_seed, "a_share_statistics_bootstrap", dataset_id, identity
-                    )
-                    if "prediction_bootstrap" in analyses
-                    else None,
-                )
+            by_date = daily_mean_frame(
+                correlations.loc[column, list(CORRELATION_METRICS)],
+                sessions=config.get("sessions"),
             )
+            row = {}
+            for metric in CORRELATION_METRICS:
+                summary = (
+                    _prediction_summary(
+                        by_date.loc[:, [metric]].rename(
+                            columns={metric: _PREDICTION_COLUMN}
+                        ),
+                        prediction_id=identity,
+                        inference_blocker=(
+                            selected_path_blocker
+                            if selections
+                            else selection_reason
+                            if any(
+                                family == identity
+                                for _, family in retrospective_entries
+                            )
+                            else None
+                        ),
+                        max_lags=max_lags if "prediction_hac" in analyses else None,
+                        block_size=block_size
+                        if "prediction_bootstrap" in analyses
+                        else None,
+                        repetitions=repetitions
+                        if "prediction_bootstrap" in analyses
+                        else None,
+                        seed=derive_seed(
+                            root_seed,
+                            "a_share_statistics_bootstrap",
+                            dataset_id,
+                            identity,
+                        )
+                        if "prediction_bootstrap" in analyses
+                        else None,
+                    )
+                    .iloc[0]
+                    .to_dict()
+                )
+                row.update(
+                    summary
+                    if metric == "rankic"
+                    else {
+                        f"{metric}_{field}": summary[field]
+                        for field in PREDICTION_CORRELATION_FIELDS
+                    }
+                )
+            prediction_summaries.append(pd.DataFrame([row]))
     if needs_losses:
         model_losses = pd.DataFrame.from_records(
             loss_records,
@@ -662,6 +709,9 @@ def _model_target_metadata(config, spec, window):
         "window": {"start": str(window.start), "end": str(window.end)},
         "evaluation": {
             **config["evaluation"],
+            "top_quantile": resolve_top_quantile(
+                config["evaluation"].get("top_quantile")
+            ),
             "label_availability_columns": {label: availability},
         },
         "prediction_metrics": {
@@ -1165,12 +1215,14 @@ def model_statistics(config):
             "primary_label",
             "label_availability_columns",
             "head_fraction",
+            "top_quantile",
             "raw_return_label",
             "baseline",
         }
         or "primary_label" not in evaluation
     ):
         raise ValueError("model_statistics_evaluation_invalid")
+    evaluation["top_quantile"] = resolve_top_quantile(evaluation.get("top_quantile"))
     baseline = evaluation.get("baseline", "zero_prediction")
     if baseline not in ("zero_prediction", "training_mean"):
         raise ValueError("model_statistics_baseline_invalid")
@@ -1356,7 +1408,7 @@ def model_statistics(config):
                     raise ValueError("statistics_prediction_family_mismatch")
                 if selection is not None:
                     from quant_research_platform.contracts.models import (
-                        validate_model_facts,
+                        compare_model_facts,
                     )
 
                     selected = next(
@@ -1364,7 +1416,7 @@ def model_statistics(config):
                         for candidate in selection["candidates"]
                         if candidate["model_id"] == wanted[family]
                     )
-                    validate_model_facts(facts, expected=selected)
+                    compare_model_facts(facts, selected)
                 supplied.add(family)
                 model_metadata = prediction_model_metadata(metadata)
                 if (

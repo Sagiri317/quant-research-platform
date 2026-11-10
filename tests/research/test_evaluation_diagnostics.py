@@ -169,6 +169,18 @@ def test_evaluation_chunk_producer_releases_consumed_frames(monkeypatch) -> None
             "n_obs",
             "ic_reason",
             "rankic_reason",
+            *[
+                f"{side}_{field}"
+                for side in ("long", "short")
+                for field in (
+                    "ic",
+                    "rankic",
+                    "n_obs",
+                    "n_selected",
+                    "ic_reason",
+                    "rankic_reason",
+                )
+            ],
         ]
         assert list(grouped.columns) == [
             "timestamp",
@@ -308,6 +320,9 @@ def test_streaming_ic_summary_matches_stable_canonical_values(epsilon: float) ->
             "rankic_reason": [None, None, None],
         }
     )
+    for side in ("long", "short"):
+        for metric in ("ic", "rankic"):
+            metrics[f"{side}_{metric}"] = values
     spec = EvaluationSpec(
         evaluation_id="stable_ic_summary",
         market_id=MarketId("a_share"),
@@ -338,16 +353,23 @@ def test_streaming_ic_summary_matches_stable_canonical_values(epsilon: float) ->
         sum((value - expected_mean) ** 2 for value in values) / len(values)
     ) ** 0.5
     expected_ratio = expected_mean / expected_std
-    for column in ("mean_ic", "std_ic", "mean_rankic", "std_rankic"):
-        expected = {
-            "mean_ic": expected_mean,
-            "std_ic": expected_std,
-            "mean_rankic": expected_mean,
-            "std_rankic": expected_std,
-        }[column]
-        assert streaming[column] == pytest.approx(expected, rel=0.0, abs=1e-12)
-    for column in ("icir", "rankicir"):
-        assert streaming[column] == pytest.approx(expected_ratio, rel=1e-08, abs=1e-12)
+    for metric in (
+        "ic",
+        "rankic",
+        "long_ic",
+        "long_rankic",
+        "short_ic",
+        "short_rankic",
+    ):
+        assert streaming[f"mean_{metric}"] == pytest.approx(
+            expected_mean, rel=0.0, abs=1e-12
+        )
+        assert streaming[f"std_{metric}"] == pytest.approx(
+            expected_std, rel=0.0, abs=1e-12
+        )
+        assert streaming[f"{metric}ir"] == pytest.approx(
+            expected_ratio, rel=1e-08, abs=1e-12
+        )
 
 
 def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
@@ -597,6 +619,9 @@ def test_ic_summary_nonzero_variance_survives_chunking_and_persistence(
             "rankic_reason": None,
         }
     )
+    for side in ("long", "short"):
+        for metric in ("ic", "rankic"):
+            metrics[f"{side}_{metric}"] = values
     spec = EvaluationSpec(
         evaluation_id="stable_ic_summary",
         market_id=MarketId("a_share"),
@@ -629,7 +654,14 @@ def test_ic_summary_nonzero_variance_survives_chunking_and_persistence(
     pd.testing.assert_frame_equal(restored, summary, check_exact=True)
     row = restored.iloc[0]
     expected_std = pstdev(values)
-    for prefix in ("ic", "rankic"):
+    for prefix in (
+        "ic",
+        "rankic",
+        "long_ic",
+        "long_rankic",
+        "short_ic",
+        "short_rankic",
+    ):
         assert row[f"std_{prefix}"] == pytest.approx(expected_std, rel=1e-12, abs=1e-15)
         assert row[f"{prefix}ir"] == pytest.approx(
             mean(values) / expected_std, rel=1e-12, abs=1e-14
@@ -775,7 +807,6 @@ def _write_count_evaluation(tmp_path, count):
     )
     from quant_research_platform.contracts.evaluations import (
         EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
-        EVALUATION_METRICS_COLUMNS,
     )
 
     spec = EvaluationSpec(
@@ -787,20 +818,19 @@ def _write_count_evaluation(tmp_path, count):
         evaluation_axis="single_asset_time_series",
         n_groups=2,
     )
-    metrics = pd.DataFrame(
+    metrics = evaluation_engine._time_series_metric_records(
         [
-            [
-                pd.Timestamp("2023-01-02"),
-                "signal",
-                "label",
-                1.0,
-                None,
-                count,
-                None,
-                "not_applicable",
-            ]
-        ],
-        columns=EVALUATION_METRICS_COLUMNS,
+            {
+                "timestamp": pd.Timestamp("2023-01-02"),
+                "signal": "signal",
+                "label": "label",
+                "ic": 1.0,
+                "rankic": None,
+                "n_obs": count,
+                "ic_reason": None,
+                "rankic_reason": "not_applicable",
+            }
+        ]
     )
     grouped = pd.DataFrame(columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS)
     metadata = {

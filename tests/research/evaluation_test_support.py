@@ -48,6 +48,11 @@ def evaluation_config(
             "correlation_clock": spec.correlation_clock,
             "filter_mode": spec.filter_mode,
             "n_groups": spec.n_groups,
+            **(
+                {"top_quantile": spec.top_quantile}
+                if spec.top_quantile is not None
+                else {}
+            ),
         },
         "window": {"start": start, "end": end},
         "cutoff": cutoff or end,

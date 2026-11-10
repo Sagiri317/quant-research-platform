@@ -942,13 +942,12 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
             root, columns=None, time_window=None
         )
         assert manifest["row_count"] == 1
-        assert manifest["file_count"] == len(session.all_paths) == 2
+        assert manifest["file_count"] == len(session.all_paths) == 1
         assert manifest["partition_count"] == 1
         expected_partition = f"year={nonempty['timestamp'].iloc[0].year}"
         assert manifest["partition_row_counts"] == {expected_partition: 1}
         assert [path.name for path in session.all_paths] == [
             "part-000.parquet",
-            "part-001.parquet",
         ]
         assert len({path.parent for path in session.all_paths}) == 1
         assert tuple(
@@ -956,7 +955,7 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
             .read_metadata(path)
             .num_rows
             for path in session.all_paths
-        ) == (1, 0)
+        ) == (1,)
         assert session.logical_dtypes == manifest["logical_dtypes"]
         assert read_dataset(root)["asset_id"].astype("string").tolist() == ["live-only"]
         manifests.append(manifest)

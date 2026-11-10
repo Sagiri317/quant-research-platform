@@ -61,7 +61,7 @@ def financial_events_from_interim(
         FINANCIAL_VALUE_COLUMNS
     ):
         raise ValueError("financial_interim_set_invalid")
-    if tuple(disclosures.columns) != DISCLOSURE_COLUMNS:
+    if not set(DISCLOSURE_COLUMNS).issubset(disclosures.columns):
         raise ValueError("financial_disclosure_schema_invalid")
     disclosure = disclosures.loc[:, DISCLOSURE_COLUMNS].copy()
     counts = {}
@@ -424,44 +424,40 @@ def _prepare_pit_fundamentals(events):
         ["asset_id", "metric_id", "report_period", "available_at"], keep=False
     ).any():
         raise ValueError("pit_revision_order_ambiguous")
-    streams = tuple(
-        (
-            key,
-            stream.sort_values(
-                ["available_at", "report_period", "version_identity"], kind="mergesort"
-            ).reset_index(drop=True),
-        )
-        for key, stream in right.groupby(["asset_id", "metric_id"], sort=False)
-    )
-    return partial(_query_pit_fundamentals, streams=streams, right=right.iloc[:0])
-
-
-def _query_pit_fundamentals(left, *, streams, right):
-    if not streams:
-        result = left.iloc[:0].copy()
-        for column in _PIT_EVENT_COLUMNS.difference({"asset_id"}):
-            result[column] = right[column]
-        for prefix in ("prior_year", "prior_fy"):
-            result[f"{prefix}_report_period"] = pd.Series(dtype="datetime64[ns]")
-            result[f"{prefix}_value"] = pd.Series(dtype="float64")
-        return result
-    frames: list[pd.DataFrame] = []
-    observation_positions = left.groupby("asset_id", sort=False).indices
-    for (asset_id, metric_id), stream in streams:
-        asset_observations = left.iloc[
-            observation_positions.get(asset_id, np.empty(0, dtype=np.intp))
-        ].sort_values("timestamp", kind="mergesort")
-        timestamps = asset_observations["timestamp"].to_numpy()
-        availability = stream["available_at"].to_numpy()
+    streams = []
+    for key, stream in right.groupby(["asset_id", "metric_id"], sort=False):
+        stream = stream.sort_values(
+            ["available_at", "report_period", "version_identity"], kind="mergesort"
+        ).reset_index(drop=True)
         periods = stream["report_period"].to_numpy()
         # A late revision of an older report must not roll back the current period.
         current_at_event = np.maximum.accumulate(
             np.where(
-                periods == np.maximum.accumulate(periods),
-                np.arange(len(stream)),
-                -1,
+                periods == np.maximum.accumulate(periods), np.arange(len(stream)), -1
             )
         )
+        streams.append(
+            (
+                key,
+                stream,
+                current_at_event,
+                stream.groupby("report_period", sort=False).indices,
+            )
+        )
+    return partial(_query_pit_fundamentals, streams=streams, right=right.iloc[:0])
+
+
+def _query_pit_fundamentals(left, *, streams, right):
+    observations = {
+        asset: group.sort_values("timestamp", kind="mergesort")["timestamp"].to_numpy()
+        for asset, group in left.groupby("asset_id", sort=False)
+    }
+    frames: list[pd.DataFrame] = []
+    for (asset_id, metric_id), stream, current_at_event, period_positions in streams:
+        timestamps = observations.get(asset_id)
+        if timestamps is None:
+            continue
+        availability = stream["available_at"].to_numpy()
         last_legal = np.searchsorted(availability, timestamps, side="right") - 1
         current_positions = np.where(
             last_legal >= 0,
@@ -485,7 +481,6 @@ def _query_pit_fundamentals(left, *, streams, right):
                 "value": current_values,
             }
         )
-        period_positions = stream.groupby("report_period", sort=False).indices
         current_periods = current["report_period"].to_numpy()
         legal_periods = current["report_period"].dropna().unique()
         for prefix, preceding_period in (
@@ -513,12 +508,20 @@ def _query_pit_fundamentals(left, *, streams, right):
             frame[f"{prefix}_report_period"] = dependency["report_period"].to_numpy()
             frame[f"{prefix}_value"] = values
         frames.append(frame)
-    return (
-        pd.concat(frames, ignore_index=True)
-        .infer_objects()
-        .sort_values(["asset_id", "timestamp", "metric_id"], kind="mergesort")
-        .reset_index(drop=True)
-    )
+    if frames:
+        return (
+            pd.concat(frames, ignore_index=True)
+            .infer_objects()
+            .sort_values(["asset_id", "timestamp", "metric_id"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    result = left.iloc[:0].copy()
+    for column in _PIT_EVENT_COLUMNS.difference({"asset_id"}):
+        result[column] = right[column]
+    for prefix in ("prior_year", "prior_fy"):
+        result[f"{prefix}_report_period"] = pd.Series(dtype="datetime64[ns]")
+        result[f"{prefix}_value"] = pd.Series(dtype="float64")
+    return result
 
 
 def _prior_year_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:

@@ -57,7 +57,7 @@ def strict_string_series(
     allow_empty: bool = False,
     allow_null: bool = False,
 ) -> pd.Series:
-    result = pd.Series(values, copy=True)
+    result = pd.Series(values)
     null_mask = _null_mask(result)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
@@ -113,7 +113,7 @@ def strict_timestamp_series(
     allow_null: bool = False,
     errors: str = "raise",
 ) -> pd.Series:
-    series = pd.Series(values, copy=True)
+    series = pd.Series(values)
     if errors not in {"raise", "coerce"}:
         raise ValueError("invalid_timestamp_errors")
     if errors == "coerce":
@@ -234,7 +234,7 @@ def strict_bool_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    series = pd.Series(values, copy=True)
+    series = pd.Series(values)
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
@@ -273,7 +273,7 @@ def strict_integer_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    series = pd.Series(values, copy=True)
+    series = pd.Series(values)
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
@@ -321,7 +321,7 @@ def _real_numeric_series(
     """Parse real observations; optionally retain malformed cells as unavailable."""
     if errors not in {"raise", "coerce"}:
         raise ValueError(error)
-    series = pd.Series(values, copy=True)
+    series = pd.Series(values)
     if (
         pd.api.types.is_bool_dtype(series.dtype)
         or pd.api.types.is_complex_dtype(series.dtype)
@@ -332,6 +332,8 @@ def _real_numeric_series(
                 np.nan, index=series.index, name=series.name, dtype="float64"
             )
         raise ValueError(error)
+    if series.dtype.kind in "iuf":
+        return series
     null_mask = _null_mask(series)
     if not pd.api.types.is_numeric_dtype(series.dtype) and not isinstance(
         series.dtype, pd.StringDtype
@@ -374,9 +376,7 @@ def _finite_numeric_series(
 def _validated_finite_series(
     numeric: pd.Series, *, error: str, allow_null: bool
 ) -> pd.Series:
-    if (numeric.isna().any() and not allow_null) or not np.isfinite(
-        numeric.dropna()
-    ).all():
+    if (not allow_null and numeric.isna().any()) or np.isinf(numeric).any():
         raise ValueError(error)
     return numeric
 
@@ -401,7 +401,7 @@ def strict_hashable_key_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    series = pd.Series(values, copy=True)
+    series = pd.Series(values)
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)

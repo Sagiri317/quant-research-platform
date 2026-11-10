@@ -200,6 +200,10 @@ def test_saved_common_correlation_uses_identical_timestamp_blocks(tmp_path, scop
     )
     with artifact.table("factor_stratified_diagnostics.parquet") as table:
         selected = table.loc[table.signal.eq("z")]
+        assert set(selected.stratification) == {"all", "industry", "side"}
+        sides = selected.loc[selected.stratification.eq("side")]
+        assert sides["mean"].isna().all() and sides.observation_count.eq(0).all()
+        selected = selected.loc[~selected.stratification.eq("side")]
         assert set(selected.stratification) == {"all", "industry"}
         assert selected["mean"].to_numpy() == pytest.approx([expected] * len(selected))
     with artifact.table("factor_diagnostics.parquet") as table:
@@ -246,6 +250,11 @@ def test_saved_intraday_evaluation_uses_the_same_daily_ic_rankic_axis(
     artifact = read_statistics_artifact(published)
     with artifact.table("factor_stratified_diagnostics.parquet") as table:
         assert set(table.statistic) == {"ic", "rankic"}
+        sides = table.loc[table.stratification.eq("side")]
+        assert len(sides) == 4 and sides["mean"].isna().all()
+        assert sides.observation_count.eq(0).all()
+        assert sides.observation_pairs.eq(4).all()
+        table = table.loc[table.stratification.eq("all")]
         assert table["mean"].to_numpy() == pytest.approx([-1 / 3] * 2)
         assert table.observation_count.eq(2).all()
         assert table.observed_date_count.eq(2).all()

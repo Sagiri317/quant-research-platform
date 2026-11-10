@@ -44,12 +44,11 @@ def iter_level2_events(orders, trades):
 
     A Shanghai remainder may be recorded after its immediate fills. Same-millisecond
     cross-stream order is assumed, so lifecycle age at that timestamp is undefined.
+    observed_segments supplies each stream in timestamp/source-row order.
     """
 
     def stream(frame, priority):
-        for row in frame.sort_values(
-            ["timestamp", "source_row"], kind="stable"
-        ).itertuples(index=False):
+        for row in frame.itertuples(index=False):
             yield row.timestamp, priority, row.source_row, row
 
     for _, priority, _, row in merge(

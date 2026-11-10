@@ -89,8 +89,9 @@ class DatasetSummaryObserver:
         for column, role in self.column_roles.items():
             if column in self.primary_key or column not in frame:
                 continue
-            series = frame[column]
-            nan_count = int(series.isna().sum())
+            nan_count = (
+                int(frame[column].isna().sum()) if role in {"factor", "label"} else 0
+            )
             if role == "factor" and nan_count:
                 self.factor_nan_profile[column] = (
                     self.factor_nan_profile.get(column, 0) + nan_count

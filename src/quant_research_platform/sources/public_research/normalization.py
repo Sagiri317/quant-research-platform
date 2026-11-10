@@ -186,6 +186,8 @@ def accepts(data_id, record):
 def _numbers(frame, columns):
     counts = frame.attrs.setdefault("invalid_numeric_cells", {})
     for column in columns:
+        if column in counts:
+            continue
         values = (
             frame[column]
             .astype("str")

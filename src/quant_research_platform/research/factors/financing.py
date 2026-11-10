@@ -208,8 +208,9 @@ def calculate(
     cache = {}
 
     def known(field, lag=0):
-        if (field, lag) in cache:
-            return cache[field, lag]
+        if lag in cache:
+            return cache[lag][field]
+        selected = fields if lag == 0 else ("financing_balance",)
         target = observation_dates(lag + observation_lag_sessions)
         valid = target.notna() & listed.notna() & target.ge(listed)
         left = (
@@ -224,19 +225,19 @@ def calculate(
             .loc[valid]
             .sort_values("_cutoff", kind="mergesort")
         )
-        result = pd.Series(np.nan, index=frame.index, dtype="float64")
+        result = pd.DataFrame(np.nan, index=frame.index, columns=selected)
         if len(left) and len(values):
             joined = pd.merge_asof(
                 left,
-                values[[*key, field]],
+                values[[*key, *selected]],
                 left_on="_cutoff",
                 right_on="_clock",
                 by=["asset_id", "_obs"],
                 direction="backward",
             )
-            result.loc[joined._row] = joined[field].to_numpy()
-        cache[field, lag] = result
-        return result
+            result.loc[joined._row] = joined[list(selected)].to_numpy()
+        cache[lag] = result
+        return result[field]
 
     output = (
         decisions.loc[:, ["market_id", "asset_id", "timestamp"]]

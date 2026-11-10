@@ -573,12 +573,9 @@ def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
     "clock,error",
     [
         ("2024-01-03T01:30:00", "timezone_required"),
-        ("2024-01-01T01:30:00Z", "precedes_dependency"),
     ],
 )
-def test_release_clock_requires_explicit_timezone_and_no_early_availability(
-    tmp_path, clock, error
-):
+def test_release_clock_requires_explicit_timezone(tmp_path, clock, error):
     from quant_research_platform.sources.public_research.interim import _release_clocks
 
     path = tmp_path / "clocks.csv"
@@ -593,3 +590,88 @@ def test_release_clock_requires_explicit_timezone_and_no_early_availability(
     ).to_csv(path, index=False)
     with pytest.raises(ValueError, match=error):
         _release_clocks(path)
+
+
+@pytest.mark.parametrize(
+    "clock_column",
+    ["publication_date", "published_at", "calendar_date", "calendar_order"],
+)
+def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_column):
+    from quant_research_platform.sources.public_research.interim import (
+        materialize_interim_data,
+    )
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    rows = pd.DataFrame(
+        {
+            "observation_date": ["2024-01-02", "2024-02-02"],
+            "ratio_name": ["TOTAL", "TOTAL"],
+            "put_call_ratio": ["0.5", "0.6"],
+            "source_url": ["https://example.org/cboe"] * 2,
+            "source_sha256": ["source"] * 2,
+            "publication_date": [None, None],
+            "published_at": [None, None],
+        }
+    )
+    clocks = None
+    if clock_column.startswith("calendar_"):
+        clocks = raw / "clocks.csv"
+        pd.DataFrame(
+            {
+                "source": ["cboe_put_call_extracted"] * 2,
+                "observation_date": rows.observation_date,
+                "published_at": ["2024-01-03T12:00:00Z", "2024-02-03T13:00:00Z"],
+                "estimated_available_at": [
+                    "2024-01-03T12:00:00Z",
+                    "2024-01-01T12:00:00Z"
+                    if clock_column == "calendar_date"
+                    else "2024-02-03T12:00:00Z",
+                ],
+                "availability_basis": ["source_release"] * 2,
+                "evidence_url": ["https://example.org/rule"] * 2,
+            }
+        ).to_csv(clocks, index=False)
+    else:
+        rows[clock_column] = (
+            ["2024-01-03", "2024-01-01"]
+            if clock_column == "publication_date"
+            else ["2024-01-03T12:00:00Z", "2024-01-01T12:00:00Z"]
+        )
+    payload = rows.to_csv(index=False).encode()
+    (raw / "ratio.csv").write_bytes(payload)
+    record = {
+        "path": "ratio.csv",
+        "source": "cboe_put_call_extracted",
+        "status": "downloaded",
+        "url": "https://example.org/cboe",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "retrieved_at": "2024-03-01T00:00:00Z",
+    }
+    (raw / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": [record]})
+    )
+    data_id = "public_option_put_call"
+    output = tmp_path / "selected"
+    materialize_interim_data(
+        raw_root=raw,
+        release_csv=clocks,
+        output_roots={data_id: output},
+        data_ids=[data_id],
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+    )
+    result = read_dataset(output)
+    assert result.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+    assert result.put_call_ratio.tolist() == [0.5]
+    with pytest.raises(ValueError, match="public_release_clock_precedes_dependency"):
+        materialize_interim_data(
+            raw_root=raw,
+            release_csv=clocks,
+            output_roots={data_id: tmp_path / "invalid"},
+            data_ids=[data_id],
+            start_date="2024-02-01",
+            end_date="2024-02-29",
+        )
+    assert not (tmp_path / "invalid").exists()

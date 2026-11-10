@@ -996,6 +996,25 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
     return values
 
 
+def compare_model_facts(facts, expected):
+    """Compare published recipes; resolve defaults only when representations differ."""
+    for key in (
+        "market_id",
+        "family_id",
+        "asset_ids",
+        "candidate_parameters",
+        "label_unit",
+        "input_units",
+        "target_definition",
+    ):
+        if facts.get(key) != expected.get(key):
+            raise ValueError(f"model_scientific_facts_mismatch: {key}")
+    if facts["model"] != expected["model"] and model_spec_payload(
+        _model_spec(facts["model"])
+    ) != model_spec_payload(_model_spec(expected["model"])):
+        raise ValueError("model_scientific_facts_mismatch: model")
+
+
 def validate_model_facts(facts, metadata=None, *, expected=None):
     """Validate and compare scientific model recipes independently of storage paths."""
     required = {
@@ -1040,21 +1059,7 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
     ):
         raise ValueError("model_training_asset_scope_invalid")
     if expected is not None:
-        for key in (
-            "market_id",
-            "family_id",
-            "asset_ids",
-            "candidate_parameters",
-            "label_unit",
-            "input_units",
-            "target_definition",
-        ):
-            if facts.get(key) != expected.get(key):
-                raise ValueError(f"model_scientific_facts_mismatch: {key}")
-        if model_spec_payload(spec) != model_spec_payload(
-            _model_spec(expected["model"])
-        ):
-            raise ValueError("model_scientific_facts_mismatch: model")
+        compare_model_facts(facts, expected)
     if metadata is None:
         return
     if "rows_after_input_label_dropna" in metadata:

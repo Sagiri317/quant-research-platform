@@ -1,6 +1,6 @@
 """Causal statistics of recorded trades and explicitly linked order observations."""
 
-from collections import deque
+from math import isfinite
 
 import numpy as np
 import pandas as pd
@@ -57,22 +57,15 @@ def _at_quotes(values, event_times, quote_times):
 
 
 def trade_statistics(trades, config, *, columns=None):
+    """Summarize the timestamp/source-row order established by observed_segments."""
     columns = protocol.TRADE_EVENT_FACTORS if columns is None else set(columns)
-    work = (
-        trades.loc[trades.event_kind.isin(("trade", "unknown"))]
-        .sort_values(["timestamp", "source_row"], kind="stable")
-        .reset_index(drop=True)
+    work = trades.loc[trades.event_kind.isin(("trade", "unknown"))].reset_index(
+        drop=True
     )
     window, history = config["event_window"], config["history_window"]
     known = work.event_kind.eq("trade")
     result = pd.DataFrame(index=work.index)
-    interval_columns = {
-        "trade_interval_seconds",
-        "trade_interval_mean_seconds",
-        "trade_interval_cv",
-        "trade_activity_ratio",
-        "trade_interval_return_interaction",
-    }
+    interval_columns = protocol.TRADE_INTERVAL_FACTORS
     if columns & interval_columns:
         interval = (
             work.timestamp.diff()
@@ -108,10 +101,15 @@ def trade_statistics(trades, config, *, columns=None):
         side = work.side.map({"buy": 1.0, "sell": -1.0}).astype(float).where(known)
         volume = work.volume.where(work.volume.gt(0) & known)
         signed = side * volume
+        if columns & {
+            "trade_event_flow_imbalance",
+            "large_trade_pressure",
+            "small_trade_pressure",
+        }:
+            window_volume = volume.rolling(window, min_periods=window).sum()
         if "trade_event_flow_imbalance" in columns:
             result["trade_event_flow_imbalance"] = (
-                signed.rolling(window, min_periods=window).sum()
-                / volume.rolling(window, min_periods=window).sum()
+                signed.rolling(window, min_periods=window).sum() / window_volume
             )
         if columns & {"trade_signed_run", "trade_signed_run_volume"}:
             observed = side.notna() & volume.notna()
@@ -141,8 +139,7 @@ def trade_statistics(trades, config, *, columns=None):
                     threshold.notna() & signed.notna()
                 )
                 result[name] = (
-                    pressure.rolling(window, min_periods=window).sum()
-                    / volume.rolling(window, min_periods=window).sum()
+                    pressure.rolling(window, min_periods=window).sum() / window_volume
                 )
         if "trade_volume_flow_imbalance" in columns:
             cumulative = np.r_[0.0, np.nancumsum(volume.to_numpy())]
@@ -179,13 +176,19 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
         "observed_completed_lifetime_seconds",
         "observed_lifecycle_match_fraction",
     )
-    output = []
+    output_index = range(len(quotes))
     if link_field is None:
-        return pd.DataFrame(np.nan, index=range(len(quotes)), columns=names)
+        return pd.DataFrame(np.nan, index=output_index, columns=names)
+    unknown_at = first_unknown_event_time(orders, trades)
+    if pd.notna(unknown_at):
+        quotes = quotes.loc[quotes.timestamp.lt(unknown_at)]
+    if quotes.empty:
+        return pd.DataFrame(np.nan, index=output_index, columns=names)
     active, quantity, birth_quantity = {}, np.zeros(2), np.zeros(2)
-    cancelled, cancel_pressure, completed, matched = (
-        deque(maxlen=window) for _ in range(4)
-    )
+    cancelled, cancel_pressure, completed, matched = histories = ([], [], [], [])
+    quantities = np.empty((len(quotes), 2))
+    births = np.empty_like(quantities)
+    positions = np.empty((len(quotes), 4), dtype=np.intp)
     events = iter(iter_level2_events(orders, trades))
     pending = next(events, None)
     origin = quotes.timestamp.iloc[0]
@@ -204,7 +207,7 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
                 cancel_pressure.append(np.nan)
             return
         born, remaining, side, original = remove(key)
-        valid = np.isfinite(amount) and 0 < amount <= remaining
+        valid = isfinite(amount) and 0 < amount <= remaining
         matched.append(int(valid))
         if not valid:
             if cancel:
@@ -223,9 +226,8 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
         elif original:
             completed.append(age)
 
-    for quote in quotes.itertuples(index=False):
-        when = (quote.timestamp - origin).total_seconds()
-        while pending is not None and pending[1].timestamp <= quote.timestamp:
+    for index, timestamp in enumerate(quotes.timestamp):
+        while pending is not None and pending[1].timestamp <= timestamp:
             stream, row = pending
             event_time = (row.timestamp - origin).total_seconds()
             if row.event_kind == "order":
@@ -237,7 +239,7 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
                 if (
                     key is not None
                     and row.side in {"buy", "sell"}
-                    and np.isfinite(row.volume)
+                    and isfinite(row.volume)
                     and row.volume > 0
                 ):
                     side = 0 if row.side == "buy" else 1
@@ -264,26 +266,39 @@ def lifecycle_features(quotes, orders, trades, *, link_field, window):
                     key = nonzero[0] if len(nonzero) == 1 else None
                 consume(key, row.volume, event_time, True)
             pending = next(events, None)
-        ages = np.divide(
-            when * quantity - birth_quantity,
-            quantity,
-            out=np.full(2, np.nan),
-            where=quantity > 0,
-        )
-        total = quantity.sum()
-        output.append(
-            (
-                (when * total - birth_quantity.sum()) / total if total > 0 else np.nan,
-                ages[0] - ages[1],
-                np.mean(cancelled) if cancelled else np.nan,
-                np.sum(cancel_pressure) if cancel_pressure else np.nan,
-                np.mean(completed) if completed else np.nan,
-                np.mean(matched) if matched else np.nan,
-            )
-        )
-    result = pd.DataFrame(output, columns=names)
-    result.loc[quotes.timestamp.ge(first_unknown_event_time(orders, trades))] = np.nan
-    return result
+        quantities[index] = quantity
+        births[index] = birth_quantity
+        positions[index] = [len(values) - 1 for values in histories]
+    when = (quotes.timestamp - origin).dt.total_seconds().to_numpy()
+    ages = np.divide(
+        when[:, None] * quantities - births,
+        quantities,
+        out=np.full_like(quantities, np.nan),
+        where=quantities > 0,
+    )
+    total = quantities.sum(axis=1)
+    result = pd.DataFrame(
+        {
+            names[0]: np.divide(
+                when * total - births.sum(axis=1),
+                total,
+                out=np.full(len(quotes), np.nan),
+                where=total > 0,
+            ),
+            names[1]: ages[:, 0] - ages[:, 1],
+        }
+    )
+    for column, values, index in zip(names[2:], histories, positions.T, strict=True):
+        if not values:
+            result[column] = np.nan
+            continue
+        rolling = pd.Series(values).rolling(window, min_periods=1)
+        size = np.minimum(np.arange(1, len(values) + 1), window)
+        summed = rolling.sum().where(rolling.count().eq(size)).to_numpy()
+        if column != "observed_age_weighted_cancel_pressure":
+            summed = summed / size
+        result[column] = np.where(index >= 0, summed[np.maximum(index, 0)], np.nan)
+    return result.reindex(output_index)
 
 
 def compute_event_factors(
@@ -294,12 +309,13 @@ def compute_event_factors(
     trade_columns = selected_columns & protocol.TRADE_EVENT_FACTORS
     cancel_columns = selected_columns & protocol.CANCEL_EVENT_FACTORS
     lifecycle_columns = selected_columns & protocol.LIFECYCLE_FACTORS
+    linked_lifecycle = lifecycle_columns and config["order_link_field"] is not None
     output = []
     streams = {}
     needs_cancel_trades = bool(cancel_columns) and panel.exchange.eq("SZSE").any()
-    if trade_columns or needs_cancel_trades or lifecycle_columns:
+    if trade_columns or needs_cancel_trades or linked_lifecycle:
         streams["trades"] = trades
-    if cancel_columns or lifecycle_columns:
+    if cancel_columns or linked_lifecycle:
         streams["orders"] = orders
     for work, selected in observed_segments(panel, **streams):
         aligned = pd.DataFrame(index=range(len(work)))
@@ -317,16 +333,19 @@ def compute_event_factors(
                 if work.exchange.iloc[0] == "SZSE"
                 else additions.iloc[:0]
             )
+            message_columns = ["timestamp", "source_row"]
+            if cancel_columns != {"observed_cancel_count_fraction"}:
+                message_columns.append("volume")
             messages = (
                 pd.concat(
                     [
-                        additions[["timestamp", "source_row", "volume"]].assign(
+                        additions[message_columns].assign(
                             cancel=additions.event_kind.map(
                                 {"order": 0.0, "cancel": 1.0}
                             ),
                             stream_priority=1,
                         ),
-                        cancellations[["timestamp", "source_row", "volume"]].assign(
+                        cancellations[message_columns].assign(
                             cancel=cancellations.event_kind.map({"cancel": 1.0}),
                             stream_priority=1 if work.exchange.iloc[0] == "SSE" else 0,
                         ),
@@ -379,8 +398,8 @@ def compute_event_factors(
                     aligned,
                     lifecycle_features(
                         work,
-                        selected["orders"],
-                        selected["trades"],
+                        selected.get("orders"),
+                        selected.get("trades"),
                         link_field=config["order_link_field"],
                         window=config["event_window"],
                     ).loc[:, list(lifecycle_columns)],

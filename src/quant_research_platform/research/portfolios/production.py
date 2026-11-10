@@ -234,7 +234,7 @@ def backtest(config: Mapping) -> Path:
         if candidate.prediction_selector not in {"champion", metadata["family_id"]}:
             raise ValueError("portfolio_prediction_selector_mismatch")
         if selection is not None:
-            from quant_research_platform.contracts.models import validate_model_facts
+            from quant_research_platform.contracts.models import compare_model_facts
 
             selected_id = (
                 selection["selected_model_id"]
@@ -258,7 +258,7 @@ def backtest(config: Mapping) -> Path:
             )
             if expected is None:
                 raise ValueError("portfolio_prediction_selection_mismatch")
-            validate_model_facts(facts, expected=expected)
+            compare_model_facts(facts, expected)
         cutoffs = [facts["fit_cutoff"]]
         if selection_mode == "causal":
             cutoffs.append(facts.get("selection_cutoff"))

@@ -6,6 +6,23 @@ from dataclasses import dataclass
 from typing import Literal
 
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
+from quant_research_platform.contracts.validation import strict_finite_float
+
+DEFAULT_TOP_QUANTILE = 0.2
+
+
+def resolve_top_quantile(value=None):
+    """Resolve the shared symmetric evaluation and ordinary portfolio fraction."""
+    if value is not None and type(value) not in (int, float):
+        raise ValueError("evaluation_top_quantile_invalid")
+    value = strict_finite_float(
+        DEFAULT_TOP_QUANTILE if value is None else value,
+        error="evaluation_top_quantile_invalid",
+    )
+    if not 0 < value <= 1:
+        raise ValueError("evaluation_top_quantile_invalid")
+    return value
+
 
 SignalSourceKind = Literal["factor", "feature", "prediction"]
 SignalDirection = Literal["higher_is_better", "lower_is_better"]

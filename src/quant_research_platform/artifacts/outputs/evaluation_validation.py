@@ -286,14 +286,19 @@ def validate_evaluation_output_metadata_shape(
     if isinstance(metadata, dict) and "response_diagnostics" in metadata:
         science.add("response_diagnostics")
     base = _EVALUATION_OUTPUT_METADATA_KEYS | (
-        {"correlation_clock"}
-        if isinstance(metadata, dict) and "correlation_clock" in metadata
+        {key for key in ("correlation_clock", "top_quantile") if key in metadata}
+        if isinstance(metadata, dict)
         else set()
     )
     if type(metadata) is not dict or set(metadata) not in (
         base,
         base | science,
         base | science | EVALUATION_SCIENCE_KEYS,
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
+    if "top_quantile" in metadata and type(metadata["top_quantile"]) not in (
+        int,
+        float,
     ):
         raise ValueError("output_manifest_metadata_invalid")
     if science <= set(metadata):
@@ -484,6 +489,7 @@ def validate_evaluation_output_metadata_shape(
             label_availability_columns=label_availability_columns,
             evaluation_axis=metadata["evaluation_axis"],
             correlation_clock=metadata.get("correlation_clock", "observation"),
+            top_quantile=metadata.get("top_quantile"),
             filter_mode=metadata["filter_mode"],
             n_groups=evaluation_diagnostics.n_groups,
             run_type=metadata["run_type"],

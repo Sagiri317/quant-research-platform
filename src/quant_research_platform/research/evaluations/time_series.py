@@ -63,6 +63,8 @@ def _evaluation_axes(evaluation_axis, sessions, asset_ids):
 
 def _daily_blocks(frame, *, evaluation_axis, sessions, asset_ids):
     selected = frame.loc[frame.asset_id.isin(asset_ids)]
+    if selected.duplicated(["timestamp", "asset_id"]).any():
+        raise ValueError("evaluation_input_keys_duplicate")
     dates = selected.timestamp.dt.normalize()
     if not dates.isin(sessions).all():
         raise ValueError("evaluation_input_session_not_declared")
@@ -108,10 +110,6 @@ def _signal_metric_blocks(
 ):
     """Compute each timestamp cross section or asset-day exactly once."""
     sessions, asset_ids = _evaluation_axes(evaluation_axis, sessions, asset_ids)
-    if frame.asset_id.eq(_CROSS_SECTION_ASSET).any():
-        raise ValueError("evaluation_asset_id_reserved")
-    if frame.duplicated(["timestamp", "asset_id"]).any():
-        raise ValueError("evaluation_input_keys_duplicate")
     baselines = tuple(baseline_columns)
     if len(set(baselines)) != len(baselines):
         raise ValueError("evaluation_baselines_invalid")
@@ -195,9 +193,11 @@ def _common_metric_blocks(blocks, *, metric_candidates):
         ]
         if selected.empty:
             continue
-        defined = selected.groupby(
-            ["timestamp", "asset_id"], sort=False
-        ).value.transform(lambda values: np.isfinite(values).all())
+        defined = (
+            np.isfinite(selected.value)
+            .groupby([selected.timestamp, selected.asset_id], sort=False)
+            .transform("all")
+        )
         unmatched = selected.index[~defined]
         result.loc[unmatched, "value"] = np.nan
         result.loc[unmatched, "reason"] = "no_common_defined_blocks"
@@ -633,7 +633,9 @@ def evaluate_time_series(config):
         parts = []
         identity = None
         for path in paths:
-            part, metadata = read_predictions(Path(path), time_window=window)
+            part, metadata = read_predictions(
+                Path(path), time_window=window, asset_ids=asset_ids
+            )
             model = metadata["model_facts"]["model"]
             if model["target_column"] != label:
                 raise ValueError("evaluation_prediction_target_mismatch")

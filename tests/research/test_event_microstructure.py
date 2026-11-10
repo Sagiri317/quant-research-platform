@@ -16,6 +16,7 @@ from quant_research_platform.research.factors.microstructure import compute_fact
 from quant_research_platform.research.protocols.a_share_hft import (
     EVENT_FACTORS,
     FACTOR_INPUTS,
+    LIFECYCLE_FACTORS,
 )
 from quant_research_platform.sources.venvoo import normalize
 from tests.markets.a_share.test_high_frequency import (
@@ -353,3 +354,242 @@ def test_local_undefined_values_survive_native_factor_publication(tmp_path, data
         assert result.observed_lifecycle_match_fraction.iloc[2] == 1
         assert result.trade_volume_flow_imbalance.iloc[1] == 1
         assert result.iloc[-1][columns].isna().all()
+
+
+def test_lifecycle_event_windows_keep_ties_missing_values_and_two_trade_links():
+    origin = pd.Timestamp("2024-01-02T01:30:00")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "a",
+            "timestamp": origin + pd.to_timedelta(np.arange(11), unit="s"),
+            "session_date": origin.normalize(),
+            "segment_id": "am",
+            "exchange": "SZSE",
+        }
+    )
+    orders = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": origin + pd.to_timedelta([0, 0, 1, 4, 6], unit="s"),
+            "source_row": np.arange(5),
+            "event_kind": "order",
+            "exchange": "SZSE",
+            "order_type": "2",
+            "ex_order_id": [1, 2, 3, 4, 5],
+            "side": ["buy", "sell", "buy", "sell", "buy"],
+            "volume": [100.0, 200.0, 50.0, 100.0, 100.0],
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": origin
+            + pd.to_timedelta([0, 2, 3, 4, 5, 6, 7, 8, 9], unit="s"),
+            "source_row": np.arange(9),
+            "event_kind": ["cancel", "trade", *(["cancel"] * 6), "unknown"],
+            "bid_order_id": [1, 1, 1, 3, 999, 0, 0, 5, 0],
+            "ask_order_id": [0, 2, 0, 0, 0, 2, 4, 0, 0],
+            "volume": [10.0, 40.0, 60.0, 50.0, 10.0, 160.0, 100.0, 101.0, 1.0],
+        }
+    )
+    columns = [name for name in EVENT_FACTORS if name in LIFECYCLE_FACTORS]
+    result = compute_event_factors(
+        panel,
+        orders.iloc[[4, 1, 3, 0, 2]],
+        trades.iloc[::-1],
+        columns=columns,
+        config={"event_window": 2, "order_link_field": "ex_order_id"},
+    )
+    # Orders born at 0/1/4/6 seconds; a trade consumes both linked sides.
+    expected = {
+        "observed_order_age_seconds": [
+            0,
+            6 / 7,
+            49 / 27,
+            58 / 21,
+            32 / 13,
+            45 / 13,
+            1,
+            1,
+            np.nan,
+        ],
+        "observed_order_age_side_difference": [
+            0,
+            -1 / 3,
+            -5 / 11,
+            -1,
+            np.nan,
+            np.nan,
+            -2,
+            np.nan,
+            np.nan,
+        ],
+        "observed_cancel_age_seconds": [
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            3,
+            np.nan,
+            np.nan,
+            4.5,
+            np.nan,
+        ],
+        "observed_age_weighted_cancel_pressure": [
+            np.nan,
+            np.nan,
+            np.nan,
+            np.nan,
+            330,
+            np.nan,
+            np.nan,
+            -1260,
+            np.nan,
+        ],
+        "observed_completed_lifetime_seconds": [
+            np.nan,
+            np.nan,
+            np.nan,
+            3,
+            3,
+            3,
+            4.5,
+            4.5,
+            4.5,
+        ],
+        "observed_lifecycle_match_fraction": [0, 0, 1, 1, 1, 0.5, 0.5, 1, 0.5],
+    }
+    for column, values in expected.items():
+        np.testing.assert_allclose(result[column].iloc[:9], values, atol=1e-12)
+    assert result.loc[9:, columns].isna().all().all()
+
+
+def test_depth_imbalance_reuses_levels_without_extending_missing_dependencies():
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "a",
+            "timestamp": pd.date_range("2024-01-02T01:30:00", periods=3, freq="3s"),
+            "segment_id": "am",
+        }
+    )
+    for level in range(1, 11):
+        panel[f"bid_px{level}"], panel[f"ask_px{level}"] = (
+            10 - level / 100,
+            10 + level / 100,
+        )
+        panel[f"bid_vol{level}"], panel[f"ask_vol{level}"] = 100.0, 200.0
+    panel["bid_px10"] = np.nan
+    panel.loc[0, "bid_vol10"] = 0
+    panel.loc[2, "ask_vol5"] = np.nan
+    columns = [f"imbalance_{level}" for level in (1, 5, 10)] + [
+        "book_ofi_5",
+        "book_ofi_10",
+    ]
+    result = compute_factors(panel, columns=columns)
+    np.testing.assert_allclose(result.imbalance_1, -1 / 3)
+    np.testing.assert_allclose(result.imbalance_5, [-1 / 3, -1 / 3, np.nan])
+    np.testing.assert_allclose(result.imbalance_10, [-1100 / 2900, np.nan, np.nan])
+    np.testing.assert_allclose(result.book_ofi_5, [np.nan, 0, np.nan])
+    assert result.book_ofi_10.isna().all()
+
+
+def test_unlinked_lifecycle_and_cancel_counts_do_not_consume_unused_event_values():
+    origin = pd.Timestamp("2024-01-02T01:30:00")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "a",
+            "timestamp": origin + pd.to_timedelta([0, 1, 2], unit="s"),
+            "session_date": origin.normalize(),
+            "segment_id": "am",
+            "exchange": "SSE",
+        }
+    )
+    result = compute_event_factors(
+        panel, None, None, columns=list(LIFECYCLE_FACTORS), config={}
+    )
+    assert result[list(LIFECYCLE_FACTORS)].isna().all().all()
+    orders = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": panel.timestamp,
+            "source_row": [0, 1, 2],
+            "event_kind": ["order", "cancel", "order"],
+        }
+    )
+    result = compute_event_factors(
+        panel,
+        orders,
+        None,
+        columns=["observed_cancel_count_fraction"],
+        config={"event_window": 2},
+    )
+    np.testing.assert_allclose(
+        result.observed_cancel_count_fraction, [np.nan, 0.5, 0.5]
+    )
+
+
+def test_multilevel_flow_missing_unused_quantity_survives_native_publication(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.research.datasets.assembler import assemble
+    from quant_research_platform.sources.venvoo import interim_spec
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    raw = raw_quotes(tuple(93000000 + 3000 * i for i in range(12)))
+    for level in range(1, 11):
+        raw[f"bid_px{level}"] = 100000 - 100 * level
+        raw[f"ask_px{level}"] = 100000 + 100 * level
+        raw[f"bid_vol{level}"], raw[f"ask_vol{level}"] = 100.0, 100.0
+    raw.loc[0, "bid_vol1"] = np.nan
+    raw.loc[1:, "bid_px1"] = 100000
+    quotes = normalize(raw, "hft_quotes", INSTRUMENTS)
+    source = tmp_path / "quotes"
+    write_dataset(source, quotes, spec=interim_spec("hft_quotes"))
+    window = {"start": "2018-02-14", "end": "2018-02-14"}
+    panel = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "hft_panel",
+            "inputs": {"hft_quotes": str(source)},
+            "time_window": window,
+            "output_root": str(tmp_path / "panel"),
+        }
+    )
+    columns = ["book_ofi", "book_ofi_5", "book_ofi_10", "bid_replenishment_30s"]
+    factors = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "hft_factors",
+            "inputs": {"hft_panel": str(panel)},
+            "time_window": window,
+            "factor_columns": columns,
+            "output_root": str(tmp_path / "factors"),
+        }
+    )
+    dataset = assemble(
+        {
+            "market_id": "a_share",
+            "dataset_id": "conditional_ofi",
+            "base_input_data_id": "hft_panel",
+            "inputs": {"hft_panel": str(panel), "hft_factors": str(factors)},
+            "factor_columns": columns,
+            "feature_recipe": None,
+            "time_window": window,
+            "output_root": str(tmp_path / "dataset"),
+        }
+    )
+    result = read_dataset(dataset)
+    # The improved bid consumes only the current 100 shares, not prior depth.
+    np.testing.assert_allclose(result.loc[1, columns[:3]].to_numpy(float), 100)
+    np.testing.assert_allclose(result.loc[2:, columns[:3]], 0)
+    # A price change is not replenishment at an unchanged price level.
+    np.testing.assert_allclose(result.bid_replenishment_30s.iloc[10:], 0)
+    assert result.iloc[0][columns].isna().all()
+    # At an unchanged price, the missing current quantity is a real dependency.
+    observed = read_dataset(panel)
+    observed.loc[2, "bid_vol1"] = np.nan
+    changed = compute_factors(observed, columns=columns)
+    assert changed.loc[2:3, columns[:3]].isna().all().all()
+    assert changed.bid_replenishment_30s.iloc[10:].isna().all()

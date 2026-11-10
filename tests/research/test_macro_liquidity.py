@@ -76,6 +76,46 @@ def test_daily_carry_does_not_create_monthly_history_or_fill_missing_release():
     assert result[columns[0]].iloc[1] == 100
 
 
+def test_individually_requested_transforms_keep_revisions_and_partial_ewma_weights():
+    history = _observations(
+        [
+            ("us_vix", f"2024-01-0{day}", f"2024-01-0{day}T23:00", value)
+            for day, value in enumerate((10, 14, np.nan, 18, 26), start=1)
+        ]
+        + [("us_vix", "2024-01-02", "2024-01-06T23:00", 16)]
+    )
+    config = _config(window=4)
+    config.update(minimum_fraction=0.5, ewma_halflife=1)
+    expected = {
+        "level": 26,
+        "change": 8,
+        "acceleration": np.nan,
+        "yoy_change": np.nan,
+        "zscore": 6 / np.sqrt(28),
+        "percentile": 2.5 / 3,
+        "sum": 60,
+        "volatility": np.sqrt(2),
+        "innovation": 26 - 44 / 3,
+        "innovation_zscore": (26 - 44 / 3) / np.sqrt(52 / 3),
+        "ewma_deviation": 26 - (10 / 8 + 16 / 4 + 18) / (1 / 8 + 1 / 4 + 1),
+        "log_level": np.log(26),
+        "growth": 26 / 18 - 1,
+        "yoy_growth": np.nan,
+        "implied_variance": 0.26**2,
+        "risk_neutral_skewness": 7.4,
+    }
+    combined = _history_features(history, expected, "index", "D", 4, config)
+    for transform, value in expected.items():
+        selected = _history_features(history, (transform,), "index", "D", 4, config)
+        pd.testing.assert_series_equal(selected[transform], combined[transform])
+        np.testing.assert_allclose(selected[transform].iloc[-1], value, atol=1e-14)
+    # Before the full window exists, missing observations retain their age in
+    # the exponential weights; neither a daily carry nor a gap compresses time.
+    assert combined.ewma_deviation.iloc[3] == pytest.approx(
+        18 - (10 / 4 + 14 / 2) / (1 / 4 + 1 / 2)
+    )
+
+
 def test_net_liquidity_matches_observation_dates_and_converts_billions():
     data = _observations(
         [
@@ -462,5 +502,128 @@ def test_year_growth_matches_economic_period_and_preserves_revision_clock(
     assert (
         _history_features(missing, ("yoy_growth",), "currency", frequency, 3, _config())
         .yoy_growth.isna()
+        .all()
+    )
+
+
+def test_joint_decision_and_return_clocks_replay_revisions_once(monkeypatch):
+    from quant_research_platform.research.factors.macro_liquidity import calculations
+
+    sessions = pd.bdate_range("2024-01-02", periods=6)
+    mature_levels = np.arange(6, dtype=float) ** 2
+    decision_levels = 100 + np.arange(6, dtype=float) ** 3
+    observations = _observations(
+        [
+            ("us_vix", day, day + pd.Timedelta(hours=hour), value)
+            for day, mature, revised in zip(
+                sessions, mature_levels, decision_levels, strict=True
+            )
+            for hour, value in ((6, mature), (7.5, revised))
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "market_type": 1,
+            "timestamp": sessions + pd.Timedelta(hours=8),
+            "signal_session": sessions,
+            "listing_date": sessions[0],
+            "return_available_at": sessions + pd.Timedelta(hours=7),
+            "period_return": np.r_[np.nan, 2 * np.diff(mature_levels)],
+        }
+    )
+    dates = pd.date_range(sessions[0], sessions[-1])
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": dates,
+            "source_market_type": 1,
+            "is_trading_day": dates.isin(sessions),
+        }
+    )
+    original = calculations.macro_states
+    replayed = []
+
+    def record(observations, cutoffs, **kwargs):
+        replayed.append(pd.DatetimeIndex(cutoffs).unique())
+        return original(observations, cutoffs, **kwargs)
+
+    monkeypatch.setattr(calculations, "macro_states", record)
+    actual = calculate_macro_factors(
+        observations,
+        panel,
+        columns=["ml_us_vix_level", "ml_us_vix_beta", "ml_us_vix_shock_x_own_beta"],
+        config={"beta_window": 4, "beta_min_observations": 3, "beta_min_changes": 3},
+        calendar=calendar,
+    )
+    np.testing.assert_allclose(actual.ml_us_vix_level, decision_levels)
+    np.testing.assert_allclose(actual.ml_us_vix_beta.iloc[3:], 2)
+    np.testing.assert_allclose(
+        actual.ml_us_vix_shock_x_own_beta.iloc[3:], 2 * np.diff(decision_levels)[2:]
+    )
+    assert actual.ml_us_vix_beta.iloc[:3].isna().all()
+    assert len(replayed) == 1
+    assert set(replayed[0]) == set(panel.timestamp) | set(panel.return_available_at)
+    columns = list(actual.columns[3:])
+    config = {"beta_window": 4, "beta_min_observations": 3, "beta_min_changes": 3}
+    decision_states = original(
+        observations, panel.timestamp, columns=columns, config=parameters(config)
+    )
+    explicit = calculate_macro_factors(
+        observations,
+        panel,
+        columns=columns,
+        config=config,
+        states=decision_states,
+        calendar=calendar,
+    )
+    pd.testing.assert_frame_equal(explicit, actual)
+    assert len(replayed) == 2
+    assert set(replayed[1]) == set(panel.return_available_at)
+
+
+def test_batched_macro_interactions_keep_each_eligible_exposure_domain():
+    observations = _observations(
+        [
+            (variable, day, day, value)
+            for variable, values in (("us_vix", (10, 14)), ("us_vvix", (20, 26)))
+            for day, value in zip(
+                pd.date_range("2024-01-01", periods=2), values, strict=True
+            )
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": list("ABCDEF"),
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": [True, True, True, True, True, False],
+            "industry_standard_id": ["CSRC2012"] * 6,
+            "industry_level1_code": ["C", "C", "J", "J", None, "C"],
+            "volatility_60d": [1.0, 3.0, 5.0, np.nan, 7.0, 1000.0],
+            "amihud_60d": [4.0, 4.0, 4.0, 4.0, np.nan, 1000.0],
+        }
+    )
+    columns = [
+        f"ml_{state}_change_x_{industry}{exposure}"
+        for state in ("us_vix", "us_vvix")
+        for industry in ("", "industry_")
+        for exposure in ("volatility_60d", "amihud_60d", "beta_252d")
+    ]
+    actual = calculate_macro_factors(observations, panel, columns=columns, config={})
+    # Finite eligible volatility is [1, 3, 5, 7], with mean 4 and variance 20/3.
+    own = np.array([-3, -1, 1, np.nan, 3, np.nan]) / np.sqrt(20 / 3)
+    industry = np.array([-2, -2, 1, 1, np.nan, np.nan]) / np.sqrt(20 / 3)
+    for state, shock in (("us_vix", 4), ("us_vvix", 6)):
+        np.testing.assert_allclose(
+            actual[f"ml_{state}_change_x_volatility_60d"], shock * own
+        )
+        np.testing.assert_allclose(
+            actual[f"ml_{state}_change_x_industry_volatility_60d"], shock * industry
+        )
+    assert (
+        actual[[name for name in columns if not name.endswith("volatility_60d")]]
+        .isna()
+        .all()
         .all()
     )

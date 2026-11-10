@@ -266,8 +266,7 @@ class ExactPrimaryKeyIndex:
                 columns.append(map(payloads.__getitem__, encoded.indices.to_numpy()))
             else:
                 columns.append(_key_column_payloads(column))
-        for _ in range(keys.num_rows):
-            yield b"".join(next(column) for column in columns)
+        yield from map(b"".join, zip(*columns, strict=True))
 
     def _comparison_payload_rows(
         self, keys: pa.Table, values: pa.Table

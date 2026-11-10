@@ -7,11 +7,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.models import _PREDICTION_LOSS_REASONS
+from quant_research_platform.contracts.evaluations import CORRELATION_METRICS
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -26,7 +25,6 @@ from quant_research_platform.storage.identity import open_filesystem_file
 from quant_research_platform.storage.manifests import read_qrp_json_file, write_manifest
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
-    iter_dataset_part_batches,
     parquet_table_writer,
 )
 
@@ -617,6 +615,57 @@ _ARROW_SCHEMAS["factor_annual_diagnostics.parquet"] = _ARROW_SCHEMAS[
     "factor_diagnostics.parquet"
 ].append(pa.field("year", pa.int64(), nullable=False))
 
+# Original columns remain required. Correlation results are declared optional
+# output groups, supplied only when the analysis actually requests them.
+FACTOR_CORRELATION_FIELDS = (
+    "observation_count",
+    "status",
+    "reason",
+    "mean",
+    "standard_error",
+    "t_statistic",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+    "fdr_adjusted_p_value",
+)
+PREDICTION_CORRELATION_FIELDS = (
+    "observation_count",
+    "status",
+    "reason",
+    "mean",
+    "standard_error",
+    "t_statistic",
+    "p_value",
+    "ci_lower",
+    "ci_upper",
+    "bootstrap_status",
+    "bootstrap_reason",
+    "bootstrap_lower",
+    "bootstrap_upper",
+)
+_CORRELATION_FIELDS = {
+    "factor_diagnostics.parquet": FACTOR_CORRELATION_FIELDS,
+    "factor_annual_diagnostics.parquet": FACTOR_CORRELATION_FIELDS,
+    "prediction_diagnostics.parquet": PREDICTION_CORRELATION_FIELDS,
+}
+_REQUIRED_COLUMNS = {
+    member: tuple(schema.names) for member, schema in _ARROW_SCHEMAS.items()
+}
+for _member, _names in _CORRELATION_FIELDS.items():
+    _schema = _ARROW_SCHEMAS[_member]
+    _ARROW_SCHEMAS[_member] = pa.schema(
+        [
+            *_schema,
+            *(
+                pa.field(f"{metric}_{name}", _schema.field(name).type)
+                for metric in CORRELATION_METRICS[1:]
+                for name in _names
+            ),
+        ]
+    )
+
+
 _TABLE_COLUMNS = {
     member: tuple(schema.names) for member, schema in _ARROW_SCHEMAS.items()
 }
@@ -632,7 +681,7 @@ _TIMESTAMP_COLUMNS = {
     member: tuple(field.name for field in schema if pa.types.is_timestamp(field.type))
     for member, schema in _ARROW_SCHEMAS.items()
 }
-STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
+STATISTICS_TABLE_COLUMNS = _REQUIRED_COLUMNS
 
 
 def _nullable_count(member, column):
@@ -644,7 +693,7 @@ def _nullable_count(member, column):
 
 def _restored_frame(table, member):
     frame = table.to_pandas(integer_object_nulls=True)
-    for column in _COUNT_COLUMNS[member]:
+    for column in set(_COUNT_COLUMNS[member]).intersection(frame.columns):
         frame[column] = frame[column].astype(
             "Int64" if _nullable_count(member, column) else "int64"
         )
@@ -659,15 +708,6 @@ class StatisticsArtifact:
     root: Path
     table_group: str
     _members: tuple[str, ...]
-
-    def _batches(self, member, *, filters=None):
-        if member not in self._members:
-            raise ValueError("statistics_table_member_invalid")
-        with closing_iterator(
-            iter_dataset_part_batches(self.root / member, parquet_filters=filters)
-        ) as batches:
-            for batch in batches:
-                yield _restored_frame(batch, member)
 
     @contextmanager
     def table(self, member: str):
@@ -700,13 +740,16 @@ def write_statistics_artifact(
         for name, frame in tables.items():
             member = f"{name}.parquet"
             validated = _validated_frame(frame, member=member, metadata=metadata)
+            schema = pa.schema(
+                [field for field in _ARROW_SCHEMAS[member] if field.name in validated]
+            )
             with closing_iterator(
                 open_filesystem_file(staging / member, "xb")
             ) as handle:
                 with parquet_table_writer(
                     handle,
                     compression="zstd",
-                    schema=_ARROW_SCHEMAS[member],
+                    schema=schema,
                     statistics=tuple(
                         column
                         for column in ("fold_id", "side", "event_id", "sample_id")
@@ -716,7 +759,7 @@ def write_statistics_artifact(
                     writer(
                         pa.Table.from_pandas(
                             validated,
-                            schema=_ARROW_SCHEMAS[member],
+                            schema=schema,
                             preserve_index=False,
                         )
                     )
@@ -790,6 +833,8 @@ def _validate_table_binding(frame, *, member, metadata):
         ).all()
     ):
         raise ValueError("statistics_candidate_id_mismatch")
+    if not _TIMESTAMP_COLUMNS[member] and member != "factor_annual_diagnostics.parquet":
+        return
     start, stop, inclusive = time_window_timestamp_interval(
         TimeWindow(**metadata["window"])
     )
@@ -804,17 +849,108 @@ def _validate_table_binding(frame, *, member, metadata):
             raise ValueError("statistics_table_window_mismatch")
 
 
-def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFrame:
+def _validate_inference_values(result, member):
+    if not result.status.isin(("DEFINED", "UNDEFINED")).all():
+        raise ValueError("statistics_table_status_invalid")
+    defined = result.status.eq("DEFINED")
+    measurements = [
+        column
+        for column in (
+            "value",
+            "loss",
+            "mean",
+            "standard_error",
+            "t_statistic",
+            "p_value",
+            "ci_lower",
+            "ci_upper",
+            "bootstrap_lower",
+            "bootstrap_upper",
+        )
+        if column in result
+        and not (
+            member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
+            and column in {"bootstrap_lower", "bootstrap_upper"}
+        )
+    ]
     if (
-        type(frame) is not pd.DataFrame
-        or tuple(frame.columns) != _TABLE_COLUMNS[member]
+        result.loc[defined, measurements].isna().any().any()
+        or result.loc[
+            ~defined,
+            [
+                column
+                for column in measurements
+                if column != "mean"
+                or member
+                not in {
+                    "prediction_diagnostics.parquet",
+                    "model_comparison.parquet",
+                    "factor_stratified_diagnostics.parquet",
+                    "factor_diagnostics.parquet",
+                    "factor_annual_diagnostics.parquet",
+                    "fama_macbeth.parquet",
+                }
+            ],
+        ]
+        .notna()
+        .any()
+        .any()
+        or result.loc[defined, "reason"].ne("").any()
+        or result.loc[~defined, "reason"].str.strip().eq("").any()
+    ):
+        raise ValueError("statistics_table_status_value_invalid")
+    if member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}:
+        bootstrap_defined = result.bootstrap_status.eq("DEFINED")
+        if (
+            not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all()
+            or result.loc[bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]]
+            .isna()
+            .any()
+            .any()
+            or result.loc[~bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]]
+            .notna()
+            .any()
+            .any()
+            or result.loc[bootstrap_defined, "bootstrap_reason"].ne("").any()
+            or result.loc[~bootstrap_defined, "bootstrap_reason"]
+            .str.strip()
+            .eq("")
+            .any()
+            or result.loc[
+                bootstrap_defined,
+                ["bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"],
+            ]
+            .isna()
+            .any()
+            .any()
+        ):
+            raise ValueError("statistics_table_bootstrap_status_value_invalid")
+
+
+def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFrame:
+    if type(frame) is not pd.DataFrame:
+        raise ValueError(f"statistics_table_schema_invalid:{member}")
+    required = set(_REQUIRED_COLUMNS[member])
+    for metric in CORRELATION_METRICS[1:]:
+        fields = {f"{metric}_{name}" for name in _CORRELATION_FIELDS.get(member, ())}
+        if fields.intersection(frame.columns):
+            required.update(fields)
+    if (
+        required - set(frame.columns)
+        or set(frame.columns) - set(_TABLE_COLUMNS[member])
+        or tuple(frame.columns)
+        != tuple(column for column in _TABLE_COLUMNS[member] if column in frame)
     ):
         raise ValueError(f"statistics_table_schema_invalid:{member}")
-    result = frame.copy()
+    result = frame.copy(deep=False)
     for field in _ARROW_SCHEMAS[member]:
-        if not field.nullable and result[field.name].isna().any():
+        if (
+            field.name in result
+            and not field.nullable
+            and result[field.name].isna().any()
+        ):
             raise ValueError("statistics_table_null_invalid")
-    for column in _STRING_COLUMNS[member]:
+    for column in set(_STRING_COLUMNS[member]).intersection(result.columns):
         if member == "factor_stratified_diagnostics.parquet" and column == "stratum":
             if any(type(value) is not str for value in result[column].dropna()):
                 raise ValueError("statistics_stratum_invalid")
@@ -824,7 +960,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         if values.isna().any():
             result[column] = values.astype("string").fillna("")
         result[column] = result[column].astype(str)
-    for column in _COUNT_COLUMNS[member]:
+    for column in set(_COUNT_COLUMNS[member]).intersection(result.columns):
         values = strict_integer_series(
             result[column],
             error="statistics_table_count_invalid",
@@ -833,12 +969,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         if values.lt(0).any():
             raise ValueError("statistics_table_count_invalid")
         result[column] = values
-    if "input_date_count" in result:
-        valid_count = result[
-            "period_count" if member == "fama_macbeth.parquet" else "observation_count"
-        ]
-        if (result["input_date_count"] < valid_count).any():
-            raise ValueError("statistics_input_date_count_invalid")
     for column in _TIMESTAMP_COLUMNS.get(member, ()):
         values = pd.to_datetime(result[column], errors="raise")
         if values.isna().any():
@@ -847,7 +977,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
     numeric_columns = tuple(
         column
         for column in _TABLE_COLUMNS[member]
-        if column not in _STRING_COLUMNS[member]
+        if column in result
+        and column not in _STRING_COLUMNS[member]
         and column not in _COUNT_COLUMNS[member]
         and (column not in _TIMESTAMP_COLUMNS.get(member, ()))
     )
@@ -864,172 +995,21 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         "model_group_comparison.parquet",
         "model_prediction_metrics.parquet",
     }:
-        if not result.status.isin(("DEFINED", "UNDEFINED")).all():
-            raise ValueError("statistics_table_status_invalid")
-        defined = result.status.eq("DEFINED")
-        measurements = [
-            column
-            for column in (
-                "value",
-                "loss",
-                "mean",
-                "standard_error",
-                "t_statistic",
-                "p_value",
-                "ci_lower",
-                "ci_upper",
-                "bootstrap_lower",
-                "bootstrap_upper",
-            )
-            if column in result
-            and not (
-                member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}
-                and column in {"bootstrap_lower", "bootstrap_upper"}
-            )
-        ]
-        if (
-            result.loc[defined, measurements].isna().any().any()
-            or result.loc[
-                ~defined,
-                [
-                    column
-                    for column in measurements
-                    if column != "mean"
-                    or member
-                    not in {
-                        "prediction_diagnostics.parquet",
-                        "model_comparison.parquet",
-                        "factor_stratified_diagnostics.parquet",
-                        "factor_diagnostics.parquet",
-                        "factor_annual_diagnostics.parquet",
-                        "fama_macbeth.parquet",
-                    }
-                ],
-            ]
-            .notna()
-            .any()
-            .any()
-            or result.loc[defined, "reason"].ne("").any()
-            or result.loc[~defined, "reason"].str.strip().eq("").any()
-        ):
-            raise ValueError("statistics_table_status_value_invalid")
-        if member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}:
-            bootstrap_defined = result.bootstrap_status.eq("DEFINED")
-            if (
-                not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all()
-                or result.loc[bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]]
-                .isna()
-                .any()
-                .any()
-                or result.loc[
-                    ~bootstrap_defined, ["bootstrap_lower", "bootstrap_upper"]
-                ]
-                .notna()
-                .any()
-                .any()
-                or result.loc[bootstrap_defined, "bootstrap_reason"].ne("").any()
-                or result.loc[~bootstrap_defined, "bootstrap_reason"]
-                .str.strip()
-                .eq("")
-                .any()
-                or result.loc[
-                    bootstrap_defined,
-                    ["bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"],
-                ]
-                .isna()
-                .any()
-                .any()
-            ):
-                raise ValueError("statistics_table_bootstrap_status_value_invalid")
-        if member in {
-            "prediction_diagnostics.parquet",
-            "model_comparison.parquet",
-            "factor_diagnostics.parquet",
-            "factor_annual_diagnostics.parquet",
-            "fama_macbeth.parquet",
-        }:
-            count = result[
-                "period_count"
-                if member == "fama_macbeth.parquet"
-                else "observation_count"
-            ]
-            if result["mean"].notna().ne(count.gt(0)).any():
-                raise ValueError("statistics_table_descriptive_mean_count_invalid")
-        for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
-            if column in result and (not result[column].dropna().between(0, 1).all()):
-                raise ValueError("statistics_table_probability_invalid")
-        if "standard_error" in result and (defined & result.standard_error.le(0)).any():
-            raise ValueError("statistics_table_standard_error_invalid")
-        for lower, upper in (
-            ("ci_lower", "ci_upper"),
-            ("bootstrap_lower", "bootstrap_upper"),
-        ):
-            if lower in result and result[lower].gt(result[upper]).any():
-                raise ValueError("statistics_table_interval_invalid")
-        if member in {
-            "factor_diagnostics.parquet",
-            "factor_annual_diagnostics.parquet",
-        }:
-            applicable = result.fdr_method.isin(("BH", "BY"))
-            if (
-                not (applicable | result.fdr_method.eq("NOT_APPLICABLE")).all()
-                or result.defined_hypothesis_count.gt(
-                    result.planned_hypothesis_count
-                ).any()
-                or (
-                    not result.missing_hypothesis_count.eq(
-                        result.planned_hypothesis_count
-                        - result.defined_hypothesis_count
-                    ).all()
-                )
-                or result.loc[applicable, "fdr_alpha"].isna().any()
-                or (
-                    not result.loc[applicable, "fdr_alpha"]
-                    .between(0, 1, inclusive="neither")
-                    .all()
-                )
-                or result.loc[applicable & defined, "fdr_adjusted_p_value"].isna().any()
-                or result.loc[~applicable | ~defined, "fdr_adjusted_p_value"]
-                .notna()
-                .any()
-                or result.loc[~applicable, "fdr_alpha"].notna().any()
-            ):
-                raise ValueError("statistics_table_fdr_invalid")
-        if member == "factor_correlation.parquet":
-            if (
-                not result.statistic.isin(("pearson", "spearman")).all()
-                or result.factor_id.str.strip().eq("").any()
-                or result.comparison_factor_id.str.strip().eq("").any()
-                or result.factor_id.eq(result.comparison_factor_id).any()
-                or defined.ne(result.observation_count.gt(0)).any()
-                or result.observation_pairs.lt(2 * result.observation_count).any()
-                or result.mean_absolute.notna().ne(defined).any()
-                or not result.loc[defined, "mean"].between(-1, 1).all()
-                or not result.loc[defined, "mean_absolute"].between(0, 1).all()
-                or (result.mean_absolute + 1e-12 < result["mean"].abs()).any()
-            ):
-                raise ValueError("statistics_factor_correlation_invalid")
-        if member == "fama_macbeth_periods.parquet":
-            white_defined = result.white_p_value.notna()
-            if (
-                (white_defined & ~defined).any()
-                or not result.loc[white_defined, "white_p_value"].between(0, 1).all()
-                or result.loc[white_defined, "white_reason"].ne("").any()
-                or result.loc[~white_defined, "white_reason"].str.strip().eq("").any()
-            ):
-                raise ValueError("statistics_table_white_invalid")
-        if member == "model_reality_checks.parquet":
-            indicator = result.statistic_id.isin(("superior", "included"))
-            probability = result.statistic_id.isin(
-                ("lower_p_value", "consistent_p_value", "upper_p_value", "p_value")
-            )
-            if (
-                not (indicator | probability).all()
-                or not result.alpha.between(0, 1, inclusive="neither").all()
-                or (not result.loc[defined & indicator, "value"].isin((0, 1)).all())
-                or (not result.loc[defined & probability, "value"].between(0, 1).all())
-            ):
-                raise ValueError("statistics_table_reality_check_invalid")
+        _validate_inference_values(result, member)
+        for metric in CORRELATION_METRICS[1:]:
+            names = _CORRELATION_FIELDS.get(member, ())
+            if names and f"{metric}_status" in result:
+                projected = result.loc[
+                    :,
+                    [
+                        column
+                        for column in _REQUIRED_COLUMNS[member]
+                        if column in result
+                    ],
+                ].copy()
+                for name in names:
+                    projected[name] = result[f"{metric}_{name}"]
+                _validate_inference_values(projected, member)
     if member in {
         "model_losses.parquet",
         "model_comparison.parquet",
@@ -1059,7 +1039,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         )
         defined = result.status.eq("DEFINED")
         bootstrap_defined = result.bootstrap_status.eq("DEFINED")
-        fdr_defined = defined & result.fdr_method.isin(("BH", "BY"))
         measurements = (
             "standard_error",
             "t_statistic",
@@ -1075,10 +1054,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             or result.sample_role.isna().any()
             or result.sample_role.str.strip().eq("").any()
             or (result.sample_role.nunique() > 1)
-            or (
-                bootstrap_defined
-                & result.observation_count.le(result.bootstrap_block_size)
-            ).any()
             or result.loc[
                 bootstrap_defined, ["global_mean", "quarterly_mean", "mean_difference"]
             ]
@@ -1090,7 +1065,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             .isna()
             .any()
             .any()
-            or (defined & result.observation_count.lt(2)).any()
             or result.loc[~defined, list(measurements)].notna().any().any()
             or result.loc[defined, "reason"].ne("").any()
             or result.loc[~defined, "reason"].str.strip().eq("").any()
@@ -1101,27 +1075,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             .str.strip()
             .eq("")
             .any()
-            or (not result.fdr_method.isin(("BH", "BY", "NOT_APPLICABLE")).all())
-            or result.loc[fdr_defined, "fdr_adjusted_p_value"].isna().any()
-            or result.loc[~fdr_defined, "fdr_adjusted_p_value"].notna().any()
-            or (not result.fdr_alpha.between(0, 1, inclusive="neither").all())
-            or (not result.confidence.between(0, 1, inclusive="neither").all())
-            or (not result.fdr_family_size.eq(len(result)).all())
-            or (defined & result.standard_error.le(0)).any()
-            or result.ci_lower.gt(result.ci_upper).any()
-            or result.bootstrap_lower.gt(result.bootstrap_upper).any()
-            or (not result.p_value.dropna().between(0, 1).all())
-            or (not result.fdr_adjusted_p_value.dropna().between(0, 1).all())
         ):
             raise ValueError("statistics_group_comparison_invalid")
-        if member == "model_group_comparison.parquet" and (
-            result.observation_count.gt(result.calendar_count).any()
-            or (
-                (defined | bootstrap_defined)
-                & result.observation_count.ne(result.calendar_count)
-            ).any()
-        ):
-            raise ValueError("statistics_group_comparison_count_invalid")
         if (
             member == "portfolio_group_comparison.parquet"
             and not result.empty
@@ -1131,64 +1086,16 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
             )
         ):
             raise ValueError("statistics_group_comparison_primary_invalid")
-    if member == "portfolio_group_comparison.parquet":
-        for group in ("global", "quarterly"):
-            column = f"{group}_terminal_wealth"
-            missing = result[column].isna()
-            if (
-                result.loc[~missing, f"{column}_reason"].ne("").any()
-                or not result.loc[missing, f"{column}_reason"]
-                .isin(("nonfinite_result", "nonpositive_start_nav"))
-                .all()
-            ):
-                raise ValueError("statistics_terminal_wealth_invalid")
-    if member == "model_prediction_metrics.parquet":
-        incomparable_reasons = _PREDICTION_LOSS_REASONS
-        mse_reasons = ("no_valid_targets", "nonfinite_result", *incomparable_reasons)
-        no_targets = result.target_count.eq(0)
-        incomparable = result.mse_reason.isin(
-            incomparable_reasons
-        ) | result.oos_r2_reason.isin(incomparable_reasons)
-        if (
-            result.duplicated(["timestamp", "family_id"]).any()
-            or result.target_count.gt(result.prediction_count).any()
-            or result.head_selected_count.gt(result.prediction_count).any()
-            or result.head_evaluable_count.gt(result.head_selected_count).any()
-            or not result.head_coverage.dropna().between(0, 1).all()
-            or result.mse.dropna().lt(0).any()
-            or result.baseline_mse.dropna().lt(0).any()
-            or result.oos_r2.dropna().gt(1).any()
-            or result.loc[no_targets, ["mse", "baseline_mse", "oos_r2"]]
-            .notna()
-            .any()
-            .any()
-            or result.loc[result.mse.notna(), "mse_reason"].ne("").any()
-            or not result.loc[result.mse.isna(), "mse_reason"].isin(mse_reasons).all()
-            or (result.mse_reason.eq("no_valid_targets") & ~no_targets).any()
-            or result.loc[result.oos_r2.notna(), "oos_r2_reason"].ne("").any()
-            or not result.loc[result.oos_r2.isna(), "oos_r2_reason"]
-            .isin((*mse_reasons, "zero_baseline_error"))
-            .all()
-            or (result.oos_r2_reason.eq("no_valid_targets") & ~no_targets).any()
-            or (
-                result.oos_r2_reason.eq("zero_baseline_error")
-                & result.baseline_mse.ne(0)
-            ).any()
-            or (incomparable & result.oos_r2_reason.ne(result.mse_reason)).any()
-        ):
-            raise ValueError("statistics_prediction_metrics_invalid")
-    if member == "model_losses.parquet":
-        if (
-            not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
-            or not result["loss"].dropna().between(-1, 1).all()
-            or (not result["common_date"].isin((0, 1)).all())
-            or (result["common_observation_count"] > result["observation_count"]).any()
-            or result.groupby("timestamp")["common_observation_count"]
-            .nunique()
-            .gt(1)
-            .any()
-        ):
-            raise ValueError("statistics_model_loss_invalid")
+    if (
+        member == "model_prediction_metrics.parquet"
+        and result.duplicated(["timestamp", "family_id"]).any()
+    ):
+        raise ValueError("statistics_table_duplicate_keys")
+    if (
+        member == "model_losses.parquet"
+        and not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
+    ):
+        raise ValueError("statistics_model_loss_invalid")
     if member in _COMPARISON_MEMBERS:
         if (
             not result.reference_kind.isin(("benchmark", "control")).all()
@@ -1231,72 +1138,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 or result.loc[~defined, reason].eq("").any()
             ):
                 raise ValueError("statistics_table_status_value_invalid")
-        if (
-            "planned_observation_count" in result
-            and result.observation_count.gt(result.planned_observation_count).any()
-        ):
-            raise ValueError("statistics_comparison_count_invalid")
         if "start_at" in result and not result.start_at.lt(result.end_at).all():
             raise ValueError("statistics_comparison_interval_invalid")
-        if (
-            member == "portfolio_market_exposure.parquet"
-            and not result.confidence.between(0, 1, inclusive="neither").all()
-        ):
-            raise ValueError("statistics_comparison_confidence_invalid")
-    if member == "portfolio_market_exposure.parquet":
-        hypothesis = result.coefficient_id.isin(
-            ("alpha", "market_return_intercept", "beta")
-        )
-        inferred = result.inference_status.eq("DEFINED")
-        if (
-            not result.inference_status.isin(
-                ("DEFINED", "UNDEFINED", "NOT_APPLICABLE")
-            ).all()
-            or not result.inference_status.eq("NOT_APPLICABLE").eq(~hypothesis).all()
-            or (inferred & ~result.status.eq("DEFINED")).any()
-            or result.loc[inferred, "inference_reason"].ne("").any()
-            or result.loc[~inferred, "inference_reason"].eq("").any()
-            or result.loc[~inferred, ["t_statistic", "p_value", "fdr_adjusted_p_value"]]
-            .notna()
-            .any()
-            .any()
-            or not result.fdr_method.eq("BY").all()
-            or result.defined_hypothesis_count.gt(result.planned_hypothesis_count).any()
-            or not result.coefficient_id.isin(
-                ("alpha", "market_return_intercept", "beta", "correlation", "r_squared")
-            ).all()
-            or not result.p_value.dropna().between(0, 1).all()
-            or not result.fdr_adjusted_p_value.dropna().between(0, 1).all()
-            or result.loc[
-                inferred,
-                [
-                    "standard_error",
-                    "t_statistic",
-                    "p_value",
-                    "ci_lower",
-                    "ci_upper",
-                    "fdr_adjusted_p_value",
-                ],
-            ]
-            .isna()
-            .any()
-            .any()
-            or result.loc[
-                ~hypothesis,
-                [
-                    "standard_error",
-                    "t_statistic",
-                    "p_value",
-                    "ci_lower",
-                    "ci_upper",
-                    "fdr_adjusted_p_value",
-                ],
-            ]
-            .notna()
-            .any()
-            .any()
-        ):
-            raise ValueError("statistics_exposure_inference_invalid")
     if member in STATISTICS_TABLE_GROUPS["portfolio"] and member not in (
         "portfolio_group_comparison.parquet",
         *_COMPARISON_MEMBERS,
@@ -1340,71 +1183,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
                 or result.loc[~defined, "reason"].eq("").any()
             ):
                 raise ValueError("statistics_table_status_value_invalid")
-        if member == "portfolio_daily.parquet":
-            if (
-                result[["cash_post", "nav_before", "nav_post", "nav_end"]]
-                .isna()
-                .any()
-                .any()
-                or result[["nav_before", "nav_post", "nav_end"]].lt(0).any().any()
-                or not result.cash_post.between(0, result.nav_post).all()
-            ):
-                raise ValueError("statistics_cash_exposure_invalid")
-            expected_cash_weight = result.cash_post / result.nav_post.where(
-                result.nav_post > 0
-            )
-            if not np.isclose(
-                result.cash_weight_post,
-                expected_cash_weight,
-                rtol=1e-12,
-                atol=1e-12,
-                equal_nan=True,
-            ).all():
-                raise ValueError("statistics_cash_exposure_invalid")
-            positive_start = result.nav_before.gt(0)
-            ratios = [
-                "net_return",
-                "gross_return",
-                "cost_drag",
-                "target_turnover",
-                "requested_turnover",
-                "realized_turnover",
-            ]
-            expected_return = (
-                (result.nav_end - result.nav_before)
-                / result.nav_before.where(positive_start)
-            ).replace([np.inf, -np.inf], np.nan)
-            if not np.isclose(
-                result.net_return,
-                expected_return,
-                rtol=1e-10,
-                atol=1e-12,
-                equal_nan=True,
-            ).all():
-                raise ValueError("statistics_return_status_invalid")
-            defined_return = positive_start & result.net_return.notna()
-            if (
-                not result.return_status.eq(
-                    defined_return.map({True: "DEFINED", False: "UNDEFINED"})
-                ).all()
-                or not result.return_reason.eq(
-                    pd.Series(
-                        [
-                            ""
-                            if defined
-                            else "nonfinite_result"
-                            if positive
-                            else "nonpositive_start_nav"
-                            for defined, positive in zip(
-                                defined_return, positive_start, strict=True
-                            )
-                        ],
-                        index=result.index,
-                    )
-                ).all()
-                or result.loc[~positive_start, ratios].notna().any().any()
-            ):
-                raise ValueError("statistics_return_status_invalid")
         if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
             raise ValueError("statistics_holding_interval_invalid")
         if "decision_at" in result:
@@ -1461,6 +1239,9 @@ def _validate_factor_stratified(frame, metadata):
     """Bind concrete factor summaries to their persisted EVAL inputs and family."""
     binding = metadata.get("evaluation_binding", {})
     policy = metadata.get("statistics", {})
+    allowed_domains = {"side", *binding.get("strata", {}).get("kinds", [])}
+    if set(metadata.get("stratum_domains", {})) - allowed_domains:
+        raise ValueError("statistics_stratified_domain_invalid")
     if frame.duplicated(
         ["signal", "label", "sample_scope", "stratification", "stratum", "statistic"]
     ).any():
@@ -1477,11 +1258,23 @@ def _validate_factor_stratified(frame, metadata):
     expected.update(
         (signal, binding["strata"]["primary_label"], scope, kind, stratum, statistic)
         for kind, strata in metadata.get("stratum_domains", {}).items()
+        if kind != "side"
         for stratum in strata
         for signal in signals
         for scope in scopes
         for statistic in ("ic", "rankic")
     )
+    if "side" in metadata.get("stratum_domains", {}):
+        if metadata["stratum_domains"]["side"] != ["long", "short"]:
+            raise ValueError("statistics_stratified_domain_invalid")
+        expected.update(
+            (signal, label, scope, "side", side, statistic)
+            for signal in signals
+            for label in binding.get("label_columns", [])
+            for scope in scopes
+            for side in ("long", "short")
+            for statistic in ("ic", "rankic")
+        )
     actual = {
         (
             row.signal,
@@ -1495,24 +1288,6 @@ def _validate_factor_stratified(frame, metadata):
     }
     if actual != expected:
         raise ValueError("statistics_stratified_domain_incomplete")
-    if (
-        not frame.signal.isin(
-            [item["signal_id"] for item in binding.get("signals", [])]
-        ).all()
-        or not frame.label.isin(binding.get("label_columns", [])).all()
-        or not frame.sample_scope.isin(metadata.get("family_scopes", [])).all()
-        or not frame.statistic.isin(("ic", "rankic")).all()
-    ):
-        raise ValueError("statistics_stratified_domain_invalid")
-    if (
-        not (
-            frame.input_date_count.ge(frame.observed_date_count)
-            & frame.observed_date_count.ge(frame.observation_count)
-        ).all()
-        or frame["mean"].notna().ne(frame.observation_count.gt(0)).any()
-        or frame.observation_pairs.lt(2 * frame.observation_count).any()
-    ):
-        raise ValueError("statistics_stratified_count_invalid")
     for scope, block in frame.groupby("sample_scope"):
         if not block.input_date_count.eq(
             metadata.get("input_date_counts", {}).get(scope)
@@ -1521,48 +1296,3 @@ def _validate_factor_stratified(frame, metadata):
     for key in ("hac_lag", "fdr_method", "fdr_alpha"):
         if not frame[key].eq(policy.get(key)).all():
             raise ValueError("statistics_stratified_policy_invalid")
-    if (
-        not frame.fdr_method.isin(("BH", "BY")).all()
-        or not frame.fdr_alpha.between(0, 1, inclusive="neither").all()
-    ):
-        raise ValueError("statistics_stratified_policy_invalid")
-    defined = frame.status.eq("DEFINED")
-    if (
-        frame.fdr_adjusted_p_value.notna().ne(defined).any()
-        or not frame.defined_hypothesis_count.eq(int(defined.sum())).all()
-    ):
-        raise ValueError("statistics_stratified_fdr_invalid")
-    if (
-        (defined & frame.observation_count.le(frame.hac_lag)).any()
-        or (defined & frame.observation_count.lt(2)).any()
-        or not frame["mean"].dropna().between(-1, 1).all()
-    ):
-        raise ValueError("statistics_stratified_inference_invalid")
-    sufficient = frame.observation_count.ge(2) & frame.observation_count.gt(
-        frame.hac_lag
-    )
-    incomplete = frame.observation_count.lt(frame.input_date_count)
-    if (
-        (defined & incomplete).any()
-        or (defined & frame.fdr_adjusted_p_value.lt(frame.p_value)).any()
-        or frame.loc[incomplete, "reason"].ne("incomplete_session_clock").any()
-        or frame.loc[~defined & ~incomplete & sufficient, "reason"]
-        .ne("hac_inference_undefined")
-        .any()
-        or frame.loc[~incomplete & ~sufficient, "reason"]
-        .ne("insufficient_dates_for_hac")
-        .any()
-    ):
-        raise ValueError("statistics_stratified_inference_invalid")
-    for kind, block in frame.groupby("stratification", sort=False):
-        if kind == "all":
-            if block.stratum.notna().any():
-                raise ValueError("statistics_stratified_domain_invalid")
-        elif (
-            kind not in binding.get("strata", {}).get("kinds", [])
-            or not block.label.eq(binding["strata"]["primary_label"]).all()
-            or not block.stratum.dropna()
-            .isin(metadata.get("stratum_domains", {}).get(kind, []))
-            .all()
-        ):
-            raise ValueError("statistics_stratified_domain_invalid")

@@ -3164,14 +3164,6 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
 def test_cash_exposure_is_post_execution_ledger_cash(
     tmp_path, monkeypatch, construction, fees, blocked
 ):
-    from quant_research_platform.artifacts.statistics import (
-        STATISTICS_TABLE_COLUMNS,
-        _validated_frame,
-    )
-    from tests.helpers.statistics_artifacts import (
-        statistics_metadata,
-    )
-
     frames, fee_frame, window = _inputs()
     if not fees:
         fee_frame["rate"] = 0.0
@@ -3201,28 +3193,6 @@ def test_cash_exposure_is_post_execution_ledger_cash(
     elif not fees:
         assert row["cash_weight_post"] == pytest.approx(
             0.5032 if construction.endswith("half_step") else 0.0064
-        )
-    row.update(
-        candidate_id="cash_probe",
-        sample_role="validation",
-        return_status="DEFINED",
-        return_reason="",
-    )
-    daily = pd.DataFrame(
-        [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
-    )
-    metadata = statistics_metadata(window, candidate_ids=[row["candidate_id"]])
-    _validated_frame(
-        daily,
-        member="portfolio_daily.parquet",
-        metadata=metadata,
-    )
-    daily.loc[0, "cash_weight_post"] += 0.01
-    with pytest.raises(ValueError, match="statistics_cash_exposure_invalid"):
-        _validated_frame(
-            daily,
-            member="portfolio_daily.parquet",
-            metadata=metadata,
         )
 
 

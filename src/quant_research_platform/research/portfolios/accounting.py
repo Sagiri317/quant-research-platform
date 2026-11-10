@@ -21,6 +21,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
+    _portfolio_budget_exceeded,
     _quantity_equal,
     portfolio_notional_tolerance,
 )
@@ -860,13 +861,6 @@ def execute_stock_target(
         )
     )
     market_masks = {market: markets == market for market in set(markets[eligible])}
-    prepared = {
-        (market, side): prepare_trade_cost(
-            execution_date, market, side, fee_schedule, assumptions
-        )
-        for market in market_masks
-        for side in ("buy", "sell")
-    }
     adv = frame.adv.to_numpy()
     candidates = np.where(eligible, np.minimum(requested, capacities), 0.0)
     selling = desired_values < 0
@@ -884,6 +878,15 @@ def execute_stock_target(
     reasons[eligible & selling & (sellable < requested) & (sellable <= capacities)] = (
         "locked_shares"
     )
+
+    prepared = {
+        (market, side): prepare_trade_cost(
+            execution_date, market, side, fee_schedule, assumptions
+        )
+        for market, market_mask in market_masks.items()
+        for side in ("buy", "sell")
+        if (market_mask & (candidates > 0) & (selling == (side == "sell"))).any()
+    }
 
     def trade_costs(units, side):
         result = np.zeros_like(costs)
@@ -941,7 +944,7 @@ def execute_stock_target(
     for index in np.argsort(-proceeds, kind="stable"):
         if sells[index] == 0:
             continue
-        if fsum((cash_after_sells, proceeds[index])) < 0:
+        if _portfolio_budget_exceeded((-proceeds[index],), (cash_after_sells,)):
             reasons[index] = "cash_limit"
             continue
         quantity[index] = -sells[index]
@@ -956,28 +959,42 @@ def execute_stock_target(
     )
     buys = np.where(~selling, candidates, 0.0)
 
-    def scaled_buys(scale):
+    buy_mask = buys > 0
+
+    def buy_quantities(scale):
         units = np.zeros(len(frame))
-        mask = buys > 0
-        units[mask] = round_stock_orders(
-            buys[mask] * scale, minimum[mask], increment[mask]
+        units[buy_mask] = round_stock_orders(
+            buys[buy_mask] * scale, minimum[buy_mask], increment[buy_mask]
         )
+        return units
+
+    def buy_result(units):
         values, buy_prices = trade_costs(units, "buy")
         spend = fsum((*(units * np.where(units > 0, buy_prices, 0.0)), *values.ravel()))
         return units, values, spend, buy_prices
 
-    bought, buy_costs, spend, buy_prices = scaled_buys(1.0)
-    if spend > cash_after_sells:
+    purchase = buy_result(buy_quantities(1.0))
+    if _portfolio_budget_exceeded((purchase[2],), (cash_after_sells,)):
         low, high = 0.0, 1.0
+        lower, upper = buy_result(buy_quantities(low)), purchase
         while True:
             middle = (low + high) / 2.0
             if middle == low or middle == high:
                 break
-            if scaled_buys(middle)[2] <= cash_after_sells:
-                low = middle
+            units = buy_quantities(middle)
+            # Equal quantized orders retain the bound's already computed fees/depth.
+            if np.array_equal(units, lower[0]):
+                trial = lower
+            elif np.array_equal(units, upper[0]):
+                trial = upper
             else:
-                high = middle
-        bought, buy_costs, spend, buy_prices = scaled_buys(low)
+                trial = buy_result(units)
+            if not _portfolio_budget_exceeded((trial[2],), (cash_after_sells,)):
+                low, lower = middle, trial
+            else:
+                high, upper = middle, trial
+        purchase = lower
+    bought, buy_costs, spend, buy_prices = purchase
     cash_limited = bought < buys
     reasons[cash_limited] = np.where(
         reasons[cash_limited] == "adv_capacity",

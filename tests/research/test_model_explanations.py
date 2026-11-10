@@ -74,19 +74,33 @@ def _case(tmp_path, algorithm="linear_regression", *, parameters=None):
 
 
 @pytest.mark.parametrize("algorithm", list(_ALGORITHMS))
-def test_real_models_roundtrip_matches_production_prediction(tmp_path, algorithm):
+def test_real_models_roundtrip_matches_production_prediction(
+    tmp_path, algorithm, monkeypatch
+):
     case, frame, config = _case(tmp_path, algorithm)
+    config["selection"]["max_rows"] = 7
     predictions, _, _ = predict_frame(
         tmp_path / "predict", frame, case, window=config["window"]
     )
+    from quant_research_platform.research.models import explanations
+
+    evaluated_rows = []
+    original_output = explanations._output
+
+    def output(result, selected, *args, **kwargs):
+        evaluated_rows.append(len(selected))
+        return original_output(result, selected, *args, **kwargs)
+
+    monkeypatch.setattr(explanations, "_output", output)
     metadata, tables = read_explanation(explain(config))
+    assert evaluated_rows == [7]
     actual = tables["predictions"].merge(
         predictions,
         on=["timestamp", "asset_id"],
         suffixes=("", "_production"),
         validate="one_to_one",
     )
-    assert len(actual) == 24
+    assert len(actual) == 7
     np.testing.assert_allclose(
         actual.prediction_score,
         actual.prediction_score_production,
@@ -256,6 +270,7 @@ def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
 )
 def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     case, frame, config = _case(tmp_path, algorithm)
+    config["selection"]["max_rows"] = 7
     config["methods"] = ["linear_shap"]
     config["background"] = {
         "inputs": config["inputs"],
@@ -303,6 +318,7 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
 
 def test_real_tree_interventional_shap(tmp_path):
     case, frame, config = _case(tmp_path, "xgboost_regressor")
+    config["selection"]["max_rows"] = 7
     config["methods"] = ["tree_shap_interventional"]
     config["background"] = {
         "inputs": config["inputs"],

@@ -20,16 +20,13 @@ from tests.helpers.output_frames import (
 )
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_manifest_actual_model_and_paths(tmp_path, legacy):
+def test_manifest_actual_model_and_paths(tmp_path):
     root, frame, metadata = native_bundle(tmp_path)
     manifest = json.loads((root / "manifest.json").read_text())
     assert not {"model_id", "family_id", "label_unit"} & set(manifest["metadata"])
     assert validate_output_manifest(manifest) is manifest
     assert manifest["metadata"] == metadata
     assert "run_id" not in manifest
-    if legacy:
-        (root / "manifest.json").write_text(json.dumps(manifest))
     actual, restored = read_predictions(root)
     assert restored == metadata
     pd.testing.assert_frame_equal(

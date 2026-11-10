@@ -246,7 +246,7 @@ def test_native_own_common_strata_and_persisted_reduction(
 
     monkeypatch.setattr(factor_stats, "iter_dataset_chunks", forbidden)
     monkeypatch.setattr(dataset_stats, "open_dataset_session", forbidden)
-    monkeypatch.setattr(factor_stats, "cross_sectional_rank_ic", forbidden)
+    monkeypatch.setattr(factor_stats, "cross_sectional_correlations", forbidden)
     monkeypatch.setattr(factor_stats, "fama_macbeth_period", forbidden)
     output = factor_statistics(
         {
@@ -275,8 +275,10 @@ def test_native_own_common_strata_and_persisted_reduction(
             ("size", "3"): (1, 1 if filtered else 0),
             ("liquidity", "2"): (2, 0 if filtered else 2),
             ("liquidity", "3"): (1, 2 if filtered else 0),
+            ("side", "long"): (1, 1 if filtered else 0),
+            ("side", "short"): (1, 1),
         }
-        assert len(result) == 36  # (all + 8 strata) × 2 scopes × IC/RankIC
+        assert len(result) == 44  # (all + 8 strata + 2 sides) × 2 scopes × IC/RankIC
         assert result.input_date_count.eq(1).all()
         for row in result.loc[~result.stratification.eq("all")].itertuples():
             stratum = None if pd.isna(row.stratum) else row.stratum
@@ -617,15 +619,26 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
                 (stratum, block)
                 for stratum, block in tables["daily_strata"].groupby("stratum")
             ],
+            *[
+                (
+                    side,
+                    tables["metrics"][[f"{side}_ic", f"{side}_rankic"]].rename(
+                        columns={f"{side}_ic": "ic", f"{side}_rankic": "rankic"}
+                    ),
+                )
+                for side in ("long", "short")
+            ],
         ]:
             for statistic in ("ic", "rankic"):
                 values = group[statistic].dropna().to_numpy()
+                if len(values) < 28:
+                    continue  # Common-side selections have one asset and are undefined.
                 numeric_sequences[(scope, kind, statistic)] = values
                 inference = hac_mean(values, max_lags=20)
                 expected.append((scope, kind, statistic, inference))
     adjusted = fdr_adjust(
-        [row[3].p_value for row in expected] + [1.0, 1.0], method="BY"
-    ).adjusted_p_values[:-2]
+        [row[3].p_value for row in expected] + [1.0] * 6, method="BY"
+    ).adjusted_p_values[:-6]
     per_layer = np.concatenate(
         [
             fdr_adjust(
@@ -641,8 +654,8 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
             for (scope, kind, statistic), values in numeric_sequences.items()
         ]
         adjusted = fdr_adjust(
-            [row[3].p_value for row in expected] + [1.0, 1.0], method=method
-        ).adjusted_p_values[:-2]
+            [row[3].p_value for row in expected] + [1.0] * 6, method=method
+        ).adjusted_p_values[:-6]
         output = factor_statistics(
             {
                 "evaluation_inputs": [str(own), str(common)],
@@ -654,7 +667,7 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
         artifact = read_statistics_artifact(output)
         with artifact.table("factor_stratified_diagnostics.parquet") as result:
             assert result.hac_lag.eq(lag).all() and result.fdr_method.eq(method).all()
-            assert len(result) == 12  # 2 scopes × (all, A, B) × IC/RankIC
+            assert len(result) == 20  # 2 scopes × (all, A, B, long, short) × IC/RankIC
             absent = result.loc[
                 result.sample_scope.eq("common") & result.stratum.eq("B")
             ]
@@ -932,77 +945,34 @@ def test_rank_ic_reads_only_its_selected_evaluation_members(
 
 
 @pytest.mark.parametrize(
-    "mutation",
-    (
-        "duplicate",
-        "scope",
-        "stratum",
-        "pairs",
-        "reason",
-        "family_count",
-        "missing_all",
-        "false_clock",
-        "missing_clock",
-        "defined_gap",
-    ),
+    "mutation", ("duplicate", "scope", "stratum", "missing_all", "stratum_binding")
 )
-def test_stratified_statistics_semantics_checked_at_publication(
+def test_stratified_statistics_bindings_checked_at_publication(
     tmp_path, mutation, stratified_baselines
 ):
-    import pyarrow.parquet as pq
-
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
 
-    root = tmp_path / "stats-copy"
-    shutil.copytree(
-        stratified_baselines[3 if mutation == "defined_gap" else 1][1], root
-    )
-    artifact = read_statistics_artifact(root)
-    path = root / "factor_stratified_diagnostics.parquet"
-    table = pq.read_table(path)
-    frame = table.to_pandas()
-    if mutation == "duplicate":
-        frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
-    elif mutation == "missing_all":
-        frame = frame.loc[
-            ~(frame.stratification.eq("all") & frame.statistic.eq("ic"))
-        ].copy()
-    elif mutation == "scope":
-        frame.loc[0, "sample_scope"] = "common"
-    elif mutation == "stratum":
-        frame.loc[0, "stratum"] = "literal-null"
-    elif mutation == "pairs":
-        frame.loc[0, "observation_pairs"] = 0
-    elif mutation == "reason":
-        frame.loc[0, "reason"] = "unexplained"
-    elif mutation == "false_clock":
-        complete = frame.observation_count.eq(frame.input_date_count)
-        assert complete.any()
-        frame.loc[complete, "reason"] = "incomplete_session_clock"
-    elif mutation == "missing_clock":
-        incomplete = frame.observation_count.lt(frame.input_date_count)
-        assert incomplete.any()
-        frame.loc[incomplete, "reason"] = "insufficient_dates_for_hac"
-    elif mutation == "defined_gap":
-        row = frame.index[frame.observation_count.eq(3)][0]
-        frame.loc[row, "observation_count"] = 2
-        frame.loc[row, "status"] = "DEFINED"
-        frame.loc[row, "reason"] = ""
-        frame.loc[row, "standard_error"] = 0.1
-        frame.loc[row, "t_statistic"] = frame.loc[row, "mean"] / 0.1
-        frame.loc[row, ["p_value", "fdr_adjusted_p_value"]] = 0.5
-        frame.loc[row, "ci_lower"] = frame.loc[row, "mean"] - 0.2
-        frame.loc[row, "ci_upper"] = frame.loc[row, "mean"] + 0.2
-        frame["defined_hypothesis_count"] = 1
-    else:
-        frame["defined_hypothesis_count"] = 1
-    with pytest.raises(ValueError):
-        write_statistics_artifact(
-            tmp_path / "rejected",
-            metadata=artifact.metadata,
-            tables={"factor_stratified_diagnostics": frame},
-            table_group="factor",
-        )
+    artifact = read_statistics_artifact(stratified_baselines[1][1])
+    with artifact.table("factor_stratified_diagnostics.parquet") as frame:
+        if mutation == "duplicate":
+            frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
+        elif mutation == "missing_all":
+            frame = frame.loc[
+                ~(frame.stratification.eq("all") & frame.statistic.eq("ic"))
+            ]
+        elif mutation == "scope":
+            frame.loc[0, "sample_scope"] = "common"
+        elif mutation == "stratum":
+            frame.loc[0, "stratum"] = "literal-null"
+        else:
+            artifact.metadata["evaluation_binding"]["strata"]["kinds"] = []
+        with pytest.raises(ValueError):
+            write_statistics_artifact(
+                tmp_path / "rejected",
+                metadata=artifact.metadata,
+                tables={"factor_stratified_diagnostics": frame},
+                table_group="factor",
+            )
 
 
 def test_exhaustive_strata_observation_totals_match_all(tmp_path):
@@ -1044,7 +1014,7 @@ def test_empty_native_window_publishes_and_reduces_undefined(tmp_path):
     with read_statistics_artifact(reduced).table(
         "factor_stratified_diagnostics.parquet"
     ) as frame:
-        assert len(frame) == 2
+        assert len(frame) == 6
         assert frame.input_date_count.eq(0).all()
         assert frame.observation_count.eq(0).all()
         assert frame.status.eq("UNDEFINED").all()

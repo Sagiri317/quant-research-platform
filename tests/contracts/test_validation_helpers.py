@@ -12,6 +12,35 @@ import pytest
 import quant_research_platform.contracts.validation as validation
 
 
+@pytest.mark.parametrize(
+    ("parser", "values", "replacement"),
+    [
+        (validation.strict_string_series, ["a", "b"], "changed"),
+        (
+            validation.strict_timestamp_series,
+            pd.date_range("2024-01-01", periods=2),
+            pd.Timestamp("2025-01-01"),
+        ),
+        (validation.strict_bool_series, [True, False], False),
+        (validation.strict_integer_series, [1, 2], 3),
+        (validation.strict_real_numeric_series, [1.0, 2.0], 3.0),
+        (validation.strict_hashable_key_series, ["a", "b"], "changed"),
+    ],
+)
+def test_boundary_parsers_preserve_input_and_independent_results(
+    parser, values, replacement
+):
+    source = pd.Series(values)
+    original = source.copy()
+    parsed = parser(source, error="invalid")
+    pd.testing.assert_series_equal(source, original)
+    parsed.iloc[0] = replacement
+    pd.testing.assert_series_equal(source, original)
+    result = parsed.copy()
+    source.iloc[1] = original.iloc[0]
+    pd.testing.assert_series_equal(parsed, result)
+
+
 @pytest.mark.parametrize("storage", ["python", "pyarrow"])
 def test_real_numeric_string_dtype_uses_vectorized_parsing(monkeypatch, storage):
     def unexpected_scalar_check(_value):

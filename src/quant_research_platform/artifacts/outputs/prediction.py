@@ -14,7 +14,7 @@ import pyarrow as pa
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_frame,
 )
-from quant_research_platform.contracts.models import prediction_columns
+from quant_research_platform.contracts.models import ModelSpec, prediction_columns
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import (
@@ -38,11 +38,13 @@ def prediction_model_metadata(metadata):
         **metadata["model_metadata"],
         "model_algorithm": recipe["model_algorithm"],
         "input_columns": [
-            *recipe["input_factor_columns"],
-            *recipe["input_feature_columns"],
+            *recipe.get("input_factor_columns", ModelSpec.input_factor_columns),
+            *recipe.get("input_feature_columns", ModelSpec.input_feature_columns),
         ],
         "target_column": recipe["target_column"],
-        "sample_filter_mode": recipe["sample_filter_mode"],
+        "sample_filter_mode": recipe.get(
+            "sample_filter_mode", ModelSpec.sample_filter_mode
+        ),
     }
 
 
@@ -119,7 +121,12 @@ def write_prediction_outputs(
 
 
 def read_predictions(
-    path: Path, *, columns=None, time_window=None, include_available_probabilities=False
+    path: Path,
+    *,
+    columns=None,
+    time_window=None,
+    include_available_probabilities=False,
+    asset_ids=None,
 ):
     """Read selected predictions without fitting or discovery."""
     from quant_research_platform.artifacts.outputs.manifest import (
@@ -142,7 +149,11 @@ def read_predictions(
 
     with closing_iterator(
         _iter_prediction_member(
-            path, metadata, columns=columns, time_window=time_window
+            path,
+            metadata,
+            columns=columns,
+            time_window=time_window,
+            asset_ids=asset_ids,
         )
     ) as chunks:
         frames = list(chunks)
@@ -180,11 +191,16 @@ def iter_predictions(path: Path, *, columns=None, time_window=None):
     )
 
 
-def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
+def _iter_prediction_member(
+    path, metadata, *, columns=None, time_window=None, asset_ids=None
+):
     from quant_research_platform.storage.datasets.reading import (
         parquet_filters_for_time_window,
     )
-    from quant_research_platform.storage.parquet import iter_dataset_part_batches
+    from quant_research_platform.storage.parquet import (
+        PreparedMembershipValues,
+        iter_dataset_part_batches,
+    )
 
     requested = prediction_columns(metadata) if columns is None else tuple(columns)
     if (
@@ -197,6 +213,15 @@ def _iter_prediction_member(path, metadata, *, columns=None, time_window=None):
     filters = parquet_filters_for_time_window(
         timestamp_column="timestamp", time_window=time_window
     )
+    if asset_ids is not None:
+        filters = [
+            *(filters or ()),
+            (
+                "asset_id",
+                "in",
+                PreparedMembershipValues(pa.array(asset_ids, type=pa.string())),
+            ),
+        ]
 
     with closing_iterator(
         iter_dataset_part_batches(

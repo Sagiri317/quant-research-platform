@@ -1,6 +1,8 @@
 """Native source-to-panel preparation for structure context and session labels."""
 
+import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.research.factors.market_structure import calculate
 from quant_research_platform.storage.datasets import read_dataset
@@ -107,3 +109,91 @@ def test_daily_factor_units_follow_economic_quantities():
     }.items():
         assert units[factor] == unit
     assert catalog.get("market_panel_1d").column_units["volume"] == "shares"
+
+
+@pytest.mark.parametrize("unknown", ("exit", "listing"))
+def test_structure_lifecycle_history_survives_publication_and_assembly(
+    tmp_path, unknown
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.research.datasets.assembler import assemble
+    from quant_research_platform.research.factors.market_structure import DESCRIPTIONS
+
+    dates = pd.bdate_range("2024-01-02", periods=81).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    stocks = frames["stock_master"].copy()
+    stocks["timestamp"] = stocks.listing_date
+    own = stocks.loc[stocks.source_asset_id.eq("000001")]
+    unknown_state = (
+        {"delisting_date_unresolved": True}
+        if unknown == "exit"
+        else {"listing_date": pd.NaT}
+    )
+    frames["stock_master"] = pd.concat(
+        [
+            stocks,
+            own.assign(timestamp=dates[22], **unknown_state),
+            own.assign(timestamp=dates[27], delisting_date_unresolved=False),
+        ],
+        ignore_index=True,
+    )
+    inputs = _write_inputs(tmp_path / "source", frames)
+    inputs["market_panel_1d"] = _prepare(
+        tmp_path / "panel", "market_panel_1d", inputs, dates[0], dates[-1]
+    )
+    panel = read_dataset(inputs["market_panel_1d"])
+    axis = producer._calendar_panel_axis(panel, frames["trading_calendar"])
+    own_axis = axis.loc[axis.asset_id.eq("000001")].sort_values("timestamp")
+    assert own_axis.groupby("_calendar_segment").size().tolist() == (
+        [81] if unknown == "exit" else [22, 1, 1, 1, 1, 1, 54]
+    )
+    root = _prepare(
+        tmp_path / "structure", "market_structure_factors", inputs, dates[0], dates[-1]
+    )
+    structure = read_dataset(root)
+    own = structure.loc[structure.asset_id.eq("000001")].set_index("timestamp")
+    # Exit uncertainty does not erase observed prices. Unknown identity does:
+    # the recovered listing needs twenty preceding closes again from day 27.
+    position = np.arange(len(dates))
+    valid = position >= 20
+    if unknown == "listing":
+        valid &= (position < 22) | (position >= 47)
+    assert own.industry_return_relative_20d.notna().tolist() == valid.tolist()
+    day = position[valid]
+    own_return = (11.0 + day) / (11.0 + day - 20) - 1
+    peer_return = (
+        sum((initial + day) / (initial + day - 20) - 1 for initial in (12.0, 13.0)) / 2
+    )
+    np.testing.assert_allclose(
+        own.loc[dates[valid], "industry_return_relative_20d"],
+        own_return - peer_return,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    np.testing.assert_allclose(
+        own.loc[dates[22:27], "industry_amount_share"],
+        (11.0 + position[22:27]) / (36.0 + 3 * position[22:27]),
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    saved = read_dataset(
+        assemble(
+            {
+                "market_id": "a_share",
+                "dataset_id": "structure",
+                "inputs": {"structure": str(root)},
+                "factor_columns": list(DESCRIPTIONS),
+                "label_columns": [],
+                "feature_groups": ["raw"],
+                "feature_recipe": None,
+                "time_window": {
+                    "start": str(dates[0].date()),
+                    "end": str(dates[-1].date()),
+                },
+                "output_root": str(tmp_path / "assembled"),
+            }
+        )
+    )
+    pd.testing.assert_frame_equal(saved.loc[:, structure.columns], structure)

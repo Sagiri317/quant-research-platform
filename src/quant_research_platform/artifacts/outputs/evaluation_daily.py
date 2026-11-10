@@ -13,6 +13,18 @@ METRICS_SCHEMA = pa.schema(
         pa.field("n_obs", pa.int64()),
         pa.field("ic_reason", pa.large_string()),
         pa.field("rankic_reason", pa.large_string()),
+        *[
+            pa.field(f"{side}_{name}", dtype)
+            for side in ("long", "short")
+            for name, dtype in (
+                ("ic", pa.float64()),
+                ("rankic", pa.float64()),
+                ("n_obs", pa.int64()),
+                ("n_selected", pa.int64()),
+                ("ic_reason", pa.large_string()),
+                ("rankic_reason", pa.large_string()),
+            )
+        ],
     ]
 )
 

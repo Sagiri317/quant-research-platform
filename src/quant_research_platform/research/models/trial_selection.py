@@ -443,7 +443,7 @@ def score(config):
     from quant_research_platform.contracts.models import (
         _fit_windows,
         _model_spec,
-        validate_model_facts,
+        compare_model_facts,
     )
     from quant_research_platform.contracts.time import (
         TimeWindow,
@@ -674,7 +674,7 @@ def score(config):
                     )
                 ].set_index(["timestamp", "asset_id"])[target]
             if first_facts is not None:
-                validate_model_facts(facts, expected=first_facts)
+                compare_model_facts(facts, first_facts)
             else:
                 first_facts = facts
             actual_keys = pd.MultiIndex.from_frame(
@@ -1028,10 +1028,7 @@ def select(config):
 
 
 def _selection_decisions(value):
-    from quant_research_platform.contracts.models import validate_model_facts
-
     for candidate in value["candidates"]:
-        validate_model_facts(candidate)
         validate_input_market(candidate, value["market_id"])
         if (
             candidate["model_id"] != candidate["model"]["model_id"]

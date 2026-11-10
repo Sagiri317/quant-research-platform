@@ -297,3 +297,44 @@ def test_known_failed_new_candidate_does_not_mask_older_held_level(side):
     pd.testing.assert_frame_equal(
         baseline, calculate_price_volume_factors(frame, factor_columns=(column,))
     )
+
+
+@pytest.mark.parametrize("window", (20, 60, 252))
+def test_rolling_references_expire_extrema_and_unknown_sessions(window):
+    from quant_research_platform.contracts.time import TimeWindow
+
+    n = 2 * window + 12
+    prices = 40 + np.sin(np.arange(n) / 5) * 3
+    high, low = prices + 1, prices - 1
+    high[1], low[2] = 70, 20
+    high[window + 2] = np.nan
+    adjustment = np.where(np.arange(n) < window, 1, 2)
+    panel = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=pd.bdate_range("2020-01-02", periods=n),
+            adj_close=prices,
+            close=prices / adjustment,
+            high=high / adjustment,
+            low=low / adjustment,
+        )
+    )
+    columns = tuple(
+        f"{name}_{window}d"
+        for name in ("peak_drawdown", "support_distance", "resistance_distance")
+    )
+    expected = np.full((n, 3), np.nan)
+    for end in range(window, n):
+        past = slice(end - window, end)
+        expected[end, 0] = max(1 - prices[end] / max(prices[past]), 0)
+        expected[end, 1] = prices[end] / min(low[past]) - 1
+        if np.isfinite(high[past]).all():
+            expected[end, 2] = prices[end] / max(high[past]) - 1
+    actual = calculate_price_volume_factors(panel, factor_columns=columns)
+    np.testing.assert_allclose(actual[list(columns)], expected, rtol=1e-13, atol=1e-15)
+    bounded = calculate_price_volume_factors(
+        panel.iloc[::-1],
+        factor_columns=columns,
+        output_window=TimeWindow(panel.timestamp.iloc[-5], panel.timestamp.iloc[-1]),
+    )
+    pd.testing.assert_frame_equal(bounded, actual.iloc[-5:].reset_index(drop=True))

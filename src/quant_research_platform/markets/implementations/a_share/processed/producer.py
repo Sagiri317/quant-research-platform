@@ -496,12 +496,32 @@ def _processed_frames(
             materialize_dataset_session(panel_axis),
             calendar,
             panel_end=panel_end,
-            # Past members and suspended return carry belong to the market state.
+            # Only the recursive market model replays all past membership.
             time_window=_preceding_input_window(time_window)
-            if full_cross_section
+            if market_model
             else time_window,
-            lookback=lookback,
+            lookback=factor_engine.factor_lookback_bars(
+                tuple(
+                    definition
+                    for definition in definitions
+                    if definition.output_column != "market_breadth_change_5d"
+                )
+            ),
             lookahead=lookahead,
+            market_lookback=factor_engine.factor_lookback_bars(
+                tuple(
+                    definition
+                    for definition in definitions
+                    if definition.output_column == "market_breadth_change_5d"
+                )
+            ),
+            peer_lookback=factor_engine.factor_lookback_bars(
+                tuple(
+                    definition
+                    for definition in definitions
+                    if definition.output_column == "industry_comovement_20d"
+                )
+            ),
         )
         sessions = tuple(sorted(declared_axis.timestamp.unique()))
         sessions = tuple(pd.Timestamp(value) for value in sessions)
@@ -734,7 +754,15 @@ def _processed_frames(
 
 
 def _calendar_panel_axis(
-    panel, calendar, *, panel_end=None, time_window=None, lookback=0, lookahead=0
+    panel,
+    calendar,
+    *,
+    panel_end=None,
+    time_window=None,
+    lookback=0,
+    lookahead=0,
+    market_lookback=0,
+    peer_lookback=0,
 ):
     """Fill consumed own-market sessions without rewriting historical membership."""
     if panel.empty:
@@ -742,7 +770,16 @@ def _calendar_panel_axis(
     panel = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").reset_index(
         drop=True
     )
-    unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
+    identity_unknown = panel[["listing_date", "market_type"]].isna().any(axis=1)
+    panel["_identity_segment"] = (
+        (
+            identity_unknown
+            | identity_unknown.groupby(panel.asset_id).shift(fill_value=False)
+        )
+        .groupby(panel.asset_id)
+        .cumsum()
+    )
+    unknown = identity_unknown.copy()
     if "delisting_date_unresolved" in panel:
         unknown |= panel["delisting_date_unresolved"].astype("boolean").fillna(True)
     previous_unknown = unknown.groupby(panel.asset_id).shift(fill_value=False)
@@ -767,17 +804,13 @@ def _calendar_panel_axis(
         "market_type",
         "_calendar_segment",
     ]
-    pieces = [panel.loc[unknown & panel.timestamp.between(lower, upper), columns]]
-    for market, observed in pieces[0].groupby("market_type", sort=False):
-        state = states[market].reindex(pd.DatetimeIndex(observed.timestamp))
-        if state.isna().any():
-            raise ValueError("a_share_panel_calendar_coverage_missing")
-        if not state.all():
-            raise ValueError("a_share_input_key_outside_calendar")
-    for asset, asset_rows in panel.groupby("asset_id", sort=False):
+    histories = []
+    market_preceding = []
+    peer_starts = []
+    historical_context = bool(market_lookback or peer_lookback)
+    for _, asset_rows in panel.groupby("asset_id", sort=False):
         if "delisting_date" in asset_rows:
-            # Knowledge follows the explicit listing identity, while unknown
-            # membership independently breaks numerical window continuity.
+            # Exit facts are local to their listing and known-state run.
             listing = asset_rows.listing_date
             if "delisting_date_unresolved" in asset_rows:
                 unresolved_end = asset_rows.delisting_date_unresolved.astype(
@@ -796,95 +829,149 @@ def _calendar_panel_axis(
             asset_rows = asset_rows.assign(
                 _calendar_exit=exit_date.where(exit_date.ge(known_at), known_at)
             )
-        for (_, _), lifecycle in asset_rows.loc[~unknown.loc[asset_rows.index]].groupby(
-            ["listing_date", "_calendar_segment"], sort=False
+        # Exit knowledge controls filling, not the observed history halo.
+        # Collect both admission intervals and real unknown-bound observations
+        # before selecting the same listing's required preceding/following dates.
+        for _, listing_rows in asset_rows.groupby(
+            ["listing_date", "_identity_segment"], sort=False, dropna=False
         ):
-            first = lifecycle.iloc[0]
-            # A later explicit lifecycle or unknown membership bounds this segment.
-            later = asset_rows.loc[
-                (asset_rows.timestamp > first.timestamp)
-                & (
-                    asset_rows._calendar_segment.ne(first._calendar_segment)
-                    | asset_rows.listing_date.ne(first.listing_date)
-                )
-            ]
-            segment_end = (
-                stop if later.empty else later.timestamp.min() - pd.Timedelta(days=1)
-            )
-            changed = lifecycle.market_type.ne(lifecycle.market_type.shift()).fillna(
-                True
-            )
-            if "_calendar_exit" in lifecycle:
-                changed |= (
-                    lifecycle._calendar_exit.notna()
-                    & lifecycle._calendar_exit.ne(lifecycle._calendar_exit.shift())
-                )
-            changes = lifecycle.loc[changed]
+            observed_unknown = listing_rows.loc[unknown.loc[listing_rows.index]]
+            candidates = list(observed_unknown.timestamp)
             intervals = []
-            candidates = []
-            for position, (_, row) in enumerate(changes.iterrows()):
-                start = max(row.timestamp, row.listing_date)
-                end = segment_end
-                if position + 1 < len(changes):
-                    end = min(
-                        end, changes.iloc[position + 1].timestamp - pd.Timedelta(days=1)
+            known = listing_rows.loc[~unknown.loc[listing_rows.index]]
+            for _, lifecycle in known.groupby("_calendar_segment", sort=False):
+                first = lifecycle.iloc[0]
+                later = asset_rows.loc[
+                    (asset_rows.timestamp > first.timestamp)
+                    & (
+                        asset_rows._calendar_segment.ne(first._calendar_segment)
+                        | asset_rows.listing_date.ne(first.listing_date)
                     )
-                if pd.notna(row.get("_calendar_exit", pd.NaT)):
-                    end = min(end, row._calendar_exit)
-                if end < start:
-                    continue
-                intervals.append((row, start, end))
-                state = states[row.market_type].loc[start:end]
-                candidates.extend(state.index[state.to_numpy(dtype=bool)])
-            if not intervals:
-                continue
-            start, end = intervals[0][1], intervals[-1][2]
-            if end < lower or start > upper:
-                continue
-            # Select the true per-lifecycle halo before requiring O/C evidence.
-            # Unknown calendar dates inside it still fail; they cannot be skipped.
+                ]
+                segment_end = (
+                    stop
+                    if later.empty
+                    else later.timestamp.min() - pd.Timedelta(days=1)
+                )
+                changed = lifecycle.market_type.ne(
+                    lifecycle.market_type.shift()
+                ).fillna(True)
+                if "_calendar_exit" in lifecycle:
+                    changed |= (
+                        lifecycle._calendar_exit.notna()
+                        & lifecycle._calendar_exit.ne(lifecycle._calendar_exit.shift())
+                    )
+                changes = lifecycle.loc[changed]
+                for position, (_, row) in enumerate(changes.iterrows()):
+                    start = max(row.timestamp, row.listing_date)
+                    end = segment_end
+                    if position + 1 < len(changes):
+                        end = min(
+                            end,
+                            changes.iloc[position + 1].timestamp - pd.Timedelta(days=1),
+                        )
+                    if pd.notna(row.get("_calendar_exit", pd.NaT)):
+                        end = min(end, row._calendar_exit)
+                    if end < start:
+                        continue
+                    intervals.append((row, start, end))
+                    state = states[row.market_type].loc[start:end]
+                    candidates.extend(state.index[state.to_numpy(dtype=bool)])
             dates = pd.DatetimeIndex(candidates).sort_values()
             preceding = dates[dates < lower]
             following = dates[dates > upper]
+            if market_lookback:
+                market_preceding.extend(preceding[-market_lookback:])
+            active = observed_unknown.timestamp.between(lower, upper).any() or any(
+                start <= upper and end >= lower for _, start, end in intervals
+            )
+            if not active:
+                if historical_context:
+                    histories.append((listing_rows.index, intervals, None))
+                continue
+            starts = [start for _, start, _ in intervals]
+            ends = [end for _, _, end in intervals]
+            if not observed_unknown.empty:
+                starts.append(observed_unknown.timestamp.min())
+                ends.append(observed_unknown.timestamp.max())
+            if peer_lookback:
+                peer_starts.append(
+                    preceding[-peer_lookback]
+                    if len(preceding) >= peer_lookback
+                    else min(starts)
+                )
+            # Unknown calendar days inside a selected admitted interval still
+            # fail coverage; they cannot be skipped to compress its session axis.
             required_start = (
                 preceding[-lookback]
                 if lookback and len(preceding) >= lookback
-                else start
+                else min(starts)
                 if lookback
                 else lower.ceil("D")
             )
             required_end = (
                 following[lookahead - 1]
                 if lookahead and len(following) >= lookahead
-                else end
+                else max(ends)
                 if lookahead
                 else upper.floor("D")
             )
-            for row, start, end in intervals:
-                start, end = max(start, required_start), min(end, required_end)
-                if end < start:
-                    continue
-                days = pd.date_range(start, end).as_unit("ns")
-                state = states[row.market_type].reindex(days)
-                if state.isna().any():
-                    raise ValueError("a_share_panel_calendar_coverage_missing")
-                observed = lifecycle.loc[
-                    lifecycle.timestamp.between(start, end), "timestamp"
-                ]
-                if not state.reindex(pd.DatetimeIndex(observed)).all():
-                    raise ValueError("a_share_input_key_outside_calendar")
-                pieces.append(
-                    pd.DataFrame(
-                        {
-                            "market_id": row.market_id,
-                            "asset_id": asset,
-                            "timestamp": days[state.to_numpy(dtype=bool)],
-                            "listing_date": row.listing_date,
-                            "market_type": row.market_type,
-                            "_calendar_segment": row["_calendar_segment"],
-                        }
-                    )
+            histories.append(
+                (listing_rows.index, intervals, (required_start, required_end))
+            )
+    # Only historical breadth and peer-return windows need prior cohorts.
+    # A stock's MA/price window must not widen another market's calendar domain.
+    if historical_context:
+        preceding = pd.DatetimeIndex(market_preceding).unique().sort_values()
+        if len(preceding):
+            peer_starts.append(preceding[max(0, len(preceding) - market_lookback)])
+        context_start = min(peer_starts, default=lower.ceil("D"))
+    pieces = [panel.iloc[:0].loc[:, columns]]
+    for indices, intervals, bounds in histories:
+        if bounds is None:
+            required_start, required_end = context_start, upper.floor("D")
+        else:
+            required_start, required_end = bounds
+            if historical_context:
+                required_start = min(required_start, context_start)
+        listing_rows = panel.loc[indices]
+        observed_unknown = listing_rows.loc[unknown.loc[indices]]
+        observed_unknown = observed_unknown.loc[
+            observed_unknown.timestamp.between(required_start, required_end),
+            columns,
+        ]
+        for market, observed in observed_unknown.groupby("market_type", sort=False):
+            state = states[market].reindex(pd.DatetimeIndex(observed.timestamp))
+            if state.isna().any():
+                raise ValueError("a_share_panel_calendar_coverage_missing")
+            if not state.all():
+                raise ValueError("a_share_input_key_outside_calendar")
+        pieces.append(observed_unknown)
+        for row, start, end in intervals:
+            start, end = max(start, required_start), min(end, required_end)
+            if end < start:
+                continue
+            days = pd.date_range(start, end).as_unit("ns")
+            state = states[row.market_type].reindex(days)
+            if state.isna().any():
+                raise ValueError("a_share_panel_calendar_coverage_missing")
+            observed = listing_rows.loc[
+                listing_rows.timestamp.between(start, end), "timestamp"
+            ]
+            if not state.reindex(pd.DatetimeIndex(observed)).all():
+                raise ValueError("a_share_input_key_outside_calendar")
+            pieces.append(
+                pd.DataFrame(
+                    {
+                        "market_id": row.market_id,
+                        "asset_id": row.asset_id,
+                        "timestamp": days[state.to_numpy(dtype=bool)],
+                        "listing_date": row.listing_date,
+                        "market_type": row.market_type,
+                        "_calendar_segment": row["_calendar_segment"],
+                    }
                 )
+            )
     declared = pd.concat(pieces, ignore_index=True)
     keys = ["market_id", "asset_id", "timestamp"]
     if declared.duplicated(keys).any():
@@ -917,9 +1004,11 @@ def _calendar_panel_axis(
         continuous.loc[positions] = (intervening_opens == 0) & (
             known_days == (end - start).dt.days.to_numpy() - 1
         )
+    # Known listing changes belong to the consumers' listing-date histories;
+    # keeping their clock lets ON/ID report the actual lifecycle boundary.
     continuous &= (
         ordered.listing_date.notna()
-        & ordered.listing_date.eq(prior.listing_date)
+        & prior.listing_date.notna()
         & ordered.market_type.notna()
     )
     declared["_calendar_segment"] = (~continuous).groupby(ordered.asset_id).cumsum()
@@ -940,18 +1029,11 @@ def _align_panel_observations(declared, dependencies):
         ]
         for name, frame in dependencies.items()
     }
+    declared_keys = pd.MultiIndex.from_frame(declared[keys])
     for selected in dependencies.values():
         if (
-            selected.merge(
-                declared[keys],
-                on=keys,
-                how="left",
-                indicator=True,
-                validate="one_to_one",
-            )["_merge"]
-            .eq("left_only")
-            .any()
-        ):
+            declared_keys.get_indexer(pd.MultiIndex.from_frame(selected[keys])) < 0
+        ).any():
             raise ValueError("a_share_input_key_outside_panel")
     selected = dependencies["market_panel_1d"]
     observed = [column for column in selected if column not in declared]

@@ -549,18 +549,29 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
             .any()
         ):
             raise ValueError("plot_duplicate_factor_identity")
+    metrics = ["ic", "rankic"]
+    for side in ("long", "short"):
+        for metric in ("ic", "rankic"):
+            name = f"{side}_{metric}"
+            key = f"mean_{name}" if summary else name
+            if any(key in row for row in rows) and not all(
+                row.get(f"{name}_reason") == "not_applicable" for row in rows
+            ):
+                metrics.append(name)
     figure, axes = _figure(
-        2 if summary else 2 * len(groups),
-        title="IC / Rank IC（描述性统计）",
+        len(metrics) if summary else len(metrics) * len(groups),
+        title="IC / Rank IC（描述性统计；short 保留信号与收益原相关符号）"
+        if len(metrics) > 2
+        else "IC / Rank IC（描述性统计）",
         source_reference=source_reference,
         sample_role=sample_role,
     )
     if summary:
-        figure.set_figheight(max(6, len(groups) + 3))
+        figure.set_figheight(max(3 * len(metrics), len(groups) * len(metrics) / 2 + 3))
     if not groups:
         _note(axes[0], "UNDEFINED：没有因子评估数据")
         return figure, axes
-    for metric_index, metric in enumerate(("ic", "rankic")):
+    for metric_index, metric in enumerate(metrics):
         value_key = f"mean_{metric}" if summary else metric
         finite = [
             _number(row[value_key])
@@ -574,7 +585,9 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
         padding = max((high - low) * 0.15, 0.01)
         limits = max(-1, low - padding), min(1, high + padding)
         for group_index, (key, items) in enumerate(sorted(groups.items())):
-            axis = axes[metric_index if summary else 2 * group_index + metric_index]
+            axis = axes[
+                metric_index if summary else len(metrics) * group_index + metric_index
+            ]
             items = (
                 items
                 if summary
@@ -632,7 +645,11 @@ def plot_factor_ic(rows, *, source_reference, sample_role, timezone, summary=Fal
                     _note(axis, "UNDEFINED: " + "; ".join(reasons))
                 _time_axis(axis, timezone, times)
             label = f"{'平均 ' if summary else ''}"
-            label += f"{'IC' if metric == 'ic' else 'Rank IC'}（相关系数）"
+            side, _, statistic = metric.rpartition("_")
+            label += f"{side.capitalize() + ' ' if side else ''}"
+            label += (
+                f"{'IC' if (statistic or metric) == 'ic' else 'Rank IC'}（相关系数）"
+            )
             if summary:
                 axis.set_xlabel(label)
                 axis.set_xlim(*limits)
@@ -1219,12 +1236,18 @@ def plot(config):
                         "stratification",
                         "stratum",
                         "timestamp",
-                        "ic",
-                        "rankic",
-                        "mean_ic",
-                        "mean_rankic",
-                        "ic_reason",
-                        "rankic_reason",
+                        *(
+                            column
+                            for metric in (
+                                "ic",
+                                "rankic",
+                                "long_ic",
+                                "long_rankic",
+                                "short_ic",
+                                "short_rankic",
+                            )
+                            for column in (metric, f"mean_{metric}", f"{metric}_reason")
+                        ),
                     ),
                     "activity": ("entry_at", "cost_drag", "realized_turnover"),
                     "series": (

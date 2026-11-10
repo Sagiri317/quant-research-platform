@@ -18,6 +18,16 @@ def _trailing_sum(values, timestamps, seconds):
     return result
 
 
+def _level_flow(prices, quantity, prior_price, prior_quantity, sign):
+    """Use only quantities selected by the observed price move at each level."""
+    return np.where(
+        (prices > 0) & (prior_price > 0),
+        np.where(sign * prices >= sign * prior_price, quantity, 0)
+        - np.where(sign * prices <= sign * prior_price, prior_quantity, 0),
+        np.nan,
+    )
+
+
 def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
     columns = protocol.DEFAULT_FACTORS if columns is None else tuple(columns)
     requested = set(columns)
@@ -42,27 +52,29 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                 values["spread_cny"] = spread
             if "relative_spread" in needed:
                 values["relative_spread"] = spread / work.mid
-        for level in (1, 5, 10):
-            if f"imbalance_{level}" not in needed:
-                continue
+        levels = [level for level in (1, 5, 10) if f"imbalance_{level}" in needed]
+        if levels:
             depth = {}
             for side in ("bid", "ask"):
                 quantity = work[
-                    [f"{side}_vol{i}" for i in range(1, level + 1)]
+                    [f"{side}_vol{i}" for i in range(1, max(levels) + 1)]
                 ].to_numpy(dtype=float)
-                price = work[[f"{side}_px{i}" for i in range(1, level + 1)]].to_numpy(
-                    dtype=float
-                )
+                price = work[
+                    [f"{side}_px{i}" for i in range(1, max(levels) + 1)]
+                ].to_numpy(dtype=float)
                 depth[side] = np.where(
                     (quantity == 0) | np.isfinite(price), quantity, np.nan
-                ).sum(axis=1)
-            denominator = depth["bid"] + depth["ask"]
-            values[f"imbalance_{level}"] = np.divide(
-                depth["bid"] - depth["ask"],
-                denominator,
-                out=np.full(len(work), np.nan),
-                where=denominator > 0,
-            )
+                )
+            for level in levels:
+                bid = depth["bid"][:, :level].sum(axis=1)
+                ask = depth["ask"][:, :level].sum(axis=1)
+                denominator = bid + ask
+                values[f"imbalance_{level}"] = np.divide(
+                    bid - ask,
+                    denominator,
+                    out=np.full(len(work), np.nan),
+                    where=denominator > 0,
+                )
         if "microprice_deviation" in needed:
             depth1 = work.bid_vol1 + work.ask_vol1
             values["microprice_deviation"] = (
@@ -70,17 +82,16 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                 - work.mid
             ) / work.mid
         if needed & {"book_ofi", "depth_normalized_ofi", "book_ofi_30s"}:
-            previous = work[["bid_px1", "ask_px1", "bid_vol1", "ask_vol1"]].shift(1)
-            ofi = (
-                work.bid_vol1.where(work.bid_px1.ge(previous.bid_px1), 0)
-                - previous.bid_vol1.where(work.bid_px1.le(previous.bid_px1), 0)
-                - work.ask_vol1.where(work.ask_px1.le(previous.ask_px1), 0)
-                + previous.ask_vol1.where(work.ask_px1.ge(previous.ask_px1), 0)
+            book = work[["bid_px1", "ask_px1", "bid_vol1", "ask_vol1"]].to_numpy(float)
+            previous = np.vstack((np.full(4, np.nan), book[:-1]))
+            flow = _level_flow(
+                book[:, :2],
+                book[:, 2:],
+                previous[:, :2],
+                previous[:, 2:],
+                np.array([1, -1]),
             )
-            prices = ["bid_px1", "ask_px1"]
-            ofi = ofi.where(
-                work[prices].gt(0).all(axis=1) & previous[prices].gt(0).all(axis=1)
-            )
+            ofi = pd.Series(flow[:, 0] - flow[:, 1])
             if "book_ofi" in needed:
                 values["book_ofi"] = ofi
             if "depth_normalized_ofi" in needed:
@@ -88,10 +99,13 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                 values["depth_normalized_ofi"] = ofi / depth.where(depth.gt(0))
             if "book_ofi_30s" in needed:
                 values["book_ofi_30s"] = _trailing_sum(ofi, work.timestamp, 30)
-        for seconds in (3, 30, 60):
-            if f"return_{seconds}s" in needed:
-                times = work.timestamp.to_numpy(dtype="datetime64[ns]")
-                mid = work.mid.to_numpy(dtype=float)
+        return_windows = [
+            seconds for seconds in (3, 30, 60) if f"return_{seconds}s" in needed
+        ]
+        if return_windows:
+            times = work.timestamp.to_numpy(dtype="datetime64[ns]")
+            mid = work.mid.to_numpy(dtype=float)
+            for seconds in return_windows:
                 previous_index = (
                     np.searchsorted(
                         times, times - np.timedelta64(seconds, "s"), side="right"
@@ -299,25 +313,20 @@ def _book_features(work, halflife, columns):
         quantity = work[[f"{side}_vol{i}" for i in range(1, levels + 1)]].to_numpy(
             float
         )
-        prior_price = np.vstack((np.full(levels, np.nan), prices[:-1]))
-        prior_quantity = np.vstack((np.full(levels, np.nan), quantity[:-1]))
-        valid = (
-            np.isfinite(prices)
-            & np.isfinite(prior_price)
-            & np.isfinite(quantity)
-            & np.isfinite(prior_quantity)
-        )
+        if flow_names or f"{side}_replenishment_30s" in columns:
+            prior_price = np.vstack((np.full(levels, np.nan), prices[:-1]))
+            prior_quantity = np.vstack((np.full(levels, np.nan), quantity[:-1]))
         if flow_names:
-            flow[side] = np.where(
-                valid,
-                np.where(sign * prices >= sign * prior_price, quantity, 0)
-                - np.where(sign * prices <= sign * prior_price, prior_quantity, 0),
-                np.nan,
+            flow[side] = _level_flow(
+                prices, quantity, prior_price, prior_quantity, sign
             )[:, :flow_levels]
-        known = np.isfinite(quantity).all(axis=1) & (
-            (quantity == 0) | np.isfinite(prices)
-        ).all(axis=1)
-        if selected or slopes:
+        if slopes or selected & {
+            f"{side}_depth_concentration",
+            f"{side}_near_depth_fraction",
+        }:
+            known = np.isfinite(quantity).all(axis=1) & (
+                (quantity == 0) | np.isfinite(prices)
+            ).all(axis=1)
             total = quantity.sum(axis=1)
             denominator = np.where(known & (total > 0), total, np.nan)
             fraction = quantity / denominator[:, None]
@@ -351,6 +360,7 @@ def _book_features(work, halflife, columns):
             if f"{side}_depth_slope_change" in columns:
                 shapes[f"{side}_depth_slope_change"] = np.r_[np.nan, np.diff(slope)]
         if f"{side}_replenishment_30s" in columns:
+            valid = np.isfinite(prices) & np.isfinite(prior_price)
             replenished = np.where(
                 valid & (prices == prior_price),
                 np.maximum(quantity - prior_quantity, 0),
@@ -363,6 +373,8 @@ def _book_features(work, halflife, columns):
     if flow_names:
         level_flow = flow["bid"] - flow["ask"]
         for level in (5, 10):
+            if not columns & {f"book_ofi_{level}", f"depth_normalized_ofi_{level}"}:
+                continue
             current = level_flow[:, :level].sum(axis=1)
             if f"book_ofi_{level}" in columns:
                 shapes[f"book_ofi_{level}"] = current
@@ -381,7 +393,8 @@ def _book_features(work, halflife, columns):
             shapes["book_ofi_near_far"] = level_flow[:, :5].sum(axis=1) - level_flow[
                 :, 5:
             ].sum(axis=1)
-        total = pd.Series(level_flow.sum(axis=1))
+        if columns & {"book_ofi_10_30s", "book_ofi_10_ewma"}:
+            total = pd.Series(level_flow.sum(axis=1))
         if "book_ofi_10_30s" in columns:
             shapes["book_ofi_10_30s"] = _trailing_sum(total, work.timestamp, 30)
         if "book_ofi_10_ewma" in columns:

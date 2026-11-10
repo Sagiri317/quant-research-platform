@@ -24,7 +24,8 @@
       "future_mid_return_30s"
     ],
     "evaluation_axis": "cross_sectional",
-    "correlation_clock": "trading_day"
+    "correlation_clock": "trading_day",
+    "top_quantile": 0.2
   },
   "sessions": [
     "2018-02-14"

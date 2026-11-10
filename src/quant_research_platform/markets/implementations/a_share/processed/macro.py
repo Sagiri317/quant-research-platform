@@ -390,15 +390,20 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             metadata["producer_diagnostics"]["macro_beta_missing_inputs"] = sorted(
                 missing
             )
-        cutoffs = set()
-        with closing_iterator(
-            iter_dataset_chunks(session.projected_view(("timestamp",)))
-        ) as chunks:
-            for frame in chunks:
-                cutoffs.update(frame.timestamp.unique())
-        states = macro_states(
-            observations, sorted(cutoffs), columns=columns, config=parameters(config)
-        )
+        states = None
+        if not beta:
+            cutoffs = set()
+            with closing_iterator(
+                iter_dataset_chunks(session.projected_view(("timestamp",)))
+            ) as chunks:
+                for frame in chunks:
+                    cutoffs.update(frame.timestamp.unique())
+            states = macro_states(
+                observations,
+                sorted(cutoffs),
+                columns=columns,
+                config=parameters(config),
+            )
         metadata["producer_diagnostics"]["feature_preserve_amplitude"] = [
             name for name in columns if RECIPES[name][0] != "beta"
         ]

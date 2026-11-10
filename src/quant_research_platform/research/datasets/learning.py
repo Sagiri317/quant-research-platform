@@ -19,14 +19,25 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 
-def research_frame(source, window, columns, *, label=None, context_columns=()):
+def research_frame(
+    source,
+    window,
+    columns,
+    *,
+    label=None,
+    context_columns=(),
+    row_filters=(),
+    observation_keys=None,
+):
     """Read a bounded panel and return its source session and maturity column.
 
     Labels and their availability clocks are read only when explicitly requested.
     """
     columns = tuple(columns)
     _validate_column_tuple(columns, "research_features", required=False)
-    options = _dataset_input_options(source, time_window=TimeWindow(**window))
+    options = _dataset_input_options(
+        source, time_window=TimeWindow(**window), row_filters=row_filters
+    )
     session = open_dataset_session(**options)
     spec = session.spec
     if any(
@@ -55,6 +66,12 @@ def research_frame(source, window, columns, *, label=None, context_columns=()):
     frame = materialize_dataset_session(
         session.projected_view(tuple(dict.fromkeys(selected)))
     )
+    if observation_keys is not None:
+        frame = frame.loc[
+            pd.MultiIndex.from_frame(frame[["timestamp", "asset_id"]]).isin(
+                pd.MultiIndex.from_frame(observation_keys[["timestamp", "asset_id"]])
+            )
+        ].copy()
     frame["timestamp"] = strict_timestamp_series(
         frame.timestamp, error="research_timestamp_invalid"
     )

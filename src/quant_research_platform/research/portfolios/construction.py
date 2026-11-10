@@ -4,14 +4,17 @@ neutrality limits.
 
 from __future__ import annotations
 
-from math import floor
 from typing import Literal
 
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+from quant_research_platform.compute.dataframe.cross_section import (
+    _select_quantile_boundary,
+    _stable_zscore,
+)
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+from quant_research_platform.contracts.signals import DEFAULT_TOP_QUANTILE
 from quant_research_platform.contracts.validation import (
     _real_numeric_series,
     strict_finite_float,
@@ -32,8 +35,8 @@ def build_simple_target_weights(
     eligible: pd.Series,
     method: TargetMethod = "equal_weight",
     portfolio_mode: PortfolioMode = "long_only",
-    top_quantile: float = 0.2,
-    bottom_quantile: float = 0.2,
+    top_quantile: float = DEFAULT_TOP_QUANTILE,
+    bottom_quantile: float = DEFAULT_TOP_QUANTILE,
     float_market_cap: pd.Series | None = None,
     neutrality: Literal["none", "industry", "size", "industry_size"] = "none",
     industry: pd.Series | None = None,
@@ -92,9 +95,13 @@ def build_simple_target_weights(
     if int(valid.sum()) == 0:
         raise ValueError("target_selection_unavailable")
     valid_values = values.loc[valid]
-    top = _select_boundary(valid_values, top_quantile, ascending=False)
+    top = valid_values.index[
+        _select_quantile_boundary(valid_values, top_quantile, ascending=False)
+    ]
     bottom = (
-        _select_boundary(valid_values, bottom_quantile, ascending=True)
+        valid_values.index[
+            _select_quantile_boundary(valid_values, bottom_quantile, ascending=True)
+        ]
         if portfolio_mode == "long_short"
         else pd.Index([], dtype="string")
     )
@@ -167,20 +174,6 @@ def _bool_series(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
     if result.isna().any():
         raise ValueError(error)
     return result.astype(bool)
-
-
-def _select_boundary(
-    values: pd.Series,
-    quantile: float,
-    *,
-    ascending: bool,
-) -> pd.Index:
-    count = max(1, floor(len(values) * quantile))
-    ranks = values.rank(method="average", ascending=ascending)
-    boundary_rank = float(
-        ranks.loc[values.sort_values(ascending=ascending).index[count - 1]]
-    )
-    return pd.Index(values.index[ranks <= boundary_rank], dtype="string")
 
 
 def _selected_capitals(

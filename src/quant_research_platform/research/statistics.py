@@ -20,6 +20,7 @@ from statsmodels.tools.tools import add_constant
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _average_ranks,
+    _compute_ic_and_grouped_label_values,
     _pearson_correlation_result,
 )
 from quant_research_platform.contracts.validation import (
@@ -827,6 +828,36 @@ def fama_macbeth_period(
         white_reason=None if white_p_value is not None else "white_test_undefined",
         observation_count=len(numeric),
     )
+
+
+def cross_sectional_correlations(
+    frame: pd.DataFrame, *, value_columns, label_column, top_quantile
+) -> pd.DataFrame:
+    """Project eligible candidates onto the evaluation correlation kernel.
+
+    The caller masks unavailable labels without removing candidate rows. Column
+    aliases allow model-internal integer identities without changing their keys.
+    """
+    from quant_research_platform.compute.panels import ComputePanelSpec
+
+    names = {column: f"signal_{index}" for index, column in enumerate(value_columns)}
+    selected = frame.loc[:, ["timestamp", "asset_id", *value_columns, label_column]]
+    selected = selected.rename(columns={**names, label_column: "label"})
+    metrics, _ = _compute_ic_and_grouped_label_values(
+        selected,
+        ComputePanelSpec(
+            signal_columns=tuple(names.values()),
+            label_columns=("label",),
+            asset_column="asset_id",
+        ),
+        top_quantile=top_quantile,
+        include_groups=False,
+    )
+    metrics["signal"] = metrics.signal.map(
+        {name: column for column, name in names.items()}
+    )
+    metrics["label"] = label_column
+    return metrics
 
 
 def cross_sectional_rank_ic(

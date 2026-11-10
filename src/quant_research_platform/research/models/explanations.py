@@ -338,7 +338,7 @@ def _attributions(result, context, indices, method, background, output_space):
     validate_attribution_method(method, algorithm)
     columns = result.metadata["input_columns"]
     selected = context.iloc[indices]
-    raw, explained = _output(result, context, output_space)
+    raw, explained = _output(result, selected, output_space)
     method_facts = {
         "method": method,
         "implementation": "qrp",
@@ -434,7 +434,7 @@ def _attributions(result, context, indices, method, background, output_space):
     reasons = []
     for row in range(len(selected)):
         residual[row], tolerance[row], reason = attribution_additivity(
-            base[row], contributions[row], explained[indices[row]], relative
+            base[row], contributions[row], explained[row], relative
         )
         if reason:
             contributions[row, :] = np.nan
@@ -443,8 +443,8 @@ def _attributions(result, context, indices, method, background, output_space):
     method_facts["additivity_relative_tolerance"] = relative
     predictions = selected[["timestamp", "asset_id"]].copy()
     predictions["base_value"] = base
-    predictions["explained_output"] = explained[indices]
-    predictions["prediction_score"] = raw[indices]
+    predictions["explained_output"] = explained
+    predictions["prediction_score"] = raw
     predictions["additivity_residual"] = residual
     predictions["additivity_tolerance"] = tolerance
     predictions["status"] = ["UNDEFINED" if reason else "DEFINED" for reason in reasons]

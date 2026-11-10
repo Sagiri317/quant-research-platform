@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from pandas.api.indexers import BaseIndexer
 
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.validation import (
@@ -160,6 +161,20 @@ def factor_definitions():
     )
 
 
+class _HistoryWindow(BaseIndexer):
+    """Bound native rolling kernels to contiguous, sorted lifecycle histories."""
+
+    def __init__(self, history_start, window_size):
+        super().__init__(window_size=window_size)
+        self.history_start = history_start
+
+    def get_window_bounds(
+        self, num_values=0, min_periods=None, center=None, closed=None, step=None
+    ):
+        end = np.arange(1, num_values + 1, dtype=np.int64)
+        return np.maximum(end - self.window_size, self.history_start), end
+
+
 def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
     """Use the supplied historical universe; never infer it from today's members.
 
@@ -205,6 +220,18 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
     if "adj_close" in inputs:
         frame["_c"] = frame.adj_close.where(frame.adj_close.gt(0))
         frame["_mom"] = (frame._c / history._c.shift(20) - 1).where(fresh)
+    rolling_factors = {
+        "market_above_ma20_fraction",
+        "market_above_ma60_fraction",
+        "market_high_low_balance_60d",
+        "industry_comovement_20d",
+        "leader_breadth_fragility",
+    }
+    history_start = (
+        np.arange(len(frame), dtype=np.int64) - history.cumcount().to_numpy()
+        if rolling_factors.intersection(requested)
+        else None
+    )
     out = frame.loc[:, ["asset_id", "timestamp"]].copy()
     timestamps = frame.timestamp
 
@@ -220,22 +247,21 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
             window == 20 and "leader_breadth_fragility" in requested
         ):
             continue
-        frame[f"_ma{window}"] = history._c.transform(
-            lambda x, window=window: x.rolling(window, min_periods=window).mean()
-        )
-        valid = fresh & frame[f"_ma{window}"].notna() & frame._c.notna()
-        above = frame._c.gt(frame[f"_ma{window}"]).astype(float).where(valid)
+        mean = frame._c.rolling(
+            _HistoryWindow(history_start, window), min_periods=window
+        ).mean()
+        valid = fresh & mean.notna() & frame._c.notna()
+        above = frame._c.gt(mean).astype(float).where(valid)
         out[f"market_above_ma{window}_fraction"] = market_mean(above)
+        del mean, valid, above
     if "market_high_low_balance_60d" in requested:
         prior = history._c.shift()
-        prior_groups = prior.groupby(
-            [frame[key] for key in history_keys], sort=False, dropna=False
-        )
-        high = prior_groups.transform(lambda x: x.rolling(60, min_periods=60).max())
-        low = prior_groups.transform(lambda x: x.rolling(60, min_periods=60).min())
+        prior_window = prior.rolling(_HistoryWindow(history_start, 60), min_periods=60)
+        high, low = prior_window.max(), prior_window.min()
         valid = fresh & frame._c.notna() & high.notna() & low.notna()
         high_low = frame._c.gt(high).astype(float) - frame._c.lt(low).astype(float)
         out["market_high_low_balance_60d"] = market_mean(high_low.where(valid))
+        del prior, prior_window, high, low, high_low, valid
     if "market_breadth_change_5d" in requested:
         breadth = out.groupby("timestamp", sort=True).market_up_fraction.first()
         out["market_breadth_change_5d"] = timestamps.map(breadth - breadth.shift(5))
@@ -244,16 +270,35 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
             1 - out.market_above_ma20_fraction
         )
 
+    del history, fresh
     if any(name.startswith("industry_") for name in requested):
-        _industry_context(frame, out, requested, history_keys)
-    return (
-        out.loc[:, ["asset_id", "timestamp", *requested]]
-        .replace([np.inf, -np.inf], np.nan)
-        .reset_index(drop=True)
-    )
+        _industry_context(frame, out, requested, history_start)
+    del frame, history_start
+    out = out.loc[:, ["asset_id", "timestamp", *requested]]
+    for name in requested:
+        out[name] = out[name].replace([np.inf, -np.inf], np.nan)
+    return out.reset_index(drop=True)
 
 
-def _industry_context(frame, out, requested, history_keys):
+def _leave_one_out_mean(values, group_ids):
+    """Merge centered prefix/suffix means without subtracting self from a total."""
+    sides = []
+    for step in (1, -1):
+        ordered, keys = values.iloc[::step], group_ids.iloc[::step]
+        groups = ordered.groupby(keys, sort=False)
+        prior = groups.shift()
+        count = prior.notna().groupby(keys, sort=False).cumsum()
+        # A nonempty side's anchor is a peer, never the excluded current row.
+        anchor = groups.transform("first")
+        centered = (prior - anchor).fillna(0).groupby(keys, sort=False).cumsum()
+        mean = anchor + centered / count.where(count > 0)
+        sides.append((mean.iloc[::step], count.iloc[::step]))
+    (left, nleft), (right, nright) = sides
+    base = left.fillna(right)
+    return base + (right - base).fillna(0) * nright / (nleft + nright)
+
+
+def _industry_context(frame, out, requested, history_start):
     timestamps = frame.timestamp
     sector_columns = list(_INDUSTRY)
     known = frame[sector_columns].notna().all(axis=1) & frame[sector_columns].ne(
@@ -295,6 +340,15 @@ def _industry_context(frame, out, requested, history_keys):
             out["industry_isolation_20d"] = (
                 (means.clip(lower=0) * peer_fraction).reindex(index).to_numpy()
             )
+    peer_ids = (
+        groups.ngroup()
+        if {
+            "industry_return_relative_20d",
+            "industry_turnover_relative",
+            "industry_comovement_20d",
+        }.intersection(requested)
+        else None
+    )
     for source, target, ratio in (
         ("_mom", "industry_return_relative_20d", False),
         ("_t", "industry_turnover_relative", True),
@@ -305,10 +359,7 @@ def _industry_context(frame, out, requested, history_keys):
         ):
             continue
         values = frame[source]
-        count = groups[source].transform("count") - values.notna().astype(int)
-        peers = (groups[source].transform("sum") - values.fillna(0)) / count.where(
-            count > 0
-        )
+        peers = _leave_one_out_mean(values, peer_ids)
         if ratio is None:
             frame[target] = peers
         else:
@@ -344,9 +395,6 @@ def _industry_context(frame, out, requested, history_keys):
             sector_amount / market_amount.where(market_amount > 0)
         ) / (sector_cap / market_cap.where(market_cap > 0)).where(sector_cap > 0)
     if "industry_comovement_20d" in requested:
-        correlation = pd.Series(np.nan, index=frame.index)
-        for _, group in frame.groupby(list(history_keys), sort=False, dropna=False):
-            correlation.loc[group.index] = (
-                group._r.rolling(20, min_periods=20).corr(group._loo_r).to_numpy()
-            )
-        out["industry_comovement_20d"] = correlation
+        out["industry_comovement_20d"] = frame._r.rolling(
+            _HistoryWindow(history_start, 20), min_periods=20
+        ).corr(frame._loo_r)

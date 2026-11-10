@@ -1613,3 +1613,42 @@ def test_vector_window_owners_keep_domains_and_native_roundtrip(tmp_path, case):
     pd.testing.assert_frame_equal(
         read_dataset(tmp_path / "native"), actual, check_exact=True
     )
+
+
+def test_selected_output_keeps_order_nulls_and_empty_shapes():
+    dates = pd.bdate_range("2024-01-02", periods=2).as_unit("ns")
+    frame = pd.DataFrame(
+        dict(
+            asset_id=["b", "a", "b", "a"],
+            timestamp=np.repeat(dates, 2),
+            close=[2.0, 1.0, np.nan, 3.0],
+            total_market_cap=[100.0, 100.0, 0.0, 100.0],
+        )
+    )
+    columns = ("share_price", "log_total_market_cap", "share_price")
+    window = TimeWindow(dates[1], dates[1])
+    actual = calculate_price_volume_factors(
+        frame, factor_columns=columns, output_window=window
+    )
+    expected = pd.DataFrame(
+        dict(
+            asset_id=["a", "b"],
+            timestamp=[dates[1], dates[1]],
+            share_price=[3.0, np.nan],
+            log_total_market_cap=[np.log(100), np.nan],
+        )
+    )
+    expected["timestamp"] = expected.timestamp.dt.as_unit("ns")
+    pd.testing.assert_frame_equal(actual, expected)
+    empty = calculate_price_volume_factors(frame.iloc[:0], factor_columns=columns)
+    absent = calculate_price_volume_factors(
+        frame,
+        factor_columns=columns,
+        output_window=TimeWindow("2025-01-01", "2025-01-02"),
+    )
+    pd.testing.assert_frame_equal(empty, expected.iloc[:0])
+    pd.testing.assert_frame_equal(absent, empty)
+    pd.testing.assert_frame_equal(
+        calculate_price_volume_factors(frame, factor_columns=(), output_window=window),
+        expected.loc[:, ["asset_id", "timestamp"]],
+    )

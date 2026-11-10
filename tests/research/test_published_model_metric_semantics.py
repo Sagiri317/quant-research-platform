@@ -1,6 +1,7 @@
 """Public-operation counterexamples for label-scale losses and declared FDR families."""
 
 import json
+import math
 
 import numpy as np
 import pandas as pd
@@ -414,18 +415,32 @@ def test_stratified_fdr_keeps_undefined_declared_hypotheses(tmp_path, method):
     ) as diagnostics:
         defined = diagnostics.loc[diagnostics.status.eq("DEFINED")]
         undefined = diagnostics.loc[diagnostics.status.eq("UNDEFINED")]
-        assert len(diagnostics) == 4
+        assert len(diagnostics) == 12
         assert diagnostics.defined_hypothesis_count.eq(2).all()
+        assert len(defined) == 2 and len(undefined) == 10
+        assert defined.signal.eq("x").all()
+        assert defined.stratification.eq("all").all()
+        assert set(defined.statistic) == {"ic", "rankic"}
         assert undefined.p_value.isna().all()
         assert undefined.fdr_adjusted_p_value.isna().all()
+        sides = diagnostics.loc[diagnostics.stratification.eq("side")]
+        assert len(sides) == 8
+        assert sides.observation_count.eq(0).all()
+        assert sides.loc[sides.signal.eq("x"), "observation_pairs"].eq(8).all()
+        # Every boundary tie belongs to each side of the constant signal.
+        assert sides.loc[sides.signal.eq("constant"), "observation_pairs"].eq(24).all()
+        # Eight daily correlations are [1]*4 + [.5]*2 + [-.5]*2.
+        # Their lag-zero HAC SE is sqrt(3)/8, yielding this independent p-value.
+        p_value = math.erfc((0.5 / (math.sqrt(3) / 8)) / math.sqrt(2))
+        assert defined.p_value.to_numpy() == pytest.approx(p_value)
         expected = (
-            2
-            * (sum(1 / index for index in range(1, 5)) if method == "BY" else 1)
-            * defined.p_value.iloc[0]
+            6
+            * (sum(1 / index for index in range(1, 13)) if method == "BY" else 1)
+            * p_value
         )
         assert defined.fdr_adjusted_p_value.to_numpy() == pytest.approx(expected)
         if method == "BY":
-            assert expected == pytest.approx(0.08717223057414171)
+            assert expected == pytest.approx(0.38953986733601303)
             assert expected > 0.05
 
 

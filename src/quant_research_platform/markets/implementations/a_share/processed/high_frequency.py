@@ -184,9 +184,9 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
         factor_columns = tuple(
             name for name, role in spec.column_roles.items() if role == "factor"
         )
-        panel_columns = None
+        projections = {}
         if spec.data_id == "hft_factors":
-            panel_columns = tuple(
+            projections["hft_panel"] = tuple(
                 dict.fromkeys(
                     (
                         *protocol.KEY,
@@ -200,16 +200,32 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                 )
             )
         elif spec.data_id == "hft_event_factors":
-            panel_columns = (*protocol.KEY, "session_date", "exchange", "segment_id")
+            projections["hft_panel"] = (
+                *protocol.KEY,
+                "session_date",
+                "exchange",
+                "segment_id",
+            )
+        elif spec.data_id == "hft_hawkes_factors":
+            projections["hft_panel"] = (*protocol.KEY, "session_date", "segment_id")
+            projections["hft_trades"] = (
+                "asset_id",
+                "timestamp",
+                "source_row",
+                "event_kind",
+                "side",
+            )
         used_inputs = set(sessions)
         if spec.data_id == "hft_event_factors":
-            used_inputs = {"hft_panel"} | set().union(
-                *(
-                    protocol.event_factor_streams(name, exchange)
-                    for name in factor_columns
-                    for exchange in ("SSE", "SZSE")
+            projections.update(
+                protocol.event_input_columns(
+                    factor_columns,
+                    order_link_field=json.loads(spec.parameters_json)[
+                        "order_link_field"
+                    ],
                 )
             )
+            used_inputs = set(projections)
         for day in pd.date_range(
             pd.Timestamp(lower).normalize(),
             pd.Timestamp(upper).normalize(),
@@ -217,10 +233,19 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
             inclusive="both" if closed else "left",
         ):
             window = TimeWindow(day.date(), day.date())
+            if spec.kind == "factor":
+                # Causal factors need the day's prefix, never its unused suffix.
+                window = TimeWindow(
+                    day,
+                    min(
+                        day + pd.Timedelta(days=1) - pd.Timedelta(1, "ns"),
+                        pd.Timestamp(upper) - pd.Timedelta(0 if closed else 1, "ns"),
+                    ),
+                )
             data = {
                 name: materialize_dataset_session(
-                    session.filtered_view(window).projected_view(panel_columns)
-                    if name == "hft_panel" and panel_columns is not None
+                    session.filtered_view(window).projected_view(projections[name])
+                    if name in projections
                     else session.filtered_view(window)
                 )
                 for name, session in sessions.items()
@@ -239,11 +264,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
             elif spec.data_id == "hft_factors":
                 frame = compute_factors(
                     data["hft_panel"],
-                    columns=tuple(
-                        name
-                        for name, role in spec.column_roles.items()
-                        if role == "factor"
-                    ),
+                    columns=factor_columns,
                     **json.loads(spec.parameters_json),
                 )
             elif spec.data_id == "hft_event_factors":
@@ -251,11 +272,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                     data["hft_panel"],
                     data.get("hft_orders"),
                     data.get("hft_trades"),
-                    columns=tuple(
-                        name
-                        for name, role in spec.column_roles.items()
-                        if role == "factor"
-                    ),
+                    columns=factor_columns,
                     config=json.loads(spec.parameters_json),
                     missing_streams=missing,
                 )

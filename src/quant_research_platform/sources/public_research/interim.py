@@ -162,6 +162,16 @@ def materialize_interim_data(
                     )
                     if frame.timestamp.isna().any():
                         raise ValueError("public_observation_date_invalid")
+                    if start_date is not None:
+                        frame = frame.loc[frame.timestamp.ge(pd.Timestamp(start_date))]
+                    if end_date is not None:
+                        frame = frame.loc[
+                            frame.timestamp.lt(
+                                pd.Timestamp(end_date) + pd.Timedelta(days=1)
+                            )
+                        ]
+                    if frame.empty:
+                        continue
                     from quant_research_platform.sources.macro.interim import (
                         date_end_available,
                     )
@@ -210,6 +220,8 @@ def materialize_interim_data(
                         frame.loc[applied, "availability_evidence_url"] = clock.loc[
                             applied, "evidence_url"
                         ]
+                    if frame.available_at.lt(frame.published_at).any():
+                        raise ValueError("public_release_clock_precedes_dependency")
                     observed = frame.timestamp.dt.normalize()
                     if data_id == "public_finra_margin":
                         observed += pd.offsets.MonthEnd(0)
@@ -224,14 +236,6 @@ def materialize_interim_data(
                             raise ValueError("public_release_clock_precedes_dependency")
                     if frame.publication_date.lt(observed).any():
                         raise ValueError("public_release_clock_precedes_dependency")
-                    if start_date is not None:
-                        frame = frame.loc[frame.timestamp.ge(pd.Timestamp(start_date))]
-                    if end_date is not None:
-                        frame = frame.loc[
-                            frame.timestamp.lt(
-                                pd.Timestamp(end_date) + pd.Timedelta(days=1)
-                            )
-                        ]
                     numeric_fields = [
                         field
                         for field, unit in DATASETS[data_id].items()
@@ -341,18 +345,6 @@ def _release_clocks(path):
         raise ValueError("public_observation_date_invalid")
     if clocks.duplicated(["source", "observation_date"]).any():
         raise ValueError("public_release_clock_duplicate")
-    if clocks.estimated_available_at.lt(clocks.published_at).any():
-        raise ValueError("public_release_clock_precedes_dependency")
-    for source, rows in clocks.groupby("source", sort=False):
-        for name in ("estimated_available_at", "published_at"):
-            dates = (
-                rows[name]
-                .dt.tz_convert(_source_timezone(source))
-                .dt.tz_localize(None)
-                .dt.normalize()
-            )
-            if dates.lt(rows.observation_date).any():
-                raise ValueError("public_release_clock_precedes_dependency")
     return clocks.set_index(["source", "observation_date"]), hashlib.sha256(
         payload
     ).hexdigest()

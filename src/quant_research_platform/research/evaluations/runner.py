@@ -1,6 +1,7 @@
 """Evaluate explicit signals against labels observable at the declared cutoff."""
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -43,6 +44,7 @@ from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
+    _selection_filters,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -239,6 +241,44 @@ def evaluate(config):
             )
         del frame
 
+    if (
+        predictions
+        and not ordinary
+        and all(
+            metadata.get("asset_ids") is not None
+            for _, metadata in predictions.values()
+        )
+    ):
+        # Prediction-only evaluation consumes the explicit output asset scopes,
+        # before scanning or establishing its narrower observation key.
+        assets = tuple(
+            sorted(
+                {
+                    asset
+                    for _, metadata in predictions.values()
+                    for asset in metadata["asset_ids"]
+                }
+            )
+        )
+        scope = (("asset_id", "in", assets),)
+        session = replace(
+            session,
+            parquet_filters=(
+                *(session.parquet_filters or ()),
+                *_selection_filters(
+                    session.arrow_schema,
+                    timestamp=session.timestamp_column,
+                    time_window=None,
+                    years=None,
+                    row_filters=scope,
+                ),
+            ),
+        )
+        source = (
+            {"path": str(source)} if not isinstance(source, Mapping) else dict(source)
+        )
+        source["row_filters"] = (*source.get("row_filters", ()), *scope)
+
     if config["sample_scope"] == "common" or strata or supports_daily:
         columns = tuple(
             dict.fromkeys(
@@ -301,22 +341,6 @@ def evaluate(config):
                         # Assign positionally: input chunk indexes need not match
                         # the prediction key index or start at zero.
                         frame[column] = prediction.reindex(keys).to_numpy()
-                if (
-                    predictions
-                    and not ordinary
-                    and all(
-                        metadata.get("asset_ids") is not None
-                        for _, metadata in predictions.values()
-                    )
-                ):
-                    # Explicit prediction asset scopes constrain prediction-only
-                    # evaluations without requalifying historical model inputs.
-                    assets = {
-                        asset
-                        for _, metadata in predictions.values()
-                        for asset in metadata["asset_ids"]
-                    }
-                    frame = frame.loc[frame.asset_id.isin(assets)]
                 for label, available in spec.label_availability_columns.items():
                     mature = label_maturity_mask(
                         frame,
@@ -526,7 +550,6 @@ def _resolved_strata(config, *, spec, declared):
 
 def _scoped_evaluation_frames(sources):
     from contextlib import ExitStack
-    from dataclasses import replace
 
     from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
@@ -760,18 +783,6 @@ def _scoped_evaluate(
                     keys = pd.MultiIndex.from_frame(raw[["timestamp", "asset_id"]])
                     for column, (prediction, _metadata) in predictions.items():
                         raw[column] = prediction.reindex(keys).to_numpy()
-                    if all(
-                        signal.source_kind == "prediction" for signal in spec.signals
-                    ) and all(
-                        metadata.get("asset_ids") is not None
-                        for _, metadata in predictions.values()
-                    ):
-                        assets = {
-                            asset
-                            for _, metadata in predictions.values()
-                            for asset in metadata["asset_ids"]
-                        }
-                        raw = raw.loc[raw.asset_id.isin(assets)]
                 yield raw, peers
 
     with build_scoped_evaluation_result(

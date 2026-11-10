@@ -14,6 +14,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
     _compute_ic_and_grouped_label_values,
+    _correlation_metrics_frame,
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
 )
@@ -22,7 +23,6 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     EVALUATION_IC_SUMMARY_COLUMNS,
-    EVALUATION_METRICS_COLUMNS,
     EvaluationDiagnostics,
     EvaluationSpec,
 )
@@ -60,9 +60,9 @@ class _EvaluationStreamingState:
         self._min_timestamp: pd.Timestamp | None = None
         self._max_timestamp: pd.Timestamp | None = None
         self._skipped_timestamp_count = 0
-        self._ic: dict[tuple[str, str], dict[str, int | float]] = {}
+        self._ic: dict[tuple[str, str, str], dict[str, int | float]] = {}
         self._spread: dict[tuple[str, str], dict[str, float | int]] = {}
-        self._day = None
+        self._day = {}
         self._daily_ic = {}
 
     def consume(
@@ -95,57 +95,17 @@ class _EvaluationStreamingState:
         self._skipped_timestamp_count += metadata["skipped_timestamp_count"]
         if not metrics.empty:
             self._metric_rows += len(metrics)
-            common = (
-                common_correlation_mask(
-                    metrics, groups=("timestamp", "label")
-                ).to_numpy()
-                if metadata.get("common_metrics")
-                else None
+            self._rows_after_signal_label_dropna += sum(
+                int(count) for count in metrics.n_obs
             )
-            for row_number, row in enumerate(
-                metrics.itertuples(index=False, name=None)
-            ):
-                (
-                    _timestamp,
-                    signal,
-                    label,
-                    ic,
-                    rankic,
-                    count,
-                    _ic_reason,
-                    _rankic_reason,
-                ) = row
-                count = int(count)
-                self._rows_after_signal_label_dropna += count
-                key = (str(signal), str(label))
-                stats = self._ic.get(key)
-                if stats is None:
-                    stats = {
-                        "ic_count": 0,
-                        "ic_mean": 0.0,
-                        "ic_m2": 0.0,
-                        "ic_positive": 0,
-                        "rankic_count": 0,
-                        "rankic_mean": 0.0,
-                        "rankic_m2": 0.0,
-                        "rankic_positive": 0,
-                    }
-                    self._ic[key] = stats
-                if self._spec.correlation_clock == "trading_day":
-                    day = pd.Timestamp(_timestamp).normalize()
-                    if self._day is not None and day != self._day:
-                        self._flush_day()
-                    self._day = day
-                    daily = self._daily_ic.setdefault(key, [0.0, 0, 0.0, 0])
-                    for offset, value in ((0, ic), (2, rankic)):
-                        if common is not None and not common[row_number, offset // 2]:
-                            continue
-                        if pd.notna(value) and math.isfinite(value):
-                            daily[offset] += value
-                            daily[offset + 1] += 1
-                else:
-                    _add_correlation_aggregate(stats, "ic", ic)
-                    _add_correlation_aggregate(stats, "rankic", rankic)
+            self._consume_correlations(metrics, side="all", metadata=metadata)
+        if not metrics.empty and self._spec.top_quantile is not None:
+            for side in ("long", "short"):
+                columns = {f"{side}_{metric}": metric for metric in ("ic", "rankic")}
+                selected = metrics.loc[:, ["timestamp", "signal", "label", *columns]]
+                self._consume_correlations(
+                    selected.rename(columns=columns), side=side, metadata=metadata
+                )
         if not grouped_label_values.empty:
             self._grouped_rows += len(grouped_label_values)
             current_key: tuple[object, object, object] | None = None
@@ -214,58 +174,102 @@ class _EvaluationStreamingState:
                 last_value = value
             finish_group()
 
-    def _flush_day(self):
-        for key, daily in self._daily_ic.items():
+    def _consume_correlations(self, metrics, *, side, metadata):
+        common = (
+            common_correlation_mask(metrics, groups=("timestamp", "label")).to_numpy()
+            if metadata.get("common_metrics")
+            else None
+        )
+        for row_number, row in enumerate(metrics.itertuples(index=False)):
+            key = (str(row.signal), str(row.label), side)
+            stats = self._ic.get(key)
+            if stats is None:
+                stats = {
+                    f"{metric}_{name}": 0
+                    for metric in ("ic", "rankic")
+                    for name in ("count", "mean", "m2", "positive")
+                }
+                self._ic[key] = stats
+            if self._spec.correlation_clock == "trading_day":
+                day = pd.Timestamp(row.timestamp).normalize()
+                if side in self._day and day != self._day[side]:
+                    self._flush_day(side)
+                self._day[side] = day
+                daily = self._daily_ic.setdefault(key, [0.0, 0, 0.0, 0])
+                for offset, value in ((0, row.ic), (2, row.rankic)):
+                    if common is not None and not common[row_number, offset // 2]:
+                        continue
+                    if pd.notna(value) and math.isfinite(value):
+                        daily[offset] += value
+                        daily[offset + 1] += 1
+            else:
+                _add_correlation_aggregate(stats, "ic", row.ic)
+                _add_correlation_aggregate(stats, "rankic", row.rankic)
+
+    def _flush_day(self, side=None):
+        for key in list(self._daily_ic):
+            if side is not None and key[2] != side:
+                continue
+            daily = self._daily_ic.pop(key)
             for offset, metric in ((0, "ic"), (2, "rankic")):
                 if daily[offset + 1]:
                     _add_correlation_aggregate(
                         self._ic[key], metric, daily[offset] / daily[offset + 1]
                     )
-        self._daily_ic.clear()
 
     def ic_summary(self) -> pd.DataFrame:
         self._flush_day()
-        records: list[dict[str, object]] = []
-        for (signal, label), stats in sorted(self._ic.items()):
-            ic = _correlation_summary(stats, "ic")
-            rankic = _correlation_summary(stats, "rankic")
-            if (
-                self._spec.evaluation_axis == "single_asset_time_series"
-                and self._spec.correlation_clock == "observation"
-            ):
-                rankic = {
-                    "mean": np.nan,
-                    "std": np.nan,
-                    "ratio": np.nan,
-                    "positive_rate": np.nan,
-                    "count": 0,
-                    "reason": "not_applicable",
-                    "std_reason": "not_applicable",
-                    "ratio_reason": "not_applicable",
-                }
-            records.append(
-                {
-                    "signal": signal,
-                    "label": label,
-                    "mean_ic": ic["mean"],
-                    "std_ic": ic["std"],
-                    "icir": ic["ratio"],
-                    "positive_ic_rate": ic["positive_rate"],
-                    "valid_ic_count": ic["count"],
-                    "mean_rankic": rankic["mean"],
-                    "std_rankic": rankic["std"],
-                    "rankicir": rankic["ratio"],
-                    "positive_rankic_rate": rankic["positive_rate"],
-                    "valid_rankic_count": rankic["count"],
-                    "ic_reason": ic["reason"],
-                    "std_ic_reason": ic["std_reason"],
-                    "icir_reason": ic["ratio_reason"],
-                    "rankic_reason": rankic["reason"],
-                    "std_rankic_reason": rankic["std_reason"],
-                    "rankicir_reason": rankic["ratio_reason"],
-                }
+        records = {}
+        for (signal, label, side), stats in sorted(self._ic.items()):
+            row = records.setdefault(
+                (signal, label), {"signal": signal, "label": label}
             )
-        return pd.DataFrame.from_records(records, columns=EVALUATION_IC_SUMMARY_COLUMNS)
+            prefix = "" if side == "all" else f"{side}_"
+            for metric in ("ic", "rankic"):
+                result = _correlation_summary(stats, metric)
+                if (
+                    self._spec.evaluation_axis == "single_asset_time_series"
+                    and self._spec.correlation_clock == "observation"
+                    and metric == "rankic"
+                ):
+                    result = {
+                        **result,
+                        "mean": np.nan,
+                        "std": np.nan,
+                        "ratio": np.nan,
+                        "positive_rate": np.nan,
+                        "count": 0,
+                        "reason": "not_applicable",
+                        "std_reason": "not_applicable",
+                        "ratio_reason": "not_applicable",
+                    }
+                name = f"{prefix}{metric}"
+                row.update(
+                    {
+                        f"mean_{name}": result["mean"],
+                        f"std_{name}": result["std"],
+                        f"{name}ir": result["ratio"],
+                        f"positive_{name}_rate": result["positive_rate"],
+                        f"valid_{name}_count": result["count"],
+                        f"{name}_reason": result["reason"],
+                        f"std_{name}_reason": result["std_reason"],
+                        f"{name}ir_reason": result["ratio_reason"],
+                    }
+                )
+        frame = pd.DataFrame.from_records(
+            list(records.values()), columns=EVALUATION_IC_SUMMARY_COLUMNS
+        )
+        if self._spec.top_quantile is None:
+            for side in ("long", "short"):
+                for metric in ("ic", "rankic"):
+                    frame[f"valid_{side}_{metric}_count"] = 0
+                    for name in (
+                        f"{side}_{metric}_reason",
+                        f"std_{side}_{metric}_reason",
+                        f"{side}_{metric}ir_reason",
+                    ):
+                        frame[name] = "not_applicable"
+        return frame
 
     def group_spread_summary(self) -> pd.DataFrame:
         records: list[dict[str, object]] = []
@@ -304,7 +308,7 @@ class _EvaluationStreamingState:
             rows_after_signal_label_dropna=self._rows_after_signal_label_dropna,
             metric_rows=self._metric_rows,
             grouped_label_value_rows=self._grouped_rows,
-            ic_summary_rows=len(self._ic),
+            ic_summary_rows=sum(key[2] == "all" for key in self._ic),
             group_spread_summary_rows=len(self._spread),
             timestamp_count=self._timestamp_count,
             min_timestamp=None
@@ -629,13 +633,7 @@ def _time_series_metrics_frame(
 
 
 def _time_series_metric_records(records):
-    metrics = pd.DataFrame.from_records(records, columns=EVALUATION_METRICS_COLUMNS)
-    metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
-    for column in ("signal", "label", "ic_reason", "rankic_reason"):
-        metrics[column] = metrics[column].astype("string")
-    for column in ("ic", "rankic"):
-        metrics[column] = metrics[column].astype("float64")
-    metrics["n_obs"] = metrics["n_obs"].astype("int64")
+    metrics = _correlation_metrics_frame(records)
     return metrics.sort_values(
         ["timestamp", "signal", "label"], kind="stable"
     ).reset_index(drop=True)
@@ -691,6 +689,7 @@ def _evaluate_filtered_frame(
     spec: EvaluationSpec,
     asset_column: str,
     ordinal_signals=None,
+    include_sides=True,
 ) -> _EvaluationOutputChunk:
     signal_columns = tuple(signal.signal_id for signal in spec.signals)
     label_columns = spec.label_columns
@@ -711,12 +710,13 @@ def _evaluate_filtered_frame(
         compute_spec,
         n_groups=n_groups,
         ordinal_signals=ordinal_signals,
+        top_quantile=spec.top_quantile if include_sides else None,
     )
     absent = timestamps.drop_duplicates().loc[
         ~timestamps.drop_duplicates().isin(metrics.timestamp)
     ]
     if not absent.empty:
-        missing = pd.DataFrame.from_records(
+        missing = _correlation_metrics_frame(
             [
                 {
                     "timestamp": timestamp,
@@ -732,8 +732,8 @@ def _evaluate_filtered_frame(
                 for signal in signal_columns
                 for label in label_columns
             ],
-            columns=EVALUATION_METRICS_COLUMNS,
-        ).astype(metrics.dtypes.to_dict())
+            side_reason="insufficient_observations",
+        )
         metrics = (
             pd.concat([metrics, missing], ignore_index=True)
             .sort_values(["timestamp", "signal", "label"], kind="stable")
@@ -994,6 +994,7 @@ def _evaluate_scoped_day(pair, *, spec_values, sources, cutoff, sample_scope, st
                     metadata,
                     spec=stratum_spec,
                     asset_column="asset_id",
+                    include_sides=False,
                     ordinal_signals=(
                         ordinal_signals.loc[subset.index]
                         if ordinal_signals is not None

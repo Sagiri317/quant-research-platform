@@ -186,19 +186,16 @@ def _join_processed_inputs(
     risk_facts: pd.DataFrame | None = None,
     risk_cache: dict | None = None,
 ) -> pd.DataFrame:
-    base = dataset_spec.base_input_data_id
-    risk_input_id = risk_exposure_input["data_id"] if risk_exposure_input else None
     assembled = base_frame.reset_index(drop=True)
     if (
         "market_id" in base_frame
         and not base_frame.market_id.eq(str(dataset_spec.market_id)).all()
     ):
         raise ValueError("research_dataset_market_mismatch")
-    base_keys = _scalar_keys(assembled, dataset_spec.primary_key)
-    for input_data_id in dataset_spec.input_data_ids:
-        if input_data_id in {base, risk_input_id}:
-            continue
-        input_frame = input_frames[input_data_id]
+    base_keys = (
+        _scalar_keys(assembled, dataset_spec.primary_key) if input_frames else []
+    )
+    for input_data_id, input_frame in input_frames.items():
         positions = _input_key_positions(
             base_keys,
             input_frame,
@@ -1221,6 +1218,10 @@ def assemble(config: Mapping) -> Path:
                 existing_columns=existing,
                 extra_columns=("listing_date",) if risk_input_id is not None else (),
             )
+        if data_id not in {base_input, risk_input_id} and not set(columns).difference(
+            spec.primary_key
+        ):
+            continue
         projected[data_id] = sessions[data_id].projected_view(columns)
         if data_id != risk_input_id:
             existing = tuple(dict.fromkeys((*existing, *columns)))

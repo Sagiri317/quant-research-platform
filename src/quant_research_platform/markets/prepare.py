@@ -338,7 +338,10 @@ def _configured_spec(spec, config):
         )
         if "labels" in actual:
             actual["labels"] = [item.to_manifest() for item in selected]
-    if spec.market_id == "a_share" and spec.data_id == "price_volume_facts":
+    if spec.market_id == "a_share" and spec.data_id in {
+        "price_volume_facts",
+        "market_structure_factors",
+    }:
         from quant_research_platform.research.factors.engine import factor_lookback_bars
         from quant_research_platform.research.protocols.a_share import factor_catalog
 

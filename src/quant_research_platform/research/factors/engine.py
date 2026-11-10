@@ -53,9 +53,7 @@ def calculate_factors_for_panel(
             output_columns=tuple(d.output_column for d in requested),
         )
     if families == ("risk_residual",):
-        from quant_research_platform.research.protocols.a_share import (
-            RISK_STYLE_COLUMNS,
-        )
+        from quant_research_platform.contracts.risk import RISK_STYLE_COLUMNS
 
         from .residual import calculate_residual_factors
 
@@ -210,6 +208,9 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
             ),
             default=0,
         )
+        if definition.family == "market_structure":
+            # Structure definitions already declare preceding sessions explicitly.
+            current = definition.lookback_window or 0
         column = definition.output_column
         # Unshifted windows include today's sample; endpoint lags and shocks
         # consume the full number of preceding sessions.

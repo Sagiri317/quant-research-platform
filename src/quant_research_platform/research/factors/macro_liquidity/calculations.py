@@ -1,10 +1,14 @@
 """Compute release-frequency histories once, then align states to decision cutoffs."""
 
 from bisect import bisect_right, insort
+from itertools import groupby
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_group_codes,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     market_type_calendar_state,
 )
@@ -16,7 +20,6 @@ from quant_research_platform.research.factors.macro_liquidity.definitions import
     STATE_PRODUCTS,
     VARIABLES,
 )
-from quant_research_platform.research.features.transforms import _industry_group_codes
 
 DEFAULT_WINDOWS = {"D": 60, "W": 26, "M": 24, "Q": 12, "event": 20}
 _LATEST_BALANCE_RATIOS = {
@@ -101,9 +104,14 @@ def _composite_history(observations, name):
     rows = observations.loc[observations.series_id.isin(weights)]
     state = {key: {} for key in weights}
     output = []
-    for timestamp, update in rows.groupby("timestamp", sort=True):
+    for timestamp, update in groupby(
+        rows.dropna(subset=["timestamp"])
+        .sort_values("timestamp", kind="stable")
+        .itertuples(index=False),
+        key=lambda row: row.timestamp,
+    ):
         changed = set()
-        for row in update.itertuples(index=False):
+        for row in update:
             state[row.series_id][row.observation_date] = row.value
             changed.add(row.observation_date)
         for observed in sorted(changed):
@@ -133,83 +141,122 @@ def _composite_history(observations, name):
 def _history_features(history, transforms, unit, frequency, window, config):
     """Update known observations and revisions without counting daily carries."""
     columns = tuple(transforms)
+    selected = set(columns)
+    previous_transforms = selected & {"change", "acceleration", "growth"}
+    yearly_transforms = selected & {"yoy_change", "yoy_growth"}
+    current_transforms = selected & {"zscore", "percentile", "sum"}
+    prior_transforms = selected & {"innovation", "innovation_zscore", "ewma_deviation"}
+    prior_mean = bool(selected & {"innovation", "innovation_zscore"})
+    volatility = "volatility" in selected
     dates, state, output = [], {}, []
     minimum = max(2, int(np.ceil(window * config["minimum_fraction"])))
     scale = 100 if unit == "percent" else 1
-    for timestamp, changes in history.groupby("timestamp", sort=True):
-        for row in changes.itertuples(index=False):
+    if "ewma_deviation" in selected:
+        weights = np.exp2(-np.arange(window - 1, -1, -1) / config["ewma_halflife"])
+    for timestamp, changes in groupby(
+        history.dropna(subset=["timestamp"])
+        .sort_values("timestamp", kind="stable")
+        .itertuples(index=False),
+        key=lambda row: row.timestamp,
+    ):
+        for row in changes:
             observed = row.observation_date
             if observed not in state:
                 insort(dates, observed)
             state[observed] = row.value
         latest = dates[-1]
         x = state[latest]
-        tail = np.asarray([state[day] for day in dates[-(window + 1) :]], dtype=float)
-        current = tail[-window:]
-        prior = tail[:-1]
-        finite = np.isfinite(current)
-        previous = tail[-2] if len(tail) >= 2 else np.nan
-        year_target = latest - pd.DateOffset(years=1)
-        if frequency in {"M", "Q"}:
-            period = year_target.to_period(frequency)
-            year_index = bisect_right(dates, period.end_time) - 1
-            same_period = (
-                year_index >= 0 and dates[year_index].to_period(frequency) == period
-            )
-        else:
-            year_index = bisect_right(dates, year_target) - 1
-            tolerance = {"D": 7, "W": 7, "event": 0}[frequency]
-            same_period = (
-                year_index >= 0 and (year_target - dates[year_index]).days <= tolerance
-            )
-        year_value = state[dates[year_index]] if same_period else np.nan
-        change = (x - previous) * scale
-        values = {
-            "level": x,
-            "change": change,
-            "acceleration": (x - 2 * previous + tail[-3]) * scale
-            if len(tail) >= 3
-            else np.nan,
-            "yoy_change": (x - year_value) * scale,
-        }
-        if "implied_variance" in transforms:
-            values["implied_variance"] = (x / 100) ** 2 if x >= 0 else np.nan
-        if "risk_neutral_skewness" in transforms:
-            values["risk_neutral_skewness"] = (100 - x) / 10
-        if finite.sum() >= minimum:
-            sample = current[finite]
-            std = sample.std(ddof=1)
-            values["zscore"] = (x - sample.mean()) / std if std > 0 else np.nan
-            values["percentile"] = (
-                (np.count_nonzero(sample < x) + 0.5 * np.count_nonzero(sample == x))
-                / len(sample)
-                if np.isfinite(x)
-                else np.nan
-            )
-            values["sum"] = sample.sum() * scale
-        differences = np.diff(tail) * scale
-        valid_differences = differences[np.isfinite(differences)]
-        if len(valid_differences) >= minimum:
-            values["volatility"] = valid_differences.std(ddof=1)
-        known = np.isfinite(prior)
-        if known.sum() >= minimum:
-            values["innovation"] = (x - prior[known].mean()) * scale
-            std = prior[known].std(ddof=1)
-            values["innovation_zscore"] = (
-                (x - prior[known].mean()) / std if std > 0 else np.nan
-            )
-            weights = np.exp2(
-                -np.arange(len(prior) - 1, -1, -1) / config["ewma_halflife"]
-            )
-            values["ewma_deviation"] = (
-                x - np.average(prior[known], weights=weights[known])
-            ) * scale
-        if set(transforms) & {"log_level", "growth", "yoy_growth"}:
+        values = {}
+        if "level" in selected:
+            values["level"] = x
+        if "log_level" in selected:
             values["log_level"] = np.log(x) if x > 0 else np.nan
-            values["growth"] = x / previous - 1 if x > 0 and previous > 0 else np.nan
-            values["yoy_growth"] = (
-                x / year_value - 1 if x > 0 and year_value > 0 else np.nan
+        if previous_transforms:
+            previous = state[dates[-2]] if len(dates) >= 2 else np.nan
+            if "change" in selected:
+                values["change"] = (x - previous) * scale
+            if "acceleration" in selected:
+                values["acceleration"] = (
+                    (x - 2 * previous + state[dates[-3]]) * scale
+                    if len(dates) >= 3
+                    else np.nan
+                )
+            if "growth" in selected:
+                values["growth"] = (
+                    x / previous - 1 if x > 0 and previous > 0 else np.nan
+                )
+        if yearly_transforms:
+            year_target = latest - pd.DateOffset(years=1)
+            if frequency in {"M", "Q"}:
+                period = year_target.to_period(frequency)
+                year_index = bisect_right(dates, period.end_time) - 1
+                same_period = (
+                    year_index >= 0 and dates[year_index].to_period(frequency) == period
+                )
+            else:
+                year_index = bisect_right(dates, year_target) - 1
+                tolerance = {"D": 7, "W": 7, "event": 0}[frequency]
+                same_period = (
+                    year_index >= 0
+                    and (year_target - dates[year_index]).days <= tolerance
+                )
+            year_value = state[dates[year_index]] if same_period else np.nan
+            if "yoy_change" in selected:
+                values["yoy_change"] = (x - year_value) * scale
+            if "yoy_growth" in selected:
+                values["yoy_growth"] = (
+                    x / year_value - 1 if x > 0 and year_value > 0 else np.nan
+                )
+        if "implied_variance" in selected:
+            values["implied_variance"] = (x / 100) ** 2 if x >= 0 else np.nan
+        if "risk_neutral_skewness" in selected:
+            values["risk_neutral_skewness"] = (100 - x) / 10
+        if current_transforms or prior_transforms or volatility:
+            tail = np.asarray(
+                [state[day] for day in dates[-(window + 1) :]], dtype=float
             )
+        if current_transforms:
+            current = tail[-window:]
+            sample = current[np.isfinite(current)]
+            if len(sample) >= minimum:
+                if "zscore" in selected:
+                    std = sample.std(ddof=1)
+                    values["zscore"] = (x - sample.mean()) / std if std > 0 else np.nan
+                if "percentile" in selected:
+                    values["percentile"] = (
+                        (
+                            np.count_nonzero(sample < x)
+                            + 0.5 * np.count_nonzero(sample == x)
+                        )
+                        / len(sample)
+                        if np.isfinite(x)
+                        else np.nan
+                    )
+                if "sum" in selected:
+                    values["sum"] = sample.sum() * scale
+        if volatility:
+            differences = np.diff(tail) * scale
+            valid_differences = differences[np.isfinite(differences)]
+            if len(valid_differences) >= minimum:
+                values["volatility"] = valid_differences.std(ddof=1)
+        if prior_transforms:
+            prior = tail[:-1]
+            known = np.isfinite(prior)
+            if known.sum() >= minimum:
+                sample = prior[known]
+                if prior_mean:
+                    mean = sample.mean()
+                    if "innovation" in selected:
+                        values["innovation"] = (x - mean) * scale
+                    if "innovation_zscore" in selected:
+                        std = sample.std(ddof=1)
+                        values["innovation_zscore"] = (
+                            (x - mean) / std if std > 0 else np.nan
+                        )
+                if "ewma_deviation" in selected:
+                    values["ewma_deviation"] = (
+                        x - np.average(sample, weights=weights[-len(prior) :][known])
+                    ) * scale
         output.append(
             (timestamp, latest, *(values.get(column, np.nan) for column in columns))
         )
@@ -255,11 +302,14 @@ def required_factors(columns, config):
     for name, components in STATE_PRODUCTS.items():
         if "ml_" + name in needed:
             needed.update("ml_" + item for item in components)
-    if needed & {"ml_us_net_liquidity_latest", *_LATEST_BALANCE_RATIOS}:
+    if "ml_us_net_liquidity_latest" in needed:
         needed.update(
             "ml_" + item + "_level"
-            for item in ("us_fed_assets", "us_tga_wed", "us_on_rrp", "us_reserves_wed")
+            for item in ("us_fed_assets", "us_tga_wed", "us_on_rrp")
         )
+    for name, variable in _LATEST_BALANCE_RATIOS.items():
+        if name in needed:
+            needed.update(("ml_us_fed_assets_level", f"ml_{variable}_level"))
     return needed
 
 
@@ -368,48 +418,18 @@ def liquidity_beta(
 def calculate_macro_factors(
     observations, panel, *, columns, config, states=None, calendar=None
 ):
-    """Broadcast macro histories; equity interactions operate cross-sectionally."""
+    """Align both clocks once, or use explicit precomputed decision states."""
     config = parameters(config)
     work = panel.sort_values(["timestamp", "asset_id"], kind="stable").reset_index(
         drop=True
     )
-    if states is None:
-        states = macro_states(
-            observations, work.timestamp, columns=columns, config=config
-        )
-    output = work.loc[:, ["market_id", "asset_id", "timestamp"]].merge(
-        states, on="timestamp", how="left", validate="many_to_one"
-    )
-    for column in columns:
-        recipe = RECIPES[column]
-        if recipe[0] in {"interaction", "industry_interaction"}:
-            _, state, exposure = recipe
-            if exposure not in work:
-                output[column] = np.nan
-                continue
-            value = pd.to_numeric(work[exposure], errors="raise")
-            if "eligible" in work:
-                value = value.where(work.eligible)
-            group = value.groupby(work.timestamp, sort=False)
-            std = group.transform("std").where(lambda x: x.gt(0))
-            value = (value - group.transform("mean")) / std
-            if recipe[0] == "industry_interaction":
-                if not {"industry_standard_id", "industry_level1_code"} <= set(work):
-                    output[column] = np.nan
-                    continue
-                # Sector means use only the current, eligible cross-section.
-                value = value.groupby(
-                    [work.timestamp, _industry_group_codes(work)], sort=False
-                ).transform("mean")
-                if "eligible" in work:
-                    value = value.where(work.eligible)
-            output[column] = output["ml_" + state] * value
     beta_columns = [
         name
         for name in sorted(required_factors(columns, config))
         if RECIPES[name][0] == "beta"
     ]
-    output[beta_columns] = np.nan
+    variables = {RECIPES[name][1] for name in beta_columns}
+    clocks = None
     if (
         beta_columns
         and calendar is not None
@@ -418,13 +438,74 @@ def calculate_macro_factors(
         clocks = pd.to_datetime(work.return_available_at, utc=True).dt.tz_localize(None)
         # Unknown or immature returns are unusable, not a reason to invent a close.
         clocks = clocks.where(clocks.le(work.timestamp))
-        variables = {RECIPES[name][1] for name in beta_columns}
+    if states is None:
+        cutoffs = (
+            work.timestamp
+            if clocks is None
+            else pd.concat((work.timestamp, clocks.dropna()), ignore_index=True)
+        )
+        states = macro_states(observations, cutoffs, columns=columns, config=config)
+        historical = states
+    elif clocks is not None:
         historical = macro_states(
             observations,
             clocks.dropna(),
             columns=[f"ml_{name}_level" for name in variables],
             config=config,
-        ).set_index("timestamp")
+        )
+    output = work.loc[:, ["market_id", "asset_id", "timestamp"]].merge(
+        states, on="timestamp", how="left", validate="many_to_one"
+    )
+    interactions = {
+        column: RECIPES[column]
+        for column in columns
+        if RECIPES[column][0] in {"interaction", "industry_interaction"}
+    }
+    if interactions:
+        exposures = list(
+            dict.fromkeys(
+                recipe[2] for recipe in interactions.values() if recipe[2] in work
+            )
+        )
+        values = work.loc[:, exposures].apply(pd.to_numeric, errors="raise")
+        if "eligible" in work:
+            values = values.where(work.eligible, axis=0)
+        groups = values.groupby(work.timestamp, sort=False)
+        std = groups.transform("std").where(lambda x: x.gt(0))
+        values = (values - groups.transform("mean")) / std
+        sector_exposures = list(
+            dict.fromkeys(
+                recipe[2]
+                for recipe in interactions.values()
+                if recipe[0] == "industry_interaction" and recipe[2] in values
+            )
+        )
+        sectors = pd.DataFrame(index=work.index)
+        if sector_exposures and {"industry_standard_id", "industry_level1_code"} <= set(
+            work
+        ):
+            # Sector means use only the current, eligible cross-section.
+            industries = _industry_group_codes(work)
+            sectors = (
+                values.loc[industries.notna(), sector_exposures]
+                .groupby([work.timestamp, industries], sort=False)
+                .transform("mean")
+                .reindex(work.index)
+            )
+            if "eligible" in work:
+                sectors = sectors.where(work.eligible, axis=0)
+        products = {}
+        for column, (kind, state, exposure) in interactions.items():
+            exposure_values = sectors if kind == "industry_interaction" else values
+            products[column] = (
+                output["ml_" + state] * exposure_values[exposure]
+                if exposure in exposure_values
+                else np.nan
+            )
+        output = pd.concat((output, pd.DataFrame(products, index=work.index)), axis=1)
+    output[beta_columns] = np.nan
+    if clocks is not None:
+        historical = historical.set_index("timestamp")
         listing = work.listing_date
         previous = work.groupby("asset_id", sort=False)[
             ["listing_date", "market_type"]

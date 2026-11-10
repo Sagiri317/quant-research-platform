@@ -67,15 +67,21 @@ def calibrate_uncertainty(config):
         set(),
     )
     alpha = strict_finite_float(config["alpha"], error="conformal_alpha_invalid")
+    predictions, metadata = read_predictions(
+        Path(config["predictions"]),
+        columns=("timestamp", "asset_id", "prediction_score"),
+        time_window=TimeWindow(**config["window"]),
+    )
     frame, session, availability = research_frame(
-        config["dataset"], config["window"], (), label=config["label"]
+        config["dataset"],
+        config["window"],
+        (),
+        label=config["label"],
+        observation_keys=predictions,
     )
     spec = session.spec
     if spec.get("column_units", {}).get(config["label"]) != config["unit"]:
         raise ValueError("uncertainty_label_unit_mismatch")
-    predictions, metadata = read_predictions(
-        Path(config["predictions"]), time_window=TimeWindow(**config["window"])
-    )
     if _prediction_loss_reason(
         metadata["model_facts"], config["label"], spec, session.manifest
     ):
@@ -199,8 +205,18 @@ def evaluate_uncertainty(config):
     config = _strict_config(
         config, {"intervals", "dataset", "window", "label", "cutoff", "output"}, set()
     )
+    session = open_dataset_session(
+        Path(config["intervals"]),
+        columns=("timestamp", "asset_id", "prediction_lower", "prediction_upper"),
+        time_window=TimeWindow(**config["window"]),
+    )
+    intervals = materialize_dataset_session(session)
     labels, label_session, availability = research_frame(
-        config["dataset"], config["window"], (), label=config["label"]
+        config["dataset"],
+        config["window"],
+        (),
+        label=config["label"],
+        observation_keys=intervals,
     )
     label_spec = label_session.spec
     labels = mature_rows(
@@ -208,9 +224,6 @@ def evaluate_uncertainty(config):
         label=config["label"],
         availability=availability,
         cutoff=config["cutoff"],
-    )
-    session = open_dataset_session(
-        Path(config["intervals"]), time_window=TimeWindow(**config["window"])
     )
     if (
         session.spec["column_units"].get("prediction_lower")
@@ -220,7 +233,6 @@ def evaluate_uncertainty(config):
         != _target_definition(label_spec, config["label"], label_session.manifest)
     ):
         raise ValueError("uncertainty_evaluation_target_mismatch")
-    intervals = materialize_dataset_session(session)
     paired = labels.merge(
         intervals[["timestamp", "asset_id", "prediction_lower", "prediction_upper"]],
         on=["timestamp", "asset_id"],

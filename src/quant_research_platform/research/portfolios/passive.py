@@ -10,6 +10,7 @@ from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     PortfolioDiagnostic,
+    _portfolio_budget_exceeded,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share.execution import (
@@ -119,17 +120,14 @@ class PassiveOrders:
         self.limits = dict(
             zip(
                 market_types.index,
-                zip(minimum, increment, maximum, strict=True),
+                zip(markets, minimum, increment, maximum, strict=True),
                 strict=True,
             )
         )
-        self.costs = {
-            (asset, side): prepare_trade_cost(
-                day, market, "buy" if side == 1 else "sell", schedule, assumptions
-            )
-            for asset, market in zip(market_types.index, markets, strict=True)
-            for side in (1, -1)
-        }
+        self.day = day
+        self.schedule = schedule
+        self.assumptions = assumptions
+        self.costs = {}
         self.face_value_per_share = face_value_per_share
         self.orders = {}
         self.intents = {}
@@ -205,6 +203,16 @@ class PassiveOrders:
             rows.extend(self._remove(asset, status))
         self.intents.clear()
         return rows
+
+    def advance(self, at, *, inclusive=True):
+        """Release expired cancellations on the account clock, after tied trades."""
+        diagnostics = []
+        for asset, order in list(self.orders.items()):
+            if order.cancel_at is not None and (
+                order.cancel_at <= at.value if inclusive else order.cancel_at < at.value
+            ):
+                diagnostics.extend(self._remove(asset, "cancelled"))
+        return diagnostics
 
     def trade(self, event):
         at = int(event.timestamp.value)
@@ -285,7 +293,7 @@ class PassiveOrders:
         return diagnostics
 
     def quote(self, at, current, units, sellable, cash):
-        diagnostics = []
+        diagnostics = self.advance(at)
         at_ns = int(at.value)
         free = cash - self.frozen_cash()
         for asset, row in current.iterrows():
@@ -300,14 +308,6 @@ class PassiveOrders:
             if order is not None and (not observed or row.segment_id != order.segment):
                 free += self.reservation(order)
                 diagnostics.extend(self._remove(asset, "observation_gap"))
-                order = None
-            if (
-                order is not None
-                and order.cancel_at is not None
-                and at_ns >= order.cancel_at
-            ):
-                free += self.reservation(order)
-                diagnostics.extend(self._remove(asset, "cancelled"))
                 order = None
             if order is not None:
                 side = "bid" if order.side == 1 else "ask"
@@ -382,7 +382,7 @@ class PassiveOrders:
                     )
                 )
                 continue
-            minimum, increment, maximum = self.limits[asset]
+            market, minimum, increment, maximum = self.limits[asset]
             available = sellable[asset] if side == -1 else np.inf
             desired = min(abs(requested), available, maximum)
             quantity = int(
@@ -393,7 +393,18 @@ class PassiveOrders:
                     sellable=available if side == -1 else None,
                 )
             )
-            cost = self.costs[asset, side]
+            cost = None
+            if quantity:
+                key = market, side
+                if key not in self.costs:
+                    self.costs[key] = prepare_trade_cost(
+                        self.day,
+                        market,
+                        "buy" if side == 1 else "sell",
+                        self.schedule,
+                        self.assumptions,
+                    )
+                cost = self.costs[key]
 
             face = (
                 self.face_value_per_share.get(asset)
@@ -406,16 +417,24 @@ class PassiveOrders:
                     cost, side, price, count, face_value_per_share=face
                 )
 
-            if side == 1 and quantity and required(quantity) > free:
+            if (
+                side == 1
+                and quantity
+                and _portfolio_budget_exceeded((required(quantity),), (free,))
+            ):
                 low, high = 0, quantity // increment
                 while low < high:
                     middle = (low + high + 1) // 2
-                    if required(middle * increment) <= free:
+                    if not _portfolio_budget_exceeded(
+                        (required(middle * increment),), (free,)
+                    ):
                         low = middle
                     else:
                         high = middle - 1
                 quantity = int(low * increment) if low * increment >= minimum else 0
-            if not quantity or required(quantity) > free:
+            if not quantity or _portfolio_budget_exceeded(
+                (required(quantity),), (free,)
+            ):
                 diagnostics.append(
                     PortfolioDiagnostic(
                         asset,

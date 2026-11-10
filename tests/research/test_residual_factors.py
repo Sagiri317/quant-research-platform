@@ -216,3 +216,21 @@ def test_residual_factor_clipping_uses_prior_complete_cross_section():
         rtol=1e-11,
         atol=1e-13,
     )
+
+
+def test_residual_drawdown_matches_independent_suffix_loss_after_gaps():
+    from math import fsum
+
+    values = np.r_[np.full(700, 0.01), np.sin(np.arange(150)) * 0.03, np.zeros(80)]
+    values[[18, 711, 800]] = np.nan
+    for window in (20, 60):
+        expected = np.full(len(values), np.nan)
+        for end in range(window - 1, len(values)):
+            path = values[end - window + 1 : end + 1]
+            if np.isfinite(path).all():
+                expected[end] = max(
+                    0, *(-fsum(path[start:]) for start in range(window))
+                )
+        np.testing.assert_allclose(
+            _residual_drawdown(values, window), expected, rtol=1e-12, atol=1e-14
+        )

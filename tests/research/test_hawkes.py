@@ -204,3 +204,52 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, unknown_kind)
                 "output_root": str(tmp_path / "invalid"),
             }
         )
+
+
+def test_factor_unknown_barrier_preserves_independent_pre_jump_intensity():
+    from quant_research_platform.research.factors.hawkes import compute_hawkes_factors
+
+    origin = pd.Timestamp("2024-01-02T01:30:00")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "a",
+            "timestamp": origin + pd.to_timedelta(np.arange(5), unit="s"),
+            "session_date": origin.normalize(),
+            "segment_id": "am",
+        }
+    )
+    trades = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": origin + pd.to_timedelta([0, 1, 2, 2, 3], unit="s"),
+            "source_row": np.arange(5),
+            "event_kind": ["trade", "trade", "unknown", "trade", "trade"],
+            "side": ["buy", "sell", "buy", "buy", "sell"],
+        }
+    )
+    mu = np.array([0.5, 0.7])
+    alpha = np.array([[0.2, 0.1], [0.1, 0.2]])
+    beta = 2.0
+    result = compute_hawkes_factors(
+        panel, trades, ((mu, alpha, beta), origin - pd.Timedelta(days=1))
+    )
+    expected = np.array(
+        [
+            mu,
+            mu + beta * alpha @ [np.exp(-beta), 0],
+            mu + beta * alpha @ [np.exp(-2 * beta), np.exp(-beta)],
+        ]
+    )
+    np.testing.assert_allclose(
+        result.loc[:2, ["hawkes_buy_intensity", "hawkes_sell_intensity"]], expected
+    )
+    total = expected.sum(axis=1)
+    np.testing.assert_allclose(
+        result.hawkes_intensity_imbalance.iloc[:3],
+        (expected[:, 0] - expected[:, 1]) / total,
+    )
+    np.testing.assert_allclose(
+        result.hawkes_excitation_fraction.iloc[:3], 1 - mu.sum() / total
+    )
+    assert result.loc[3:, list(HAWKES_FACTORS)].isna().all().all()

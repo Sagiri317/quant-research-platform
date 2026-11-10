@@ -12,9 +12,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.evaluations import CORRELATION_METRICS
 from quant_research_platform.contracts.experiments import (
     legal_training_rows,
 )
+from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import (
     TimeWindow,
 )
@@ -32,7 +34,7 @@ from quant_research_platform.research.statistics import (
     _apply_fdr,
     _selected_analyses,
     common_correlation_mask,
-    cross_sectional_rank_ic,
+    cross_sectional_correlations,
     daily_mean_frame,
     fama_macbeth_period,
     hac_mean,
@@ -83,6 +85,8 @@ def build_a_share_factor_statistics_tables(
     evaluation = config["evaluation"]
     factors = tuple(evaluation["factors"])
     analyses = _factor_analyses(config)
+    top_quantile = resolve_top_quantile(evaluation.get("top_quantile"))
+    metrics = CORRELATION_METRICS if "analyses" not in config else ("rankic",)
     uses_label = bool(set(analyses) - {"factor_correlation"})
     primary_label = evaluation["primary_label"] if uses_label else None
     availability = (
@@ -166,14 +170,24 @@ def build_a_share_factor_statistics_tables(
                 availability_column=availability,
                 target_column=primary_label,
             )
-            if mature.empty:
-                continue
             if {"rank_ic", "annual_stability"}.intersection(analyses):
+                candidates = batch.loc[batch.eligible.eq(True)].copy()
+                labels = candidates[primary_label]
+                if pd.api.types.is_integer_dtype(labels.dtype):
+                    labels = labels.astype(
+                        "UInt64"
+                        if pd.api.types.is_unsigned_integer_dtype(labels.dtype)
+                        else "Int64"
+                    )
+                candidates[primary_label] = labels.where(
+                    candidates.index.isin(mature.index)
+                )
                 ranks.extend(
-                    cross_sectional_rank_ic(
-                        mature,
+                    cross_sectional_correlations(
+                        candidates,
                         value_columns=factors,
                         label_column=primary_label,
+                        top_quantile=top_quantile if len(metrics) > 1 else None,
                     ).to_dict("records")
                 )
             if "fama_macbeth" in analyses:
@@ -191,29 +205,35 @@ def build_a_share_factor_statistics_tables(
                     )
     tables = {}
     if {"rank_ic", "annual_stability"}.intersection(analyses):
+        rank_by_date = pd.DataFrame.from_records(
+            ranks, columns=["timestamp", "signal", *metrics]
+        ).pivot(index="timestamp", columns="signal", values=list(metrics))
+        rank_by_date = rank_by_date.reindex(
+            index=input_dates,
+            columns=pd.MultiIndex.from_product([metrics, factors]),
+        )
+        rank_by_date.columns = pd.Index(
+            rank_by_date.columns.to_list(), tupleize_cols=False
+        )
         rank_by_date = (
-            pd.DataFrame.from_records(ranks, columns=["timestamp", *factors])
-            .set_index("timestamp")
-            .reindex(input_dates)
+            daily_mean_frame(rank_by_date, sessions=config.get("sessions"))
             .rename_axis("timestamp")
             .reset_index()
         )
-        rank_by_date = daily_mean_frame(
-            rank_by_date.set_index("timestamp"), sessions=config.get("sessions")
-        ).reset_index()
         summary_options = dict(
             factors=factors,
             families=families,
+            metrics=metrics,
             methods=methods if _inference_blocker(config) is None else (None,),
             max_lags=max_lags,
         )
         if "rank_ic" in analyses:
-            tables["factor_diagnostics"] = _factor_summary(
+            tables["factor_diagnostics"] = _factor_correlations_summary(
                 rank_by_date, **summary_options
             )
         if "annual_stability" in analyses:
             tables["factor_annual_diagnostics"] = _annual_factor_summary(
-                rank_by_date, **summary_options
+                rank_by_date, summary=_factor_correlations_summary, **summary_options
             )
     if correlations:
         tables["factor_correlation"] = _factor_correlation_summary(
@@ -312,11 +332,56 @@ def _factor_summary(
     return result
 
 
-def _annual_factor_summary(rank_by_date, **summary_options):
+def _factor_correlations_summary(
+    rank_by_date, *, factors, families, metrics=CORRELATION_METRICS, **options
+):
+    """Infer all requested correlations in one factor family, retaining old keys."""
+    from quant_research_platform.artifacts.statistics import (
+        FACTOR_CORRELATION_FIELDS,
+        STATISTICS_TABLE_COLUMNS,
+    )
+
+    expanded = _factor_summary(
+        rank_by_date,
+        factors=tuple((metric, factor) for metric in metrics for factor in factors),
+        families={
+            family: tuple((metric, factor) for metric in metrics for factor in members)
+            for family, members in families.items()
+        },
+        **options,
+    )
+    expanded["statistic"] = expanded.factor_id.map(lambda value: value[0])
+    expanded["factor_id"] = expanded.factor_id.map(lambda value: value[1])
+    keys = ["family_id", "factor_id", "fdr_method"]
+    result = (
+        expanded.loc[expanded.statistic.eq("rankic")]
+        .drop(columns="statistic")
+        .set_index(keys)
+    )
+    for metric in metrics[1:]:
+        selected = expanded.loc[expanded.statistic.eq(metric)].set_index(keys)
+        result = result.join(
+            selected.loc[:, list(FACTOR_CORRELATION_FIELDS)].add_prefix(f"{metric}_")
+        )
+    result = result.reset_index()
+    return result.loc[
+        :,
+        [
+            *STATISTICS_TABLE_COLUMNS["factor_diagnostics.parquet"],
+            *(
+                f"{metric}_{name}"
+                for metric in metrics[1:]
+                for name in FACTOR_CORRELATION_FIELDS
+            ),
+        ],
+    ]
+
+
+def _annual_factor_summary(rank_by_date, *, summary=_factor_summary, **summary_options):
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 
     parts = [
-        _factor_summary(group, **summary_options).assign(year=int(year))
+        summary(group, **summary_options).assign(year=int(year))
         for year, group in rank_by_date.groupby(
             pd.to_datetime(rank_by_date["timestamp"]).dt.year, sort=True
         )
@@ -579,7 +644,8 @@ def factor_statistics(config):
     analyses = _factor_analyses(config)
     if (
         not isinstance(evaluation, dict)
-        or set(evaluation) - {"factors", "primary_label", "label_availability_columns"}
+        or set(evaluation)
+        - {"factors", "primary_label", "label_availability_columns", "top_quantile"}
         or (
             {"factors", "primary_label"}
             if set(analyses) - {"factor_correlation"}
@@ -588,6 +654,7 @@ def factor_statistics(config):
         - set(evaluation)
     ):
         raise ValueError("factor_statistics_evaluation_invalid")
+    evaluation["top_quantile"] = resolve_top_quantile(evaluation.get("top_quantile"))
     expected = {"hac_lag"} if set(analyses) != {"factor_correlation"} else set()
     if {"rank_ic", "annual_stability"}.intersection(analyses):
         if isinstance(policy, dict):
@@ -735,6 +802,8 @@ def _factor_statistics_from_evaluations(config):
                 "common_rule",
             )
         }
+        if "stratified_ic" in analyses:
+            current["top_quantile"] = metadata.get("top_quantile")
         current["window"] = config["window"]
         current["input_facts"] = {
             key: value
@@ -777,8 +846,18 @@ def _factor_statistics_from_evaluations(config):
                     "timestamps": [],
                 }
         members = ["metrics"]
-        if "stratified_ic" in analyses and metadata["strata"] is not None:
-            members += ["daily_coverage", "daily_strata"]
+        if "stratified_ic" in analyses:
+            for signal in metadata["signals"]:
+                for label in metadata["label_columns"]:
+                    for side in ("long", "short"):
+                        series[(signal["signal_id"], label, scope, "side", side)] = {
+                            "ic": [],
+                            "rankic": [],
+                            "pairs": 0,
+                            "timestamps": [],
+                        }
+            if metadata["strata"] or "daily_strata" in metadata["optional_member_rows"]:
+                members += ["daily_coverage", "daily_strata"]
         validate_output_bundle(
             path,
             expected_definition_id="evaluation_outputs",
@@ -833,10 +912,24 @@ def _factor_statistics_from_evaluations(config):
                 coverage = daily.get("daily_coverage")
                 if "daily_coverage" in members and coverage is None:
                     raise ValueError("evaluation_daily_dates_mismatch")
-                for name, frame in (
+                domains = [
                     ("metrics", metrics),
                     ("daily_strata", daily.get("daily_strata")),
-                ):
+                ]
+                if "stratified_ic" in analyses:
+                    for side in ("long", "short"):
+                        columns = {
+                            f"{side}_{name}": name for name in ("ic", "rankic", "n_obs")
+                        }
+                        domains.append(
+                            (
+                                side,
+                                metrics.loc[
+                                    :, ["timestamp", "signal", "label", *columns]
+                                ].rename(columns=columns),
+                            )
+                        )
+                for name, frame in domains:
                     if frame is None:
                         continue
                     if (
@@ -856,9 +949,17 @@ def _factor_statistics_from_evaluations(config):
                             )
                         )
                     for row in frame.itertuples(index=False):
-                        kind = "all" if name == "metrics" else row.stratification
+                        kind = (
+                            "all"
+                            if name == "metrics"
+                            else "side"
+                            if name in {"long", "short"}
+                            else row.stratification
+                        )
                         stratum = (
-                            None
+                            name
+                            if name in {"long", "short"}
+                            else None
                             if name == "metrics" or pd.isna(row.stratum)
                             else row.stratum
                         )
@@ -918,6 +1019,7 @@ def _factor_statistics_from_evaluations(config):
                             ),
                             {"ic": [], "rankic": [], "pairs": 0, "timestamps": []},
                         )
+        stratum_domains["side"] = ["long", "short"]
         rows = []
         for key, values in series.items():
             daily = daily_mean_frame(
@@ -1012,23 +1114,25 @@ def _factor_statistics_from_evaluations(config):
         ):
             raise ValueError("factor_statistics_evaluation_invalid")
         scope = entries[0][1]["sample_scope"]
-        ranks = pd.DataFrame(
-            {
-                "timestamp": input_dates[scope],
-                **{
-                    factor: series[
-                        (factor, evaluation["primary_label"], scope, "all", None)
-                    ]["rankic"]
-                    for factor in factors
-                },
-            }
-        )
+        metrics = CORRELATION_METRICS if "analyses" not in config else ("rankic",)
+        ranks = {}
+        for metric in metrics:
+            side, _, name = metric.rpartition("_")
+            kind, stratum = ("side", side) if side else ("all", None)
+            for factor in factors:
+                ranks[(metric, factor)] = series[
+                    (factor, evaluation["primary_label"], scope, kind, stratum)
+                ][name or metric]
+        ranks = pd.DataFrame(ranks, index=input_dates[scope])
+        ranks.columns = pd.Index(ranks.columns.to_list(), tupleize_cols=False)
+        ranks = ranks.rename_axis("timestamp").reset_index()
         ranks = daily_mean_frame(
             ranks.set_index("timestamp"),
             sessions=session_axes[scope],
         ).reset_index()
         summary_options = dict(
             factors=factors,
+            metrics=metrics,
             families=_factor_families(policy["factor_fdr_families"], factors),
             methods=(
                 _fdr_method(policy["fdr_primary"], expected="BY"),
@@ -1037,10 +1141,12 @@ def _factor_statistics_from_evaluations(config):
             max_lags=lag,
         )
         if "rank_ic" in analyses:
-            tables["factor_diagnostics"] = _factor_summary(ranks, **summary_options)
+            tables["factor_diagnostics"] = _factor_correlations_summary(
+                ranks, **summary_options
+            )
         if "annual_stability" in analyses:
             tables["factor_annual_diagnostics"] = _annual_factor_summary(
-                ranks, **summary_options
+                ranks, summary=_factor_correlations_summary, **summary_options
             )
     return write_statistics_artifact(
         Path(config["output"]),

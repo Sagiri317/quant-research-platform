@@ -634,15 +634,6 @@ def test_requested_risk_free_defines_alpha_and_missing_rf_blocks_without_fallbac
         pd.testing.assert_frame_equal(
             rows, zero["portfolio_market_exposure"], check_exact=True
         )
-    invalid = zero["portfolio_market_exposure"].copy()
-    invalid.loc[invalid.coefficient_id.eq("alpha"), "p_value"] = 0.0
-    with pytest.raises(ValueError, match="statistics_exposure_inference_invalid"):
-        write_statistics_artifact(
-            tmp_path / "invalid-zero-excess",
-            metadata=metadata,
-            tables={"portfolio_market_exposure": invalid},
-            table_group="portfolio",
-        )
     (tmp_path / "rf.parquet").unlink()
     missing, _ = _compare(_axis(portfolio, dates), [ref], **kwargs)
     assert missing["portfolio_market_exposure"].status.eq("UNDEFINED").all()

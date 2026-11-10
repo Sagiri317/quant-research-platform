@@ -19,6 +19,7 @@ from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
+    resolve_top_quantile,
 )
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -41,7 +42,17 @@ EVALUATION_FORECAST_AGE_BOUNDS = (
 )
 
 
-EVALUATION_METRICS_COLUMNS = (
+CORRELATION_METRICS = (
+    "rankic",
+    "ic",
+    "long_ic",
+    "long_rankic",
+    "short_ic",
+    "short_rankic",
+)
+
+
+EVALUATION_BASE_METRICS_COLUMNS = (
     "timestamp",
     "signal",
     "label",
@@ -50,6 +61,22 @@ EVALUATION_METRICS_COLUMNS = (
     "n_obs",
     "ic_reason",
     "rankic_reason",
+)
+EVALUATION_SIDE_FIELDS = (
+    "ic",
+    "rankic",
+    "n_obs",
+    "n_selected",
+    "ic_reason",
+    "rankic_reason",
+)
+EVALUATION_METRICS_COLUMNS = (
+    *EVALUATION_BASE_METRICS_COLUMNS,
+    *(
+        f"{side}_{name}"
+        for side in ("long", "short")
+        for name in EVALUATION_SIDE_FIELDS
+    ),
 )
 EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
     "timestamp",
@@ -79,6 +106,22 @@ EVALUATION_IC_SUMMARY_COLUMNS = (
     "std_rankic_reason",
     "rankicir_reason",
 )
+EVALUATION_IC_SUMMARY_COLUMNS += tuple(
+    column
+    for side in ("long", "short")
+    for metric in ("ic", "rankic")
+    for column in (
+        f"mean_{side}_{metric}",
+        f"std_{side}_{metric}",
+        f"{side}_{metric}ir",
+        f"positive_{side}_{metric}_rate",
+        f"valid_{side}_{metric}_count",
+        f"{side}_{metric}_reason",
+        f"std_{side}_{metric}_reason",
+        f"{side}_{metric}ir_reason",
+    )
+)
+
 EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "signal",
     "label",
@@ -137,6 +180,7 @@ class EvaluationSpec:
     correlation_clock: Literal["observation", "trading_day"] = "observation"
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
+    top_quantile: float | None = None
     run_type: str = "evaluation"
 
     def __post_init__(self) -> None:
@@ -160,6 +204,12 @@ class EvaluationSpec:
             "trading_day",
         }:
             raise ValueError("evaluation_correlation_clock_invalid")
+        if self.evaluation_axis == "cross_sectional":
+            object.__setattr__(
+                self, "top_quantile", resolve_top_quantile(self.top_quantile)
+            )
+        elif self.top_quantile is not None:
+            raise ValueError("evaluation_top_quantile_requires_cross_sectional")
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")

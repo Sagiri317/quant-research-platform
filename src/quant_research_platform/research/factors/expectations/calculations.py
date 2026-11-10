@@ -88,10 +88,9 @@ def _prepare_expectations(
     # An identified later report with unknown EPS must replace its predecessor.
     # Dropping it here would resurrect an older institutional forecast.
     forecast["forecast_eps"] = _local_finite_numeric(forecast["forecast_eps"])
-    forecast["available_at"] = forecast["declare_date"].map(
-        lambda value: _next_session(sessions, value)
+    forecast["available_at"] = sessions.take(
+        sessions.searchsorted(forecast["declare_date"], side="right")
     )
-    forecast = forecast.dropna(subset=["available_at"])
     # Preserve each report until its latest visible revision is known. Sources
     # without report IDs still contribute independent rows to institution medians;
     # their positional keys are internal only and never infer report identity.
@@ -310,13 +309,8 @@ def _local_finite_numeric(values):
 def _finite_median(values) -> float:
     # Unknown reports on the same institutional declaration day make its median
     # unavailable; later known declarations can resolve that local barrier.
+    if len(values) == 1:
+        return float(values[0])
     if any(pd.isna(value) for value in values):
         return np.nan
     return float(np.median(values))
-
-
-def _next_session(
-    sessions: pd.DatetimeIndex, date_value: pd.Timestamp
-) -> pd.Timestamp | pd.NaT:
-    position = int(sessions.searchsorted(date_value, side="right"))
-    return sessions[position] if position < len(sessions) else pd.NaT

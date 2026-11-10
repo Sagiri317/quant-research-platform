@@ -246,7 +246,16 @@ def test_old_period_revisions_update_dependencies_without_current_rollback() -> 
     before_late_revisions = _prepare_pit_fundamentals(events.iloc[:3])(
         _pit_observations(observations.iloc[:3])
     )
-    result = _prepare_pit_fundamentals(events)(_pit_observations(observations))
+    query = _prepare_pit_fundamentals(events)
+    result = query(_pit_observations(observations))
+    # Prepared event indices are immutable across out-of-order observation blocks.
+    pieces = [
+        query(_pit_observations(observations.iloc[part]))
+        for part in (slice(3, None), slice(0, 3))
+    ]
+    pd.testing.assert_frame_equal(
+        pd.concat(pieces).sort_values("timestamp").reset_index(drop=True), result
+    )
     pd.testing.assert_frame_equal(
         result.iloc[:3], before_late_revisions, check_dtype=False
     )

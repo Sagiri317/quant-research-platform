@@ -119,8 +119,26 @@ def test_unselected_year_is_not_discovered_and_eval_feeds_statistics(
         )
     )
     with statistic.table("factor_stratified_diagnostics.parquet") as frame:
-        assert frame.observation_pairs.eq(3).all()
-        assert frame.observation_count.eq(1).all()
+        assert len(frame) == 6
+        assert frame.sample_scope.eq(scope).all()
+        assert frame.input_date_count.eq(1).all()
+        whole = frame.loc[frame.stratification.eq("all")]
+        assert set(whole.statistic) == {"ic", "rankic"}
+        assert whole.observation_pairs.eq(3).all()
+        assert whole.observation_count.eq(1).all()
+        assert whole["mean"].tolist() == pytest.approx([1.0, 1.0])
+        sides = frame.loc[frame.stratification.eq("side")]
+        assert set(zip(sides.stratum, sides.statistic, strict=True)) == {
+            (side, statistic)
+            for side in ("long", "short")
+            for statistic in ("ic", "rankic")
+        }
+        # Three candidates at q=.2 select one per side before label pairing.
+        assert sides.observation_pairs.eq(1).all()
+        assert sides.observation_count.eq(0).all()
+        assert sides.status.eq("UNDEFINED").all()
+        assert sides.reason.eq("incomplete_session_clock").all()
+        assert sides[["mean", "p_value", "fdr_adjusted_p_value"]].isna().all().all()
 
 
 @pytest.mark.parametrize("peer_input", [False, True])

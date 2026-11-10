@@ -9,7 +9,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.outputs.manifest import validate_output_bundle
+from quant_research_platform.artifacts.outputs.prediction import _iter_prediction_member
 from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
@@ -154,25 +155,31 @@ def _decisions(quotes, predictions, latency_ns):
     for asset, group in quotes.groupby("asset_id", sort=False):
         if asset not in signals:
             continue
-        times = group.timestamp.to_numpy(dtype="datetime64[ns]").astype("int64")
+        times = group.timestamp.to_numpy(dtype="datetime64[ns]").view("int64")
         segments = group.segment_id.to_numpy()
-        for row in signals[asset].sort_values("timestamp").itertuples(index=False):
-            if pd.isna(row.prediction_score):
-                continue
-            signal_at = int(row.timestamp.value)
-            decision = np.searchsorted(times, signal_at, side="right") - 1
-            if decision < 0 or signal_at > times[-1]:
-                continue
-            index = max(
-                np.searchsorted(times, signal_at + latency_ns),
-                np.searchsorted(times, signal_at, side="right"),
+        selected = (
+            signals[asset].dropna(subset=["prediction_score"]).sort_values("timestamp")
+        )
+        signal_times = selected.timestamp.to_numpy(dtype="datetime64[ns]").view("int64")
+        decisions = times.searchsorted(signal_times, side="right") - 1
+        valid = (decisions >= 0) & (signal_times <= times[-1])
+        signal_times, decisions = signal_times[valid], decisions[valid]
+        scores = selected.prediction_score.to_numpy()[valid]
+        executions = np.maximum(
+            times.searchsorted(signal_times + latency_ns), decisions + 1
+        )
+        available = (executions < len(times)) & (
+            segments[np.minimum(executions, len(times) - 1)] == segments[decisions]
+        )
+        result.update(
+            (
+                (int(signal_at), asset),
+                (int(times[index]) if observed else None, float(score)),
             )
-            execution_at = (
-                int(times[index])
-                if index < len(times) and segments[index] == segments[decision]
-                else None
+            for signal_at, index, observed, score in zip(
+                signal_times, executions, available, scores, strict=True
             )
-            result[signal_at, asset] = (execution_at, float(row.prediction_score))
+        )
     return result
 
 
@@ -292,7 +299,7 @@ def inventory_batches(
         nonlocal previous, sequence
         current = values(at)
         axis = sorted(previous.keys() | current.keys())
-        before, after = [], []
+        before, after, end = [], [], []
         for asset in axis:
             prior, present = previous.get(asset), current.get(asset)
             if present is None:
@@ -314,15 +321,16 @@ def inventory_batches(
                 )
             before.append(replace(prior, phase="before"))
             after.append(replace(present, phase="after"))
+            end.append(present)
         batch = PortfolioLedgerBatch(
             sequence,
             tuple(trades),
             tuple(flows),
-            (*before, *after, *(replace(row, phase="end") for row in after)),
+            (*before, *after, *end),
             tuple(diagnostics),
             tuple(adjustments),
         )
-        previous = {row.asset_id: replace(row, phase="end") for row in after}
+        previous = {row.asset_id: row for row in end}
         sequence += 1
         return batch
 
@@ -696,6 +704,10 @@ def inventory_batches(
             status_target=status_target,
         ):
             at = pd.Timestamp(stamp)
+            if passive is not None:
+                cancellations = passive.advance(at)
+                if cancellations:
+                    yield emit(at, diagnostics=cancellations)
             status_diagnostics = []
             for asset, state in status_events.get(stamp, pd.DataFrame()).iterrows():
                 known = state[["is_st", "is_pt", "is_delisting"]].notna().all()
@@ -1014,6 +1026,9 @@ def inventory_batches(
                         next_trade = next(event_iterator, None)
                         fill = passive.trade(event)
                         if fill is not None:
+                            cancellations = passive.advance(
+                                event.timestamp, inclusive=False
+                            )
                             trade, cashflows, diagnostic = settle(
                                 event.timestamp, event.asset_id, *fill
                             )
@@ -1021,7 +1036,11 @@ def inventory_batches(
                                 event.timestamp,
                                 trades=(trade,),
                                 flows=cashflows,
-                                diagnostics=(diagnostic, *passive.diagnostics()),
+                                diagnostics=(
+                                    diagnostic,
+                                    *cancellations,
+                                    *passive.diagnostics(),
+                                ),
                             )
                     else:
                         request_at, requested = next_request
@@ -1741,18 +1760,24 @@ def inventory_inputs(
     daily_sessions = _daily_market_views(daily, window)
     prediction_frames = []
     for path in prediction_paths:
-        frame, facts = read_predictions(
-            Path(path),
-            columns=("timestamp", "asset_id", "prediction_score"),
-            time_window=TimeWindow(start, end),
+        manifest, _ = validate_output_bundle(
+            Path(path), expected_definition_id="prediction_outputs"
         )
+        facts = manifest["metadata"]
         if facts["model_facts"]["market_id"] != "a_share":
             raise ValueError("hft_prediction_market_mismatch")
         if prediction_validator is not None:
             prediction_validator(facts)
-        prediction_frames.append(
-            frame.loc[frame.asset_id.isin(config["parameters"]["maximum_inventory"])]
-        )
+        with closing_iterator(
+            _iter_prediction_member(
+                Path(path),
+                facts,
+                columns=("timestamp", "asset_id", "prediction_score"),
+                time_window=TimeWindow(start, end),
+                asset_ids=tuple(config["parameters"]["maximum_inventory"]),
+            )
+        ) as chunks:
+            prediction_frames.extend(chunks)
     prediction_days = {}
     if prediction_frames:
         predictions = pd.concat(prediction_frames, ignore_index=True)

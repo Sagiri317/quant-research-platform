@@ -11,6 +11,8 @@ processed 保存市场面板、因子和标签，research 保存研究数据及�
 
 原生数据和研究产物在写入时建立结构、主键、类型及必要科学约定。下游信任成功发布的事实，
 只核当前操作所需字段、单位、市场、时间、参数，以及合并或比较产生的新关系。
+合法的额外列、资产、时段及输出指标不使输入非法；先选择实际消费域，保留真实回看与成熟依赖，再检查本次产生的关系。
+列投影同步投影角色、单位和标签可用时点声明；选中标签仍自动保留它实际依赖的成熟列。
 普通读取不重建全历史键集合，不复验元数据汇总、逐文件 schema、计数或原有经济转移；
 解码和恢复已声明的类型仍属读取职责，实际 I/O 与解码错误直接传播。
 外部结构化 raw 的来源和质量检查保留在规范化入口；显式 `inspect`、`compare`、`fingerprint`
@@ -426,6 +428,8 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 `evaluation.head_fraction` 默认 0.2，可显式覆盖；先按 `ceil(N×fraction)` 确定预测阈值，
 边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定，默认只在输入存在
 `forward_return_20d` 时使用该列，否则收益指标未定义；标准化目标与原始收益使用不同单位。
+这是现有头部收益描述口径。新增 long/short IC、RankIC 的 `evaluation.top_quantile` 共用普通组合的
+`floor(N*q)` 边界选择，不改变 `head_fraction`、头部收益或真实交易规则。
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
 MSE 使用标签单位的模型输出，不重复缩放；排序指标与头部选择保持各自定义。
 训练从实际使用的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
@@ -507,8 +511,8 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 `prepare-source`可显式传入`release_csv`补充有依据的历史可用时间。字段为`source`、
 `observation_date`、`estimated_available_at`、`availability_basis`、`evidence_url`，
 可选`published_at`仅用于确有真实发布时间证据的情况；估计值不填进真实发布时间。
-时刻必须带UTC偏移或Z，源清单和结构化来源自带的发布时间同样校验；发布／可用日
-不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。规则文件哈希进入原生
+时刻必须带UTC偏移或Z，源清单和结构化来源自带的发布时间同样校验；先按观察日选取请求窗口，再检查所选记录的发布／可用日
+不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。窗口外业务时钟异常不阻塞当前导入，来源路径、格式和观察日结构仍须合法。规则文件哈希进入原生
 元数据。原有实际发布时间优先，已有不可变产物不原地修改，应写新输出路径。
 
 `financing_factors`消费结构化`public_margin_balances`和`decision_panel`；默认

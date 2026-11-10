@@ -212,12 +212,70 @@ TRADE_EVENT_FACTORS = frozenset(
 LIFECYCLE_FACTORS = EVENT_FACTORS.keys() - TRADE_EVENT_FACTORS - CANCEL_EVENT_FACTORS
 
 
+TRADE_INTERVAL_FACTORS = frozenset(
+    {
+        "trade_interval_seconds",
+        "trade_interval_mean_seconds",
+        "trade_interval_cv",
+        "trade_activity_ratio",
+        "trade_interval_return_interaction",
+    }
+)
+EVENT_KEY_FIELDS = ("asset_id", "timestamp", "source_row", "event_kind")
+EVENT_INPUTS = {
+    **{
+        name: {
+            "hft_trades": ("price",)
+            if name == "trade_interval_return_interaction"
+            else ()
+            if name in TRADE_INTERVAL_FACTORS or name == "trade_intensity"
+            else ("side", "volume")
+        }
+        for name in TRADE_EVENT_FACTORS
+    },
+    **{
+        name: dict.fromkeys(
+            ("hft_orders", "hft_trades"),
+            () if name == "observed_cancel_count_fraction" else ("volume",),
+        )
+        for name in CANCEL_EVENT_FACTORS
+    },
+    **dict.fromkeys(
+        LIFECYCLE_FACTORS,
+        {
+            "hft_orders": (
+                "exchange",
+                "order_type",
+                "side",
+                "volume",
+                "order_id",
+                "ex_order_id",
+            ),
+            "hft_trades": ("volume", "bid_order_id", "ask_order_id"),
+        },
+    ),
+}
+
+
 def event_factor_streams(column, exchange):
-    if column in TRADE_EVENT_FACTORS:
-        return {"hft_trades"}
     if column in CANCEL_EVENT_FACTORS and exchange == "SSE":
         return {"hft_orders"}
-    return {"hft_orders", "hft_trades"}
+    return set(EVENT_INPUTS[column])
+
+
+def event_input_columns(columns, *, order_link_field):
+    """Project recorded event streams for the selected factors and link contract."""
+    required = {}
+    for column in columns:
+        if column in LIFECYCLE_FACTORS and order_link_field is None:
+            continue
+        for stream, fields in EVENT_INPUTS[column].items():
+            required.setdefault(stream, set(EVENT_KEY_FIELDS)).update(fields)
+    if "hft_orders" in required:
+        required["hft_orders"].difference_update(("order_id", "ex_order_id"))
+        if order_link_field is not None and set(columns) & LIFECYCLE_FACTORS:
+            required["hft_orders"].add(order_link_field)
+    return {stream: tuple(sorted(fields)) for stream, fields in required.items()}
 
 
 HAWKES_FACTORS = {
@@ -247,7 +305,21 @@ def factor_catalog():
         )
         for name, inputs in {
             **FACTOR_INPUTS,
-            **dict.fromkeys(EVENT_FACTORS, ("timestamp", "volume")),
+            **{
+                name: tuple(
+                    dict.fromkeys(
+                        (
+                            *EVENT_KEY_FIELDS,
+                            *(
+                                field
+                                for fields in EVENT_INPUTS[name].values()
+                                for field in fields
+                            ),
+                        )
+                    )
+                )
+                for name in EVENT_FACTORS
+            },
             **dict.fromkeys(HAWKES_FACTORS, ("timestamp", "side")),
         }.items()
     )

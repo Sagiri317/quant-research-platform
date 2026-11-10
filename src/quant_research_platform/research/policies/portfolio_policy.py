@@ -7,6 +7,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
+from quant_research_platform.contracts.signals import DEFAULT_TOP_QUANTILE
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
@@ -47,7 +48,8 @@ def portfolio_policy_parameters(value):
         if "risk_limits" in parameters or "trade_cost_bps" in parameters:
             raise ValueError("portfolio_risk_parameters_unused")
         quantile = strict_finite_float(
-            parameters.get("top_quantile", 0.2), error="portfolio_quantile_invalid"
+            parameters.get("top_quantile", DEFAULT_TOP_QUANTILE),
+            error="portfolio_quantile_invalid",
         )
         if not 0 < quantile <= 1:
             raise ValueError("portfolio_quantile_invalid")

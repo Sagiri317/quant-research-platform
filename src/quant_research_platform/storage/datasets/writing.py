@@ -108,7 +108,7 @@ class _WriteStats:
         return frame
 
     def prepare_frame(self, frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
-        output = frame.loc[:, list(self.spec.required_columns)].copy()
+        output = frame.loc[:, list(self.spec.required_columns)]
         for column in self.spec.primary_key:
             if self.spec.column_roles.get(column) is ColumnRole.TIMESTAMP:
                 output[column] = strict_timestamp_series(
@@ -171,8 +171,10 @@ class _WriteStats:
 
     def observe_file(self, path: Path, table: pa.Table) -> None:
         """Record the table just written and the closed file size."""
-        physical_schema = physical_schema_from_schema(table.schema.remove_metadata())
         if self._schema is None:
+            physical_schema = physical_schema_from_schema(
+                table.schema.remove_metadata()
+            )
             self._schema = physical_schema
             self.columns = physical_schema_columns(physical_schema)
             self.schema_hash = canonical_json_hash(physical_schema)
@@ -266,7 +268,6 @@ def write_dataset(
 ) -> DatasetInspection:
     spec_payload = data_spec_payload(spec)
     final_root = Path(dataset_root)
-    final_root = Path(final_root)
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     with closing_iterator(ExitStack()) as input_owner:
         close = getattr(input_chunks, "close", None)
@@ -398,10 +399,9 @@ def _write_contents(
         raise ValueError("unsupported_dataset_arrow_type")
     if accumulator.row_count == 0 and (not saw_empty_schema):
         raise ValueError("empty_dataset_schema_missing")
-    if saw_empty_schema:
+    if accumulator.row_count == 0:
         logical_dtypes = accumulator.materialized_logical_dtypes()
-        partition = "" if accumulator.row_count == 0 else min(part_indices)
-        path = partition_part_path(root, partition, part_indices.get(partition, 0))
+        path = partition_part_path(root, "", 0)
         assert accumulator._arrow_schema is not None
         table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
         table = table.replace_schema_metadata(

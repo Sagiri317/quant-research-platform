@@ -317,6 +317,111 @@ def _factor_evaluation_config(tmp_path, frame):
     }
 
 
+def test_native_prediction_segments_validate_only_selected_assets(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from tests.helpers.output_frames import _price_volume_prediction_metadata
+
+    timestamps = pd.to_datetime(["2020-01-04 09:30", "2020-01-04 09:31"])
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "asset_id": "a",
+            "x": [1.0, 2.0],
+            "peer": [2.0, 1.0],
+            "label": [1.0, 2.0],
+            "eligible": True,
+            "label_available_at": timestamps,
+        }
+    )
+    config = _factor_evaluation_config(tmp_path, frame)
+    config.update(
+        evaluation_axis="single_asset_time_series",
+        factor_columns=[],
+        comparison_groups={},
+        inference_groups={"models": ["model"]},
+    )
+    reference = None
+    for outside in (False, True):
+        paths = []
+        for position, timestamp in enumerate(timestamps):
+            metadata = _price_volume_prediction_metadata()
+            metadata.update(prediction_window=config["window"])
+            metadata.pop("prediction_rows")
+            metadata.pop("effective_prediction_end")
+            metadata["model_facts"]["model"]["target_column"] = "label"
+            predicted = pd.DataFrame(
+                {
+                    "timestamp": [timestamp],
+                    "asset_id": ["a"],
+                    "prediction_score": [float(position + 1)],
+                    "prediction_rank_score": [0.0],
+                }
+            )
+            if outside:
+                predicted = pd.concat(
+                    [
+                        predicted,
+                        predicted.assign(timestamp=timestamps[0], asset_id="outside"),
+                    ],
+                    ignore_index=True,
+                )
+            paths.append(
+                str(
+                    write_prediction_outputs(
+                        output_path=tmp_path / f"pred-{outside}-{position}",
+                        output_chunks=[predicted],
+                        metadata=metadata,
+                    )
+                )
+            )
+        config.update(
+            predictions={"model": paths}, output=str(tmp_path / f"result-{outside}")
+        )
+        daily = read_dataset(evaluate_time_series(config) / "daily")
+        if reference is None:
+            reference = daily
+        else:
+            pd.testing.assert_frame_equal(daily, reference, check_exact=True)
+        observed = daily.loc[daily.timestamp.eq("2020-01-04")].set_index("metric")
+        assert observed.loc["ic", "value"] == 1
+        assert observed.loc["ic", "observation_count"] == 2
+
+    config.update(
+        predictions={"model": [paths[0], paths[0]]},
+        output=str(tmp_path / "overlapping-selected"),
+    )
+    with pytest.raises(ValueError, match="evaluation_prediction_keys_duplicate"):
+        evaluate_time_series(config)
+    assert not (tmp_path / "overlapping-selected").exists()
+
+
+def test_daily_metrics_validate_keys_after_asset_selection():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2020-01-04 09:30", "2020-01-04 09:31"]),
+            "asset_id": "a",
+            "signal": [1.0, 2.0],
+            "label": [2.0, 4.0],
+        }
+    )
+    kwargs = dict(
+        evaluation_axis="single_asset_time_series",
+        sessions=["2020-01-04"],
+        asset_ids=["a"],
+    )
+    expected = daily_signal_metrics(frame, **kwargs)
+    outside = frame.iloc[[0, 0]].assign(asset_id="outside")
+    reserved = frame.iloc[[0]].assign(asset_id="__cross_section__")
+    actual = daily_signal_metrics(
+        pd.concat([frame, outside, reserved], ignore_index=True), **kwargs
+    )
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    with pytest.raises(ValueError, match="evaluation_input_keys_duplicate"):
+        daily_signal_metrics(pd.concat([frame, frame.iloc[[0]]]), **kwargs)
+
+
 @pytest.mark.parametrize("axis", ["cross_sectional", "single_asset_time_series"])
 def test_empty_session_axis_roundtrips_native_schemas_and_rejects_observations(
     tmp_path, axis

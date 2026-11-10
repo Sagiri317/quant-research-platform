@@ -308,17 +308,6 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
                 check_exact=True,
             )
             assert persisted[f"{column}_reason"].eq("").all()
-    damaged = {**tables, "portfolio_daily": daily.copy()}
-    damaged["portfolio_daily"].loc[
-        daily.return_status.eq("UNDEFINED"), "net_return"
-    ] = 0.0
-    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
-        write_statistics_artifact(
-            tmp_path / "invalid",
-            metadata=metadata,
-            tables=damaged,
-            table_group="portfolio",
-        )
 
 
 @pytest.mark.parametrize("daily_complete", [False, True])

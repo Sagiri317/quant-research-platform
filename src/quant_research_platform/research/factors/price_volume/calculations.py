@@ -84,10 +84,20 @@ def calculate_price_volume_factors(
             allow_null=True,
         ).to_numpy(dtype="float64", copy=False)
     ordered = ordered.sort_values([*history_keys, "timestamp"], kind="mergesort")
-    output: dict[str, list[np.ndarray]] = {factor: [] for factor in requested}
     bounds = (
         None if output_window is None else time_window_timestamp_interval(output_window)
     )
+    output_keys = ordered.loc[:, ("asset_id", "timestamp")]
+    if bounds is not None:
+        lower, upper, closed = bounds
+        timestamps = output_keys["timestamp"]
+        output_keys = output_keys.loc[
+            timestamps.ge(lower)
+            & (timestamps.le(upper) if closed else timestamps.lt(upper))
+        ]
+    output_keys = output_keys.reset_index(drop=True)
+    output = np.empty((len(output_keys), len(requested)), dtype="float64", order="F")
+    offset = 0
     for _identity, group in ordered.groupby(
         list(history_keys), sort=False, dropna=False
     ):
@@ -115,38 +125,23 @@ def calculate_price_volume_factors(
                 )
             )
         sums, statistical_sums = {}, {}
-        for factor in requested:
+        for column, factor in enumerate(requested):
             partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
-            output[factor].append(
-                _calculate_values(
-                    statistical_values if partial else values,
-                    statistical_sums if partial else sums,
-                    factor,
-                    start,
-                    stop,
-                    fresh=fresh,
-                    min_fresh_fraction=min_fresh_fraction,
-                )
+            output[offset : offset + stop - start, column] = _calculate_values(
+                statistical_values if partial else values,
+                statistical_sums if partial else sums,
+                factor,
+                start,
+                stop,
+                fresh=fresh,
+                min_fresh_fraction=min_fresh_fraction,
             )
-    ordered = ordered.loc[:, ("asset_id", "timestamp")]
-    if bounds is not None:
-        lower, upper, closed = bounds
-        timestamps = ordered["timestamp"]
-        ordered = ordered.loc[
-            timestamps.ge(lower)
-            & (timestamps.le(upper) if closed else timestamps.lt(upper))
-        ]
-    ordered = ordered.reset_index(drop=True)
+        offset += stop - start
+    output[~np.isfinite(output)] = np.nan
     computed = pd.DataFrame(
-        {
-            factor: np.concatenate(output[factor])
-            if output[factor]
-            else np.empty(0, dtype="float64")
-            for factor in requested
-        },
-        index=ordered.index,
+        output, columns=requested, index=output_keys.index, copy=False
     )
-    return pd.concat([ordered, computed.where(np.isfinite(computed))], axis=1)
+    return pd.concat([output_keys, computed], axis=1)
 
 
 def _calculate_values(
@@ -165,7 +160,7 @@ def _calculate_values(
             sums["amount_profile_60d"] = _calculate_amount_profile(values)
         return sums["amount_profile_60d"][factor][start:stop].copy()
     if factor in PRICE_VOLUME_LEVEL_DESCRIPTIONS:
-        return _calculate_level_values(values, factor, start, stop)
+        return _calculate_level_values(values, sums, factor, start, stop)
     if factor in PRICE_VOLUME_THEME_DESCRIPTIONS:
         return _calculate_theme_values(values, factor, start, stop)
     if factor.startswith(("alpha101_", "alpha191_", "qlib_")):
@@ -676,130 +671,136 @@ def _calculate_amount_profile(values):
     return output
 
 
-def _calculate_level_values(values, factor, start, stop):
+def _price_extreme(values, sums, side):
+    """Own adjusted references once per asset, without window-sized copies."""
+    key = ("price_extreme", side)
+    if key not in sums:
+        price = values["adj_close"]
+        valid = np.isfinite(price) & (price > 0)
+        if side == "adj_close":
+            extreme = price
+        else:
+            raw, close = values[side], values["close"]
+            valid &= np.isfinite(raw) & (raw > 0) & np.isfinite(close) & (close > 0)
+            extreme = np.divide(
+                raw * price, close, out=np.full(len(price), np.nan), where=valid
+            )
+        sums[key] = np.where(valid, extreme, np.nan)
+    return sums[key]
+
+
+def _price_reference(values, sums, side, width):
+    key = ("price_reference", side, width)
+    if key not in sums:
+        rolling = pd.Series(_price_extreme(values, sums, side)).rolling(
+            width, min_periods=1
+        )
+        extreme = rolling.min() if side == "low" else rolling.max()
+        sums[key] = extreme.to_numpy(), rolling.count().eq(width).to_numpy()
+    return sums[key]
+
+
+def _calculate_level_values(values, sums, factor, start, stop):
     if "_break_retest_" in factor:
-        return _calculate_retest_values(values, factor, start, stop)
-    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
-    width = windows[0]
+        return _calculate_retest_values(values, sums, factor, start, stop)
+    width = _PRICE_VOLUME_INPUT_WINDOWS[factor][1][0] - 1
     output = np.full(stop - start, np.nan)
-    first = max(start, width - 1)
+    first = max(start, width)
     if first >= stop:
         return output
-    matrices = {
-        name: sliding_window_view(values[name][first - width + 1 : stop], width)
-        for name in names
-    }
-    reference_only = factor.startswith(("support_distance_", "resistance_distance_"))
-    valid = np.logical_and.reduce(
-        [
-            (np.isfinite(required) & (required > 0)).all(axis=1)
-            for name, matrix in matrices.items()
-            for required in (
-                matrix[:, :-1]
-                if factor.startswith("peak_age_")
-                or reference_only
-                and name != "adj_close"
-                else matrix,
-            )
-        ]
-    )
-    if not valid.any():
-        return output
-    prices = matrices["adj_close"][valid]
-    prior, current = prices[:, :-1], prices[:, -1]
-    peak = prior.max(axis=1)
-    if factor.startswith("peak_drawdown_"):
-        result = np.maximum(1 - current / peak, 0)
-    elif factor.startswith(("peak_age_", "up_leg_retracement_")):
-        peak_index = prior.shape[1] - 1 - prior[:, ::-1].argmax(axis=1)
-        if factor.startswith("peak_age_"):
-            result = prior.shape[1] - peak_index
-        else:
-            before_peak = np.arange(prior.shape[1])[None, :] < peak_index[:, None]
-            low = np.where(before_peak, prior, np.inf).min(axis=1)
-            result = np.divide(
-                peak - current,
-                peak - low,
-                out=np.full(len(peak), np.nan),
-                where=np.isfinite(low) & (peak > low),
-            )
-    else:
+    if not factor.startswith(("peak_age_", "up_leg_retracement_")):
         side = (
-            "low"
+            "adj_close"
+            if factor.startswith("peak_drawdown_")
+            else "low"
             if factor.startswith("support_") or factor == "failed_down_breakout_20d"
             else "high"
         )
-        extremes, close = matrices[side][valid], matrices["close"][valid]
-        reference = extremes[:, :-1] * prior / close[:, :-1]
-        level = reference.min(axis=1) if side == "low" else reference.max(axis=1)
-        if factor.startswith("support_distance_"):
+        references, complete = _price_reference(values, sums, side, width)
+        level = references[first - 1 : stop - 1]
+        current = values["adj_close"][first:stop]
+        valid = complete[first - 1 : stop - 1] & np.isfinite(current) & (current > 0)
+        if side == "adj_close":
+            result = np.maximum(1 - current / level, 0)
+        elif factor.startswith(("support_distance_", "resistance_distance_")):
             result = current / level - 1
-        elif factor.startswith("resistance_distance_"):
-            result = current / level - 1
-        elif factor.startswith(("support_rejection_", "resistance_rejection_")):
-            extreme = extremes[:, -1] * current / close[:, -1]
-            if side == "low":
+        else:
+            extreme = _price_extreme(values, sums, side)[first:stop]
+            valid &= np.isfinite(extreme)
+            if factor.startswith("support_rejection_"):
                 touch = (extreme >= level) & (extreme <= 1.01 * level)
                 result = np.where(touch, (current - extreme) / level, 0)
-                result[extreme > current] = np.nan
-            else:
+                valid &= extreme <= current
+            elif factor.startswith("resistance_rejection_"):
                 touch = (extreme >= 0.99 * level) & (extreme <= level)
                 result = np.where(touch, (extreme - current) / level, 0)
-                result[extreme < current] = np.nan
-        elif factor == "failed_up_breakout_20d":
-            result = np.where(
-                current <= level,
-                np.maximum(extremes[:, -1] * current / close[:, -1] / level - 1, 0),
-                0,
-            )
-        else:
-            result = np.where(
-                current >= level,
-                np.maximum(1 - extremes[:, -1] * current / close[:, -1] / level, 0),
-                0,
-            )
+                valid &= extreme >= current
+            elif factor == "failed_up_breakout_20d":
+                result = np.where(
+                    current <= level, np.maximum(extreme / level - 1, 0), 0
+                )
+            else:
+                result = np.where(
+                    current >= level, np.maximum(1 - extreme / level, 0), 0
+                )
+        output[first - start :][valid] = result[valid]
+        return output
+    prices = sliding_window_view(
+        _price_extreme(values, sums, "adj_close")[first - width : stop], width + 1
+    )
+    valid = np.isfinite(prices)
+    if factor.startswith("peak_age_"):
+        valid = valid[:, :-1]
+    valid = valid.all(axis=1)
+    if not valid.any():
+        return output
+    prices = prices[valid]
+    prior, current = prices[:, :-1], prices[:, -1]
+    peak_index = prior.shape[1] - 1 - prior[:, ::-1].argmax(axis=1)
+    if factor.startswith("peak_age_"):
+        result = prior.shape[1] - peak_index
+    else:
+        peak = prior.max(axis=1)
+        before_peak = np.arange(prior.shape[1])[None, :] < peak_index[:, None]
+        low = np.where(before_peak, prior, np.inf).min(axis=1)
+        result = np.divide(
+            peak - current,
+            peak - low,
+            out=np.full(len(peak), np.nan),
+            where=np.isfinite(low) & (peak > low),
+        )
     output[first - start :][valid] = result
     return output
 
 
-def _calculate_retest_values(values, factor, start, stop):
+def _calculate_retest_values(values, sums, factor, start, stop):
     """Freeze each observed breakout's level instead of moving it with the range."""
-    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
-    width = windows[0]
+    width = _PRICE_VOLUME_INPUT_WINDOWS[factor][1][0]
     output = np.full(stop - start, np.nan)
     first = max(start, width - 1)
     if first >= stop:
         return output
-    matrices = {
-        name: sliding_window_view(values[name][first - width + 1 : stop], width)
-        for name in names
-    }
     upward = factor.startswith("up_")
     reference_side, touch_side = ("high", "low") if upward else ("low", "high")
-    prices, close = matrices["adj_close"], matrices["close"]
-    prices = np.where(np.isfinite(prices) & (prices > 0), prices, np.nan)
-    close = np.where(np.isfinite(close) & (close > 0), close, np.nan)
-    reference = matrices[reference_side][:, :-2] * prices[:, :-2] / close[:, :-2]
-    reference = np.where(np.isfinite(reference) & (reference > 0), reference, np.nan)
-    touch = matrices[touch_side][:, -1] * prices[:, -1] / close[:, -1]
-    touch_known = (
-        np.isfinite(touch)
-        & (touch > 0)
-        & ((touch <= prices[:, -1]) if upward else (touch >= prices[:, -1]))
+    price = _price_extreme(values, sums, "adj_close")
+    prices = sliding_window_view(price[first - 5 : stop], 6)
+    references, complete_references = _price_reference(
+        values, sums, reference_side, width - 6
+    )
+    touch = _price_extreme(values, sums, touch_side)[first:stop]
+    touch_known = np.isfinite(touch) & (
+        (touch <= prices[:, -1]) if upward else (touch >= prices[:, -1])
     )
     result = np.zeros(len(prices))
-    window = width - 6
     for lag in range(5, 0, -1):
-        event = width - 1 - lag
-        past = reference[:, event - window : event]
-        known = np.isfinite(past)
-        level = np.where(known, past, -np.inf if upward else np.inf)
-        level = level.max(axis=1) if upward else level.min(axis=1)
+        event = 5 - lag
+        level = references[first - lag - 1 : stop - lag - 1]
+        level = np.where(np.isfinite(level), level, -np.inf if upward else np.inf)
         event_known = np.isfinite(prices[:, event])
         did_not_break = event_known & (
             (prices[:, event] <= level) if upward else (prices[:, event] >= level)
         )
-        complete = known.all(axis=1) & event_known
+        complete = complete_references[first - lag - 1 : stop - lag - 1] & event_known
         path = prices[:, event:]
         crossed_back = (
             (path < level[:, None]) if upward else (path > level[:, None])

@@ -43,6 +43,7 @@
     ],
     "evaluation_axis": "cross_sectional",
     "filter_mode": "eligible",
-    "n_groups": 5
+    "n_groups": 5,
+    "top_quantile": 0.2
   }
 }

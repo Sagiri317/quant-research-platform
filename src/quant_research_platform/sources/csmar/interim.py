@@ -1299,12 +1299,11 @@ def _iter_normalized_interim_frames(
                 combined["settlement_date_unresolved"] = combined.groupby(
                     list(primary_key), dropna=False
                 )["settlement_date_unresolved"].transform("any")
+            duplicate_groups = combined.loc[duplicate].groupby(
+                list(primary_key), dropna=False, sort=False
+            )
             for column in combined.columns.difference(primary_key):
-                distinct = (
-                    combined.loc[duplicate]
-                    .groupby(list(primary_key), dropna=False, sort=False)[column]
-                    .transform("nunique", dropna=False)
-                )
+                distinct = duplicate_groups[column].transform("nunique", dropna=False)
                 conflict = distinct.gt(1).reindex(combined.index, fill_value=False)
                 if conflict.any():
                     source_row_counts[f"conflicting_{column}_rows"] = int(

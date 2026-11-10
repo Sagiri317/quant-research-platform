@@ -42,10 +42,6 @@ class _DigestingReader:
         buffer[: len(chunk)] = chunk
         return len(chunk)
 
-    def drain(self) -> None:
-        while self.read(64 * 1024):
-            pass
-
     def hexdigest(self) -> str:
         return self._digest.hexdigest()
 

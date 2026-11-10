@@ -57,8 +57,22 @@ def normalize_book(config):
         source.logical_columns
     ):
         raise ValueError("normalization_book_input_required")
-    roles = declared["column_roles"]
-    target = _target_definition(declared, "model_target", manifest)
+    availability = {
+        label: column
+        for label, column in declared.get("label_availability_columns", {}).items()
+        if label in source.logical_columns
+    }
+    selected = tuple(
+        dict.fromkeys(
+            (
+                *source.logical_columns,
+                *declared["primary_key"],
+                *availability.values(),
+            )
+        )
+    )
+    source = source.projected_view(selected)
+    roles = {name: declared["column_roles"][name] for name in selected}
     spec = ProcessedDataSpec(
         data_id=config["dataset_id"],
         market_id=declared["market_id"],
@@ -69,10 +83,14 @@ def normalize_book(config):
         primary_key=tuple(declared["primary_key"]),
         partition_columns=tuple(declared["partition_columns"]),
         column_units={
-            **declared.get("column_units", {}),
+            **{
+                name: unit
+                for name, unit in declared.get("column_units", {}).items()
+                if name in roles
+            },
             **dict.fromkeys(columns, "zscore"),
         },
-        label_availability_columns=declared.get("label_availability_columns", {}),
+        label_availability_columns=availability,
         processed_input_data_ids=(declared["data_id"],),
     )
     history = {}
@@ -142,7 +160,15 @@ def normalize_book(config):
                 **diagnostics,
                 "target_definitions": {
                     **diagnostics.get("target_definitions", {}),
-                    **({"model_target": target} if "model_target" in roles else {}),
+                    **(
+                        {
+                            "model_target": _target_definition(
+                                declared, "model_target", manifest
+                            )
+                        }
+                        if "model_target" in roles
+                        else {}
+                    ),
                 },
                 "reused_feature_transforms": inherited_feature_transforms(
                     declared,

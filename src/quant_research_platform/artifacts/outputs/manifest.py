@@ -66,7 +66,7 @@ def validate_output_manifest(
     if output_definition_id == "prediction_outputs":
         facts = metadata["model_facts"]
         evidence_payload = {
-            "hyperparameters": facts["model"]["hyperparameters"],
+            "hyperparameters": facts["model"].get("hyperparameters"),
             "candidate_parameters": facts["candidate_parameters"],
         }
     if evidence_json_value_unsafe_reason(evidence_payload) is not None:
@@ -144,6 +144,9 @@ def evaluation_output_metadata(
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
         "evaluation_axis": spec.evaluation_axis,
+        **(
+            {"top_quantile": spec.top_quantile} if spec.top_quantile is not None else {}
+        ),
         **(
             {"correlation_clock": spec.correlation_clock}
             if spec.correlation_clock != "observation"

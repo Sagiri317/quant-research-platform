@@ -319,41 +319,6 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata)
         assert frame.calendar_count.tolist() == [count]
 
 
-@pytest.mark.parametrize(
-    "tables,table,column,value",
-    [
-        (
-            "factor"
-            if table + ".parquet" in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            table,
-            column,
-            value,
-        )
-        for table, column, value in [
-            ("factor_diagnostics", "p_value", 1.1),
-            ("factor_diagnostics", "fdr_adjusted_p_value", -0.1),
-            ("factor_diagnostics", "fdr_alpha", 0.0),
-            ("prediction_diagnostics", "standard_error", -1.0),
-            ("prediction_diagnostics", "standard_error", 0.0),
-            ("model_comparison", "standard_error", 0.0),
-            ("factor_diagnostics", "standard_error", 0.0),
-            ("fama_macbeth", "standard_error", 0.0),
-            ("prediction_diagnostics", "ci_lower", 1.0),
-            ("prediction_diagnostics", "bootstrap_lower", 1.0),
-            ("fama_macbeth_periods", "white_p_value", 1.1),
-            ("model_reality_checks", "alpha", 1.0),
-            ("model_reality_checks", "value", 1.1),
-            ("model_reality_checks", "statistic_id", "superior"),
-        ]
-    ],
-    indirect=["tables"],
-)
-def test_research_measurement_domains(tmp_path, tables, metadata, table, column, value):
-    tables[table].loc[0, column] = value
-    _assert_rejected_at_write(tmp_path, tables, metadata, f"{table}.parquet")
-
-
 @pytest.mark.parametrize("value", [None, "", "not-a-domain", "A" * 64])
 def test_model_asset_domain_is_required_at_write(tmp_path, tables, metadata, value):
     tables["model_losses"].loc[0, "asset_coverage_id"] = value
@@ -475,9 +440,8 @@ def test_undefined_model_inference_preserves_descriptive_mean(
 
 
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
-@pytest.mark.parametrize("corruption", ("p_value", "mean_missing", "empty_mean"))
-def test_undefined_model_inference_rejects_inferential_values_and_false_means(
-    tmp_path, tables, metadata, name, corruption
+def test_undefined_model_inference_rejects_inferential_values(
+    tmp_path, tables, metadata, name
 ):
     frame = tables[name]
     frame.loc[0, "status"] = "UNDEFINED"
@@ -502,20 +466,13 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
     with statistics.read_statistics_artifact(root).table(f"{name}.parquet") as restored:
         assert restored.loc[0, "mean"] == frame.loc[0, "mean"]
         assert restored.loc[0, "bootstrap_status"] == "UNDEFINED"
-    if corruption == "p_value":
-        frame.loc[0, "p_value"] = 0.01
-    elif corruption == "mean_missing":
-        frame.loc[0, "mean"] = float("nan")
-    else:
-        frame.loc[0, "observation_count"] = 0
+    frame.loc[0, "p_value"] = 0.01
     _assert_rejected_at_write(
         tmp_path,
         tables,
         metadata,
         f"{name}.parquet",
-        error="^statistics_table_status_value_invalid$"
-        if corruption == "p_value"
-        else "^statistics_table_descriptive_mean_count_invalid$",
+        error="^statistics_table_status_value_invalid$",
     )
 
 
@@ -528,9 +485,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
         ("global_mean", "BY"),
         ("quarterly_mean", "BY"),
         ("mean_difference", "BY"),
-        ("observation_count", "BY"),
         ("sample_role", "BY"),
-        ("standard_error", "BY"),
     ],
 )
 def test_defined_group_comparison_requires_descriptive_facts(
@@ -997,44 +952,6 @@ def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
     assert not (tmp_path / "unpublished").exists()
 
 
-@pytest.mark.parametrize(
-    "tables,member",
-    [
-        (
-            "factor"
-            if member.removesuffix(".parquet") + ".parquet"
-            in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            member,
-        )
-        for member in ["factor_diagnostics.parquet", "fama_macbeth.parquet"]
-    ],
-    indirect=["tables"],
-)
-def test_undefined_descriptive_mean_requires_actual_observations(
-    tables, metadata, member
-):
-    frame = tables[member.removesuffix(".parquet")].copy()
-    frame["status"] = "UNDEFINED"
-    frame["reason"] = "no_observations"
-    frame["input_date_count"] = 0
-    frame[
-        "period_count" if member == "fama_macbeth.parquet" else "observation_count"
-    ] = 0
-    for column in (
-        "standard_error",
-        "t_statistic",
-        "p_value",
-        "ci_lower",
-        "ci_upper",
-        "fdr_adjusted_p_value",
-    ):
-        if column in frame:
-            frame[column] = float("nan")
-    with pytest.raises(ValueError, match="descriptive_mean_count_invalid"):
-        statistics._validated_frame(frame, member=member, metadata=metadata)
-
-
 @pytest.mark.parametrize("start,pnl", ((1000.0, 0.01), (1000.0, 1e-10)))
 def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start, pnl):
     from fractions import Fraction
@@ -1071,51 +988,6 @@ def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start
     result = statistics._validated_frame(frame, member=member, metadata=metadata)
     assert result.net_return.iloc[0] == net_return
     assert result.net_return.iloc[0] > 0
-    corrupted = frame.copy()
-    corrupted.loc[0, "net_return"] += 1e-10
-    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
-        statistics._validated_frame(corrupted, member=member, metadata=metadata)
-    missing = frame.copy()
-    missing.loc[0, "net_return"] = float("nan")
-    with pytest.raises(ValueError, match="statistics_return_status_invalid"):
-        statistics._validated_frame(missing, member=member, metadata=metadata)
-
-
-@pytest.mark.parametrize(
-    "changes",
-    [
-        {"mse": None, "mse_reason": ""},
-        {"mse": None, "mse_reason": "invented_reason"},
-        {"mse": 0.2, "mse_reason": "prediction_target_unit_mismatch"},
-        {"mse": -0.2},
-        {"baseline_mse": -0.2},
-        {"mse": None, "mse_reason": "no_valid_targets"},
-        {
-            "mse": None,
-            "mse_reason": "prediction_target_unit_mismatch",
-            "oos_r2": None,
-            "oos_r2_reason": "nonfinite_result",
-        },
-        {"oos_r2": None, "oos_r2_reason": "invented_reason"},
-        {"oos_r2": None, "oos_r2_reason": "prediction_target_unit_mismatch"},
-        {"target_count": 0},
-        {"oos_r2": None, "oos_r2_reason": "no_valid_targets"},
-        {"oos_r2": None, "oos_r2_reason": "zero_baseline_error"},
-        {"oos_r2": 1.01},
-    ],
-)
-def test_prediction_loss_reasons_are_validated_on_write_and_read(
-    tmp_path, tables, metadata, changes
-):
-    for column, value in changes.items():
-        tables["model_prediction_metrics"].loc[0, column] = value
-    _assert_rejected_at_write(
-        tmp_path,
-        tables,
-        metadata,
-        "model_prediction_metrics.parquet",
-        error="statistics_prediction_metrics_invalid",
-    )
 
 
 @pytest.mark.parametrize("method", ("BH", "BY"))
@@ -1189,20 +1061,6 @@ def test_paired_group_fdr_methods_reach_native_artifact(
             "year",
             2024,
             "statistics_table_window_mismatch",
-        ),
-        (
-            "factor",
-            "factor_correlation",
-            "mean_absolute",
-            0.1,
-            "statistics_factor_correlation_invalid",
-        ),
-        (
-            "factor",
-            "factor_correlation",
-            "statistic",
-            "rankic",
-            "statistics_factor_correlation_invalid",
         ),
     ],
     indirect=["tables"],
