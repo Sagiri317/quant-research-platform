@@ -327,6 +327,7 @@ def test_factor_inference_counts_original_dates_with_no_mature_or_finite_factor(
     dataset_path = tmp_path / "factor-input"
     write_dataset(dataset_path, frame, spec=spec)
     config = statistics_config(factors=["factor"])
+    config["analyses"] = ["rank_ic", "fama_macbeth"]
     config["evaluation"]["primary_label"] = "forward_return_20d"
     config["statistics"]["fama_macbeth_core_factors"] = []
     window = TimeWindow(dates[0].date(), dates[-1].date())

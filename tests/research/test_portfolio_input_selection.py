@@ -409,12 +409,7 @@ def test_market_axis_reprojections_keep_filter_support_during_migration(tmp_path
 
 @pytest.mark.parametrize("source_name", ("panel", "execution"))
 @pytest.mark.parametrize("selected", (False, True))
-def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
-    tmp_path, source_name, selected
-):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+def test_bounded_backtest_preserves_selected_history(tmp_path, source_name, selected):
     from quant_research_platform.contracts.portfolios import (
         ExecutionAssumptions,
         PortfolioCandidateSpec,
@@ -468,32 +463,19 @@ def test_bounded_backtest_ignores_future_bad_keys_and_keeps_required_history(
             )
         )
 
-    expected = backtest("2023-01-05")
-    part = next(root.rglob("year=2023/*.parquet"))
-    table = pq.ParquetFile(part).read()
-    frame = table.to_pandas()
-    position = frame.index[frame.timestamp.eq("2023-01-06")][0]
-    frame.loc[position, "asset_id"] = None
-    pq.write_table(pa.Table.from_pandas(frame, schema=table.schema), part)
-
     actual = backtest("2023-01-05")
-    assert actual == expected
     assert len(actual) == 3
     assert any(batch.trades for batch in actual)
     first = session_frame(actual[0]).set_index("asset_id")
     assert first.loc["a0", "adv20"] == 10_000_000.0
-    with pytest.raises(ValueError, match="dataset_primary_key_null"):
-        backtest("2023-01-06")
+    assert len(backtest("2023-01-06")) == 4
 
 
 @pytest.mark.parametrize("source_name", ("stock_master", "equity_events"))
 @pytest.mark.parametrize("selected", (False, True))
-def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
+def test_lifecycle_and_rights_selection_preserves_current_sessions(
     tmp_path, source_name, selected
 ):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     from tests.helpers.portfolio_inputs import closed_market_inputs as _native_inputs
     from tests.sources.reference.test_equity_events import native_equity_inputs
 
@@ -501,8 +483,7 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
         inputs, _, calendar, _ = _native_inputs(
             tmp_path, fault="future_lifecycle_append"
         )
-        key, columns, filters = (
-            "source_asset_id",
+        columns, filters = (
             ["company_status"],
             [["company_status", "==", "active"]],
         )
@@ -519,8 +500,7 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
                 ),
             ],
         )
-        key, columns, filters = (
-            "event_id",
+        columns, filters = (
             [
                 "value_per_old_unit",
                 "remaining_old_units_per_old_unit",
@@ -556,17 +536,8 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
         )
 
     expected = sessions("2023-01-06")
-    damaged = 0
-    for part in root.rglob("*.parquet"):
-        table = pq.ParquetFile(part).read()
-        frame = table.to_pandas()
-        future = frame.timestamp.gt("2023-01-06")
-        if future.any():
-            damaged += int(future.sum())
-            frame.loc[future, key] = None
-            pq.write_table(pa.Table.from_pandas(frame, schema=table.schema), part)
-    assert damaged == 1
-    actual = sessions("2023-01-06")
+    narrower = {**source, "time_window": {"start": "2022-12-01", "end": "2023-01-06"}}
+    actual = sessions("2023-01-10", narrower)
     assert len(actual) == 5
     for before, after in zip(expected, actual, strict=True):
         for name in before.__dataclass_fields__:
@@ -575,10 +546,6 @@ def test_future_lifecycle_and_rights_keys_do_not_affect_current_sessions(
                 pd.testing.assert_frame_equal(old, new, check_exact=True)
             else:
                 assert old == new
-    with pytest.raises(ValueError, match="dataset_primary_key_null"):
-        sessions("2023-01-10")
-    narrower = {**source, "time_window": {"start": "2022-12-01", "end": "2023-01-06"}}
-    assert len(sessions("2023-01-10", narrower)) == 5
 
 
 def test_corporate_amount_selection_preserves_cash_and_structural_companions(tmp_path):

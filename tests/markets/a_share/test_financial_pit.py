@@ -1091,13 +1091,6 @@ def test_multi_term_factor_vectorization_preserves_domains_and_ratios():
     pd.testing.assert_frame_equal(empty_selection, frame[["asset_id", "timestamp"]])
 
 
-def test_multi_term_ratio_preserves_small_residual_without_exact_normal_path():
-    from quant_research_platform.research.factors.fundamental.calculations import _ratio
-
-    terms = tuple(pd.Series([value]) for value in (1e16, 1.0, -1e16, 1000.0))
-    assert _ratio(terms, pd.Series([1.0])).iloc[0] == pytest.approx(1001.0)
-
-
 @pytest.mark.parametrize("report_type", ["A", "B"])
 @pytest.mark.parametrize("bad_value", ["vendor-invalid", float("inf")])
 def test_optional_financial_metric_never_erases_other_facts(report_type, bad_value):

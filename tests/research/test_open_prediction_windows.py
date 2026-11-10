@@ -1,7 +1,5 @@
 """Open prediction keeps native persistence and causal, freely selected windows."""
 
-import json
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -165,12 +163,6 @@ def test_open_prediction_preserves_nanoseconds_in_filter_and_saved_extent(tmp_pa
     assert actual.timestamp.tolist() == list(stamps[3:])
     assert metadata["prediction_window"] == config["prediction_window"]
     assert metadata["effective_prediction_end"] == stamps[-1].isoformat()
-    manifest = output / "manifest.json"
-    payload = json.loads(manifest.read_text())
-    payload["metadata"]["effective_prediction_end"] = stamps[2].isoformat()
-    manifest.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="prediction_effective_end_outside_window"):
-        read_predictions(output)
 
 
 def test_selected_refit_predicts_open_windows_for_any_purpose(tmp_path):

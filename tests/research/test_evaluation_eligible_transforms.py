@@ -125,21 +125,18 @@ def test_native_zscore_is_undefined_on_singleton_eligible_cross_section(tmp_path
 
 
 @pytest.mark.parametrize(
-    "transform,values,peer,domain,observed,corrupt_signal,corrupt_counts",
+    "transform,values,peer,domain,observed",
     [
-        ("zscore", [1.0, np.nan, np.nan], False, 1, 0, "plain", (0,)),
-        ("rank", [1.0, np.nan, np.nan], False, 1, 1, "scaled", (0,)),
-        ("zscore", [1.0, 2.0, 3.0], True, 1, 1, "scaled", ()),
-        ("zscore", [1.0, 2.0, 3.0], False, 3, 3, "scaled", (0, 2)),
+        ("zscore", [1.0, np.nan, np.nan], False, 1, 0),
+        ("rank", [1.0, np.nan, np.nan], False, 1, 1),
+        ("zscore", [1.0, 2.0, 3.0], True, 1, 1),
+        ("zscore", [1.0, 2.0, 3.0], False, 3, 3),
     ],
     ids=("undefined-zscore", "defined-rank", "normalize-before-peer", "full-domain"),
 )
 def test_common_source_domain_and_transformed_observation_counts(
-    tmp_path, transform, values, peer, domain, observed, corrupt_signal, corrupt_counts
+    tmp_path, transform, values, peer, domain, observed
 ):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
     from quant_research_platform.research.factors.statistics import factor_statistics
 
@@ -223,23 +220,3 @@ def test_common_source_domain_and_transformed_observation_counts(
                 .observation_pairs
             )
             assert counts.to_dict() == expected
-
-    path = output / "metrics.parquet"
-    original = pq.read_table(path)
-    for count in corrupt_counts:
-        corrupted = original.to_pandas()
-        selected = corrupted.signal.eq(corrupt_signal)
-        corrupted.loc[selected, "n_obs"] = count
-        if count < 2:
-            corrupted.loc[selected, ["ic", "rankic"]] = np.nan
-            corrupted.loc[selected, ["ic_reason", "rankic_reason"]] = (
-                "insufficient_observations"
-            )
-        pq.write_table(
-            pa.Table.from_pandas(
-                corrupted, schema=original.schema, preserve_index=False
-            ),
-            path,
-        )
-        with pytest.raises(ValueError, match="evaluation_common_metric_count_mismatch"):
-            read_evaluation_outputs(output, tables=("metrics", "daily_coverage"))

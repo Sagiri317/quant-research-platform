@@ -288,6 +288,7 @@ def _build_producer(
                 source_frame.timestamp.min(), source_frame.timestamp.max()
             )
         return SimpleNamespace(
+            native=True,
             root=root,
             time_window=time_window,
             arrow_schema=SimpleNamespace(names=tuple(source_frame.columns)),
