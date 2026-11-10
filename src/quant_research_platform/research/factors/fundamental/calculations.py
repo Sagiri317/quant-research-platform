@@ -5,7 +5,6 @@ facts.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from math import fsum
 
 import numpy as np
 import pandas as pd
@@ -99,11 +98,4 @@ def _ratio(
         result = np.divide(
             totals, divisors, out=np.full(len(divisors), np.nan), where=valid
         )
-    mixed = (terms > 0).any(axis=1) & (terms < 0).any(axis=1)
-    if terms.shape[1] > 2:
-        for index in np.flatnonzero(valid & mixed):
-            try:
-                result[index] = fsum(terms[index]) / divisors[index]
-            except OverflowError:
-                result[index] = np.nan
     return pd.Series(result, index=denominator.index)

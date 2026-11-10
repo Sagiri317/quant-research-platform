@@ -12,7 +12,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     filesystem_stat,
     filesystem_walk,
-    require_unaliased_path,
 )
 
 from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
@@ -114,8 +113,8 @@ INDEX_INFO_SOURCE_CODE_COLUMNS = (
 
 
 def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
-    root = require_unaliased_path(Path(root), error="csmar_raw_export_identity_changed")
-    metadata = filesystem_stat(root, follow_symlinks=False)
+    root = Path(root)
+    metadata = filesystem_stat(root)
     if not stat.S_ISDIR(metadata.st_mode):
         raise ValueError("csmar_raw_export_identity_changed")
 
@@ -130,17 +129,11 @@ def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
             parent, dirnames, filenames = next(walker)
         except StopIteration:
             return
-        require_unaliased_path(parent, error="csmar_raw_export_identity_changed")
-        for name in dirnames:
-            require_unaliased_path(
-                parent / name, error="csmar_raw_export_identity_changed"
-            )
         dirnames[:] = sorted(name for name in dirnames if name.casefold() != "raw_only")
         for name in sorted(filenames):
             path = parent / name
             if path.suffix.lower() not in SUPPORTED_RAW_EXPORT_SUFFIXES:
                 continue
-            require_unaliased_path(path, error="csmar_raw_export_identity_changed")
             if (
                 "[DES]" in path.name
                 or "__description__" in path.name
@@ -267,7 +260,7 @@ def dataset_files_by_id(
     records, physical_members = [], set()
     with closing_iterator(_iter_raw_export_paths(root)) as paths:
         for path in paths:
-            metadata = filesystem_stat(path, follow_symlinks=False)
+            metadata = filesystem_stat(path)
             if not stat.S_ISREG(metadata.st_mode):
                 raise ValueError("csmar_raw_export_identity_changed")
             dataset = _raw_dataset_candidate(path)

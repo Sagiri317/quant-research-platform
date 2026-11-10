@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 import pytest
 
 from quant_research_platform.artifacts.outputs.evaluation import read_evaluation_outputs
@@ -174,7 +175,7 @@ def test_selected_corrupt_member_still_blocks_atomic_publication(tmp_path, peer_
             sample_scope="common",
             comparison_inputs=[{"inputs": str(peer), "signal_columns": ["factor"]}],
         )
-    with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
+    with pytest.raises(pa.ArrowInvalid):
         evaluate(config)
     assert not Path(config["output"]).exists()
 

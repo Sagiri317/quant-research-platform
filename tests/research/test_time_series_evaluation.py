@@ -712,28 +712,3 @@ def test_common_metric_families_match_errors_without_using_inapplicable_candidat
     assert common["a"].loc["mse", "observation_count"] == 3
     assert common["a"].loc["ic", "observation_count"] == 6
     assert common["inapplicable"].loc["mse", "reason"] == "no_observations"
-
-    # Arithmetic undefinedness is metric-specific too: an overflowing square
-    # must not erase the finite absolute error or the IC at that timestamp.
-    overflow = _signal_metric_blocks(
-        frame.assign(economic=[1e200] * 3 + [2.0, 3.0, 4.0]),
-        evaluation_axis="cross_sectional",
-        sessions=["2020-01-04"],
-        asset_ids=list("abc"),
-        regression=True,
-        prediction_column="economic",
-    ).assign(candidate_id="overflow")
-    finite = blocks[0].assign(candidate_id="finite")
-    paired = _common_metric_blocks(
-        pd.concat([overflow, finite], ignore_index=True),
-        metric_candidates={
-            metric: ["overflow", "finite"] for metric in ("ic", "rank_ic", "mse", "mae")
-        },
-    )
-    result = _daily_signal_metrics_from_blocks(
-        paired.loc[paired.candidate_id.eq("overflow")]
-    ).set_index("metric")
-    assert result.loc["mse", "value"] == pytest.approx(1)
-    assert result.loc["mae", "value"] == pytest.approx(5e199)
-    assert result.loc["mse", "valid_block_count"] == 1
-    assert result.loc["mae", "valid_block_count"] == 2

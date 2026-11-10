@@ -12,7 +12,7 @@ from quant_research_platform.sources.csmar.raw_exports import (
     iter_private_export_chunks,
 )
 from quant_research_platform.storage.datasets import read_dataset
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
 def _materialize(tmp_path, dataset, rows, chunksize=1):
@@ -34,7 +34,7 @@ def _materialize(tmp_path, dataset, rows, chunksize=1):
     )
     assert result.skipped == ()
     assert hashlib.sha256(path.read_bytes()).digest() == before
-    return read_dataset(root), read_dataset_manifest_evidence(root), path
+    return read_dataset(root), open_dataset_session(root).manifest, path
 
 
 def _bar(**changes):

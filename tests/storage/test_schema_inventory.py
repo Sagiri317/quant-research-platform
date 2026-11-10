@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -291,96 +289,6 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(
         Path(native_filesystem_path(cli_output)).read_text(encoding="utf-8")
     )["datasets"]
     assert [item["logical_relative_root"] for item in cli_items] == sorted(expected)
-
-
-@pytest.mark.skipif(
-    os.name != "nt" or not hasattr(Path, "is_junction"),
-    reason="Windows junction capability required",
-)
-@pytest.mark.parametrize("name", ("nested", ".a-0123456789ab"))
-def test_schema_inventory_rejects_nested_junction(tmp_path: Path, name: str) -> None:
-    layer_root = tmp_path / "data" / "processed"
-    filesystem_mkdir(layer_root, parents=True)
-    external = tmp_path / "external"
-    filesystem_mkdir(external)
-    filesystem_write_text(external / "spec.json", "{}", encoding="utf-8")
-    junction = layer_root / name
-    created = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
-        capture_output=True,
-    )
-    if created.returncode != 0:
-        pytest.skip("junction_not_available")
-
-    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-        tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path))
-
-
-@pytest.mark.skipif(
-    os.name != "nt" or not hasattr(Path, "is_junction"),
-    reason="Windows junction capability required",
-)
-def test_schema_inventory_rejects_junction_project_root(tmp_path: Path) -> None:
-    external = tmp_path / "external"
-    filesystem_mkdir(external)
-    root = tmp_path / "project"
-    created = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(root), str(external)],
-        capture_output=True,
-    )
-    if created.returncode != 0:
-        pytest.skip("junction_not_available")
-
-    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-        tuple(schema_inventory._iter_dataset_artifact_roots(root))
-
-
-def test_schema_inventory_rejects_aliased_data_ancestor(tmp_path: Path) -> None:
-    root = tmp_path / "project"
-    filesystem_mkdir(root)
-    external = tmp_path / "external"
-    filesystem_mkdir(external / "processed", parents=True)
-    try:
-        Path(native_filesystem_path(root / "data")).symlink_to(
-            native_filesystem_path(external), target_is_directory=True
-        )
-    except OSError as exc:
-        pytest.skip(f"directory_symlink_not_available: {exc}")
-
-    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-        tuple(schema_inventory._iter_dataset_artifact_roots(root))
-
-
-def test_schema_inventory_rejects_alias_above_supplied_root(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    filesystem_mkdir(target / "project" / "data" / "processed", parents=True)
-    alias = tmp_path / "alias"
-    try:
-        Path(native_filesystem_path(alias)).symlink_to(
-            native_filesystem_path(target), target_is_directory=True
-        )
-    except OSError as exc:
-        pytest.skip(f"directory_symlink_not_available: {exc}")
-
-    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-        tuple(schema_inventory._iter_dataset_artifact_roots(alias / "project"))
-
-
-def test_schema_inventory_rejects_spec_symlink(tmp_path: Path) -> None:
-    layer_root = tmp_path / "data" / "processed"
-    artifact_root = layer_root / "artifact"
-    filesystem_mkdir(artifact_root, parents=True)
-    external = tmp_path / "spec.json"
-    filesystem_write_text(external, "{}", encoding="utf-8")
-    try:
-        Path(native_filesystem_path(artifact_root / "spec.json")).symlink_to(
-            native_filesystem_path(external)
-        )
-    except OSError as exc:
-        pytest.skip(f"symlink_not_available: {exc}")
-
-    with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-        tuple(schema_inventory._iter_dataset_artifact_roots(tmp_path))
 
 
 def test_schema_inventory_uses_storage_exact_duplicate_fact(

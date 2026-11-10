@@ -13,8 +13,10 @@ from quant_research_platform.sources.csmar import raw_schemas
 from quant_research_platform.sources.reference import a_share_fees
 from quant_research_platform.sources.reference import interim as reference
 from quant_research_platform.storage import identity, manifests, raw_snapshots
-from quant_research_platform.storage.datasets.reading import read_dataset
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
+    read_dataset,
+)
 from tests.helpers.a_share_raw import write_industry_reference_fixture
 from tests.helpers.choice_raw import SDK, choice_session, response
 from tests.helpers.paths import StorageLayout
@@ -119,7 +121,7 @@ def test_csmar_known_members_parse_and_hash_once_before_publication(
         == pd.date_range("2019-01-01", periods=8).tolist()
     )
     assert (
-        read_dataset_manifest_evidence(output)["source_evidence"]["content_hash"]
+        open_dataset_session(output).manifest["source_evidence"]["content_hash"]
         == expected
     )
 
@@ -167,7 +169,7 @@ def test_choice_selected_response_bytes_and_sidecars_are_read_once(
     output = outputs["financial_balance"]
     assert read_dataset(output).total_assets.tolist() == [100.0]
     assert (
-        read_dataset_manifest_evidence(output)["source_evidence"]["content_hash"]
+        open_dataset_session(output).manifest["source_evidence"]["content_hash"]
         == expected
     )
 

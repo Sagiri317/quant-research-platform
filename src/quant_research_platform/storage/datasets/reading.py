@@ -53,8 +53,6 @@ from quant_research_platform.storage.identity import (
     filesystem_is_dir,
     filesystem_is_file,
     native_filesystem_path,
-    require_artifact_root,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
@@ -212,7 +210,6 @@ def _selected_paths(root: Path, files) -> tuple[Path, ...]:
         ):
             raise ValueError("dataset_files_invalid")
         path = root / relative
-        require_unaliased_path(path, error="invalid_dataset_part_files")
         if not filesystem_is_file(path) or path in paths:
             raise ValueError("invalid_dataset_part_files")
         paths.append(path)
@@ -380,7 +377,6 @@ def _bare_dataset_session(
     if is_file:
         if files is not None:
             raise ValueError("dataset_files_require_directory")
-        require_unaliased_path(path, error="invalid_dataset_part_files")
         paths = (path,)
     else:
         if files is None:
@@ -484,15 +480,12 @@ def open_dataset_session(
         )
     if spec is not None:
         raise ValueError("dataset_spec_already_declared")
-    root = require_artifact_root(Path(dataset_root))
+    root = Path(dataset_root)
     spec_path, data_root, manifest_path = (
         root / "spec.json",
         root / "data",
         root / "_manifest" / "manifest.json",
     )
-    require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
-    require_unaliased_path(data_root, error="invalid_dataset_part_files")
-    require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
     if not filesystem_is_file(spec_path):
         raise ValueError("dataset_spec_missing")
     if not filesystem_is_dir(data_root):

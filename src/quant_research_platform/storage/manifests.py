@@ -16,15 +16,11 @@ from quant_research_platform.policy.share_safety import (
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
-    require_artifact_root,
-    require_unaliased_path,
 )
 
 
 def read_qrp_json_file(path: Path) -> tuple[bytes, dict[str, Any]]:
-    candidate = require_unaliased_path(
-        Path(path), error="dataset_metadata_file_invalid"
-    )
+    candidate = Path(path)
     try:
         with closing_iterator(open_filesystem_file(candidate)) as handle:
             raw = handle.read()
@@ -42,26 +38,6 @@ def read_qrp_json(path: Path, *, expected_schema_id: str, error: str) -> dict[st
     if payload.get("schema_id") != expected_schema_id:
         raise ValueError(error)
     return payload
-
-
-def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
-    root = require_artifact_root(Path(dataset_root))
-    spec = read_qrp_json(
-        root / "spec.json",
-        expected_schema_id="qrp-dataset-spec",
-        error="dataset_spec_schema_id_invalid",
-    )
-    payload = read_qrp_json(
-        root / "_manifest" / "manifest.json",
-        expected_schema_id="qrp-dataset-manifest",
-        error="dataset_manifest_schema_id_invalid",
-    )
-    from quant_research_platform.storage.datasets.schema import (
-        validate_dataset_manifest_payload,
-    )
-
-    validate_dataset_manifest_payload(payload, spec=spec)
-    return {**spec, **payload}
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:

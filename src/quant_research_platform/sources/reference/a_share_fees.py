@@ -17,7 +17,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     _DigestingReader,
     open_filesystem_file,
-    require_unaliased_path,
 )
 
 A_SHARE_FEE_CSV_NAME = "chatgpt_compiled_a_share_fee_schedule_2014_2025.csv"
@@ -96,8 +95,6 @@ def load_a_share_fee_source(
     sidecar_path = (
         root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
     )
-    require_unaliased_path(csv_path, error="a_share_fee_source_unavailable")
-    require_unaliased_path(sidecar_path, error="a_share_fee_source_unavailable")
     metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
     rows, data_row_count, csv_sha256, csv_bytes = _read_rows(csv_path)
     _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes)

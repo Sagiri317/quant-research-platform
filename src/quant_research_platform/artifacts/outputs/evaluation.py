@@ -34,7 +34,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import parquet_table_writer
@@ -174,27 +173,6 @@ def _write_evaluation_artifact_chunks(chunks, *, temp_root, science):
     optional.update({name: row_counts[name] for name in optional})
 
 
-def _evaluation_spec(metadata):
-    from quant_research_platform.artifacts.outputs.evaluation_validation import (
-        require_signal_metadata_list,
-    )
-
-    return EvaluationSpec(
-        evaluation_id=metadata["evaluation_id"],
-        market_id=metadata["market_id"],
-        research_dataset_id=metadata["research_dataset_id"],
-        signals=require_signal_metadata_list(
-            metadata, "signals", "output_manifest_metadata_invalid"
-        ),
-        label_columns=tuple(metadata["label_columns"]),
-        label_availability_columns=metadata["label_availability_columns"],
-        evaluation_axis=metadata["evaluation_axis"],
-        correlation_clock=metadata.get("correlation_clock", "observation"),
-        filter_mode=metadata["filter_mode"],
-        n_groups=metadata["evaluation_diagnostics"]["n_groups"],
-    )
-
-
 _EVALUATION_COLUMNS = {
     "metrics": EVALUATION_METRICS_COLUMNS,
     "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -286,7 +264,6 @@ def read_evaluation_outputs(
 def write_parquet(frame: pd.DataFrame, path: Path, *, schema=None) -> Path:
     """Write one member inside its caller-owned atomic bundle staging directory."""
     path = Path(path)
-    require_unaliased_path(path, error="invalid_output_write_path")
     with closing_iterator(open_filesystem_file(path, "xb")) as handle:
         table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
         with parquet_table_writer(handle, compression="zstd") as write_table:

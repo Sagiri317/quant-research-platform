@@ -52,12 +52,11 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
+    filesystem_stat,
     native_filesystem_path,
-    require_artifact_root,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 from quant_research_platform.storage.parquet import (
-    inspect_dataset_part,
     parquet_table_writer,
 )
 
@@ -170,22 +169,19 @@ class _WriteStats:
             physical_schema = self._arrow_schema
         return table.cast(physical_schema, safe=True)
 
-    def observe_file(self, path: Path) -> None:
-        """Record the physical schema and size reported by the closed Parquet part."""
-        metadata = inspect_dataset_part(path, require_logical_dtypes=False)
-        physical_schema = physical_schema_from_schema(metadata.schema)
+    def observe_file(self, path: Path, table: pa.Table) -> None:
+        """Record the table just written and the closed file size."""
+        physical_schema = physical_schema_from_schema(table.schema.remove_metadata())
         if self._schema is None:
             self._schema = physical_schema
             self.columns = physical_schema_columns(physical_schema)
             self.schema_hash = canonical_json_hash(physical_schema)
-        elif physical_schema != self._schema:
-            raise ValueError("dataset_schema_mismatch")
         partition = relative_partition_label(self.data_root, path)
         self.file_count += 1
-        self.file_size_bytes += metadata.file_size_bytes
+        self.file_size_bytes += filesystem_stat(path).st_size
         self.partitions.add(partition)
         self.partition_row_counts[partition] = (
-            self.partition_row_counts.get(partition, 0) + metadata.row_count
+            self.partition_row_counts.get(partition, 0) + table.num_rows
         )
 
     def dtype_metadata(self, payload: dict[str, Any]) -> bytes:
@@ -270,7 +266,7 @@ def write_dataset(
 ) -> DatasetInspection:
     spec_payload = data_spec_payload(spec)
     final_root = Path(dataset_root)
-    final_root = require_artifact_root(final_root)
+    final_root = Path(final_root)
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     with closing_iterator(ExitStack()) as input_owner:
         close = getattr(input_chunks, "close", None)
@@ -345,7 +341,7 @@ def _write_contents(
                 schema.with_metadata(table.schema.metadata), safe=True
             )
             write_parquet_file(resolved, pending, timestamp_column=timestamp_column)
-            accumulator.observe_file(pending)
+            accumulator.observe_file(pending, resolved)
         pending_parts.clear()
 
     saw_empty_schema = False
@@ -395,7 +391,7 @@ def _write_contents(
                     pending_parts.append(path)
                 else:
                     observe_pending()
-                    accumulator.observe_file(path)
+                    accumulator.observe_file(path, persisted)
     if pending_parts:
         observe_pending()
     if pending_parts:
@@ -412,7 +408,7 @@ def _write_contents(
             {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
         )
         write_parquet_file(table, path, timestamp_column=timestamp_column)
-        accumulator.observe_file(path)
+        accumulator.observe_file(path, table)
     return accumulator
 
 
@@ -445,12 +441,30 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
                 if pa.types.is_dictionary(field.type)
                 else pa.timestamp("ms", tz=field.type.tz)
                 if pa.types.is_timestamp(field.type) and field.type.unit == "s"
-                else field.type,
+                else _parquet_nested_type(field.type),
                 nullable=field.nullable,
             )
             for field in schema
         ]
     )
+
+
+def _parquet_nested_type(data_type: pa.DataType) -> pa.DataType:
+    # Parquet's compliant list representation names every value field "element".
+    if pa.types.is_struct(data_type):
+        return pa.struct(
+            [field.with_type(_parquet_nested_type(field.type)) for field in data_type]
+        )
+    if pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
+        field = data_type.value_field.with_name("element").with_type(
+            _parquet_nested_type(data_type.value_type)
+        )
+        return (
+            pa.large_list(field)
+            if pa.types.is_large_list(data_type)
+            else pa.list_(field)
+        )
+    return data_type
 
 
 def write_parquet_file(

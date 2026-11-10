@@ -3,7 +3,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 
 def prepared_source_evidence(owner, raw_root, data_id):
@@ -17,4 +17,4 @@ def prepared_source_evidence(owner, raw_root, data_id):
         if data_id in result.skipped:
             assert not output.exists()
             return None
-        return read_dataset_manifest_evidence(output)["source_evidence"]["content_hash"]
+        return open_dataset_session(output).manifest["source_evidence"]["content_hash"]

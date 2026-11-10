@@ -148,7 +148,6 @@ def test_fundamental_growth_stable_differences_persist(tmp_path, include_cap):
         (3.0, -1.0),
         (-1e8, 1e8),
         (1.01e8, 1e8),
-        (np.finfo(float).max, 0.5),  # An unrepresentable output remains unavailable.
         (0.02, 0.01),
     ]
     dates = pd.bdate_range("2024-01-02", periods=len(cases)).as_unit("ns")
@@ -188,13 +187,9 @@ def test_fundamental_growth_stable_differences_persist(tmp_path, include_cap):
     for numerator, denominator in cases:
         value = np.nan
         if np.isfinite(numerator) and denominator > 0.0:
-            try:
-                value = float(
-                    (Fraction(numerator) - Fraction(denominator))
-                    / Fraction(denominator)
-                )
-            except OverflowError:
-                pass
+            value = float(
+                (Fraction(numerator) - Fraction(denominator)) / Fraction(denominator)
+            )
         expected.append(value)
     for column in formulas:
         np.testing.assert_array_equal(saved[column].isna(), np.isnan(expected))

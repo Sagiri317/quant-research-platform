@@ -6,13 +6,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.data import ProcessedDataSpec
+from quant_research_platform.contracts.features import inherited_feature_transforms
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     DEEPLOB_INPUT_COLUMNS,
     _target_definition,
 )
-from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.models.deeplob import complete_book_rows
 from quant_research_platform.storage.atomic import reject_if_exists
@@ -50,16 +50,19 @@ def normalize_book(config):
         raise ValueError("normalization_sessions_invalid")
     source = open_dataset_session(**_dataset_input_options(config["inputs"]))
     declared = source.spec
+    manifest = source.manifest
+    diagnostics = manifest.get("producer_diagnostics", {})
     columns = list(DEEPLOB_INPUT_COLUMNS)
     if declared["frequency"] != "tick" or not set(columns).issubset(
         source.logical_columns
     ):
         raise ValueError("normalization_book_input_required")
     roles = declared["column_roles"]
-    target = _target_definition(declared, "model_target", source.manifest)
-    spec = ResearchDatasetSpec(
+    target = _target_definition(declared, "model_target", manifest)
+    spec = ProcessedDataSpec(
         data_id=config["dataset_id"],
         market_id=declared["market_id"],
+        kind="panel",
         frequency=declared["frequency"],
         grain=declared["grain"],
         column_roles=roles,
@@ -70,29 +73,7 @@ def normalize_book(config):
             **dict.fromkeys(columns, "zscore"),
         },
         label_availability_columns=declared.get("label_availability_columns", {}),
-        input_data_ids=(declared["data_id"],),
-        base_input_data_id=declared["data_id"],
-        factor_columns=tuple(name for name, role in roles.items() if role == "factor"),
-        feature_columns=tuple(
-            name for name, role in roles.items() if role == "feature"
-        ),
-        label_columns=tuple(name for name, role in roles.items() if role == "label"),
-        filter_columns=tuple(
-            name for name, role in roles.items() if role in {"mask", "universe"}
-        ),
-        context_columns=tuple(
-            name for name, role in roles.items() if role == "context"
-        ),
-        target_transform=target["target_transform"] if target else "raw",
-        target_label_column=target["source_label"] if target else "forward_return_20d",
-        target_clip=target["target_clip"] if target else "none",
-        risk_model=(
-            FactorRiskModel.from_mapping(declared["risk_model"])
-            if "risk_model" in declared
-            else FactorRiskModel.from_mapping(target["risk_model"])
-            if target and "risk_model" in target
-            else None
-        ),
+        processed_input_data_ids=(declared["data_id"],),
     )
     history = {}
     statistics = []
@@ -158,7 +139,16 @@ def normalize_book(config):
             "inputs": {"book": config["inputs"]},
             "parameters": {"sessions": dates, "lookback_sessions": lookback},
             "producer_diagnostics": {
-                **source.manifest.get("producer_diagnostics", {}),
+                **diagnostics,
+                "target_definitions": {
+                    **diagnostics.get("target_definitions", {}),
+                    **({"model_target": target} if "model_target" in roles else {}),
+                },
+                "reused_feature_transforms": inherited_feature_transforms(
+                    declared,
+                    manifest,
+                    [name for name in roles if name not in columns],
+                ),
                 "book_normalization": {
                     "columns": columns,
                     "variance_ddof": 0,

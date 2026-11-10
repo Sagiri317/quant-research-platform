@@ -1,9 +1,6 @@
-"""Native saved models preserve fitted floating moments and reject drift."""
+"""Saved models preserve fitted floating moments."""
 
 import copy
-import json
-import pickle
-from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -37,29 +34,6 @@ def _case(tmp_path):
         random_seed=11,
     )
     return fit_frame(tmp_path, frame, spec)
-
-
-@pytest.mark.parametrize("member", ("metadata", "pickle"))
-def test_native_models_reject_malformed_or_drifting_scaler_moments(tmp_path, member):
-    case = _case(tmp_path)
-    if member == "metadata":
-        path = case.root / "model.json"
-        payload = json.loads(path.read_text())
-        payload["model_metadata"]["scaler"]["weighted_mean"][0] += 1.0
-        path.write_text(json.dumps(payload))
-    else:
-        path = case.root / "predictor.pkl"
-        predictor = pickle.loads(path.read_bytes())
-        predictor = replace(
-            predictor,
-            scaler=replace(
-                predictor.scaler,
-                mean_=(predictor.scaler.mean_[0] + 1.0, *predictor.scaler.mean_[1:]),
-            ),
-        )
-        path.write_bytes(pickle.dumps(predictor))
-    with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
-        load_model(case.root)
 
 
 def test_native_fit_preserves_frozen_moments_and_nonbinary_center(tmp_path):

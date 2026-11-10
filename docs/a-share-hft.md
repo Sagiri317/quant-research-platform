@@ -6,7 +6,7 @@
 
 `prepare-source` 的 `source_id=venvoo` 读取 `<raw_root>/<YYYYMMDD>/行情.parquet`、`逐笔委托.parquet`、`逐笔成交.parquet`，按显式证券列表过滤并分批写入原生数据集。证券列表分别指定 `wind_code`、项目 `asset_id`、`exchange`（SSE/SZSE）。`instrument_type` 支持 `stock`、`equity_etf` 和 `gold_etf`，省略时为 `stock`，并随原生来源与面板保存，供交易时段划分及账户执行使用。
 
-ETF 示例见 [prepare-source-etf.json](../configs/high-frequency/prepare-source-etf.json)。该归档把上海 ETF 的供应商代码也写作 `.SZ`，示例中的 `510300.SZ`、`510500.SZ`、`518880.SZ` 均显式映射为 `SSE`；`159915.SZ` 映射为 `SZSE`。请按供应商实际代码筛选，并独立声明真实交易所。来源说明和单日实际覆盖均已核对。[数据集说明](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)
+股票和 ETF 共用 [prepare-source-hft.json](../configs/prepare-source-hft.json)。ETF 改用对应原始目录和 revision `6ab4c56bb90833c078c2484aa9c7968bdbe36561`，证券列表设为 `510300.SZ`、`510500.SZ`、`159915.SZ`、`518880.SZ`；前三个股票 ETF 的 `instrument_type=equity_etf`，黄金 ETF 为 `gold_etf`。该归档的上海 ETF 供应商代码也写作 `.SZ`，实际交易所须显式声明：`159915` 为 `SZSE`，其余三只为 `SSE`，不按后缀推断。来源说明和单日实际覆盖均已核对。[数据集说明](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)
 
 配置记录实际仓库 revision，输出保存所选本地文件 SHA256、证券映射与事件时间语义。证券价格除以 10000 转成 CNY，数量为股；`HHMMSSmmm` 按 Asia/Shanghai 解释后转成 UTC 无时区纳秒时间戳。筛选后源流的顺序编号用于区分同一毫秒的多个事件，不代表未筛选文件的物理行号。
 
@@ -49,7 +49,7 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 
 原事件轴标签为 3/30/60 秒的未来 mid 收益与方向，使用同一连续片段内第一个不早于目标期限的实际报价，成熟时间为该报价事件时间。共同决策轴另计行情可见延迟，见下文。标签不是插值价格，也不把午休或隔夜后的第一笔行情当作短期目标。
 
-`sample-hft-common.json` → `fit-hft.json` → `predict-hft.json` → `evaluate-hft.json` 贯通 `hft_common_3s`：股票每3秒更新30秒收益预测，在共同截面评价，不因此强制成交。示例仍只演示同日上下午隔开的最小链路，不能证明跨日泛化；实际研究用显式滚动训练、验证与随后预测窗口。模型与日频共用 fit/predict/evaluate。原事件轴与单资产示例保留在 `configs/high-frequency/*-hft-single-asset.json`，使用独立的 `results/hft-single-asset/` 输出，其中评价显式保留旧 observation 口径。ETF主评价按资产逐日计算日内时序指标。
+`sample-hft-common.json` → `fit-hft.json` → `predict` → `evaluate-hft.json` 演示股票共同截面链路：每3秒更新30秒收益预测，不因此强制成交。预测统一使用 `configs/predict.json`，按本次拟合输出填写 `model`、采样输入、预测窗口与新输出路径；该配置中的日频示例路径不能直接当作高频输入。高频拟合示例只演示同日上下午隔开的最小链路，不能证明跨日泛化；实际研究使用显式滚动训练、验证与随后预测窗口。ETF 按资产逐日计算日内时序指标，见 [evaluate-etf.json](../configs/high-frequency/evaluate-etf.json)；股票截面与 ETF 时序分别评价，不沿用逐条 observation 的旧示例。
 
 ## 日级评价与滚动选型
 
@@ -74,7 +74,7 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 
 这个入口只负责改变决策时间轴，不重算原始事件流或因子。`assemble` 仍只按精确键合并；如果直接把原始 `hft_panel` 改成规则网格，会改变 OFI/流量含义并污染执行输入。因此先在实际报价上计算因子、再采样；截面标准化、中性化等变换应在共同截面上另行 `assemble`。已带这些截面变换的输入不可再次采样。因果的历史盘口归一化仍可在原报价轴上进行。
 
-- 网格锚定北京时间 09:30 / 13:00，共用既有历史交易时段规则，终点不包含收盘集合竞价。配置 `interval_seconds` 默认 3，可设 30；`time_window` 限定输出，读取上界不会多扫下一日。每会话流式读取窄价格索引用于标签，宽因子/盘口按原生批大小分块读取，不物化整日全股票宽表。
+- 网格锚定北京时间 09:30 / 13:00，共用既有历史交易时段规则，终点不包含收盘集合竞价。配置 `interval_seconds` 默认 3，可设 30；`time_window` 限定输出，读取上界不会多扫下一日。
 - 每只证券、每个上午/下午会话向后取在 T 已可见的最新原报价，包括字段缺失的报价，保存其连续段标识。不得从未来回填，不跨证券、午休或隔夜。输出 `quote_timestamp` 为所取原报价事件时间，`quote_age_seconds=T-quote_timestamp`。
 - `max_quote_age_seconds` 默认 6 秒，可独立配置。这只是待检验候选，不是经验证的最优值，也不取代原面板的 `max_gap_seconds`。年龄等于上限仍可用，超过上限的输入及 mid 保留缺失。缺失只影响依赖它的字段，不改研究资格。过期原报价的时间和年龄仍保留。未配置股票池时，输出限定在实际观察到的连续片段及最终报价的年龄范围内，不在首条报价之前、已知断段间隙或空会话展开整日空网格；这些观察范围不是动态股票池。
 - `quote_visibility_delay_ms` 默认 1，可显式设置为非负毫秒。仅 `quote_timestamp+delay≤T` 的报价可用于决策；设置为 0 时才允许使用事件时间等于 T 的报价。这个配置是数据可见延迟假设，不是实测接收时钟；元数据保存参数。订单激活延迟由执行合同另行处理。
@@ -85,7 +85,7 @@ LSTM/Transformer 的高频输入应显式使用 `sequence_group_columns=["sessio
 
 ### 动态股票池
 
-主示例 `configs/high-frequency/sample-hft-common.json` 接入完整股票池输入；`sample-hft-observed.json` 保留不筛池的观察域示例。前者的 `data/processed/a_share/stock_master_pit` 和 `stock_status_pit` 是调用者须提供的原生事实表，不是已存在数据或自动生成的产物。主表 `timestamp` 须是该状态记录已经可知且有效的时点，上市日期是独立生命事实；CSMAR `Statdt` 仅状态日期，不能自动冒充公布时刻。现有日频事件只保存公告日期、执行日期，不能据此伪造盘中 `status_available_at`；在核实实际可用时刻并完成身份关联前，正式全市场股票池仍有此数据缺口。字段、时钟和真实缺失的输入行为由原生合成链测试覆盖。
+主示例 `configs/high-frequency/sample-hft-common.json` 接入完整股票池输入；省略 `stock_pool` 时使用观察域，不另存重复配置。前者的 `data/processed/a_share/stock_master_pit` 和 `stock_status_pit` 是调用者须提供的原生事实表，不是已存在数据或自动生成的产物。主表 `timestamp` 须是该状态记录已经可知且有效的时点，上市日期是独立生命事实；CSMAR `Statdt` 仅状态日期，不能自动冒充公布时刻。现有日频事件只保存公告日期、执行日期，不能据此伪造盘中 `status_available_at`；在核实实际可用时刻并完成身份关联前，正式全市场股票池仍有此数据缺口。字段、时钟和真实缺失的输入行为由原生合成链测试覆盖。
 
 `sample-hft.stock_pool` 可显式提供 `stock_master`、`status`、`available_at_column`、`trading_calendar`。它们均为原生数据集输入，身份复用日频 `stock_master` 的规范化和上市生命周期 owner；`status` 消费已由既有身份/ST处理得到的 `asset_id,timestamp,listing_date,market_type,is_st,is_pt,is_delisting`，另须真实信息可用时点列。旧状态原件没有 `is_delisting` 时保持空，不能冒称已经排除退市整理；它是业务状态，不是缺失标志。这里的 `timestamp` 是状态生效时间，状态须同时已生效且已公布，按资产和上市生命向后匹配。不得把原生日频面板自动生成的午夜 `available_at` 当成真实盘前可知事实；没有合法公布时点的记录不能建立资格。迟到旧状态不覆盖较新的已知状态，冲突只使相关资格事实未知。
 

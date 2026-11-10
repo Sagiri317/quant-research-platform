@@ -27,7 +27,6 @@ from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    require_artifact_root,
 )
 
 
@@ -39,10 +38,10 @@ def compare_datasets(
     time_window: TimeWindow | None = None,
 ) -> DatasetComparison:
     try:
-        left_path = require_artifact_root(Path(left_root))
+        left_path = Path(left_root)
         if not filesystem_exists(left_path):
             return _comparison("MISSING_LEFT")
-        right_path = require_artifact_root(Path(right_root))
+        right_path = Path(right_root)
         if not filesystem_exists(right_path):
             return _comparison("MISSING_RIGHT")
         left_context = open_dataset_session(

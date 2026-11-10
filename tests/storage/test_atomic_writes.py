@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.storage.atomic as atomic
-from quant_research_platform.storage import _scratch_ownership as scratch
+from quant_research_platform.storage import atomic as scratch
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,

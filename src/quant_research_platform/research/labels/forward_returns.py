@@ -435,7 +435,7 @@ def _on_id_asset_decomposition(group, axis, horizons):
 
 
 def _on_id_log_ratio(numerator, denominator):
-    """Preserve tiny relative moves without overflowing wide finite ratios."""
+    """Compute log returns from valid positive endpoints."""
     valid = (
         np.isfinite(numerator)
         & np.isfinite(denominator)
@@ -443,8 +443,7 @@ def _on_id_log_ratio(numerator, denominator):
         & (denominator > 0)
     )
     result = np.full(len(numerator), np.nan)
-    near = valid & (numerator * 0.5 <= denominator) & (denominator * 0.5 <= numerator)
-    result[near] = np.log1p((numerator[near] - denominator[near]) / denominator[near])
-    far = valid & ~near
-    result[far] = np.log(numerator[far]) - np.log(denominator[far])
+    result[valid] = np.log1p(
+        (numerator[valid] - denominator[valid]) / denominator[valid]
+    )
     return result

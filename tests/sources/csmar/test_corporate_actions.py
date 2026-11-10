@@ -12,7 +12,7 @@ from quant_research_platform.sources.csmar.interim import (
 )
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 
 HEADER = RAW_TABLE_CONTRACTS["corporate_actions"].required_columns
 
@@ -61,7 +61,7 @@ def test_same_day_distributions_and_exact_duplicates_survive_persistence(tmp_pat
         "timestamp",
         "kind",
     )
-    metadata = read_dataset_manifest_evidence(output)
+    metadata = open_dataset_session(output).manifest
     assert metadata["producer_diagnostics"]["exact_duplicate_count"] == 1
 
 
@@ -98,7 +98,7 @@ def test_optional_bad_values_are_unknown_and_counted_not_dropped(tmp_path):
     assert frame.settlement_date_unresolved.tolist() == [True, False]
     assert frame.loc[1, "amount"] == -0.25
     assert frame.loc[1, "settlement_date"] == pd.Timestamp("1990-01-01")
-    metadata = read_dataset_manifest_evidence(output)
+    metadata = open_dataset_session(output).manifest
     counts = metadata["producer_diagnostics"]["source_row_counts"]
     assert counts["raw_rows"] == 2
     assert counts["invalid_settlement_date_rows"] == 1
@@ -124,7 +124,7 @@ def test_invalid_event_key_excludes_only_unlocatable_row(tmp_path, changes):
     frame = read_dataset(output)
     assert frame.source_asset_id.tolist() == ["000002"]
     assert frame.amount.tolist() == [0.75]
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == 2
@@ -143,7 +143,7 @@ def test_all_unlocatable_events_publish_typed_empty(tmp_path, changes):
     assert str(frame.market_type.dtype) == "Int64"
     assert str(frame.amount.dtype) == "float64"
     assert str(frame.settlement_date_unresolved.dtype) == "bool"
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["excluded_missing_required_rows"] == 1
@@ -164,7 +164,7 @@ def test_conflicting_event_amount_keeps_key_and_independent_facts(tmp_path, chun
     assert not frame.loc["000001", "settlement_date_unresolved"]
     assert frame.loc["000002", "amount"] == 0.75
     assert "version_identity" not in frame
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["conflicting_amount_rows"] == 2
@@ -187,7 +187,7 @@ def test_unresolved_provided_payment_date_never_becomes_genuine_blank(
     assert bool(frame.loc["000001", "settlement_date_unresolved"])
     assert not bool(frame.loc["000002", "settlement_date_unresolved"])
     assert frame.amount.tolist() == [0.25, 0.25]
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     if "bad" in payments:
@@ -233,7 +233,7 @@ def test_all_vendor_kinds_remain_distinct_source_events():
 def test_unknown_nonempty_kind_is_retained_with_diagnostics(tmp_path):
     output = prepare(tmp_path, [row("UNKNOWN")])
     assert read_dataset(output).kind.tolist() == ["UNKNOWN"]
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["unsupported_kind_rows"] == 1

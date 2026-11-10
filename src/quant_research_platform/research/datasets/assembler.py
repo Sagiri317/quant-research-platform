@@ -52,7 +52,6 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.datasets.writing import (
     write_dataset,
 )
-from quant_research_platform.storage.identity import require_artifact_root
 
 
 def _assemble_research_dataset_from_sessions(
@@ -64,7 +63,7 @@ def _assemble_research_dataset_from_sessions(
     metadata: Mapping[str, object] | None,
     risk_exposure_input: Mapping | None = None,
 ) -> Path:
-    artifact_root = require_artifact_root(output_root)
+    artifact_root = Path(output_root)
     metadata = dict(metadata or {})
     label_semantics = {}
     for session in input_sessions.values():

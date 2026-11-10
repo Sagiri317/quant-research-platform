@@ -941,7 +941,7 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
 ):
     from collections import Counter
 
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
 
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
@@ -958,7 +958,7 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
         )
         expected[data_id] = (
             read_dataset(target),
-            read_dataset_manifest_evidence(target)["source_evidence"],
+            open_dataset_session(target).manifest["source_evidence"],
             _file_hashes(target),
         )
     reads = Counter()
@@ -990,7 +990,7 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
     for data_id, root in roots.items():
         frame, evidence, hashes = expected[data_id]
         pd.testing.assert_frame_equal(read_dataset(root), frame, check_exact=True)
-        assert read_dataset_manifest_evidence(root)["source_evidence"] == evidence
+        assert open_dataset_session(root).manifest["source_evidence"] == evidence
         assert _file_hashes(tmp_path / "single" / data_id) == hashes
 
 

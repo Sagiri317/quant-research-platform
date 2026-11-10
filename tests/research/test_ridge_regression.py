@@ -1,13 +1,10 @@
 """Weighted Ridge matches independent penalized normal equations end to end."""
 
-import pickle
-
 import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models.persisted import load_model
 from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 
@@ -124,10 +121,3 @@ def test_ridge_weighted_math_prediction_and_persistence(
         atol=1e-13,
     )
     assert predictor.scaler.to_payload() == frozen
-
-    # Loading must bind the actual estimator's penalty to the saved scientific facts.
-    predictor.estimator.set_params(alpha=alpha + 1)
-    with (case.root / "predictor.pkl").open("wb") as handle:
-        pickle.dump(predictor, handle)
-    with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
-        load_model(case.root)

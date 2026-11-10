@@ -309,7 +309,7 @@ def strict_integer_series(
             integer = int(numeric)
         except (ValueError, TypeError, OverflowError, InvalidOperation) as exc:
             raise ValueError(error) from exc
-        if numeric != integer or not -(2**63) <= integer <= 2**63 - 1:
+        if numeric != integer:
             raise ValueError(error)
         output.append(integer)
     return pd.Series(output, index=series.index, name=series.name, dtype=dtype)
@@ -340,11 +340,6 @@ def _real_numeric_series(
             [
                 isinstance(value, (bool, np.bool_, complex, np.complexfloating))
                 or (not is_null and not _is_hashable(value))
-                or (
-                    errors == "coerce"
-                    and isinstance(value, int)
-                    and abs(value) > float(np.finfo("float64").max)
-                )
                 for value, is_null in zip(series, null_mask, strict=True)
             ],
             index=series.index,
@@ -354,10 +349,7 @@ def _real_numeric_series(
             if errors == "raise":
                 raise ValueError(error)
             series = series.mask(invalid)
-    try:
-        numeric = pd.to_numeric(series, errors="coerce")
-    except OverflowError as exc:
-        raise ValueError(error) from exc
+    numeric = pd.to_numeric(series, errors="coerce")
     if errors == "raise" and (numeric.isna() & ~null_mask).any():
         raise ValueError(error)
     return numeric

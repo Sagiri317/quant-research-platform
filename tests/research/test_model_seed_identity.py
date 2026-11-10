@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models import fitting
 
 
 @pytest.mark.parametrize(
@@ -14,7 +13,7 @@ from quant_research_platform.research.models import fitting
         "xgboost_regressor",
     ),
 )
-def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tmp_path):
+def test_estimator_defaults_and_seed_survive_persistence(algorithm, tmp_path):
     import pickle
 
     import pandas as pd
@@ -53,7 +52,13 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm, tm
     fitted = case.result
     metadata = validate_model_metadata_core(fitted.metadata)
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))
-    fitting.validate_model_state(predictor, metadata)
+    assert metadata["random_seed"] == 731
+    np.testing.assert_allclose(
+        predictor.predict(frame[["x", "z"]]),
+        fitted.prediction_model.predict(frame[["x", "z"]]),
+        rtol=1e-12,
+        atol=1e-14,
+    )
 
 
 @pytest.mark.parametrize("seed", [None, True, -1, 2**32])

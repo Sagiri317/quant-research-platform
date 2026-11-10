@@ -29,7 +29,7 @@ qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
 qrp run-quarterly --config configs/quarterly-a-share.json
 qrp backtest-hft --config configs/backtest-hft.json
-qrp predict --config configs/predict-a-share.json
+qrp predict --config configs/predict.json
 qrp explain --config configs/explain-model.json
 qrp score --config <验证评分配置.json>
 qrp select --config <候选选择配置.json>
@@ -63,9 +63,11 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 计算会检查拟合截止、标签成熟和校准时点。直接使用 Parquet 时，还需声明列角色、单位、主键和信息可用时间。
 
 [操作示例](configs/) 中的路径需替换为实际已准备输入。
-[分批因子组装](configs/assemble-factor-batches.json)指定各批输入和所需列，只拼接原始因子。
-[已有特征复用](configs/assemble-existing-features.json)读取已经生成的特征，不重复处理；
-保留 eligible 资格列与特征中的实际空值。该示例生成无标签特征输入，训练时需另选标签及其成熟时间列。
+[选择并组装输入](configs/assemble-selected.json)统一演示分批因子与已有特征的列选择和拼接。
+已有特征保留原变换、资格列和缺值；`feature_recipe=null` 不重复处理。
+该示例生成无标签输入，训练时需另选标签及其成熟时间列。
+每种操作维护一个通用配置；不同模型、超参数、输入契约或评价轴确有差异时保留独立示例。
+路径、证券与时间范围由调用者改为本次研究值，不为这些取值另存一套配置。
 
 [隔夜与日内收益准备](configs/prepare-on-id.json)、[共同样本分层评价](configs/evaluate-stratified-a-share.json)与
 [已保存日表的统计汇总](configs/statistics-stratified-a-share.json)分别调用 prepare、evaluate、statistics-factors。

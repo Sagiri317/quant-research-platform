@@ -68,12 +68,12 @@
 
 | 依据 | 本研究采用的启发与区别 |
 |---|---|
-| [Miranda-Agrippino & Rey，2020，US Monetary Policy and the Global Financial Cycle，REStud](https://www.nber.org/papers/w21722) | 美国政策与全球金融条件共同变化；美元、NFCI、利率和央行资产状态本身不是已识别的外生政策冲击 |
-| [Ang、Hodrick、Xing、Zhang，2006，The Cross-Section of Volatility and Expected Returns，JF](https://onlinelibrary.wiley.com/doi/10.1111/j.1540-6261.2006.00836.x) | 波动率风险敏感性与横截面收益有关；本研究估计 A 股的历史 VIX Beta，不照搬美国市场结论 |
-| [Huang、Schlag、Shaliastovich、Thimme，2019，Volatility-of-Volatility Risk，JFQA](https://safe-frankfurt.de/de/publikationen/working-papers/details/publicationname/volatility-of-volatility-risk.html) | VVIX 补充 VIX 水平；原文的期权收益证据不证明 A 股预测有效 |
-| [Bollerslev、Tauchen、Zhou，2009，Expected Stock Returns and Variance Risk Premia，RFS](https://public.econ.duke.edu/~get/wpapers/btz.pdf) | 区分隐含方差和实际方差；当前没有同标的实际方差输入，未构造 VRP |
-| [Adrian、Etula、Muir，2014，Financial Intermediaries and the Cross-Section of Asset Returns，JF](https://www.newyorkfed.org/medialibrary/media/research/staff_reports/sr464.pdf) | 融资约束可能影响风险定价；净流动性与 Amihud／规模／Beta 的交互是本地代理，不等于文中的券商杠杆冲击 |
-| [Cboe 期限结构](https://www.cboe.com/tradable-products/vix/term-structure)、[SKEW 白皮书](https://cdn.cboe.com/resources/indices/documents/SKEWwhitepaperjan2011.pdf) | 同期比率和偏度反变换依公开定义；VXN、VXEEM 是不同标的风险，不能解释成同一标的期限结构 |
+| Miranda-Agrippino & Rey，2020，US Monetary Policy and the Global Financial Cycle，REStud | 美国政策与全球金融条件共同变化；美元、NFCI、利率和央行资产状态本身不是已识别的外生政策冲击 |
+| Ang、Hodrick、Xing、Zhang，2006，The Cross-Section of Volatility and Expected Returns，JF | 波动率风险敏感性与横截面收益有关；本研究估计 A 股的历史 VIX Beta，不照搬美国市场结论 |
+| Huang、Schlag、Shaliastovich、Thimme，2019，Volatility-of-Volatility Risk，JFQA | VVIX 补充 VIX 水平；原文的期权收益证据不证明 A 股预测有效 |
+| Bollerslev、Tauchen、Zhou，2009，Expected Stock Returns and Variance Risk Premia，RFS | 区分隐含方差和实际方差；当前没有同标的实际方差输入，未构造 VRP |
+| Adrian、Etula、Muir，2014，Financial Intermediaries and the Cross-Section of Asset Returns，JF | 融资约束可能影响风险定价；净流动性与 Amihud／规模／Beta 的交互是本地代理，不等于文中的券商杠杆冲击 |
+| [Cboe 期限结构](https://www.cboe.com/tradable-products/vix/term-structure)、SKEW 白皮书 | 同期比率和偏度反变换依公开定义；VXN、VXEEM 是不同标的风险，不能解释成同一标的期限结构 |
 
 ## 可检验假说
 
@@ -169,4 +169,4 @@
 
 来源契约与操作入口见[宏观技术文档](../docs/macro-liquidity.md)。
 
-公开可下载不等于取得统一再分发或商业许可，须遵守 [FRED 条款](https://fred.stlouisfed.org/legal/)、[Cboe 条款](https://www.cboe.com/terms/)及各原始提供方限制。原始数据不随仓库分发。当前输入不含 ETF／美国股票价格，VRP 未构造；正式实证与服务器规模性能仍待单独验证。
+公开可下载不等于取得统一再分发或商业许可，须遵守 FRED 条款、Cboe 条款及各原始提供方限制。原始数据不随仓库分发。当前输入不含 ETF／美国股票价格，VRP 未构造；正式实证与服务器规模性能仍待单独验证。

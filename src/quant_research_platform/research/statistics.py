@@ -214,18 +214,13 @@ def hac_mean(
         raise ValueError("hac_max_lags_invalid")
     if type(confidence) is not float or not 0.0 < confidence < 1.0:
         raise ValueError("confidence_invalid")
-    _, exponent = np.frexp(np.max(np.abs(data)))
-    normalized = np.ldexp(data, -int(exponent))
-    if float(np.ptp(normalized)) <= 8 * np.finfo("float64").eps * float(
-        np.max(np.abs(normalized))
-    ):
+    if float(np.ptp(data)) <= 8 * np.finfo("float64").eps * float(np.max(np.abs(data))):
         raise ValueError("hac_inference_undefined")
-    fit = OLS(normalized, np.ones((len(data), 1))).fit(
+    fit = OLS(data, np.ones((len(data), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
     mean = float(np.mean(data))
-    with np.errstate(over="ignore", under="ignore"):
-        standard_error = float(np.ldexp(fit.bse[0], int(exponent)))
+    standard_error = float(fit.bse[0])
     t_statistic = mean / standard_error if standard_error > 0 else np.nan
     critical = float(norm.ppf((1 + confidence) / 2))
     outputs = np.array(
@@ -396,12 +391,7 @@ def _studentized_loss_bootstrap(
 ) -> tuple[np.ndarray, np.ndarray] | None:
     from arch.bootstrap import StationaryBootstrap
 
-    scale = np.maximum(np.abs(values[:, 0]).max(), np.abs(values[:, 1:]).max(axis=0))
-    _, exponent = np.frexp(scale)
-    # Power-of-two rescaling avoids overflow without changing the studentized test.
-    differences = np.ldexp(values[:, [0]], -exponent) - np.ldexp(
-        values[:, 1:], -exponent
-    )
+    differences = values[:, [0]] - values[:, 1:]
     n = len(differences)
     means = differences.mean(axis=0)
     centered = differences - means
@@ -508,13 +498,8 @@ def _loss_differential_reason(values: np.ndarray, *, pairwise: bool) -> str | No
     )
     for left, right in pairs:
         scale = np.max(np.abs(values[:, [left, right]]))
-        _, exponent = np.frexp(scale)
-        difference = np.ldexp(values[:, left], -exponent) - np.ldexp(
-            values[:, right], -exponent
-        )
-        if float(np.ptp(difference)) <= np.finfo("float64").eps * np.ldexp(
-            scale, -exponent
-        ):
+        difference = values[:, left] - values[:, right]
+        if float(np.ptp(difference)) <= np.finfo("float64").eps * scale:
             return "constant_loss_differential"
     return None
 
@@ -539,9 +524,7 @@ def probabilistic_and_deflated_sharpe(
     observed = float(_return_sharpes(data, roundoff=return_roundoff))
     if not np.isfinite(observed):
         raise ValueError("sharpe_zero_variance")
-    _, exponent = np.frexp(np.max(np.abs(data)))
-    scaled = np.ldexp(data, -exponent)
-    centered = scaled - scaled[0]
+    centered = data - data[0]
     normalized = centered / np.std(centered, ddof=1)
     sample_skew = float(skew(normalized, bias=False))
     sample_kurtosis = float(kurtosis(normalized, fisher=False, bias=False))
@@ -1208,30 +1191,21 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     if len(data) < 2:
         return np.full(data.shape[1:], np.nan)
     unresolved = _return_intervals_overlap(data, errors)
-    _, exponent = np.frexp(np.max(np.abs(data), axis=0))
-    scaled = np.ldexp(data, -exponent)
-    result = np.ldexp(
-        np.std(scaled - scaled[0], axis=0, ddof=1),
-        exponent,
-        out=np.zeros(data.shape[1:]),
-        where=~unresolved,
-    )
+    result = np.where(unresolved, 0.0, np.std(data - data[0], axis=0, ddof=1))
     return np.where(np.isfinite(errors).all(axis=0), result, np.nan)
 
 
 def _return_sharpes(values: object, *, roundoff: object = 0.0) -> np.ndarray:
-    """Compute mean/risk in one binary scale without changing candidate coverage."""
+    """Compute mean/risk without changing candidate coverage."""
     data = np.asarray(values, dtype="float64")
     errors = _return_roundoff(data, roundoff)
     if len(data) < 2:
         return np.full(data.shape[1:], np.nan)
     unresolved = _return_intervals_overlap(data, errors)
-    _, exponent = np.frexp(np.max(np.abs(data), axis=0))
-    scaled = np.ldexp(data, -exponent)
-    differences = scaled - scaled[0]
+    differences = data - data[0]
     deviation = np.std(differences, axis=0, ddof=1)
     return np.divide(
-        np.mean(scaled, axis=0),
+        np.mean(data, axis=0),
         deviation,
         out=np.full(data.shape[1:], np.nan),
         where=(deviation > 0) & ~unresolved & np.isfinite(errors).all(axis=0),

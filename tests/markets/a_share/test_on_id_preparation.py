@@ -438,45 +438,6 @@ def test_bare_directory_member_selection_cannot_define_a_sparse_clock(tmp_path):
         )
 
 
-def test_native_infinite_price_is_local_but_general_reader_stays_strict(tmp_path):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    frame, inputs = _inputs(tmp_path)
-    panel = open_dataset_session(inputs["market_panel_1d"]["path"])
-    day = sorted(frame.timestamp.unique())[1]
-    for path in panel.all_paths:
-        table = pq.ParquetFile(path).read()
-        affected = np.array(
-            [
-                (asset == "c" and timestamp == day)
-                for asset, timestamp in zip(
-                    table["asset_id"].to_pylist(),
-                    table["timestamp"].to_pylist(),
-                    strict=True,
-                )
-            ]
-        )
-        if affected.any():
-            values = table["adj_close"].to_numpy().copy()
-            values[affected] = np.inf
-            table = table.set_column(
-                table.schema.get_field_index("adj_close"), "adj_close", pa.array(values)
-            )
-            pq.write_table(table, path)
-    with pytest.raises(ValueError, match="dataset_infinite_value"):
-        read_dataset(panel.root)
-    result = read_dataset(
-        prepare(
-            _request(tmp_path / "result", inputs, frame, parameters={"horizons": [1]})
-        )
-    )
-    first = result.loc[result.asset_id.eq("c")].iloc[0]
-    assert first.on_id_holding_intraday_log_return_1d_reason == "invalid_price"
-    assert first.on_id_holding_overnight_log_return_1d_reason == "invalid_price"
-    assert np.isfinite(first.on_id_endpoint_return_1d)
-
-
 def test_private_infinity_tolerance_does_not_relax_other_consumed_columns(tmp_path):
     from dataclasses import replace
 

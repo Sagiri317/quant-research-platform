@@ -74,7 +74,7 @@ def _factor_tables(tmp_path):
     spec, config, window, metadata, dates = _factor_input(tmp_path)
     tables = build_a_share_factor_statistics_tables(
         dataset_session=open_dataset_session(tmp_path / "input", time_window=window),
-        config=config,
+        config={**config, "analyses": ["rank_ic", "fama_macbeth"]},
         time_window=window,
     )
     return tables, metadata, dates

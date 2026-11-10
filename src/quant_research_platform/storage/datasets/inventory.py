@@ -12,14 +12,12 @@ from quant_research_platform.storage.datasets.paths import parse_year_partition_
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
     native_filesystem_path,
-    path_is_filesystem_alias,
-    require_unaliased_path,
 )
 
 _PART_FILE_PATTERN = re.compile("^part-(\\d+)\\.parquet$")
 
 
-def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
+def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool]]:
     """Map vanished directories before yielding entries to business callbacks."""
     try:
         entries = filesystem_scandir(directory)
@@ -30,13 +28,12 @@ def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
             try:
                 entry = next(entries)
                 path = directory / entry.name
-                is_directory = entry.is_dir(follow_symlinks=False)
-                is_alias = is_directory and path_is_filesystem_alias(path)
+                is_directory = entry.is_dir()
             except StopIteration:
                 return
             except (FileNotFoundError, NotADirectoryError) as error:
                 raise ValueError("invalid_dataset_part_files") from error
-            value = (path, is_directory, is_alias)
+            value = (path, is_directory)
             yield value
 
 
@@ -68,7 +65,7 @@ class DatasetSessionInventory:
         self._parts = dict(sorted(self._parts.items(), key=lambda item: item[1]))
 
     def add(self, path: Path) -> None:
-        path = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
+        path = Path(path)
         if not Path(native_filesystem_path(path)).is_file():
             raise ValueError("invalid_dataset_part_files")
         coordinates = self._validated_coordinates(path, partitioned=None)
@@ -80,52 +77,28 @@ class DatasetSessionInventory:
         )
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
-        require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
-        partitioned = partition_columns == ("year",)
-        if partitioned:
-            with closing_iterator(_directory_entries(self.data_root)) as entries:
-                partitioned = not any(
-                    path.suffix.casefold() == ".parquet" for path, _, _ in entries
-                )
-        pending = [_directory_entries(self.data_root)]
-        try:
-            while pending:
-                entries = pending[-1]
-                try:
-                    path, is_directory, is_alias = next(entries)
-                except StopIteration:
-                    pending.pop().close()
-                    continue
-                if (
-                    partitioned
-                    and path.parent == self.data_root
-                    and path.name.casefold().startswith("year=")
-                ):
-                    year = parse_year_partition_label(path.name)
-                    if years is not None and year not in years:
-                        continue
-                    if path_is_filesystem_alias(path):
-                        raise ValueError("invalid_dataset_part_files")
-                if is_directory:
-                    if not is_alias:
-                        pending.append(_directory_entries(path))
-                elif path.suffix.casefold() == ".parquet":
-                    if path_is_filesystem_alias(path):
-                        raise ValueError("invalid_dataset_part_files")
-                    coordinates = self._validated_coordinates(
-                        path, partitioned=partitioned
-                    )
-                    on_path(path, coordinates)
-        except BaseException as primary:
-            while pending:
-                try:
-                    pending.pop().close()
-                except BaseException as close_error:
-                    primary.add_note(
-                        "dataset inventory close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-            raise
+        with closing_iterator(_directory_entries(self.data_root)) as entries:
+            roots = list(entries)
+        partitioned = partition_columns == ("year",) and not any(
+            path.suffix.casefold() == ".parquet" for path, _ in roots
+        )
+        if not partitioned:
+            for path, is_directory in roots:
+                if not is_directory and path.suffix.casefold() == ".parquet":
+                    on_path(path, self._validated_coordinates(path, partitioned=False))
+            return
+        for directory, is_directory in roots:
+            if not is_directory or not directory.name.casefold().startswith("year="):
+                continue
+            year = parse_year_partition_label(directory.name)
+            if years is not None and year not in years:
+                continue
+            with closing_iterator(_directory_entries(directory)) as entries:
+                for path, is_directory in entries:
+                    if not is_directory and path.suffix.casefold() == ".parquet":
+                        on_path(
+                            path, self._validated_coordinates(path, partitioned=True)
+                        )
 
     def _validated_coordinates(
         self, path: Path, *, partitioned: bool | None

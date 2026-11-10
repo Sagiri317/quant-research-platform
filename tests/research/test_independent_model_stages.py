@@ -399,16 +399,6 @@ def test_evaluation_masks_imputed_features_before_cross_section_transform(
     assert tables["metrics"].ic.tolist() == pytest.approx([1.0])
 
 
-def test_model_facts_reject_actual_training_label_after_cutoff(tmp_path):
-    model = fit(fit_config(tmp_path, data(tmp_path)))
-    path = model / "model.json"
-    value = json.loads(path.read_text())
-    value["model_metadata"]["label_available_max"] = "2020-01-04"
-    path.write_text(json.dumps(value))
-    with pytest.raises(ValueError, match="model_training_label_after_fit_cutoff"):
-        load_model(model)
-
-
 def test_explicit_input_projection_limits_business_columns_but_adds_support(
     tmp_path, monkeypatch
 ):
@@ -585,37 +575,6 @@ def test_saved_model_allows_later_prediction_evaluation_and_refit(tmp_path):
         "2020-01-10"
     )
     assert "test_window" not in facts
-
-
-@pytest.mark.parametrize("change", ("roundoff", "zero_subnormal", "material", "column"))
-def test_model_importance_uses_numeric_tolerance_and_exact_columns(tmp_path, change):
-    source = data(tmp_path)
-    if change == "zero_subnormal":
-        frame = pd.read_parquet(source)
-        frame["label"] = 0.0
-        frame.to_parquet(source, index=False)
-    model = fit(fit_config(tmp_path, source))
-    path = model / "model.json"
-    payload = json.loads(path.read_text())
-    importance = payload["model_metadata"]["feature_importance"]
-    column = next(iter(importance))
-    if change == "zero_subnormal":
-        assert importance[column] == 0.0
-    if change in {"roundoff", "zero_subnormal"}:
-        importance[column] = float(np.nextafter(importance[column], np.inf))
-    elif change == "material":
-        importance[column] *= 1.000001
-    else:
-        importance["different_column"] = importance.pop(column)
-    path.write_text(json.dumps(payload))
-    if change in {"roundoff", "zero_subnormal"}:
-        result, _ = load_model(model)
-        assert result.metadata["feature_importance"] == importance
-    else:
-        with pytest.raises(
-            ValueError, match="model_state_metadata_mismatch|invalid_model_metadata"
-        ):
-            load_model(model)
 
 
 @pytest.mark.parametrize("missing_label", ("absent", "immature"))

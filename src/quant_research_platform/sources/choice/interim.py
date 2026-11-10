@@ -41,7 +41,6 @@ from quant_research_platform.sources.choice.raw_exports import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -136,7 +135,7 @@ def _raw_requests(raw_root: Path, *, data_ids):
     indicators = {
         field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
     }
-    root = require_unaliased_path(Path(raw_root), error="choice_raw_identity_changed")
+    root = Path(raw_root)
     try:
         entries = filesystem_scandir(root / "css")
     except NotADirectoryError as error:
@@ -148,7 +147,6 @@ def _raw_requests(raw_root: Path, *, data_ids):
             if entry.name == "failed":
                 continue
             directory = root / "css" / entry.name
-            require_unaliased_path(directory, error="choice_raw_identity_changed")
             path = directory / "response.metadata.json"
             raw_metadata, manifest = read_qrp_json_file(path)
             try:

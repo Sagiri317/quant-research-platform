@@ -47,7 +47,6 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_stat,
-    require_unaliased_path,
 )
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
@@ -1103,10 +1102,6 @@ def materialize_interim_data(
     written: dict[str, Path] = {}
     skipped: set[str] = set()
     pending = set(data_ids)
-    require_unaliased_path(
-        source_raw_root,
-        error="csmar_raw_export_identity_changed",
-    )
     indexed_files = dataset_files_by_id(source_raw_root, requested_datasets=data_ids)
 
     with closing_iterator(indexed_files):
@@ -1199,11 +1194,9 @@ def _iter_normalized_interim_frames(
     }
     pending = []
     for input_file in input_files:
-        parent = require_unaliased_path(
-            input_file.parent, error="csmar_interim_source_parent_invalid"
-        )
+        parent = Path(input_file.parent)
         try:
-            parent_stat = filesystem_stat(parent, follow_symlinks=False)
+            parent_stat = filesystem_stat(parent)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("csmar_interim_source_parent_invalid") from exc
         if not stat.S_ISDIR(parent_stat.st_mode):

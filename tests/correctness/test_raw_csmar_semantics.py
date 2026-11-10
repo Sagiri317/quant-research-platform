@@ -72,7 +72,7 @@ def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
 ):
 
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
     from tests.helpers.paths import StorageLayout
 
@@ -137,7 +137,7 @@ def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
     assert saved.source_asset_id.tolist() == ["000001", "000002"]
     assert str(saved.timestamp.dtype) == "datetime64[ns]"
     assert (
-        read_dataset_manifest_evidence(root)["producer_diagnostics"][
+        open_dataset_session(root).manifest["producer_diagnostics"][
             "exact_duplicate_count"
         ]
         == 1
@@ -389,7 +389,7 @@ def test_invalid_analyst_facts_are_local_to_required_rows_or_optional_cells(
     tmp_path, column, value, chunksize, all_bad
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -418,7 +418,7 @@ def test_invalid_analyst_facts_are_local_to_required_rows_or_optional_cells(
         good = saved.loc[saved.source_asset_id.eq("000002")].iloc[0]
         assert good.forecast_eps == 18
         assert good.report_id == "9007199254740993"
-    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+    counts = open_dataset_session(candidate).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == len(rows)
@@ -444,7 +444,7 @@ def test_calendar_raw_invalid_codes_preserve_independent_dates_and_states(
     tmp_path, column, value, chunksize
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -470,7 +470,7 @@ def test_calendar_raw_invalid_codes_preserve_independent_dates_and_states(
         assert saved.iloc[0].is_trading_day
     else:
         assert len(saved) == 1
-    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+    counts = open_dataset_session(candidate).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == 2
@@ -1719,8 +1719,10 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
     import hashlib
 
     from quant_research_platform.storage.datasets.comparison import compare_datasets
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import (
+        open_dataset_session,
+        read_dataset,
+    )
     from tests.helpers.a_share_raw import _write_csmar
     from tests.helpers.paths import StorageLayout
 
@@ -1770,7 +1772,7 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
         roots.append(root)
         saved = read_dataset(root)
         frames.append(saved.sort_values(list(spec.primary_key)).reset_index(drop=True))
-        metadata = read_dataset_manifest_evidence(root)["producer_diagnostics"]
+        metadata = open_dataset_session(root).manifest["producer_diagnostics"]
         assert metadata["exact_duplicate_count"] == 1
         if data_id == "analyst_forecast":
             counts = metadata["source_row_counts"]
@@ -1805,7 +1807,7 @@ def test_analyst_same_key_conflict_preserves_independent_reports_and_prior_datas
     tmp_path, chunksize, raw_column, value, column
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -1847,7 +1849,7 @@ def test_analyst_same_key_conflict_preserves_independent_reports_and_prior_datas
     assert saved.loc["independent-report", "forecast_eps"] == 12
     assert saved.loc["independent-report", "institution_id"] == "B"
     assert "version_identity" not in saved
-    counts = read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+    counts = open_dataset_session(candidate).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts[f"conflicting_{column}_rows"] == 2
@@ -1914,7 +1916,7 @@ def test_special_treatment_unknown_transition_keeps_event_and_valid_neighbor(
     tmp_path, code, chunksize
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -1947,7 +1949,7 @@ def test_special_treatment_unknown_transition_keeps_event_and_valid_neighbor(
     assert bool(saved.loc["000002", "is_st"])
     assert not bool(saved.loc["000002", "is_pt"])
     assert str(saved.is_st.dtype) == str(saved.is_pt.dtype) == "boolean"
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["unsupported_transition_rows"] == 1
@@ -1959,7 +1961,7 @@ def test_special_treatment_unknown_transition_keeps_event_and_valid_neighbor(
 @pytest.mark.parametrize("all_bad", [False, True])
 def test_special_treatment_blank_event_key_is_local_and_typed(tmp_path, code, all_bad):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -1984,7 +1986,7 @@ def test_special_treatment_blank_event_key_is_local_and_typed(tmp_path, code, al
     assert saved.source_asset_id.tolist() == ([] if all_bad else ["000002"])
     assert str(saved.timestamp.dtype) == "datetime64[ns]"
     assert str(saved.is_st.dtype) == str(saved.is_pt.dtype) == "boolean"
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == len(rows)
@@ -2080,13 +2082,13 @@ def test_index_membership_raw_text_survives_public_materialization(
     ]
     if bad_numeric:
         assert frame.change_type.isna().all()
-        from quant_research_platform.storage.manifests import (
-            read_dataset_manifest_evidence,
+        from quant_research_platform.storage.datasets.reading import (
+            open_dataset_session,
         )
 
-        counts = read_dataset_manifest_evidence(
+        counts = open_dataset_session(
             result.artifact_roots["index_membership"]
-        )["producer_diagnostics"]["source_row_counts"]
+        ).manifest["producer_diagnostics"]["source_row_counts"]
         assert counts["invalid_change_type_rows"] == 2
     else:
         assert frame.change_type.tolist() == [1.0, 1.0]
@@ -2204,28 +2206,16 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     )
     originals = _file_bytes(normal_layout.project_root)
     primary = failure_type("parent_failure")
-    native_check = interim.require_unaliased_path
     native_stat = interim.filesystem_stat
-    armed = False
     calls = []
 
-    def checked(path, *, error):
-        nonlocal armed
-        result = native_check(path, error=error)
-        if error == "csmar_interim_source_parent_invalid":
-            armed = True
-        return result
-
     def failed_stat(path, *args, **kwargs):
-        nonlocal armed
-        if armed and path == raw:
-            armed = False
+        if path == raw:
             calls.append(path)
             raise primary
         return native_stat(path, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(interim, "require_unaliased_path", checked)
         patch.setattr(interim, "filesystem_stat", failed_stat)
         error_type = (
             ValueError
@@ -2978,7 +2968,7 @@ def test_interim_owns_source_window_and_raw_preserves_all_business_values(
 ):
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -3022,7 +3012,7 @@ def test_interim_owns_source_window_and_raw_preserves_all_business_values(
     pd.testing.assert_frame_equal(
         read_dataset(selected), read_dataset(baseline), check_exact=True
     )
-    counts = read_dataset_manifest_evidence(selected)["producer_diagnostics"][
+    counts = open_dataset_session(selected).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == 2
@@ -3049,7 +3039,7 @@ def test_interim_owns_source_window_and_raw_preserves_all_business_values(
     pd.testing.assert_frame_equal(
         read_dataset(unknown), read_dataset(baseline), check_exact=True
     )
-    counts = read_dataset_manifest_evidence(unknown)["producer_diagnostics"][
+    counts = open_dataset_session(unknown).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == 2
@@ -3059,7 +3049,7 @@ def test_interim_owns_source_window_and_raw_preserves_all_business_values(
 
 
 def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path):
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -3075,10 +3065,10 @@ def test_multi_target_diagnostics_do_not_inherit_previous_table_counts(tmp_path)
     interim.materialize_interim_data(
         raw_root=raw, output_roots=roots, data_ids=tuple(roots), metadata=metadata
     )
-    analyst = read_dataset_manifest_evidence(roots["analyst_forecast"])[
+    analyst = open_dataset_session(roots["analyst_forecast"]).manifest[
         "producer_diagnostics"
     ]
-    calendar = read_dataset_manifest_evidence(roots["trading_calendar"])[
+    calendar = open_dataset_session(roots["trading_calendar"]).manifest[
         "producer_diagnostics"
     ]
     assert analyst["source_row_counts"]["raw_rows"] == len(_analyst_rows())
@@ -3251,7 +3241,7 @@ def test_stock_master_unresolved_delisting_keeps_later_status_and_neighbors(
     tmp_path, chunksize, bad_delisting_date
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -3306,7 +3296,7 @@ def test_stock_master_unresolved_delisting_keeps_later_status_and_neighbors(
     assert pd.api.types.is_bool_dtype(saved.delisting_date_unresolved.dtype)
     assert not saved.delisting_date_unresolved.isna().any()
     assert not saved.duplicated(["source_asset_id", "timestamp"]).any()
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["invalid_delisting_date_rows"] == 1
@@ -3321,7 +3311,7 @@ def test_stock_master_unknown_listing_date_keeps_status_time_without_fabrication
     tmp_path, chunksize, listing_date
 ):
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -3362,7 +3352,7 @@ def test_stock_master_unknown_listing_date_keeps_status_time_without_fabrication
         pd.Timestamp("2010-01-04")
     ]
     assert not saved.delisting_date_unresolved.any()
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == counts["retained_after_date_filter_rows"] == 3
@@ -3438,8 +3428,10 @@ def test_daily_bar_requested_window_preserves_typed_schema(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import (
+        open_dataset_session,
+        read_dataset,
+    )
     from tests.helpers.a_share_raw import _write_csmar
 
     data_id = "market_bars_1d"
@@ -3484,7 +3476,7 @@ def test_daily_bar_requested_window_preserves_typed_schema(
         assert schema.field("source_asset_id").type == pa.string()
         assert pa.types.is_timestamp(schema.field("timestamp").type)
         assert not any(pa.types.is_null(field.type) for field in schema)
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == len(dates)
@@ -3499,8 +3491,10 @@ def test_daily_bar_requested_window_preserves_typed_schema(
 def test_daily_bar_conflicts_preserve_agreed_facts_and_returns(
     tmp_path, chunksize, reverse, split_files
 ):
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import (
+        open_dataset_session,
+        read_dataset,
+    )
     from tests.helpers.a_share_raw import _write_csmar
 
     data_id = "market_bars_1d"
@@ -3566,7 +3560,7 @@ def test_daily_bar_conflicts_preserve_agreed_facts_and_returns(
     # Both complete alternatives establish the same adjusted opening price.
     assert saved.loc["000004", ["open", "close"]].isna().all()
     assert saved.loc["000004", "adj_open"] == 10.0
-    diagnostics = read_dataset_manifest_evidence(root)["producer_diagnostics"]
+    diagnostics = open_dataset_session(root).manifest["producer_diagnostics"]
     assert diagnostics["exact_duplicate_count"] == 1
     counts = diagnostics["source_row_counts"]
     assert counts["conflicting_volume_rows"] == 2
@@ -3581,8 +3575,10 @@ def test_daily_bar_conflicts_preserve_agreed_facts_and_returns(
 def test_index_market_conflicts_are_field_local_across_chunks(
     tmp_path, chunksize, reverse
 ):
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import (
+        open_dataset_session,
+        read_dataset,
+    )
     from tests.helpers.a_share_raw import _write_csmar
 
     rows = _nullable_index_numeric_rows("index_market")[1:3]
@@ -3605,7 +3601,7 @@ def test_index_market_conflicts_are_field_local_across_chunks(
     assert saved.index_name.tolist() == ["synthetic-index", "synthetic-index"]
     assert pd.isna(saved.close.iloc[0]) and pd.isna(saved.period_return.iloc[0])
     assert saved.close.iloc[1] == 100.0 and saved.period_return.iloc[1] == 0.0
-    counts = read_dataset_manifest_evidence(root)["producer_diagnostics"][
+    counts = open_dataset_session(root).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert (
@@ -3621,7 +3617,7 @@ def test_optional_reference_conflicts_preserve_consumed_facts(tmp_path, subtests
     )
     from quant_research_platform.markets.implementations.a_share.processed import panels
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     info = {
@@ -3695,7 +3691,7 @@ def test_optional_reference_conflicts_preserve_consumed_facts(tmp_path, subtests
                 saved = read_dataset(root)
                 assert len(saved) == 2
                 assert saved[column].isna().sum() == 1
-                counts = read_dataset_manifest_evidence(root)["producer_diagnostics"][
+                counts = open_dataset_session(root).manifest["producer_diagnostics"][
                     "source_row_counts"
                 ]
                 assert counts[f"conflicting_{column}_rows"] == 2
@@ -3729,7 +3725,7 @@ def test_unconsumed_index_name_conflict_does_not_block_benchmark_publication(tmp
         _iter_benchmark_weights,
     )
     from quant_research_platform.storage.datasets import read_dataset
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.helpers.a_share_raw import _write_csmar
 
     raw = tmp_path / "raw"
@@ -3767,9 +3763,9 @@ def test_unconsumed_index_name_conflict_does_not_block_benchmark_publication(tmp
     assert set(saved_info.index) == {"000852", "000905"}
     assert pd.isna(saved_info.loc["000852", "index_name"])
     assert saved_info.loc["000905", "index_name"] == "中证小盘500指数"
-    counts = read_dataset_manifest_evidence(roots["index_info"])[
-        "producer_diagnostics"
-    ]["source_row_counts"]
+    counts = open_dataset_session(roots["index_info"]).manifest["producer_diagnostics"][
+        "source_row_counts"
+    ]
     assert counts["conflicting_index_name_rows"] == 2
     output = prepare(
         dict(

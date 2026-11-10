@@ -64,17 +64,17 @@ def iter_dataset_part_batches(
         raise ValueError("invalid_batch_rows")
     with _opened_parquet(path) as opened:
         parquet_file, handle = opened
-        metadata = _part_metadata(
-            parquet_file,
-            handle=handle,
-            require_logical_dtypes=False,
-        )
+        physical_schema = parquet_file.schema_arrow.remove_metadata()
         if metadata_observer is not None:
-            metadata_observer(metadata)
-        selected_columns = columns or tuple(metadata.schema.names)
+            metadata_observer(
+                _part_metadata(
+                    parquet_file, handle=handle, require_logical_dtypes=False
+                )
+            )
+        selected_columns = columns or tuple(physical_schema.names)
         try:
             schema = pa.schema(
-                [metadata.schema.field(column) for column in selected_columns]
+                [physical_schema.field(column) for column in selected_columns]
             )
         except KeyError as exc:
             raise ValueError("dataset_column_not_found") from exc
@@ -104,33 +104,8 @@ def iter_dataset_part_batches(
 def _opened_parquet(path: Path):
     """Open one selected member; decoding errors propagate without a recheck."""
     with closing_iterator(open_filesystem_file(Path(path))) as handle:
-        footer_length = _parquet_footer_length(handle)
-        with closing_iterator(
-            pq.ParquetFile(
-                handle,
-                thrift_string_size_limit=max(1, footer_length),
-                thrift_container_size_limit=max(1, footer_length),
-                pre_buffer=False,
-            )
-        ) as parquet:
+        with closing_iterator(pq.ParquetFile(handle, pre_buffer=False)) as parquet:
             yield (parquet, handle)
-
-
-def _parquet_footer_length(handle: Any) -> int:
-    position = handle.tell()
-    handle.seek(0, os.SEEK_END)
-    file_size = handle.tell()
-    if file_size < 8:
-        raise ValueError("dataset_parquet_footer_invalid")
-    handle.seek(-8, os.SEEK_END)
-    trailer = handle.read(8)
-    handle.seek(position)
-    if len(trailer) != 8 or trailer[4:] != b"PAR1":
-        raise ValueError("dataset_parquet_footer_invalid")
-    footer_length = int.from_bytes(trailer[:4], "little")
-    if footer_length > file_size - 8:
-        raise ValueError("dataset_parquet_footer_invalid")
-    return footer_length
 
 
 def _part_metadata(

@@ -40,7 +40,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_is_dir,
     filesystem_is_file,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -154,16 +153,14 @@ def materialize_interim_data(
         raise ValueError("a_share_fee_source_pair_required")
     if fee_csv is not None and A_SHARE_FEE_SCHEDULE_DATA_ID not in data_ids:
         raise ValueError("reference_fee_files_not_consumed")
-    root = require_unaliased_path(raw_root, error="reference_source_root_invalid")
+    root = Path(raw_root)
     if filesystem_exists(root) and not filesystem_is_dir(root):
         raise ValueError("reference_source_root_invalid")
     written = {}
     skipped = []
     for data_id in data_ids:
         if data_id != A_SHARE_FEE_SCHEDULE_DATA_ID or fee_csv is None:
-            dataset_root = require_unaliased_path(
-                root / data_id, error="reference_source_root_invalid"
-            )
+            dataset_root = Path(root / data_id)
             if not filesystem_exists(dataset_root):
                 skipped.append(data_id)
                 continue
@@ -307,7 +304,7 @@ def _industry_source(reference_root):
             or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
         ):
             raise ValueError("industry_snapshot_member_invalid")
-        member = require_unaliased_path(root / name, error="invalid_dataset_part_files")
+        member = Path(root / name)
         candidate_raw, candidate = read_qrp_json_file(member)
         digest = hashlib.sha256(candidate_raw).hexdigest()
         members[name] = candidate

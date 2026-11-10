@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import os
-import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,8 +14,8 @@ import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.identity as identity
 import quant_research_platform.storage.parquet as physical
-from quant_research_platform.storage import _scratch_ownership as scratch_owner
 from quant_research_platform.storage import atomic, manifests
+from quant_research_platform.storage import atomic as scratch_owner
 from tests.helpers.source_preparation import prepared_source_evidence
 
 _PRIMARY_EXCEPTION_TYPES = (
@@ -66,9 +65,7 @@ def test_content_hash_close_preserves_primary_and_closes_file(
 def test_shared_path_move_is_fail_if_destination_exists(
     tmp_path: Path, long_path
 ) -> None:
-    shared = __import__(
-        "quant_research_platform.storage._scratch_ownership", fromlist=["*"]
-    )
+    shared = __import__("quant_research_platform.storage.atomic", fromlist=["*"])
     parent = tmp_path
 
     def native(path):
@@ -91,47 +88,6 @@ def test_shared_path_move_is_fail_if_destination_exists(
     shared.move_path_no_replace(source, moved)
     assert native(moved).read_text(encoding="utf-8") == "source"
     assert not native(source).exists()
-
-
-def test_write_and_scratch_owners_reject_aliased_parent_before_access(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "target"
-    identity.filesystem_mkdir(target)
-    alias = tmp_path / "alias"
-    try:
-        Path(identity.native_filesystem_path(alias)).symlink_to(
-            identity.native_filesystem_path(target), target_is_directory=True
-        )
-    except OSError as exc:
-        pytest.skip(f"directory_symlink_not_available: {exc}")
-    operations = (
-        lambda: atomic.atomic_write_text(alias / "text.txt", "payload"),
-        lambda: atomic.atomic_write_directory(alias / "tree", lambda _root: None),
-        lambda: manifests.write_manifest(
-            alias / "manifest.json", {"schema_id": "qrp-test"}
-        ),
-    )
-    for operation in operations:
-        with pytest.raises(ValueError):
-            operation()
-    assert not tuple(identity.filesystem_iterdir(target))
-
-
-def test_unaliased_path_checks_lexical_component_before_parent_traversal(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    alias = tmp_path / "alias"
-    visited: list[Path] = []
-
-    def is_alias(path: Path) -> bool:
-        visited.append(path)
-        return path == alias
-
-    monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
-    with pytest.raises(ValueError, match="invalid_path"):
-        identity.require_unaliased_path(alias / ".." / "artifact", error="invalid_path")
-    assert alias in visited
 
 
 class _BodyAndCloseFailingHandle:
@@ -247,16 +203,6 @@ def test_opened_parquet_close_surfaces_failure_on_cancellation(
     with pytest.raises(RuntimeError, match="close_failed"):
         with physical._opened_parquet(Path("part.parquet")):
             raise GeneratorExit()
-
-
-@pytest.mark.parametrize(
-    "payload", (b"\x00\x00\x00\x00NOPE", (9).to_bytes(4, "little") + b"PAR1")
-)
-def test_parquet_footer_rejects_invalid_trailer_without_constructor(
-    payload: bytes,
-) -> None:
-    with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
-        physical._parquet_footer_length(io.BytesIO(payload))
 
 
 @pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
@@ -432,250 +378,6 @@ def test_compare_expected_storage_validation_still_maps(
     assert comparison.compare_datasets(left, right).status == "INSPECTION_FAILED"
 
 
-def test_artifact_root_alias_is_rejected_by_unique_root_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = Path("dataset")
-    absolute_root = Path.cwd() / root
-    monkeypatch.setattr(
-        identity,
-        "path_is_filesystem_alias",
-        lambda candidate: candidate == absolute_root,
-    )
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        identity.require_artifact_root(root)
-
-
-@pytest.mark.parametrize("position", ("root", "immediate", "deep"))
-@pytest.mark.parametrize("alias_kind", ("symlink", "junction"))
-def test_artifact_root_rejects_exact_or_ancestor_alias(
-    tmp_path: Path, position: str, alias_kind: str
-) -> None:
-    target = tmp_path / "target"
-    identity.filesystem_mkdir(target)
-    alias = tmp_path / "alias"
-    if alias_kind == "symlink":
-        try:
-            Path(identity.native_filesystem_path(alias)).symlink_to(
-                identity.native_filesystem_path(target), target_is_directory=True
-            )
-        except OSError as exc:
-            pytest.skip(f"symlink_not_available: {exc}")
-    else:
-        if os.name != "nt" or not hasattr(Path, "is_junction"):
-            pytest.skip("junction_capability_required")
-        created = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
-            check=False,
-            capture_output=True,
-        )
-        if created.returncode != 0:
-            pytest.skip("junction_not_available")
-    root = (
-        alias
-        if position == "root"
-        else alias / "artifact"
-        if position == "immediate"
-        else alias / "nested" / "artifact"
-    )
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        identity.require_artifact_root(root)
-
-
-def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = Path("relative") / "dataset"
-    monkeypatch.setattr(identity, "path_is_filesystem_alias", lambda _candidate: False)
-    assert identity.require_artifact_root(root) == root
-
-
-def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
-    target = tmp_path / "target"
-    identity.filesystem_mkdir(target)
-    identity.filesystem_write_text(
-        target / "manifest.json", '{"schema_id":"test"}', encoding="utf-8"
-    )
-    alias = tmp_path / "alias"
-    try:
-        Path(identity.native_filesystem_path(alias)).symlink_to(
-            identity.native_filesystem_path(target), target_is_directory=True
-        )
-    except OSError as exc:
-        pytest.skip(f"directory_symlink_not_available: {exc}")
-    with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
-        manifests.read_qrp_json_file(alias / "manifest.json")
-
-
-def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        dataset_writing, "data_spec_payload", lambda _spec, **_kwargs: {}
-    )
-    monkeypatch.setattr(
-        dataset_writing,
-        "require_artifact_root",
-        lambda _root: (_ for _ in ()).throw(ValueError("invalid_dataset_part_files")),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        dataset_writing,
-        "_write_contents",
-        lambda *_args, **_kwargs: pytest.fail("writer_before_artifact_root_gate"),
-    )
-
-    class ForbiddenChunks:
-        def __iter__(self):
-            raise AssertionError("input_iterated_before_artifact_root_gate")
-
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        dataset_writing.write_dataset(Path("dataset"), ForbiddenChunks(), spec=object())
-
-
-def test_compare_rechecks_artifact_roots_before_each_exists_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    left = Path("left")
-    right = Path("right")
-    validations = {left: 0, right: 0}
-    probes = {left: 0, right: 0}
-    original_exists = comparison.filesystem_exists
-
-    def require_root(path: Path) -> Path:
-        candidate = Path(path)
-        validations[candidate] += 1
-        return candidate
-
-    def exists(path: Path) -> bool:
-        candidate = Path(path)
-        if candidate not in probes:
-            return original_exists(path)
-        probes[candidate] += 1
-        assert validations[candidate] == probes[candidate]
-        return True
-
-    monkeypatch.setattr(
-        comparison, "require_artifact_root", require_root, raising=False
-    )
-    monkeypatch.setattr(comparison, "filesystem_exists", exists)
-    monkeypatch.setattr(
-        comparison,
-        "open_dataset_session",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid_dataset")),
-    )
-    result = comparison.compare_datasets(left, right)
-    assert result.status == "INSPECTION_FAILED"
-    assert validations == {left: 1, right: 1}
-    assert probes == {left: 1, right: 1}
-
-
-def test_compare_maps_aliased_root_before_exists_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    left = Path("left")
-    right = Path("right")
-    original_exists = comparison.filesystem_exists
-
-    def reject_alias(path: Path) -> Path:
-        if Path(path) == left:
-            raise ValueError("invalid_dataset_part_files")
-        return Path(path)
-
-    monkeypatch.setattr(
-        comparison, "require_artifact_root", reject_alias, raising=False
-    )
-
-    def exists(path: Path) -> bool:
-        if Path(path) in (left, right):
-            raise AssertionError("dataset_exists_before_artifact_root_alias_gate")
-        return original_exists(path)
-
-    monkeypatch.setattr(comparison, "filesystem_exists", exists)
-    result = comparison.compare_datasets(left, right)
-    assert result.status == "INSPECTION_FAILED"
-    assert result.summary == {"error": "dataset_inspection_failed"}
-
-
-@pytest.mark.parametrize("alias_side", ("left", "right"))
-def test_compare_maps_ancestor_alias_before_public_exists_probe(
-    monkeypatch: pytest.MonkeyPatch, alias_side: str
-) -> None:
-    left = Path("left-parent") / "left"
-    right = Path("right-parent") / "right"
-    aliased_parent = Path.cwd() / (left if alias_side == "left" else right).parent
-    monkeypatch.setattr(
-        identity,
-        "path_is_filesystem_alias",
-        lambda candidate: candidate == aliased_parent,
-    )
-    original_exists = comparison.filesystem_exists
-
-    def exists(path: Path) -> bool:
-        candidate = Path(path)
-        if candidate == (left if alias_side == "left" else right):
-            raise AssertionError("dataset_exists_before_ancestor_alias_gate")
-        if candidate in (left, right):
-            return True
-        return original_exists(path)
-
-    monkeypatch.setattr(comparison, "filesystem_exists", exists)
-    result = comparison.compare_datasets(left, right)
-    assert result.status == "INSPECTION_FAILED"
-    assert result.summary == {"error": "dataset_inspection_failed"}
-
-
-@pytest.mark.parametrize("alias_side", ("left", "right"))
-def test_compare_rechecks_native_reader_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_side: str
-) -> None:
-    from tests.storage.low_level_fixtures import (
-        make_dataset_artifact_root,
-        make_default_dataset_frame,
-        make_processed_dataset_spec,
-    )
-
-    left = make_dataset_artifact_root(tmp_path / "left-parent", "same")
-    right = make_dataset_artifact_root(tmp_path / "right-parent", "same")
-    for root in (left, right):
-        dataset_writing.write_dataset(
-            root, make_default_dataset_frame(), spec=make_processed_dataset_spec("same")
-        )
-    assert comparison.compare_datasets(left, right).status == "MATCH"
-    target = left if alias_side == "left" else right
-    aliased_parent = target.parent
-    activated = False
-    alias_hits = 0
-    rejected = []
-    original_require = dataset_reading.require_artifact_root
-    original_alias = identity.path_is_filesystem_alias
-
-    def require_root(path: Path) -> Path:
-        nonlocal activated
-        if path == target:
-            activated = True
-        try:
-            return original_require(path)
-        except ValueError as error:
-            rejected.append(str(error))
-            raise
-
-    def is_alias(candidate: Path) -> bool:
-        nonlocal alias_hits
-        if activated and candidate == aliased_parent:
-            alias_hits += 1
-            return True
-        return original_alias(candidate)
-
-    monkeypatch.setattr(dataset_reading, "require_artifact_root", require_root)
-    monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
-    result = comparison.compare_datasets(left, right)
-    assert result.status == "INSPECTION_FAILED"
-    assert activated
-    assert alias_hits == 1
-    assert rejected == ["invalid_dataset_part_files"]
-
-
 def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     owned_file = tmp_path / "owned-file"
     identity.filesystem_write_bytes(owned_file, b"x")
@@ -807,10 +509,9 @@ def test_dataset_inventory_preserves_serious_io(tmp_path, monkeypatch, error_typ
 
 @pytest.mark.parametrize("operation", ("read", "inspect", "fingerprint"))
 @pytest.mark.parametrize("failure", ("tell", "seek", "read"))
-def test_public_parquet_footer_preserves_system_io(
+def test_public_parquet_reader_preserves_system_io(
     tmp_path, monkeypatch, operation, failure
 ):
-    import io
 
     from quant_research_platform.storage import datasets
     from tests.storage.low_level_fixtures import (
@@ -841,7 +542,7 @@ def test_public_parquet_footer_preserves_system_io(
             return super().seek(offset, whence)
 
         def read(self, size=-1):
-            if failure == "read" and size == 8:
+            if failure == "read":
                 raise primary
             return super().read(size)
 

@@ -16,8 +16,10 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     stock_order_limits,
 )
 from quant_research_platform.sources.reference import interim
-from quant_research_platform.storage.datasets.reading import read_dataset
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
+    read_dataset,
+)
 
 
 @pytest.fixture
@@ -32,7 +34,7 @@ def handling_schedule(tmp_path):
     )
     return fee_schedule_from_frame(
         read_dataset(output),
-        content_identity=read_dataset_manifest_evidence(output)["source_evidence"][
+        content_identity=open_dataset_session(output).manifest["source_evidence"][
             "content_hash"
         ],
     )

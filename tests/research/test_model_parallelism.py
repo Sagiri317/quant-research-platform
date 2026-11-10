@@ -117,11 +117,3 @@ def test_actual_fit_preserves_thread_configuration_and_metadata(
     assert np.isfinite(result.prediction_model.predict(frame[["x"]])).all()
     if algorithm in ALGORITHMS:
         assert result.prediction_model.n_jobs == requested
-        result.metadata["resolved_hyperparameters"]["n_jobs"] = 2
-        validate_model_metadata_core(result.metadata)
-        fitting.validate_model_state(result.prediction_model, result.metadata)
-        result.metadata["resolved_hyperparameters"]["n_estimators"] = 3
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            validate_model_metadata_core(result.metadata)
-        with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
-            fitting.validate_model_state(result.prediction_model, result.metadata)

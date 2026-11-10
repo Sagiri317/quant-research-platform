@@ -16,7 +16,6 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     filesystem_iterdir,
     open_filesystem_file,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import write_manifest
 
@@ -131,7 +130,7 @@ def iter_csv_snapshot(
     content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[object, ...]]:
     """Decode typed rows, with canonical byte verification for source acceptance."""
-    root = require_unaliased_path(root, error="raw_csv_path_invalid")
+    root = Path(root)
     if verify_bytes and set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
         "response.metadata.json",

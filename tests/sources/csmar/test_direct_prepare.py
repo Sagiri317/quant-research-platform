@@ -2,12 +2,40 @@
 
 import csv
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
 from quant_research_platform.sources.csmar.interim import materialize_interim_data
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
+
+
+@pytest.mark.parametrize("linked_member", [False, True])
+def test_source_reads_linked_raw_directory_or_csv(tmp_path, linked_member):
+    source = tmp_path / "original"
+    source.mkdir()
+    original = source / "calendar.csv"
+    original.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+    raw = tmp_path / "raw"
+    try:
+        if linked_member:
+            raw.mkdir()
+            (raw / original.name).symlink_to(original)
+        else:
+            raw.symlink_to(source, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlink_not_available")
+    output = tmp_path / "calendar"
+    result = materialize_interim_data(
+        raw_root=raw,
+        output_roots={"trading_calendar": output},
+        data_ids=("trading_calendar",),
+    )
+    assert not result.skipped
+    frame = read_dataset(output)
+    assert frame.timestamp.tolist() == [pd.Timestamp("2020-01-02")]
+    assert frame.is_trading_day.tolist() == [True]
 
 
 def test_empty_declared_source_preserves_native_schema(tmp_path):
@@ -56,9 +84,9 @@ def test_absent_requested_table_is_not_an_empty_present_table(tmp_path):
     assert frame.empty
     assert str(frame.timestamp.dtype) == "datetime64[ns]"
     assert str(frame.is_trading_day.dtype) == "bool"
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
 
-    counts = read_dataset_manifest_evidence(output)["producer_diagnostics"][
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
         "source_row_counts"
     ]
     assert counts["raw_rows"] == 1

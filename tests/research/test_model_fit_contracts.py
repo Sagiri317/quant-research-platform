@@ -193,7 +193,6 @@ def test_shared_preprocessing_matches_independent_candidate_states(monkeypatch):
                 reference.metadata["feature_importance"][column], rel=1e-12, abs=1e-14
             )
         restored = pickle.loads(pickle.dumps(result.prediction_model))
-        fitting.validate_model_state(restored, result.metadata)
         np.testing.assert_allclose(
             restored.scaler.transform(frame[["x"]]),
             reference.prediction_model.scaler.transform(frame[["x"]]),

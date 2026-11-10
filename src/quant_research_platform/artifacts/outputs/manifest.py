@@ -21,7 +21,6 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _OUTPUT_MANIFEST_KEYS = frozenset(
@@ -181,7 +180,7 @@ def validate_output_bundle(
     selected_files: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, object], tuple[Path, ...]]:
     """Read shared metadata once and check only the selected declared paths."""
-    root = require_unaliased_path(Path(root), error="output_bundle_root_invalid")
+    root = Path(root)
     if not root.is_dir():
         raise ValueError("output_bundle_root_invalid")
     manifest = read_qrp_json_file(root / "manifest.json")[1]

@@ -1,0 +1,38 @@
+{
+  "inputs": {
+    "path": "data/research/a_share/etf_3s",
+    "row_filters": [
+      [
+        "asset_id",
+        "==",
+        "510300"
+      ]
+    ]
+  },
+  "output": "results/etf/510300/evaluation",
+  "window": {
+    "start": "2023-09-08T01:30:00",
+    "end": "2023-09-08T06:59:00"
+  },
+  "cutoff": "2023-09-08T07:00:00",
+  "evaluation": {
+    "evaluation_id": "etf_30s",
+    "market_id": "a_share",
+    "research_dataset_id": "etf_3s",
+    "signals": [
+      {
+        "signal_id": "relative_spread",
+        "source_kind": "factor",
+        "source_column": "relative_spread"
+      }
+    ],
+    "label_columns": [
+      "future_mid_return_30s"
+    ],
+    "evaluation_axis": "single_asset_time_series",
+    "correlation_clock": "trading_day"
+  },
+  "sessions": [
+    "2023-09-08"
+  ]
+}

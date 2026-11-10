@@ -20,7 +20,10 @@ from quant_research_platform.sources.reference.interim import (
     A_SHARE_FEE_SCHEDULE_DATA_ID,
     A_SHARE_FEE_SIDECAR_NAME,
 )
-from quant_research_platform.storage.datasets.reading import read_dataset
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
+    read_dataset,
+)
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_mkdir,
@@ -31,7 +34,6 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from tests.helpers.paths import StorageLayout
 from tests.helpers.source_preparation import prepared_source_evidence
 
@@ -114,7 +116,7 @@ def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path
     assert result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID] == output
     frame = read_dataset(output)
     assert tuple(frame.columns) == interim.FEE_SCHEDULE_COLUMNS
-    manifest = read_dataset_manifest_evidence(output)
+    manifest = open_dataset_session(output).manifest
     assert (
         manifest["source_evidence"]["content_hash"]
         == load_a_share_fee_source(reference_root=raw).source_identity
@@ -203,7 +205,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     assert spec["primary_key"] == ["source_asset_id", "timestamp", "snapshot_id"]
     assert snapshots["observation_date"].tolist() == [pd.Timestamp("2019-12-31")]
     assert snapshots["timestamp"].tolist() == [pd.Timestamp("2020-01-04")]
-    manifest = read_dataset_manifest_evidence(root)
+    manifest = open_dataset_session(root).manifest
     assert manifest["source_evidence"]["content_hash"] == prepared_source_evidence(
         interim, raw_root / "reference", data_id
     )
@@ -560,7 +562,7 @@ def test_industry_invalid_asset_and_industry_cells_are_local(tmp_path):
         .all()
     )
     assert frame.loc["000002", "company_name"] == "synthetic issuer"
-    diagnostics = read_dataset_manifest_evidence(output)["producer_diagnostics"]
+    diagnostics = open_dataset_session(output).manifest["producer_diagnostics"]
     assert diagnostics["source_row_counts"] == {
         "excluded_missing_required_rows": 2,
         "invalid_industry_rows": 1,

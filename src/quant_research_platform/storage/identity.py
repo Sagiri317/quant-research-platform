@@ -163,36 +163,3 @@ def filesystem_open_descriptor(path: Path, flags: int, mode: int = 511) -> int:
 
 def filesystem_remove_tree(path: Path, *, onexc=None) -> None:
     shutil.rmtree(native_filesystem_path(path), onexc=onexc)
-
-
-def require_artifact_root(root: Path) -> Path:
-    candidate = Path(root)
-    return require_unaliased_path(candidate, error="invalid_dataset_part_files")
-
-
-def require_unaliased_path(path: Path, *, error: str) -> Path:
-    candidate = Path(path)
-    current = Path(candidate.anchor) if candidate.is_absolute() else Path.cwd()
-    parts = candidate.parts[1:] if candidate.anchor else candidate.parts
-    try:
-        for component in (*reversed(current.parents), current):
-            if path_is_filesystem_alias(component):
-                raise ValueError(error)
-        for part in parts:
-            if part == ".":
-                continue
-            if part == "..":
-                current = current.parent
-                continue
-            current /= part
-            if path_is_filesystem_alias(current):
-                raise ValueError(error)
-    except (FileNotFoundError, NotADirectoryError) as exc:
-        raise ValueError(error) from exc
-    return candidate
-
-
-def path_is_filesystem_alias(path: Path) -> bool:
-    candidate = Path(path)
-    native = Path(native_filesystem_path(candidate))
-    return native.is_symlink() or native.is_junction()

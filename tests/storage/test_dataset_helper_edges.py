@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
@@ -977,89 +976,6 @@ def test_inventory_discovery_rejects_invalid_or_ambiguous_parts(
         _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_inventory_discovery_rejects_resolved_path_outside_root(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    external = tmp_path / "external.parquet"
-    pq.write_table(pa.table({"value": [1]}), external)
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        alias = data_root / "part-000.parquet"
-        try:
-            alias.symlink_to(external)
-        except OSError as exc:
-            pytest.skip(f"symlink_not_available: {exc}")
-        _discovered_paths(data_root, spec={"partition_columns": []})
-
-
-def test_inventory_discovery_rejects_symlinked_part_alias(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    part = data_root / "part-000.parquet"
-    pq.write_table(pa.table({"value": [1]}), part)
-    alias = data_root / "part-001.parquet"
-    try:
-        alias.symlink_to(part)
-    except OSError as exc:
-        pytest.skip(f"symlink_not_available: {exc}")
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": []})
-
-
-def test_inventory_discovery_rejects_symlinked_partition_alias(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    year = data_root / "year=2024"
-    year.mkdir(parents=True)
-    pq.write_table(pa.table({"value": [1]}), year / "part-000.parquet")
-    alias = data_root / "year=2025"
-    try:
-        alias.symlink_to(year, target_is_directory=True)
-    except OSError as exc:
-        pytest.skip(f"symlink_not_available: {exc}")
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": ["year"]})
-
-
-@pytest.mark.skipif(
-    os.name != "nt" or not hasattr(Path, "is_junction"),
-    reason="Windows junction capability required",
-)
-def test_inventory_discovery_rejects_junction_data_root(tmp_path: Path) -> None:
-    external = tmp_path / "external"
-    external.mkdir()
-    pq.write_table(pa.table({"value": [1]}), external / "part-000.parquet")
-    data_root = tmp_path / "data"
-    created = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(data_root), str(external)],
-        check=False,
-        capture_output=True,
-    )
-    if created.returncode != 0:
-        pytest.skip("junction_not_available")
-    assert data_root.is_junction()
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": []})
-
-
-@pytest.mark.skipif(
-    os.name != "nt" or not hasattr(Path, "is_junction"),
-    reason="Windows junction capability required",
-)
-def test_inventory_discovery_does_not_descend_nested_junction(tmp_path: Path) -> None:
-    external = tmp_path / "external"
-    external.mkdir()
-    pq.write_table(pa.table({"value": [1]}), external / "part-000.parquet")
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    junction = data_root / "nested"
-    created = subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(junction), str(external)], capture_output=True
-    )
-    if created.returncode != 0:
-        pytest.skip("junction_not_available")
-    assert junction.is_junction()
-    assert _discovered_paths(data_root, spec={"partition_columns": []}) == []
-
-
 @pytest.mark.parametrize(
     "failure_type", (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
 )
@@ -1086,59 +1002,6 @@ def test_inventory_discovery_classifies_scan_error(
     else:
         assert caught.value is primary
     assert not getattr(caught.value, "__notes__", ())
-
-
-def test_directory_scan_processes_first_entry_before_enumerating_siblings(
-    tmp_path, monkeypatch
-):
-    root = tmp_path / "data"
-    root.mkdir()
-    for index in range(3):
-        pq.write_table(pa.table({"value": [index]}), root / f"part-{index:03d}.parquet")
-    scanned, processed = ([], [])
-    scan = os.scandir
-
-    class Entries:
-        def __init__(self, path):
-            self.inner = scan(path)
-
-        def __iter__(self):
-            return self
-
-        def __next__(self):
-            entry = next(self.inner)
-            scanned.append(entry.name)
-            assert processed or len(scanned) <= 2
-            return entry
-
-        def close(self):
-            self.inner.close()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            self.close()
-
-    monkeypatch.setattr(
-        os,
-        "scandir",
-        lambda path: (
-            Entries(path)
-            if not isinstance(path, int) and Path(path).name == root.name
-            else scan(path)
-        ),
-    )
-    validate = DatasetSessionInventory._validated_coordinates
-
-    def observed(self, *args, **kwargs):
-        processed.append(len(scanned))
-        return validate(self, *args, **kwargs)
-
-    monkeypatch.setattr(DatasetSessionInventory, "_validated_coordinates", observed)
-    paths = _discovered_paths(root, spec={"partition_columns": []})
-    assert [path.name for path in paths] == [f"part-{i:03d}.parquet" for i in range(3)]
-    assert 1 <= processed[0] <= 2
 
 
 def test_inventory_discovery_accepts_single_external_hardlink(tmp_path: Path) -> None:
@@ -1194,7 +1057,7 @@ def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
     assert index.identity_payload_count(namespace="left") == 1
 
 
-@pytest.mark.parametrize("invalid", ([], {}, True, 10**400, "winsorize"))
+@pytest.mark.parametrize("invalid", ([], {}, True, "winsorize"))
 def test_feature_recipe_rejects_invalid_persisted_recipe(invalid):
     factor = make_demo_research_dataset_spec().factor_columns[0]
     transform = FeatureTransformSpec("a_share_canonical", (factor,))

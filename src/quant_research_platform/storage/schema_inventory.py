@@ -31,7 +31,6 @@ from quant_research_platform.storage.datasets.schema import physical_schema_colu
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_walk,
-    require_unaliased_path,
 )
 
 _RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
@@ -52,13 +51,6 @@ def iter_schema_inventory_items(
     ):
         raise ValueError("schema_inventory_important_columns_invalid")
     important_columns = frozenset(declared_important_columns)
-    data_root = root / "data"
-    for candidate in (
-        root,
-        data_root,
-        *(data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)),
-    ):
-        require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
 
     def generate() -> Iterator[dict[str, Any]]:
         for artifact_root in _iter_dataset_artifact_roots(root):
@@ -103,13 +95,10 @@ def write_schema_inventory(
 
 def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
     data_root = project_root / "data"
-    require_unaliased_path(project_root, error="schema_inventory_dataset_invalid")
-    require_unaliased_path(data_root, error="schema_inventory_dataset_invalid")
     allowed_roots = tuple(
         data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)
     )
     for layer_root in allowed_roots:
-        require_unaliased_path(layer_root, error="schema_inventory_dataset_invalid")
         if not filesystem_exists(layer_root):
             continue
 
@@ -122,23 +111,13 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
             follow_symlinks=False,
             on_error=fail_walk,
         ):
-            require_unaliased_path(parent, error="schema_inventory_dataset_invalid")
             dirnames.sort()
-            for name in dirnames:
-                require_unaliased_path(
-                    parent / name,
-                    error="schema_inventory_dataset_invalid",
-                )
             dirnames[:] = [
                 name for name in dirnames if not is_atomic_directory_staging_name(name)
             ]
             for name in sorted(filenames):
                 if name != "spec.json":
                     continue
-                spec_path = parent / name
-                require_unaliased_path(
-                    spec_path, error="schema_inventory_dataset_invalid"
-                )
                 roots.append(parent)
         yield from sorted(
             roots, key=lambda path: path.relative_to(project_root).as_posix()

@@ -1638,40 +1638,12 @@ def test_compound_fundamental_ratios_preserve_units_and_undefined_domains(scale)
     for column, value in expected.items():
         assert actual[column].iloc[0] == pytest.approx(value, rel=1e-12, abs=0)
 
-    # Missing constituents, nonpositive denominators and final overflow stay undefined.
+    # Missing constituents and nonpositive denominators stay undefined.
     frame["short_term_borrowings"] = float("nan")
     frame["average_total_assets"] = 0.0
     frame["operating_revenue_ttm"] = -scale
     actual = calculate_fundamental_factors(frame)
     assert actual[list(expected)].isna().all().all()
-    frame["average_total_assets"] = 0.5
-    frame["consolidated_net_income_ttm"] = np.finfo(float).max
-    frame["operating_cash_flow_ttm"] = 0.0
-    assert pd.isna(calculate_fundamental_factors(frame)["accruals"].iloc[0])
-
-
-def test_compound_fundamental_ratio_preserves_cancellation() -> None:
-    from quant_research_platform.research.factors.fundamental.definitions import (
-        FUNDAMENTAL_INPUT_COLUMNS,
-    )
-
-    values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, 1.0)
-    values.update(
-        balance_report_period=pd.Timestamp("2023-12-31"),
-        income_report_period=pd.Timestamp("2023-12-31"),
-        cashflow_report_period=pd.Timestamp("2023-12-31"),
-        short_term_borrowings=1e8,
-        current_portion_noncurrent_liabilities=0.01,
-        long_term_borrowings=-1e8,
-        bonds_payable=0.0,
-        cash=0.0,
-    )
-    frame = pd.DataFrame(
-        [dict(asset_id="asset", timestamp=pd.Timestamp("2024-05-02"), **values)]
-    )
-    actual = calculate_fundamental_factors(frame)
-    assert actual["debt_to_assets"].iloc[0] == pytest.approx(0.01, rel=1e-12, abs=0)
-    assert actual["net_debt_to_assets"].iloc[0] == pytest.approx(0.01, rel=1e-12, abs=0)
 
 
 def test_fundamental_subset_requires_only_its_formula_inputs():

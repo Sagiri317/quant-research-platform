@@ -24,7 +24,6 @@ from quant_research_platform.storage.atomic import (
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
-    require_unaliased_path,
 )
 from quant_research_platform.storage.parquet import parquet_table_writer
 
@@ -223,13 +222,11 @@ def write_parquet_chunks(
     metadata: dict,
 ) -> _PredictionOutputWriteSummary:
     path = Path(path)
-    require_unaliased_path(path, error="invalid_output_write_path")
     row_count = 0
     effective_prediction_end = None
     with closing_iterator(iter(frames)) as active_frames:
         handle = open_filesystem_file(path, "xb")
         with closing_iterator(handle):
-            require_unaliased_path(path.parent, error="invalid_output_write_path")
             with parquet_table_writer(
                 handle, compression="zstd", statistics=("timestamp",)
             ) as write_table:

@@ -1,10 +1,10 @@
-"""Fit supported predictors on legal samples and validate saved estimator state."""
+"""Fit supported predictors on legal samples."""
 
 from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import cached_property
 
 import numpy as np
@@ -17,9 +17,6 @@ from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.json_codec import (
-    canonical_identity_bytes,
-)
 from quant_research_platform.contracts.models import (
     DEEPLOB_ALGORITHMS,
     SEQUENCE_ALGORITHMS,
@@ -27,7 +24,6 @@ from quant_research_platform.contracts.models import (
     TrainingWeighting,
     _thaw_model_hyperparameters,
     sequence_context_columns,
-    sequence_parameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -103,128 +99,6 @@ def prediction_callable(input_columns: tuple[str, ...], prediction_model: object
         return np.asarray(predicted, dtype="float64")
 
     return predict_from_model
-
-
-def validate_model_state(predictor: object, metadata: dict[str, object]) -> None:
-    """Bind persisted model metadata to the actual trained predictor state."""
-    spec = ModelSpec(
-        model_id="persisted_model",
-        model_algorithm=metadata["model_algorithm"],
-        input_factor_columns=tuple(metadata["input_factor_columns"]),
-        input_feature_columns=tuple(metadata["input_feature_columns"]),
-        target_column=metadata["target_column"],
-        sample_filter_mode=metadata["sample_filter_mode"],
-        hyperparameters=metadata["hyperparameters"],
-        random_seed=metadata["random_seed"],
-        training_weighting=metadata["training_weighting"],
-        training_scaling=metadata["training_scaling"],
-    )
-    if spec.model_algorithm in SEQUENCE_ALGORITHMS:
-        import torch
-
-        from quant_research_platform.research.models.neural import (
-            SequencePredictor,
-            _network,
-            _ordered_context,
-        )
-
-        if type(predictor) is not SequencePredictor or (
-            predictor.algorithm != spec.model_algorithm
-            or predictor.parameters
-            != sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
-            or not np.isfinite(predictor.target_mean)
-            or not np.isfinite(predictor.target_scale)
-            or predictor.target_scale <= 0
-        ):
-            raise ValueError("model_state_metadata_mismatch")
-        with torch.random.fork_rng():
-            network = _network(
-                predictor.algorithm, len(predictor.scaler.columns), predictor.parameters
-            )
-        network.load_state_dict(predictor.state)
-        if not all(torch.isfinite(value).all() for value in predictor.state.values()):
-            raise ValueError("model_state_metadata_mismatch")
-        _ordered_context(
-            predictor.history,
-            spec.input_columns,
-            sequence_context_columns(spec.model_algorithm, spec.hyperparameters),
-        )
-        importance = None
-    elif spec.model_algorithm == "linear_regression":
-        if type(predictor) is not LinearScaledPredictor:
-            raise ValueError("model_state_metadata_mismatch")
-        try:
-            coefficients = np.asarray(predictor.coefficients, dtype="float64")
-        except (TypeError, ValueError):
-            raise ValueError("model_state_metadata_mismatch") from None
-        if (
-            coefficients.shape != (len(predictor.scaler.columns) + 1,)
-            or not np.isfinite(coefficients).all()
-        ):
-            raise ValueError("model_state_metadata_mismatch")
-        importance = feature_importance.linear_feature_importance(spec, coefficients)
-    else:
-        if type(predictor) is not ScaledPredictor:
-            raise ValueError("model_state_metadata_mismatch")
-        expected = estimators.build_estimator_from_model_spec(
-            replace(spec, hyperparameters=metadata["resolved_hyperparameters"])
-        )
-        actual = predictor.estimator
-        if type(actual) is not type(expected):
-            raise ValueError("model_state_metadata_mismatch")
-        actual_parameters, expected_parameters = (
-            actual.get_params(deep=False),
-            expected.get_params(deep=False),
-        )
-        if spec.model_algorithm in estimators._PARALLEL_MODEL_ALGORITHMS:
-            actual_parameters.pop("n_jobs", None)
-            expected_parameters.pop("n_jobs", None)
-        if set(actual_parameters) != set(expected_parameters):
-            raise ValueError("model_state_metadata_mismatch")
-        for name, expected_value in expected_parameters.items():
-            actual_value = actual_parameters[name]
-            if isinstance(expected_value, float) and np.isnan(expected_value):
-                matches = isinstance(actual_value, float) and np.isnan(actual_value)
-            else:
-                try:
-                    matches = canonical_identity_bytes(
-                        actual_value
-                    ) == canonical_identity_bytes(expected_value)
-                except ValueError:
-                    matches = False
-            if not matches:
-                raise ValueError("model_state_metadata_mismatch")
-        try:
-            inputs_match = (
-                actual.n_features_in_ == len(predictor.scaler.columns)
-                and tuple(actual.feature_names_in_) == predictor.scaler.columns
-            )
-        except AttributeError:
-            raise ValueError("model_state_metadata_mismatch") from None
-        if not inputs_match:
-            raise ValueError("model_state_metadata_mismatch")
-        importance = feature_importance.estimator_feature_importance(spec, predictor)
-    if (
-        type(predictor.scaler) is not ModelMatrixScaler
-        or predictor.scaler.scaling != spec.training_scaling
-        or predictor.scaler.to_payload() != metadata["scaler"]
-    ):
-        raise ValueError("model_state_metadata_mismatch")
-    saved_importance = metadata.get("feature_importance")
-    if (importance is None) != (saved_importance is None) or (
-        importance is not None
-        and (
-            set(importance) != set(saved_importance)
-            or not np.allclose(
-                list(importance.values()),
-                [saved_importance[column] for column in importance],
-                rtol=1e-12,
-                atol=1e-15 * max(map(abs, importance.values()), default=0.0)
-                + np.nextafter(0.0, 1.0),
-            )
-        )
-    ):
-        raise ValueError("model_state_metadata_mismatch")
 
 
 def _fit_model_result(

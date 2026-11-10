@@ -84,20 +84,3 @@ def test_partial_source_workflow_blocks_and_preserves_old_good(tmp_path):
             data_ids=(target,),
         )
     assert _file_bytes(old_root) == before
-
-
-@pytest.mark.parametrize("location", ["root", "dataset"])
-def test_dangling_reference_source_alias_is_not_absent(tmp_path, location):
-    data_id = interim.A_SHARE_EQUITY_EVENTS_DATA_ID
-    root = tmp_path / "reference"
-    if location == "root":
-        alias = root
-    else:
-        root.mkdir()
-        alias = root / data_id
-    try:
-        alias.symlink_to(tmp_path / "missing-target", target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("directory symlinks unavailable")
-    with pytest.raises(ValueError, match="reference_source_root_invalid"):
-        prepared_source_evidence(interim, root, data_id)

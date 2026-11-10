@@ -159,62 +159,110 @@ def test_native_historical_book_normalization_and_deeplob(tmp_path):
         )
 
 
-@pytest.mark.parametrize("transform", ["date_zscore", "risk_residual"])
-def test_book_normalization_preserves_custom_target_definition(tmp_path, transform):
+@pytest.mark.parametrize("transform", ["date_zscore", "risk_residual", None])
+def test_book_normalization_preserves_targets_and_unchanged_feature_lineage(
+    tmp_path, transform
+):
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+    from quant_research_platform.contracts.features import (
+        FeatureTransformSpec,
+        inherited_feature_transforms,
+    )
     from quant_research_platform.contracts.models import _target_definition
     from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.research.datasets.high_frequency import sample_hft
     from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.storage.datasets.schema import data_spec_payload
 
     columns = list(DEEPLOB_INPUT_COLUMNS)
-    times = pd.to_datetime(["2024-01-02T01:30:00", "2024-01-03T01:30:00"])
+    times = pd.to_datetime(["2024-01-02T01:30:00"] * 2 + ["2024-01-03T01:30:00"] * 2)
     frame = pd.DataFrame(
         {
+            "market_id": "a_share",
             "timestamp": times,
-            "asset_id": "a",
+            "asset_id": ["a", "b"] * 2,
             "session_date": times.normalize(),
-            "model_target": [0.1, 0.2],
+            "exchange": "SSE",
+            "instrument_type": "stock",
+            "segment_id": "am",
+            "eligible": True,
+            "mid": 10.0,
+            "model_target": [0.1, 0.2, 0.3, 0.4],
             "mature_at": times + pd.Timedelta(seconds=30),
+            "x": [1.0, 3.0, 1.0, 3.0],
+            "feature_x": [-1.0, 1.0, -1.0, 1.0],
             **dict.fromkeys(columns, 1.0),
         }
     )
-    roles = {
-        "timestamp": "timestamp",
-        "asset_id": "key",
-        "session_date": "context",
-        "mature_at": "context",
-        "model_target": "label",
+    roles = dict.fromkeys(frame, "context")
+    roles.update(
+        market_id="key",
+        timestamp="timestamp",
+        asset_id="key",
+        eligible="mask",
+        model_target="label",
+        x="factor",
+        feature_x="feature",
         **dict.fromkeys(columns, "feature"),
-    }
-    risk = FactorRiskModel() if transform == "risk_residual" else None
-    spec = ResearchDatasetSpec(
+    )
+    feature = FeatureTransformSpec(
+        recipe_id="a_share_canonical",
+        source_columns=("x",),
+        industry_neutralize=False,
+        size_neutralize=False,
+    )
+    common = dict(
         data_id="custom_book",
         market_id="a_share",
         frequency="tick",
         grain="asset_timestamp",
-        primary_key=("timestamp", "asset_id"),
+        primary_key=("market_id", "timestamp", "asset_id"),
         partition_columns=(),
         column_roles=roles,
-        column_units={"model_target": "decimal_return"},
-        label_availability_columns={"model_target": "mature_at"},
-        input_data_ids=("quotes",),
-        base_input_data_id="quotes",
-        feature_columns=tuple(columns),
-        label_columns=("model_target",),
-        target_label_column="future_mid_return_30s",
-        target_transform=transform,
-        target_clip="mad",
-        risk_model=risk,
-    )
-    source = tmp_path / "source"
-    write_dataset(
-        source,
-        frame,
-        spec=spec,
-        metadata={
-            "producer_diagnostics": {
-                "label_semantics": {"future_mid_return_30s": {"horizon": 30000}}
-            }
+        column_units={
+            "model_target": "decimal_return",
+            "x": "dimensionless",
+            "feature_x": "zscore",
         },
+        label_availability_columns={"model_target": "mature_at"},
+    )
+    if transform is None:
+        spec = ProcessedDataSpec(**common, kind="panel")
+        producer = {
+            "reused_feature_transforms": {
+                "feature_x": {
+                    "recipe_id": "a_share_canonical",
+                    "source_columns": ["x"],
+                    "clip": "mad",
+                    "industry_neutralize": False,
+                    "size_neutralize": False,
+                    "center": True,
+                    "scale": True,
+                    "size_column": "log_total_market_cap",
+                    "output_groups": ["processed"],
+                }
+            }
+        }
+    else:
+        spec = ResearchDatasetSpec(
+            **common,
+            input_data_ids=("quotes",),
+            base_input_data_id="quotes",
+            factor_columns=("x",),
+            feature_columns=(*columns, "feature_x"),
+            feature_transforms=(feature,),
+            label_columns=("model_target",),
+            target_label_column="future_mid_return_30s",
+            target_transform=transform,
+            target_clip="mad",
+            risk_model=FactorRiskModel() if transform == "risk_residual" else None,
+        )
+        producer = {"label_semantics": {"future_mid_return_30s": {"horizon": 30000}}}
+    source = tmp_path / "source"
+    write_dataset(source, frame, spec=spec, metadata={"producer_diagnostics": producer})
+    source_session = open_dataset_session(source)
+    expected_lineage = inherited_feature_transforms(
+        data_spec_payload(spec), source_session.manifest, ("feature_x",)
     )
     output = normalize_book(
         {
@@ -227,13 +275,31 @@ def test_book_normalization_preserves_custom_target_definition(tmp_path, transfo
     )
     session = open_dataset_session(output)
     definition = _target_definition(session.spec, "model_target", session.manifest)
-    assert definition["source_label"] == "future_mid_return_30s"
-    assert definition["target_transform"] == transform
-    assert definition["target_clip"] == "mad"
-    assert definition["label_semantics"] == {"horizon": 30000}
-    if risk is not None:
-        assert definition["risk_model"] == risk.to_dict()
-    pd.testing.assert_frame_equal(
-        read_dataset(output)[["model_target", "mature_at"]],
-        frame[["model_target", "mature_at"]],
+    if transform is None:
+        assert definition is None
+    else:
+        assert definition["source_label"] == "future_mid_return_30s"
+        assert definition["target_transform"] == transform
+        assert definition["target_clip"] == "mad"
+        assert definition["label_semantics"] == {"horizon": 30000}
+        if transform == "risk_residual":
+            assert definition["risk_model"] == FactorRiskModel().to_dict()
+    assert (
+        inherited_feature_transforms(session.spec, session.manifest, ("feature_x",))
+        == expected_lineage
     )
+    pd.testing.assert_frame_equal(
+        read_dataset(output)[["model_target", "mature_at", "feature_x"]],
+        frame[["model_target", "mature_at", "feature_x"]],
+    )
+    with pytest.raises(
+        ValueError, match="hft_sampling_requires_untransformed_features"
+    ):
+        sample_hft(
+            {
+                "inputs": str(output),
+                "output": str(tmp_path / "resampled"),
+                "dataset_id": "resampled",
+                "time_window": {"start": "2024-01-02", "end": "2024-01-03"},
+            }
+        )

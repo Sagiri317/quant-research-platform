@@ -213,9 +213,10 @@ def test_unselected_cscv_does_not_validate_unused_blocks(tmp_path):
         assert values.set_index("metric_id").loc["terminal_nav", "value"] == 1000.0
 
 
+@pytest.mark.parametrize("explicit_analysis", [False, True])
 @pytest.mark.parametrize("sample_role", [None, "walk_forward_oos"])
 def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
-    tmp_path, monkeypatch, sample_role
+    tmp_path, monkeypatch, sample_role, explicit_analysis
 ):
     from quant_research_platform.storage.datasets import reading
 
@@ -280,6 +281,8 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
             "fdr_robustness": "BH_5pct",
         },
     }
+    if not explicit_analysis:
+        config.pop("analyses")
     if sample_role is None:
         config.pop("sample_role")
     else:

@@ -61,13 +61,13 @@ _FAMA_MACBETH_PERIOD_COLUMNS = (
 
 
 def _factor_analyses(config, *, saved_evaluation=False):
-    defaults = ("rank_ic", "stratified_ic" if saved_evaluation else "fama_macbeth")
+    defaults = ("rank_ic", "stratified_ic") if saved_evaluation else ("rank_ic",)
     return _selected_analyses(
         {"analyses": config.get("analyses", list(defaults))},
         (
             *defaults,
             "annual_stability",
-            *(("factor_correlation",) if not saved_evaluation else ()),
+            *(("fama_macbeth", "factor_correlation") if not saved_evaluation else ()),
         ),
     )
 

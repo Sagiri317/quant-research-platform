@@ -179,7 +179,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                     cutoff,
                 ),
             ),
-            config=config,
+            config={**config, "analyses": ["rank_ic", "fama_macbeth"]},
             time_window=TimeWindow(
                 pd.Timestamp("2014-01-02") if full_factor_history else dates[0], cutoff
             ),
@@ -275,7 +275,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                 layout.research_dataset_root("a_share", spec.data_id),
                 time_window=TimeWindow(dates[0], cutoff),
             ),
-            config=quarterly_config,
+            config={**quarterly_config, "analyses": ["rank_ic", "fama_macbeth"]},
             time_window=TimeWindow(dates[0], cutoff),
         )
     )
@@ -377,7 +377,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                     layout.research_dataset_root("a_share", spec.data_id),
                     time_window=TimeWindow(dates[0], cutoff),
                 ),
-                config=robustness_config,
+                config={**robustness_config, "analyses": ["rank_ic", "fama_macbeth"]},
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -630,7 +630,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                     layout.research_dataset_root("a_share", spec.data_id),
                     time_window=TimeWindow(dates[0], cutoff),
                 ),
-                config=config,
+                config={**config, "analyses": ["rank_ic", "fama_macbeth"]},
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -1143,7 +1143,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                     layout.research_dataset_root("a_share", spec.data_id),
                     time_window=TimeWindow(dates[0], cutoff),
                 ),
-                config=config,
+                config={**config, "analyses": ["rank_ic", "fama_macbeth"]},
                 time_window=TimeWindow(dates[0], cutoff),
             )
         )
@@ -1472,7 +1472,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         factor_window = TimeWindow(history[0], cutoff)
         factor_tables = build_a_share_factor_statistics_tables(
             dataset_session=open_dataset_session(source, time_window=factor_window),
-            config=config,
+            config={**config, "analyses": ["rank_ic", "fama_macbeth"]},
             time_window=factor_window,
         )
         index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id", "family_id"))
@@ -1601,8 +1601,8 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
 
 @pytest.mark.parametrize(
     "invalid_cap",
-    [True, np.bool_(True), 10**400, 1 + 2j, [1.0], "vendor-invalid", np.inf],
-    ids=["bool", "numpy-bool", "oversized-int", "complex", "list", "text", "infinity"],
+    [True, np.bool_(True), 1 + 2j, [1.0], "vendor-invalid", np.inf],
+    ids=["bool", "numpy-bool", "complex", "list", "text", "infinity"],
 )
 @pytest.mark.parametrize("asset_count", [3, 6])
 def test_fmb_invalid_real_weights_only_remove_weighted_observations(

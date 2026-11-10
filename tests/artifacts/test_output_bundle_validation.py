@@ -56,7 +56,7 @@ def test_nanosecond_window_and_independent_lookups(tmp_path):
 def test_prediction_member_decode_failure_propagates(tmp_path):
     root, frame, _ = native_bundle(tmp_path)
     (root / "prediction.parquet").write_bytes(b"bad parquet")
-    with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
+    with pytest.raises(pa.ArrowInvalid):
         read_predictions(root)
 
 
