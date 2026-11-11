@@ -66,6 +66,22 @@ def test_missing_quote_or_unknown_calendar_day_does_not_compress_successor_axis(
     assert not result.signal_session.eq(pd.Timestamp("2024-01-05")).any()
 
 
+def test_quote_successor_does_not_require_unrelated_board_closed_history():
+    prices, calendar = inputs()
+    # Before another board existed, its absent weekend rows are irrelevant.
+    calendar = calendar.loc[
+        ~(calendar.source_market_type.eq(32) & calendar.calendar_date.dt.weekday.ge(5))
+    ]
+    result = daily_quotes.daily_decisions(prices, calendar)
+    assert result.signal_session.tolist() == list(
+        pd.to_datetime(["2024-01-05", "2024-01-08"])
+    )
+    assert result.execution_session.tolist() == list(
+        pd.to_datetime(["2024-01-08", "2024-01-09"])
+    )
+    assert result.next_session_intraday_return.tolist() == pytest.approx([0.1, 0.0])
+
+
 def test_total_return_uses_ex_date_cash_and_new_over_old_split_ratio():
     prices, calendar = inputs()
     prices["close"] = [10.0, 4.5, 5.0]

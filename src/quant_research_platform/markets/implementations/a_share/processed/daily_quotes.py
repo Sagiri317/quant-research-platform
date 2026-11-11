@@ -161,6 +161,8 @@ def configured_spec(spec, config):
 
 def daily_decisions(prices, calendar, *, actions=None):
     """A return uses the exact next declared session; no weekend or gap compression."""
+    # ETF/index quotes use Shanghai/Shenzhen calendars, not other boards' histories.
+    calendar = calendar.loc[calendar.source_market_type.isin((1, 4))]
     sessions = unified_trading_sessions(calendar)
     blocks = []
     for asset, group in prices.groupby("asset_id", sort=False):
