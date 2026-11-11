@@ -4,23 +4,12 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.asof import latest_observations
-from quant_research_platform.markets.implementations.a_share.calendar import (
-    next_trading_sessions,
-)
 
 
-def implied_variances(decisions, risk, contracts, calendar):
-    """Interpolate total ATM variance to the actual 20/60-session horizon."""
+def implied_variances(decisions, risk, contracts):
+    """Interpolate total ATM variance to fixed 20/252 and 60/252 year tenors."""
     names = [f"implied_variance_{width}d" for width in (20, 60)]
     result = pd.DataFrame(np.nan, index=decisions.index, columns=names)
-    dates = pd.DatetimeIndex(decisions.signal_session.dropna().unique())
-    following = dates
-    horizons = {}
-    own_calendar = calendar.loc[calendar.source_market_type.eq(1)]
-    for step in range(1, 61):
-        following = next_trading_sessions(own_calendar, following)
-        if step in (20, 60):
-            horizons[step] = pd.Series(following, index=dates)
     meta = contracts.copy()
     meta["asset_id"] = meta.security_id + ":" + meta.contract_id
     meta["available_at"] = pd.concat(
@@ -78,9 +67,7 @@ def implied_variances(decisions, risk, contracts, calendar):
             curve.sort()
             tenor, variance = np.asarray(curve).T
             for width, name in zip((20, 60), names, strict=True):
-                if pd.isna(horizons[width].loc[date]):
-                    continue
-                horizon = (horizons[width].loc[date] - date).days / 365
+                horizon = width / 252
                 if tenor[0] <= horizon <= tenor[-1]:
                     result.loc[i, name] = (
                         np.interp(horizon, tenor, tenor * variance) / horizon

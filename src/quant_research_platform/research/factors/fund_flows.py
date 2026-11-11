@@ -136,6 +136,7 @@ def share_states(frame, *, session_days=None):
 
 def financial_states(cells):
     work = cells.loc[cells.value_observation_date.eq(cells.report_period_end)].copy()
+    work["value"] = work.value.to_numpy(dtype=float, na_value=np.nan)
     keys = [
         "economic_portfolio_id",
         "fund_code",
@@ -604,9 +605,14 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 } <= set(block):
                     result.loc[at, name] = (
                         pressure.groupby(
-                            [block.industry_standard_id, block.industry_level1_code]
+                            [block.industry_standard_id, block.industry_level1_code],
+                            dropna=False,
                         )
                         .transform(lambda s: s.sum(min_count=len(s)))
+                        .where(
+                            block.industry_standard_id.notna()
+                            & block.industry_level1_code.notna()
+                        )
                         .to_numpy()
                     )
     financial = (

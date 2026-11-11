@@ -303,7 +303,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             )
             for name in ("public_option_risk", "public_option_contracts")
         )
-        implied = implied_variances(frame, risk, contracts, calendar)
+        implied = implied_variances(frame, risk, contracts)
         frame[list(implied)] = implied
     if "hft_panel" in inputs:
         panel = materialize_dataset_session(
@@ -348,7 +348,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             "listing_date_inferred": False,
             "implied_variance_method": (
                 "ATM_call_put_mean_variance;linear_total_variance_actual_expiries;"
-                "20_60_future_declared_sessions;no_extrapolation"
+                "20_60_over_252_years;no_extrapolation"
             ),
         }
     }

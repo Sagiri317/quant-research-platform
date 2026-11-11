@@ -44,15 +44,15 @@ def test_atm_total_variance_interpolation_and_unknown_release():
                 )
             )
     contracts, risk = pd.DataFrame(contracts), pd.DataFrame(risk)
-    days = pd.date_range(date, periods=120)
-    calendar = pd.DataFrame(
-        dict(calendar_date=days, source_market_type=1, is_trading_day=days.weekday < 5)
+    result = implied_variances(decisions, risk, contracts)
+    target_days = 20 * 365 / 252
+    expected = (
+        ((80 - target_days) * 20 * 0.2**2 + (target_days - 20) * 80 * 0.4**2)
+        / (80 - 20)
+        / target_days
     )
-    result = implied_variances(decisions, risk, contracts, calendar)
-    # 20 following declared sessions end 28 calendar days later.
-    expected = ((80 - 28) * 20 * 0.2**2 + (28 - 20) * 80 * 0.4**2) / (80 - 20) / 28
     assert result.implied_variance_20d.iloc[0] == pytest.approx(expected)
     assert pd.isna(result.implied_variance_60d.iloc[0])
     assert result.iloc[1].isna().all()
     contracts["available_at"] = pd.NaT
-    assert implied_variances(decisions, risk, contracts, calendar).isna().all().all()
+    assert implied_variances(decisions, risk, contracts).isna().all().all()

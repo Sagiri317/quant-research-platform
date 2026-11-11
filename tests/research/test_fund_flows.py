@@ -76,6 +76,12 @@ def test_report_unit_flows_cash_and_equity_do_not_need_nav_or_holdings():
     broken = financial_states(invalid).iloc[0]
     assert pd.isna(broken.cn_fund_net_flow_rate)
     assert broken.cn_fund_equity_allocation == 0.5
+    unknown = frame.copy()
+    unknown["value"] = unknown.value.astype("Float64")
+    unknown.loc[unknown.field.eq("period_redemption_fund_shares"), "value"] = pd.NA
+    partial = financial_states(unknown).iloc[0]
+    assert pd.isna(partial.cn_fund_net_flow_rate)
+    assert partial.cn_fund_equity_allocation == 0.5
 
 
 def test_etf_share_growth_and_nav_premium_require_same_economic_day():
@@ -273,6 +279,8 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
             asset_id=["s"],
             timestamp=dates[-1] + pd.Timedelta(days=1),
             avg_volume_20d=100.0,
+            industry_standard_id=pd.NA,
+            industry_level1_code=pd.NA,
         )
     )
     fields = ["stock_passive_flow_pressure_1d", "stock_passive_flow_pressure_5d"]
@@ -282,3 +290,11 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
         columns=fields,
     )
     np.testing.assert_allclose(result.loc[0, fields].to_numpy(float), [0.01, 0.05])
+    industry = [name.replace("stock_", "industry_") for name in fields]
+    unknown = calculate(
+        decision,
+        dict(public_fund_shares=shares, public_etf_pcf_components=baskets),
+        columns=fields + industry,
+    )
+    np.testing.assert_allclose(unknown.loc[0, fields].to_numpy(float), [0.01, 0.05])
+    assert unknown[industry].isna().all().all()
