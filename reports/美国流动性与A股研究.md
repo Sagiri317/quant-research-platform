@@ -6,7 +6,7 @@
 
 ## 数据条件
 
-截至 2026-11-06，现用规范源 `data/interim/macro_liquidity/consolidated-bank-gap-20261106` 包含 **66 个序列、728,312 条版本记录、5,149 个源 NULL 值**，其中 62 个序列有 2026 年有效观测。版本行数包含历史修订，不等于独立样本数；有 2026 年观测也不等于完整覆盖 1—10 月。
+截至 2026-11-06，本报告的来源盘点包含 **66 个序列、728,312 条版本记录、5,149 个源 NULL 值**，其中 62 个序列有 2026 年有效观测。原始来源及提取口径见文末，规范化中间目录不作为报告附件依赖。版本行数包含历史修订，不等于独立样本数；有 2026 年观测也不等于完整覆盖 1—10 月。
 
 | 数据组 | 本地有效观测截止 | 主要覆盖限制 |
 |---|---|---|
@@ -164,8 +164,8 @@
 - `data/raw/macro_liquidity/public-search-20261106/`：中债日评页面、收益率水平与日变化附表、请求侧车，以及其他候选入口响应。
 - `data/raw/macro_liquidity/public-bank-20261106/`：中国银行站内检索、旧日报和补取 PDF，独立工行周报及冲突核对资料；未取得原始字节的网页阅读器摘录单独标识。
 - `data/raw/macro_liquidity/public-bank-gap-20261106/` 保存最新周报摘录、工行原 PDF、请求响应及失败记录，摘录类型与页码在 `selected-web-facts.json` 中明确标记。
-- `data/interim/macro_liquidity/consolidated-bank-gap-20261106` 为现用规范源快照，明确引用 `consolidated-bank-history-20261106` 与 6 条周报补充观测。`public-bank-gap-20261106/` 保存当前逐年覆盖、相对 Shibor 缺日和验证结果。此前银行历史批次的提取、重合比较与勘误证据在 `public-bank-20261106/`，各批次快照继续保留。报告中的行数包含历史修订版本。
-- `data/interim/macro_liquidity/early-tsf-stock-20261105/`、`usmpd-20261105/`、`cfets-yield-alternative-20261105/`：分别保存早期原频率社融存量、USMPD 事件结果和中国货币网备选曲线；尚未并入现有宏观因子。
+- 本次统计合并银行历史与 6 条周报补充观测；提取、重合比较、逐年覆盖及勘误依据由上述 `data/raw/macro_liquidity/public-bank-20261106/` 和 `public-bank-gap-20261106/` 原始批次保留。报告中的行数包含历史修订版本，不要求读者持有规范化中间快照。
+- 已采集的早期原频率社融存量、USMPD 事件结果和中国货币网备选曲线尚未并入本报告的宏观因子；其原始来源与元数据保存在 `data/raw/macro_liquidity/`，不依赖本机保存对应中间目录。
 
 来源契约与操作入口见[宏观技术文档](../docs/macro-liquidity.md)。
 
