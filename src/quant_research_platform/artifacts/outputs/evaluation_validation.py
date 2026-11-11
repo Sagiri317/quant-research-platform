@@ -286,7 +286,11 @@ def validate_evaluation_output_metadata_shape(
     if isinstance(metadata, dict) and "response_diagnostics" in metadata:
         science.add("response_diagnostics")
     base = _EVALUATION_OUTPUT_METADATA_KEYS | (
-        {key for key in ("correlation_clock", "top_quantile") if key in metadata}
+        {
+            key
+            for key in ("correlation_clock", "top_quantile", "grouping_rule")
+            if key in metadata
+        }
         if isinstance(metadata, dict)
         else set()
     )
@@ -301,6 +305,10 @@ def validate_evaluation_output_metadata_shape(
         float,
     ):
         raise ValueError("output_manifest_metadata_invalid")
+    if "grouping_rule" in metadata:
+        require_metadata_string(
+            metadata, "grouping_rule", "output_manifest_metadata_invalid"
+        )
     if science <= set(metadata):
         validate_evaluation_science(
             {

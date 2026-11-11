@@ -72,7 +72,7 @@ def test_native_evaluation_keeps_order_ties_and_pair_domain(tmp_path, direction)
     assert tables["metrics"].n_obs.tolist() == [5]
     groups = tables["grouped_label_values"].set_index("group")
     assert groups.n_obs.to_dict() == (
-        {1: 3, 2: 0, 3: 2} if sign == 1 else {1: 2, 2: 2, 3: 1}
+        {1: 3, 2: 0, 3: 2} if sign == 1 else {1: 2, 2: 0, 3: 3}
     )
     if direction == "lower_is_better":
         # The unscoped runner has its own maturity mask before the shared kernel.

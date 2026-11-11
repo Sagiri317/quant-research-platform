@@ -397,6 +397,7 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
+        n_groups=2,
     )
     state = evaluation_engine._EvaluationStreamingState(
         spec=spec,
@@ -438,7 +439,8 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
     assert pd.isna(row["group_monotonicity_score_reason"])
 
 
-def test_single_realized_group_is_undefined_for_spread_and_not_a_zero_day():
+@pytest.mark.parametrize("inner_groups", [[3], [2, 4]])
+def test_missing_extreme_groups_are_undefined_for_spread_not_a_zero_day(inner_groups):
     spec = EvaluationSpec(
         evaluation_id="ties",
         market_id=MarketId("a_share"),
@@ -449,20 +451,22 @@ def test_single_realized_group_is_undefined_for_spread_and_not_a_zero_day():
     state = evaluation_engine._EvaluationStreamingState(spec=spec)
     grouped = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-03"]),
+            "timestamp": pd.to_datetime(
+                ["2024-01-02"] * len(inner_groups) + ["2024-01-03"] * 2
+            ),
             "signal": "signal",
             "label": "label",
-            "group": [3, 1, 5],
-            "mean_label_value": [0.9, 0.1, 0.3],
+            "group": [*inner_groups, 1, 5],
+            "mean_label_value": [0.9] * len(inner_groups) + [0.1, 0.3],
             "n_obs": 5,
         }
     )
     state.consume(
         pd.DataFrame(),
-        grouped.iloc[:1],
+        grouped.iloc[: len(inner_groups)],
         {
-            "rows_input": 5,
-            "rows_after_filter_mode": 5,
+            "rows_input": 5 * len(inner_groups),
+            "rows_after_filter_mode": 5 * len(inner_groups),
             "filter_columns_used": [],
             "filter_definition": "all",
             "timestamp_count": 1,
@@ -474,7 +478,7 @@ def test_single_realized_group_is_undefined_for_spread_and_not_a_zero_day():
     assert state.group_spread_summary().empty
     state.consume(
         pd.DataFrame(),
-        grouped.iloc[1:],
+        grouped.iloc[len(inner_groups) :],
         {
             "rows_input": 10,
             "rows_after_filter_mode": 10,

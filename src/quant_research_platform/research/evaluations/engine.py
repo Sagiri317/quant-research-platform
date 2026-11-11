@@ -31,6 +31,7 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.signals import DEFAULT_N_GROUPS
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _finite_numeric_series,
@@ -144,7 +145,7 @@ class _EvaluationStreamingState:
                 timestamp,
                 signal,
                 label,
-                _group,
+                group,
                 mean_label_value,
                 _n_obs,
             ) in grouped_label_values.itertuples(index=False, name=None):
@@ -159,9 +160,10 @@ class _EvaluationStreamingState:
                     monotonicity_count = 0
                     group_count = 0
                 group_count += 1
-                if first_value is None:
+                if group == 1:
                     first_value = float(mean_label_value)
-                last_value = float(mean_label_value)
+                if group == self._spec.n_groups:
+                    last_value = float(mean_label_value)
                 if pd.isna(mean_label_value):
                     previous_value = None
                     continue
@@ -172,7 +174,6 @@ class _EvaluationStreamingState:
                     )
                     monotonicity_count += 1
                 previous_value = value
-                last_value = value
             finish_group()
 
     def _consume_correlations(self, metrics, *, side, metadata):
@@ -1048,7 +1049,7 @@ def _evaluation_strata(frame, strata):
     return groups, quality
 
 
-def training_quantile_cutpoints(scores, *, n_groups=5):
+def training_quantile_cutpoints(scores, *, n_groups=DEFAULT_N_GROUPS):
     """Freeze empirical training-score bins; ties share their upper-inclusive bin.
 
     Pass explicit predictions on the legal training reference domain, normally
@@ -1090,21 +1091,8 @@ def _response_tables(frame, *, spec, config, dates=None):
     def median_bp(values):
         return finite(np.median(values) * 10000) if len(values) else np.nan
 
-    signal, edges = next(iter(config["cutpoints"].items()))
-    n_groups = len(edges) + 1
-    all_scores = frame[signal].to_numpy(dtype="float64")
     all_values = frame.loc[:, list(spec.label_columns)].to_numpy(dtype="float64")
-    all_predicted = np.isfinite(all_scores)
     all_mature = np.isfinite(all_values).all(axis=1)
-    all_groups = np.zeros(len(frame), dtype="int64")
-    all_groups[all_predicted] = (
-        np.searchsorted(
-            np.asarray(edges, dtype="float64"),
-            all_scores[all_predicted],
-            side="left",
-        )
-        + 1
-    )
     timestamps = pd.DatetimeIndex(frame.timestamp)
     by_day = frame.groupby(timestamps.normalize(), sort=False).indices
     dates = dates or {
@@ -1117,85 +1105,112 @@ def _response_tables(frame, *, spec, config, dates=None):
     ]
     if len(dates):
         periods.append(("pooled", max(dates.values()), slice(None)))
-    for period, timestamp, positions in periods:
-        scores, labels = all_scores[positions], all_values[positions]
-        selected, all_labels, groups = (
-            all_predicted[positions],
-            all_mature[positions],
-            all_groups[positions],
-        )
-        for scope in ("common", "own"):
-            denominator = int(selected.sum())
-            for index, label in enumerate(spec.label_columns):
-                valid = selected & (
-                    all_labels if scope == "common" else np.isfinite(labels[:, index])
+    for signal, edges in config["cutpoints"].items():
+        unavailable = edges is None
+        n_groups = spec.n_groups if unavailable else len(edges) + 1
+        all_scores = frame[signal].to_numpy(dtype="float64")
+        all_predicted = np.isfinite(all_scores)
+        all_groups = np.zeros(len(frame), dtype="int64")
+        if not unavailable:
+            all_groups[all_predicted] = (
+                np.searchsorted(
+                    np.asarray(edges, dtype="float64"),
+                    all_scores[all_predicted],
+                    side="left",
                 )
-                count = int(valid.sum())
-                ic, reason = _pearson_correlation_result(
-                    scores[valid], labels[valid, index]
-                )
-                key = dict(
-                    timestamp=timestamp,
-                    period=period,
-                    sample_scope=scope,
-                    signal=signal,
-                    label=label,
-                )
-                means, counts = [], []
-                for group in range(1, n_groups + 1):
-                    values = labels[valid & (groups == group), index]
-                    average, median = mean_bp(values), median_bp(values)
-                    means.append(average)
-                    counts.append(len(values))
-                    grouped.append(
+                + 1
+            )
+        for period, timestamp, positions in periods:
+            scores, labels = all_scores[positions], all_values[positions]
+            selected, all_labels, groups = (
+                all_predicted[positions],
+                all_mature[positions],
+                all_groups[positions],
+            )
+            for scope in ("common", "own"):
+                denominator = int(selected.sum())
+                for index, label in enumerate(spec.label_columns):
+                    valid = selected & (
+                        all_labels
+                        if scope == "common"
+                        else np.isfinite(labels[:, index])
+                    )
+                    count = int(valid.sum())
+                    ic, reason = _pearson_correlation_result(
+                        scores[valid], labels[valid, index]
+                    )
+                    key = dict(
+                        timestamp=timestamp,
+                        period=period,
+                        sample_scope=scope,
+                        signal=signal,
+                        label=label,
+                    )
+                    means, counts = [], []
+                    for group in range(1, n_groups + 1):
+                        values = labels[valid & (groups == group), index]
+                        average, median = mean_bp(values), median_bp(values)
+                        means.append(average)
+                        counts.append(len(values))
+                        grouped.append(
+                            dict(
+                                **key,
+                                group=group,
+                                mean_return_bp=average,
+                                median_return_bp=median,
+                                n_obs=len(values),
+                                mean_std_bp=None,
+                                valid_day_count=int(
+                                    period == "daily" and len(values) > 0
+                                ),
+                                mean_reason="no_finite_reference"
+                                if unavailable
+                                else None
+                                if math.isfinite(average)
+                                else "no_valid_observations"
+                                if not len(values)
+                                else "nonfinite_result",
+                                median_reason="no_finite_reference"
+                                if unavailable
+                                else None
+                                if math.isfinite(median)
+                                else "no_valid_observations"
+                                if not len(values)
+                                else "nonfinite_result",
+                            )
+                        )
+                    spread_reason = (
+                        "no_finite_reference"
+                        if unavailable
+                        else "one_signal_group"
+                        if n_groups == 1
+                        else "empty_extreme_group"
+                        if not all(counts[i] for i in (0, -1))
+                        else "nonfinite_result"
+                        if not all(math.isfinite(means[i]) for i in (0, -1))
+                        else None
+                    )
+                    spread = (
+                        finite(means[-1] - means[0])
+                        if spread_reason is None
+                        else np.nan
+                    )
+                    if spread_reason is None and not math.isfinite(spread):
+                        spread_reason = "nonfinite_result"
+                    metrics.append(
                         dict(
                             **key,
-                            group=group,
-                            mean_return_bp=average,
-                            median_return_bp=median,
-                            n_obs=len(values),
-                            mean_std_bp=None,
-                            valid_day_count=int(period == "daily" and len(values) > 0),
-                            mean_reason=None
-                            if math.isfinite(average)
-                            else "no_valid_observations"
-                            if not len(values)
-                            else "nonfinite_result",
-                            median_reason=None
-                            if math.isfinite(median)
-                            else "no_valid_observations"
-                            if not len(values)
-                            else "nonfinite_result",
+                            ic=ic,
+                            ic_reason=reason,
+                            n_obs=count,
+                            signal_count=denominator,
+                            coverage=count / denominator if denominator else None,
+                            ic_std=None,
+                            valid_day_count=int(period == "daily" and ic is not None),
+                            top_bottom_mean_bp=spread,
+                            spread_reason=spread_reason,
                         )
                     )
-                spread_reason = (
-                    "one_signal_group"
-                    if n_groups == 1
-                    else "empty_extreme_group"
-                    if not all(counts[i] for i in (0, -1))
-                    else "nonfinite_result"
-                    if not all(math.isfinite(means[i]) for i in (0, -1))
-                    else None
-                )
-                spread = (
-                    finite(means[-1] - means[0]) if spread_reason is None else np.nan
-                )
-                if spread_reason is None and not math.isfinite(spread):
-                    spread_reason = "nonfinite_result"
-                metrics.append(
-                    dict(
-                        **key,
-                        ic=ic,
-                        ic_reason=reason,
-                        n_obs=count,
-                        signal_count=denominator,
-                        coverage=count / denominator if denominator else None,
-                        ic_std=None,
-                        valid_day_count=int(period == "daily" and ic is not None),
-                        top_bottom_mean_bp=spread,
-                        spread_reason=spread_reason,
-                    )
-                )
     if len(dates):
         # Summary rows are explicitly means of daily estimates, never pooled IC.
         for records, value, dispersion, keys in (
@@ -1236,12 +1251,20 @@ def _response_tables(frame, *, spec, config, dates=None):
                     row["spread_reason"] = (
                         None
                         if spreads
+                        else "no_finite_reference"
+                        if config["cutpoints"][row["signal"]] is None
                         else "one_signal_group"
-                        if n_groups == 1
+                        if not config["cutpoints"][row["signal"]]
                         else "no_valid_observations"
                     )
                 else:
-                    row["mean_reason"] = None if values else "no_valid_observations"
+                    row["mean_reason"] = (
+                        None
+                        if values
+                        else "no_finite_reference"
+                        if config["cutpoints"][row["signal"]] is None
+                        else "no_valid_observations"
+                    )
                     row["median_return_bp"] = None
                     row["median_reason"] = "not_aggregated"
                 records.append(row)

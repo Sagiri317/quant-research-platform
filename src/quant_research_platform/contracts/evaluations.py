@@ -17,6 +17,7 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.signals import (
+    DEFAULT_N_GROUPS,
     SignalSpec,
     _cross_signal_id_column_overlaps,
     resolve_top_quantile,
@@ -178,7 +179,7 @@ class EvaluationSpec:
     evaluation_axis: EvaluationAxis = "cross_sectional"
     correlation_clock: Literal["observation", "trading_day"] = "observation"
     filter_mode: EvaluationFilterMode = "eligible"
-    n_groups: int = 5
+    n_groups: int = DEFAULT_N_GROUPS
     top_quantile: float | None = None
     run_type: str = "evaluation"
 
@@ -203,9 +204,19 @@ class EvaluationSpec:
             "trading_day",
         }:
             raise ValueError("evaluation_correlation_clock_invalid")
+        if not isinstance(self.n_groups, int) or isinstance(self.n_groups, bool):
+            raise TypeError("n_groups must be an integer")
+        if self.n_groups < 2:
+            raise ValueError("evaluation_n_groups_too_small")
         if self.evaluation_axis == "cross_sectional" or self.top_quantile is not None:
             object.__setattr__(
-                self, "top_quantile", resolve_top_quantile(self.top_quantile)
+                self,
+                "top_quantile",
+                resolve_top_quantile(
+                    1 / self.n_groups
+                    if self.top_quantile is None
+                    else self.top_quantile
+                ),
             )
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
@@ -224,10 +235,6 @@ class EvaluationSpec:
             "label_availability_columns",
             MappingProxyType(dict(sorted(availability.items()))),
         )
-        if not isinstance(self.n_groups, int) or isinstance(self.n_groups, bool):
-            raise TypeError("n_groups must be an integer")
-        if self.n_groups < 2:
-            raise ValueError("evaluation_n_groups_too_small")
         _validate_signal_label_separation(self.signals, self.label_columns)
         if type(self.run_type) is not str or not self.run_type:
             raise ValueError("evaluation_run_type_required")
@@ -363,7 +370,7 @@ def validate_response_diagnostics(value, *, signals=None):
     cuts = value["cutpoints"]
     if (
         type(cuts) is not dict
-        or len(cuts) != 1
+        or not cuts
         or (
             signals is not None
             and set(cuts) != {signal.signal_id for signal in signals}
@@ -374,10 +381,11 @@ def validate_response_diagnostics(value, *, signals=None):
         if (
             type(signal) is not str
             or not signal
-            or type(edges) is not list
-            or len(edges) > 4
+            or (edges is not None and (type(edges) is not list or len(edges) > 4))
         ):
             raise ValueError("evaluation_response_cutpoints_invalid")
+        if edges is None:
+            continue
         if any(
             type(edge) not in (int, float) or not math.isfinite(edge) for edge in edges
         ):

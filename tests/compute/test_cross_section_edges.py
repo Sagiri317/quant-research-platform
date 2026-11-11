@@ -5,7 +5,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    _assign_groups_from_ranks,
     _average_ranks,
     _compute_ic_and_grouped_label_values,
     _pearson_correlation_result,
@@ -63,7 +62,6 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
 
 
 def test_dataframe_cross_section_numeric_helpers() -> None:
-    assert _assign_groups_from_ranks(np.array([3.0, 1.0, 2.0]), 5).tolist() == [3, 1, 2]
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]
 
 

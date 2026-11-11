@@ -8,7 +8,8 @@ from typing import Literal
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
 from quant_research_platform.contracts.validation import strict_finite_float
 
-DEFAULT_TOP_QUANTILE = 0.2
+DEFAULT_N_GROUPS = 5
+DEFAULT_TOP_QUANTILE = 1 / DEFAULT_N_GROUPS
 
 
 def resolve_top_quantile(value=None):

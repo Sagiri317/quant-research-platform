@@ -121,21 +121,22 @@ def test_native_zscore_is_undefined_on_singleton_eligible_cross_section(tmp_path
     _, tables = read_evaluation_outputs(output)
     # A singleton has zero variance; an ineligible peer must not define its score.
     assert tables["metrics"].n_obs.tolist() == [0]
-    assert tables["grouped_label_values"].empty
+    assert tables["grouped_label_values"].n_obs.eq(0).all()
+    assert tables["grouped_label_values"].mean_label_value.isna().all()
 
 
 @pytest.mark.parametrize(
-    "transform,values,peer,domain,observed",
+    "transform,values,peer,domain,observed,grouped_observed",
     [
-        ("zscore", [1.0, np.nan, np.nan], False, 1, 0),
-        ("rank", [1.0, np.nan, np.nan], False, 1, 1),
-        ("zscore", [1.0, 2.0, 3.0], True, 1, 1),
-        ("zscore", [1.0, 2.0, 3.0], False, 3, 3),
+        ("zscore", [1.0, np.nan, np.nan], False, 1, 0, 0),
+        ("rank", [1.0, np.nan, np.nan], False, 1, 1, 2),
+        ("zscore", [1.0, 2.0, 3.0], True, 1, 1, 1),
+        ("zscore", [1.0, 2.0, 3.0], False, 3, 3, 3),
     ],
     ids=("undefined-zscore", "defined-rank", "normalize-before-peer", "full-domain"),
 )
 def test_common_source_domain_and_transformed_observation_counts(
-    tmp_path, transform, values, peer, domain, observed
+    tmp_path, transform, values, peer, domain, observed, grouped_observed
 ):
     from quant_research_platform.artifacts.statistics import read_statistics_artifact
     from quant_research_platform.research.factors.statistics import factor_statistics
@@ -198,9 +199,14 @@ def test_common_source_domain_and_transformed_observation_counts(
     expected = {"scaled": observed, "plain": domain}
     assert tables["daily_coverage"].domain_rows.tolist() == [domain]
     assert tables["metrics"].set_index("signal").n_obs.to_dict() == expected
-    for name in ("grouped_label_values", "daily_strata"):
-        counts = tables[name].groupby("signal").n_obs.sum()
-        assert counts.reindex(expected, fill_value=0).to_dict() == expected
+    counts = tables["daily_strata"].groupby("signal").n_obs.sum()
+    assert counts.reindex(expected, fill_value=0).to_dict() == expected
+    counts = tables["grouped_label_values"].groupby("signal").n_obs.sum()
+    # A single tied score belongs to both extreme selections, just as side IC.
+    assert counts.reindex(expected, fill_value=0).to_dict() == {
+        "scaled": grouped_observed,
+        "plain": domain,
+    }
     stats = factor_statistics(
         {
             "evaluation_inputs": [str(output)],

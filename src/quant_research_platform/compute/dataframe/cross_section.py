@@ -10,6 +10,7 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     EVALUATION_METRICS_COLUMNS,
 )
+from quant_research_platform.contracts.signals import DEFAULT_N_GROUPS
 
 
 def leave_one_out_mean(values, group_ids):
@@ -37,7 +38,7 @@ def _compute_ic_and_grouped_label_values(
     frame,
     spec,
     *,
-    n_groups=5,
+    n_groups=DEFAULT_N_GROUPS,
     top_quantile=None,
     include_groups=True,
 ):
@@ -81,7 +82,7 @@ def _correlation_records(
     signal_columns,
     label_columns,
     timestamp,
-    n_groups=5,
+    n_groups=DEFAULT_N_GROUPS,
     top_quantile=None,
     include_groups=True,
 ):
@@ -94,10 +95,9 @@ def _correlation_records(
         predicted = np.isfinite(values)
         codes = _rank_codes(source, predicted)
         if include_groups:
-            ranks = _average_ranks_from_codes(codes[predicted])
-            groups = _assign_groups_from_ranks(ranks, n_groups)
+            groups = _quantile_group_masks(codes[predicted], n_groups)
         else:
-            groups = np.empty(0, dtype="int64")
+            groups = ()
         domains = {"all": (predicted, int(predicted.sum()))}
         if top_quantile is not None:
             for side, ascending in (("long", False), ("short", True)):
@@ -111,7 +111,6 @@ def _correlation_records(
             predicted,
             codes,
             groups,
-            np.unique(groups),
             domains,
             {},
         )
@@ -126,7 +125,6 @@ def _correlation_records(
             predicted,
             codes,
             groups,
-            group_ids,
             domains,
             signal_ranks_by_mask,
         ) in signals.items():
@@ -171,27 +169,18 @@ def _correlation_records(
             if include_groups:
                 predicted_labels = label_values[predicted]
                 observed_labels = np.isfinite(predicted_labels)
-                observed_groups = groups[observed_labels]
-                group_count = min(n_groups, len(groups)) + 1
-                group_counts = np.bincount(observed_groups, minlength=group_count)
-                group_sums = np.bincount(
-                    observed_groups,
-                    weights=predicted_labels[observed_labels],
-                    minlength=group_count,
-                )
-                for group in group_ids:
+                for group, members in enumerate(groups, start=1):
+                    values = predicted_labels[members & observed_labels]
                     grouped_records.append(
                         {
                             "timestamp": timestamp,
                             "signal": signal,
                             "label": label,
                             "group": group,
-                            "mean_label_value": float(
-                                group_sums[group] / group_counts[group]
-                            )
-                            if group_counts[group]
+                            "mean_label_value": float(values.mean())
+                            if len(values)
                             else np.nan,
-                            "n_obs": int(group_counts[group]),
+                            "n_obs": len(values),
                         }
                     )
     return ic_records, grouped_records
@@ -296,10 +285,22 @@ def _stable_zscore(values: pd.Series) -> pd.Series:
     return pd.Series(output, index=values.index)
 
 
-def _assign_groups_from_ranks(ranks: np.ndarray, n_groups: int) -> np.ndarray:
-    group_count = min(n_groups, len(ranks))
-    zero_based = np.floor((ranks - 1.0) * group_count / len(ranks))
-    return np.clip(zero_based.astype("int64") + 1, 1, group_count)
+def _quantile_group_masks(values: np.ndarray, n_groups: int) -> tuple[np.ndarray, ...]:
+    """Keep the same tied extreme members as side IC and equal-weight targets."""
+    low = _select_quantile_boundary(values, 1 / n_groups, ascending=True)
+    high = _select_quantile_boundary(values, 1 / n_groups, ascending=False)
+    remaining = ~(low | high)
+    groups = [low]
+    for group in range(2, n_groups):
+        selected = (
+            remaining
+            if group == n_groups - 1
+            else remaining
+            & _select_quantile_boundary(values, group / n_groups, ascending=True)
+        )
+        groups.append(selected)
+        remaining = remaining & ~selected
+    return (*groups, high)
 
 
 def _rank_codes(values: pd.Series, observed: np.ndarray) -> np.ndarray:

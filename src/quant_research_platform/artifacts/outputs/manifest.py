@@ -145,6 +145,13 @@ def evaluation_output_metadata(
         "research_dataset_id": spec.research_dataset_id,
         "evaluation_axis": spec.evaluation_axis,
         **(
+            {"grouping_rule": "fixed_groups_shared_extreme_boundaries"}
+            if spec.evaluation_axis == "cross_sectional"
+            else {"grouping_rule": "frozen_reference_cutpoints"}
+            if "response_diagnostics" in (science or {})
+            else {}
+        ),
+        **(
             {"top_quantile": spec.top_quantile} if spec.top_quantile is not None else {}
         ),
         **(

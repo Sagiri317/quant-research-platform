@@ -80,20 +80,15 @@ def test_native_multilabel_ranks_preserve_pairwise_ties_and_prediction_groups(
     metrics = tables["metrics"].set_index(["signal", "label"])
     grouped = tables["grouped_label_values"].set_index(["signal", "label"]).sort_index()
     sign = 1 if direction == "higher_is_better" else -1
+    # Each tail selects floor(6/3)=2 positions and retains its entire boundary tie.
+    members = {
+        "x": ([0, 1, 2], [3], [4, 6]),
+        "z": ([2, 3, 6], [0], [4, 5]),
+    }
     for signal in signals:
         predicted = frame[signal.source_column].notna()
-        prediction_ranks = _ranks(frame.loc[predicted, signal.source_column].tolist())
-        if sign < 0:
-            prediction_ranks = [
-                len(prediction_ranks) + 1 - rank for rank in prediction_ranks
-            ]
-        groups = pd.Series(
-            [
-                math.floor((rank - 1) * 3 / len(prediction_ranks)) + 1
-                for rank in prediction_ranks
-            ],
-            index=frame.index[predicted],
-        )
+        ordered = members[signal.source_column]
+        groups = dict(enumerate(ordered if sign > 0 else ordered[::-1], start=1))
         for label in spec.label_columns:
             paired = predicted & frame[label].notna()
             expected = sign * _correlation(
@@ -104,9 +99,9 @@ def test_native_multilabel_ranks_preserve_pairwise_ties_and_prediction_groups(
             assert metric.n_obs == paired.sum()
             assert metric.rankic == pytest.approx(expected, abs=1e-14)
             observed = grouped.loc[(signal.signal_id, label)]
-            assert observed.group.tolist() == sorted(groups.unique())
+            assert observed.group.tolist() == [1, 2, 3]
             for row in observed.itertuples():
-                labels = frame.loc[groups.index[groups.eq(row.group)], label].dropna()
+                labels = frame.loc[groups[row.group], label].dropna()
                 assert row.n_obs == len(labels)
                 assert (
                     row.mean_label_value

@@ -185,7 +185,7 @@ def test_batch_pearson_undefined_reasons_and_local_pair_masks():
     )
 
 
-def _native_config(tmp_path, frame=None):
+def _native_config(tmp_path, frame=None, extra_features=()):
     frame = _frame() if frame is None else frame
     roles = dict.fromkeys(frame.columns, "context")
     roles.update(
@@ -196,6 +196,7 @@ def _native_config(tmp_path, frame=None):
         r500="label",
         eligible="mask",
     )
+    roles.update(dict.fromkeys(extra_features, "feature"))
     root = tmp_path / "input"
     write_dataset(
         root,
@@ -256,6 +257,64 @@ def test_native_roundtrip_and_shared_scan(tmp_path, monkeypatch):
     assert len(tables["response_groups"]) == 32
     assert tables["metrics"].n_obs.tolist() == [6, 5]
     assert tables["response_groups"].median_return_bp.notna().sum() == 24
+
+
+def test_multiple_response_signals_keep_their_own_thresholds_and_direction(tmp_path):
+    frame = _frame().assign(other=lambda part: part.score * 10)
+    config = _native_config(tmp_path, frame, extra_features=("other",))
+    config["evaluation"]["signals"].append(
+        dict(
+            signal_id="inverse",
+            source_kind="feature",
+            source_column="other",
+            direction="lower_is_better",
+            transform="identity",
+        )
+    )
+    config["response_diagnostics"]["cutpoints"]["inverse"] = [-20.0]
+    manifest, tables = read_evaluation_outputs(
+        evaluate(config), tables=("response_groups", "response_metrics")
+    )
+    assert set(manifest["metadata"]["response_diagnostics"]["cutpoints"]) == {
+        "score",
+        "inverse",
+    }
+    first = _rows(
+        tables["response_groups"],
+        period="daily",
+        sample_scope="own",
+        label="r100",
+        timestamp=pd.Timestamp("2026-01-02T00:00:03"),
+    )
+    inverse = first.loc[first.signal.eq("inverse")].set_index("group")
+    direct = first.loc[first.signal.eq("score")].set_index("group")
+    assert inverse.n_obs.tolist() == [3, 1]
+    assert inverse.mean_return_bp.tolist() == pytest.approx([3, 1])
+    assert direct.n_obs.tolist() == [2, 2]
+    assert direct.mean_return_bp.tolist() == pytest.approx([1.5, 3.5])
+    equal = _rows(
+        tables["response_metrics"],
+        period="daily_equal_weight",
+        sample_scope="own",
+        label="r100",
+        signal="inverse",
+    ).iloc[0]
+    assert equal.top_bottom_mean_bp == pytest.approx(0.5)
+
+
+def test_missing_reference_bins_do_not_hide_valid_correlation(tmp_path):
+    config = _native_config(tmp_path)
+    config["response_diagnostics"]["cutpoints"]["score"] = None
+    _, tables = read_evaluation_outputs(
+        evaluate(config), tables=("response_groups", "response_metrics", "metrics")
+    )
+    assert set(tables["response_groups"].group) == {1, 2, 3, 4, 5}
+    assert tables["response_groups"].n_obs.eq(0).all()
+    assert tables["response_groups"].mean_reason.eq("no_finite_reference").all()
+    assert tables["response_metrics"].top_bottom_mean_bp.isna().all()
+    assert tables["response_metrics"].spread_reason.eq("no_finite_reference").all()
+    assert tables["metrics"].n_obs.tolist() == [6, 5]
+    assert tables["metrics"].ic.notna().all()
 
 
 @pytest.mark.parametrize("change", ["duplicate_edges", "bool_edge", "unit"])

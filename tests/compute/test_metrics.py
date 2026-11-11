@@ -104,8 +104,8 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
         n_groups=2,
     )
 
-    assert grouped["group"].tolist() == [1, 2, 4]
-    assert grouped["n_obs"].tolist() == [1, 2, 1]
+    assert grouped["group"].tolist() == [1, 2, 3, 4]
+    assert grouped["n_obs"].tolist() == [1, 2, 0, 1]
     pd.testing.assert_frame_equal(grouped, permuted)
     assert tiny["group"].tolist() == [1, 2]
 

@@ -637,8 +637,8 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
                 inference = hac_mean(values, max_lags=20)
                 expected.append((scope, kind, statistic, inference))
     adjusted = fdr_adjust(
-        [row[3].p_value for row in expected] + [1.0] * 6, method="BY"
-    ).adjusted_p_values[:-6]
+        [row[3].p_value for row in expected] + [1.0] * (20 - len(expected)), method="BY"
+    ).adjusted_p_values[: len(expected)]
     per_layer = np.concatenate(
         [
             fdr_adjust(
@@ -654,8 +654,9 @@ def test_hac20_by_is_one_full_family_and_alt_policy_applies(tmp_path):
             for (scope, kind, statistic), values in numeric_sequences.items()
         ]
         adjusted = fdr_adjust(
-            [row[3].p_value for row in expected] + [1.0] * 6, method=method
-        ).adjusted_p_values[:-6]
+            [row[3].p_value for row in expected] + [1.0] * (20 - len(expected)),
+            method=method,
+        ).adjusted_p_values[: len(expected)]
         output = factor_statistics(
             {
                 "evaluation_inputs": [str(own), str(common)],
