@@ -1,0 +1,50 @@
+{
+  "deployment": {
+    "id": "appgdep_6af4f5c29b0481918acfa8c419353232",
+    "status": "succeeded",
+    "url": "https://qrp-factor-research-20261111.sagiri0317.chatgpt.site"
+  },
+  "published_at_utc": "2026-11-11T23:10:12.203619+00:00",
+  "data_updated_at_utc": "2026-11-11T23:03:18.282458+00:00",
+  "counts": {
+    "sources": 170,
+    "selected_combinations": 15064,
+    "cross_sectional_sources": 45,
+    "cross_sectional_combinations_fixed5_both_windows": 6370,
+    "cross_sectional_historical_combinations": 0,
+    "time_series_sources": 125,
+    "time_series_combinations": 8694,
+    "time_series_blocks_completed": 15452,
+    "time_series_blocks_planned": 15452,
+    "cross_sectional_combinations_with_undefined_group_mean_full": 308,
+    "cross_sectional_combinations_with_undefined_highest_group_mean_full": 21
+  },
+  "checks": {
+    "production_http_status": 200,
+    "desktop_and_mobile_browser_passed": true,
+    "four_metric_values_both_windows_passed": true,
+    "percentage_units_passed": true,
+    "undefined_event_tail_ic_retained": true,
+    "side_selection_keeps_return_columns": true,
+    "no_horizontal_overflow": true,
+    "ic_ts_and_model_values_preserved": true,
+    "full_export_source_stamp_preserved": true,
+    "format_and_targeted_checks_passed": true
+  },
+  "data_publication_version": {
+    "number": 22,
+    "source_commit": "52cc9deb4078a4a28363d253ad6aacbc044b6376",
+    "id": "appgprj_6af44317faf081919d5c8b0e58ee3a32~appgver_2d6452863b3c819195f7dfc1ba93c49b"
+  },
+  "current_text_publication": {
+    "version": 23,
+    "source_commit": "278fb3c778d5071074cf96f9db1216129437c3bf",
+    "deployment_id": "appgdep_6af4f8d50a68819184095686a215bdb9",
+    "published_at_utc": "2026-11-11T23:23:14.061233+00:00",
+    "status": "succeeded",
+    "changes": "Clarify historical frozen thresholds for time-series returns versus original evaluation-sample tail IC; cross-sectional common-boundary wording retained.",
+    "data_export_or_recalculation": false,
+    "data_file_unchanged": true,
+    "production_desktop_mobile_checks_passed": true
+  }
+}
