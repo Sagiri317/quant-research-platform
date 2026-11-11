@@ -47,7 +47,6 @@ def factor_definitions():
             factor_set=FactorSet.STANDARD,
             input_columns=(
                 "period_return",
-                "is_trading",
                 "is_a_share_scope",
                 *(STYLES[s] for s in recipe[:2] if s),
             ),
@@ -78,11 +77,11 @@ def calculate(panel, *, factor_columns, history_keys=("asset_id",)):
     own = frame.groupby(list(history_keys), sort=False, dropna=False)
     prior = own[[STYLES[s] for s in requested]].shift()
     prior_scope = own.is_a_share_scope.shift().eq(True)
-    returns = frame.period_return.where(frame.is_trading.eq(True) & prior_scope)
+    returns = frame.period_return
     daily = pd.DataFrame(index=pd.DatetimeIndex(sorted(frame.timestamp.unique())))
     time_groups = frame.groupby("timestamp", sort=True).indices
     for style in sorted(requested):
-        values = prior[STYLES[style]]
+        values = prior[STYLES[style]].where(prior_scope)
         records = {}
         for date, indices in time_groups.items():
             exposure = values.iloc[indices].dropna()

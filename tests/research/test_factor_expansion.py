@@ -129,6 +129,37 @@ def test_style_size_needs_no_other_styles_and_uses_prior_exposure():
     np.testing.assert_allclose(actual.loc[actual.timestamp.eq(dates[20]), name], 0.76)
 
 
+@pytest.mark.parametrize("halt_return", (0.0, np.nan))
+def test_style_uses_known_holding_returns_and_prior_scope(halt_return):
+    dates = pd.bdate_range("2024-01-01", periods=21)
+    panel = pd.DataFrame(
+        [
+            dict(
+                asset_id=asset,
+                timestamp=date,
+                log_total_market_cap=size,
+                period_return=value,
+                is_a_share_scope=in_scope,
+                is_trading=trading,
+            )
+            for date in dates
+            for asset, size, value, in_scope, trading in (
+                ("small", 0.0, halt_return, True, False),
+                ("large", 1.0, 0.03, True, True),
+                ("outside", -1.0, 0.5, False, True),
+            )
+        ]
+    )
+    name = "style_size_return_trend_20d"
+    result = style_factors(panel, factor_columns=(name,))
+    last = result.loc[result.timestamp.eq(dates[-1]), name]
+    if np.isfinite(halt_return):
+        # Twenty fixed high-minus-low baskets: 20 * (0.03 - 0).
+        np.testing.assert_allclose(last, 0.6)
+    else:
+        assert last.isna().all()
+
+
 def test_limit_breadth_needs_no_prices_and_keeps_unknown_out_of_denominator():
     frame = pd.DataFrame(
         {
