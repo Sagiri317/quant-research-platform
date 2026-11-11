@@ -466,7 +466,19 @@ def calculate(decisions, sources, *, columns, parameters=None):
 
         session_days = unified_trading_sessions(sources["trading_calendar"])
     shares = (
-        share_states(sources["public_fund_shares"], session_days=session_days)
+        share_states(
+            sources["public_fund_shares"].loc[
+                sources["public_fund_shares"].asset_id.isin(
+                    (set(work.asset_id) if usable & set(ETF[:4] + ETF[5:6]) else set())
+                    | (
+                        set(sources["public_etf_pcf_components"].fund_code)
+                        if usable & set(ETF[6:])
+                        else set()
+                    )
+                )
+            ],
+            session_days=session_days,
+        )
         if usable & set(ETF[:4] + ETF[5:])
         else None
     )
@@ -503,7 +515,20 @@ def calculate(decisions, sources, *, columns, parameters=None):
             ETF[4]
         ].to_numpy()
     if usable & set(ETF[6:]):
-        parts = sources["public_etf_pcf_components"]
+        parts = sources["public_etf_pcf_components"].loc[
+            :,
+            [
+                "fund_code",
+                "timestamp",
+                "available_at",
+                "component_code",
+                "component_kind",
+                "component_quantity_unit",
+                "component_quantity",
+                "creation_unit_fund_shares",
+            ],
+        ]
+        baskets = parts.groupby(["fund_code", "timestamp"], sort=False).indices
         for date, at in work.groupby("timestamp", sort=False).indices.items():
             block = work.iloc[at]
             probes = pd.DataFrame(
@@ -513,7 +538,6 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 shares, probes, columns=("_share_delta_1d", "_share_delta_5d")
             )
             flow = probes.assign(_date=latest.observation_date.to_numpy())
-            eligible = parts.loc[parts.available_at.le(date)]
             if "avg_volume_20d" not in block:
                 continue
             for width in (1, 5):
@@ -531,6 +555,14 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 if not history:
                     continue
                 delta = pd.concat(history, ignore_index=True)
+                positions = [
+                    baskets.get((fund, day), np.empty(0, dtype=int))
+                    for fund, day in delta[["asset_id", "timestamp"]].itertuples(
+                        index=False, name=None
+                    )
+                ]
+                eligible = parts.iloc[np.concatenate(positions)]
+                eligible = eligible.loc[eligible.available_at.le(date)]
                 p = delta.merge(
                     eligible,
                     left_on=["asset_id", "timestamp"],

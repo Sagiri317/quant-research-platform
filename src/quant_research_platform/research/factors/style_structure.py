@@ -99,7 +99,7 @@ def calculate(panel, *, factor_columns, history_keys=("asset_id",)):
             records[date] = returns.loc[top].mean(skipna=False) - returns.loc[
                 bottom
             ].mean(skipna=False)
-        daily[style] = pd.Series(records)
+        daily[style] = pd.Series(records, dtype="Float64")
     out = frame.loc[:, ["asset_id", "timestamp"]].copy()
     for name in factor_columns:
         left, right, window = RECIPES[name]

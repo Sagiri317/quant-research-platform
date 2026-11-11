@@ -191,6 +191,10 @@ def calculate(decisions, sources, *, columns, parameters=None):
         for name in columns
     }
     usable = {name for name in selected if not missing[name]}
+    if usable & set(US[3:]) and "adjusted_close" not in sources["public_etf_prices"]:
+        for name in usable & set(US[3:]):
+            missing[name] = ["public_etf_prices.adjusted_close"]
+        usable.difference_update(US[3:])
     for width in (20, 60):
         name = f"implied_minus_past_realized_variance_{width}d"
         iv, rv = f"implied_variance_{width}d", f"volatility_{width}d"

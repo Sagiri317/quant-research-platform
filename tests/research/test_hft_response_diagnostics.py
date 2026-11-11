@@ -570,18 +570,28 @@ def test_time_series_batch_pairs_match_independent_oracle_across_chunks(case):
             left, right = frame[row.signal].to_numpy(), frame[row.label].to_numpy()
             valid = np.isfinite(left) & np.isfinite(right)
             assert row.n_obs == int(valid.sum())
-            assert row.rankic_reason == "not_applicable"
             if case in {"constant", "empty"}:
                 assert pd.isna(row.ic)
+                assert pd.isna(row.rankic)
                 assert row.ic_reason == (
                     "zero_variance"
                     if case == "constant"
                     else "insufficient_observations"
                 )
+                assert row.rankic_reason == row.ic_reason
             else:
                 expected = _independent_exact_pearson(left[valid], right[valid])
                 assert pd.isna(row.ic_reason)
                 assert row.ic == pytest.approx(expected, rel=1e-12, abs=1e-14)
+                x, y = left[valid], right[valid]
+                ranks = [
+                    np.array([1 + np.sum(a < v) + (np.sum(a == v) - 1) / 2 for v in a])
+                    for a in (x, y)
+                ]
+                assert pd.isna(row.rankic_reason)
+                assert row.rankic == pytest.approx(
+                    _independent_exact_pearson(*ranks), rel=1e-12, abs=1e-14
+                )
 
 
 def test_native_time_series_optional_response_preserves_mature_pair_domain(tmp_path):

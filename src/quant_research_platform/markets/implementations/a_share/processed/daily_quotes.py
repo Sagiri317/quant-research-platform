@@ -279,7 +279,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             actions.available_at, utc=True
         ).dt.tz_localize(None)
     frame = daily_decisions(prices, calendar, actions=actions)
-    if "index_market" in inputs:
+    if spec.data_id == "etf_daily_panel" and "index_market" in inputs:
         benchmark = materialize_dataset_session(
             open_dataset_session(
                 **_dataset_input_options(inputs["index_market"])

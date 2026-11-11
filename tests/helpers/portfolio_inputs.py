@@ -329,7 +329,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     market_factors = pd.concat(
         _market_model_frames((panel,), trading_calendar=None, market_history=None),
         ignore_index=True,
-    )
+    ).loc[:, list(_processed_specs().get("market_model_factors").required_columns)]
     calendar = pd.DataFrame(
         {
             "timestamp": calendar_dates,

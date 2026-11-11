@@ -242,3 +242,43 @@ def test_share_history_keeps_missing_declared_sessions():
     result = share_states(shares, session_days=dates)
     assert pd.isna(result.etf_share_change_1d.iloc[4])
     assert result.etf_share_change_5d.iloc[5] == pytest.approx(0.5)
+
+
+def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id():
+    dates = pd.bdate_range("2024-01-02", periods=7)
+    shares = pd.DataFrame(
+        dict(
+            asset_id="f",
+            timestamp=dates,
+            available_at=dates + pd.Timedelta(hours=16),
+            shares_outstanding=100 + 10 * np.arange(7),
+        )
+    )
+    baskets = pd.DataFrame(
+        dict(
+            asset_id="f:s",
+            fund_code="f",
+            timestamp=dates,
+            available_at=dates + pd.Timedelta(hours=16),
+            component_code="s",
+            component_kind="equity_security",
+            component_quantity_unit="share",
+            component_quantity=10.0,
+            creation_unit_fund_shares=100.0,
+        )
+    )
+    decision = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["s"],
+            timestamp=dates[-1] + pd.Timedelta(days=1),
+            avg_volume_20d=100.0,
+        )
+    )
+    fields = ["stock_passive_flow_pressure_1d", "stock_passive_flow_pressure_5d"]
+    result = calculate(
+        decision,
+        dict(public_fund_shares=shares, public_etf_pcf_components=baskets),
+        columns=fields,
+    )
+    np.testing.assert_allclose(result.loc[0, fields].to_numpy(float), [0.01, 0.05])

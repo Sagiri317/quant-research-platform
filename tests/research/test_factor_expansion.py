@@ -120,6 +120,13 @@ def test_style_size_needs_no_other_styles_and_uses_prior_exposure():
         processed_catalog().get("style_structure_factors"), {"factor_columns": [name]}
     )
     assert spec.processed_input_data_ids == ("market_panel_1d", "price_volume_facts")
+    missing = panel.copy()
+    missing["period_return"] = missing.period_return.astype("Float64")
+    missing.loc[
+        missing.timestamp.eq(dates[10]) & missing.asset_id.eq("4"), "period_return"
+    ] = pd.NA
+    actual = style_factors(missing, factor_columns=(name,))
+    np.testing.assert_allclose(actual.loc[actual.timestamp.eq(dates[20]), name], 0.76)
 
 
 def test_limit_breadth_needs_no_prices_and_keeps_unknown_out_of_denominator():

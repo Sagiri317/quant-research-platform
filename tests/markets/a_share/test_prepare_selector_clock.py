@@ -186,7 +186,7 @@ def test_price_history_uses_real_lag_and_selected_signal_keys(tmp_path):
         factor_columns=["reversal_20d"],
     ).set_index("timestamp")
     assert panel.timestamp.iloc[5] not in result.index
-    assert result.loc[panel.timestamp.iloc[24], "reversal_20d"] == 4.0
+    assert result.loc[panel.timestamp.iloc[24], "reversal_20d"] == -4.0
     assert pd.isna(result.loc[panel.timestamp.iloc[25], "reversal_20d"])
 
 

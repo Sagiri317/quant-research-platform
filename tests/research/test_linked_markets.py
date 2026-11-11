@@ -58,6 +58,18 @@ def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     assert result.attrs["missing_source_dependencies"] == {
         "us_short_sale_activity_fraction": ["public_finra_short_volume"]
     }
+    partial = calculate(
+        decision,
+        dict(
+            public_futures_daily=f,
+            public_futures_contracts=c,
+            index_market=i,
+            public_etf_prices=pd.DataFrame({"close": [100.0]}),
+        ),
+        columns=["index_future_near_basis", "us_sector_etf_return_shock_1d"],
+    )
+    assert partial.index_future_near_basis.iloc[-1] == pytest.approx(0.02)
+    assert partial.us_sector_etf_return_shock_1d.isna().all()
 
 
 def test_hedging_exposure_uses_the_actual_futures_benchmark():

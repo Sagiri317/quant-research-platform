@@ -122,3 +122,42 @@ def test_native_market_states_count_stock_replicas_once_without_style_input(tmp_
     result = read_dataset(path)
     assert len(result) == 1
     assert result.market_up_fraction.iloc[0] == 0.5
+
+
+def test_benchmark_selector_does_not_require_the_whole_input_to_be_one_index(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.sources.csmar.interim import interim_catalog
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_sources import _calendar_input
+
+    prices, _ = inputs()
+    one = (
+        prices[["asset_id", "timestamp", "open", "close"]]
+        .rename(columns={"asset_id": "source_asset_id"})
+        .assign(source_asset_id="000300")
+    )
+    raw = pd.concat([one, one.assign(source_asset_id="000905")], ignore_index=True)
+    spec = interim_catalog().get("index_market")
+    spec = replace(
+        spec,
+        column_roles={k: spec.column_roles[k] for k in raw},
+        column_units={k: v for k, v in spec.column_units.items() if k in raw},
+    )
+    root = tmp_path / "indices"
+    write_dataset(root, raw, spec=spec)
+    calendar = _calendar_input(
+        tmp_path / "calendar", {1: pd.DatetimeIndex(one.timestamp)}
+    )
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="benchmark_daily_panel",
+            inputs=dict(index_market=str(root), trading_calendar=str(calendar)),
+            parameters=dict(asset_ids=["000300"]),
+            time_window=dict(start="2024-01-05", end="2024-01-09"),
+            output_root=str(tmp_path / "output"),
+        )
+    )
+    assert read_dataset(output).asset_id.unique().tolist() == ["index:000300"]

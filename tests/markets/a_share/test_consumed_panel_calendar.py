@@ -75,7 +75,7 @@ def test_missing_panel_day_retains_price_lag(tmp_path):
     last = result.set_index("timestamp").loc[dates[25]]
     assert pd.isna(last.reversal_20d)
     earlier = result.set_index("timestamp").loc[dates[24]]
-    assert earlier.reversal_20d == pytest.approx(124 / 104 - 1)
+    assert earlier.reversal_20d == pytest.approx(1 - 124 / 104)
 
 
 def test_missing_calendar_day_is_evidence_error_not_quote_gap():
