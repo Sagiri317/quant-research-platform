@@ -21,6 +21,55 @@ from quant_research_platform.research.labels.engine import calculate_labels_for_
 from quant_research_platform.research.protocols.a_share import label_definitions
 
 
+@pytest.mark.parametrize("evidence", ["halt", "unknown", "terminated"])
+def test_missing_quote_uses_known_company_halt_and_past_status_only(evidence):
+    dates = pd.bdate_range("2026-03-20", periods=3)
+    frame = pd.DataFrame(
+        dict(
+            asset_id="asset",
+            market_type=1,
+            listing_date=pd.Timestamp("2000-01-01"),
+            timestamp=dates,
+            delisting_date=dates[1] if evidence == "terminated" else pd.NaT,
+            company_status=["A", "N" if evidence != "unknown" else pd.NA, "A"],
+            filling_flag=[0, np.nan, 0],
+            close=[10.0, np.nan, 11.0],
+            adj_close=[10.0, np.nan, 11.0],
+            open=[10.0, np.nan, 11.0],
+            high=[10.0, np.nan, 11.0],
+            low=[10.0, np.nan, 11.0],
+            adj_open=[10.0, np.nan, 11.0],
+            volume=[100.0, np.nan, 100.0],
+            amount=[1000.0, np.nan, 1100.0],
+            period_return=[0.01, np.nan, 0.1],
+            float_market_cap=[1000.0, np.nan, 1320.0],
+            a_float_shares=[100.0, 120.0, 120.0],
+            is_st=pd.array([True, None, True], dtype="boolean"),
+            is_pt=pd.array([False, None, False], dtype="boolean"),
+        )
+    )
+    result = _apply_suspension_semantics(frame)
+    if evidence == "halt":
+        assert result.filling_flag.iloc[1] == 1
+        assert not result.is_trading.iloc[1]
+        assert result.close.iloc[1] == 10
+        assert result.float_market_cap.iloc[1] == 1200
+        assert result.is_st.iloc[1] and not result.is_pt.iloc[1]
+        assert (
+            result.loc[1, ["volume", "amount", "period_return", "turnover"]].eq(0).all()
+        )
+    else:
+        assert (
+            result.loc[
+                1,
+                ["filling_flag", "close", "float_market_cap", "is_st", "period_return"],
+            ]
+            .isna()
+            .all()
+        )
+    assert result.period_return.iloc[-1] == pytest.approx(0.1)
+
+
 @pytest.mark.parametrize("has_raw_history", [False, True])
 def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     has_raw_history,
@@ -149,7 +198,9 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill(
     assert result["industry_level1_code"].isna().all()
     assert "scenario_universe" not in result
     if missing_caps:
-        assert result[["float_market_cap", "total_market_cap"]].isna().all().all()
+        assert result.total_market_cap.isna().all()
+        assert result.loc[result.is_trading, "float_market_cap"].isna().all()
+        assert suspension.float_market_cap == 10.0 * 100.0
         assert result.loc[result.is_trading, "turnover"].isna().all()
     else:
         assert result.float_market_cap.tolist() == [1000.0] * 3

@@ -1214,6 +1214,13 @@ def _apply_special_treatment(
 
 def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
+    if "company_status" in result:
+        confirmed = (
+            result.company_status.eq("N").fillna(False)
+            & result.filling_flag.isna()
+            & ~result.timestamp.ge(result.delisting_date)
+        )
+        result.loc[confirmed, "filling_flag"] = 1
     result["is_trading"] = (
         result["filling_flag"]
         .eq(0)
@@ -1226,6 +1233,19 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     trading = result["is_trading"].fillna(False)
     suspended = result["filling_flag"].eq(1).fillna(False)
     unknown = ~(trading | suspended)
+    for column in ("is_st", "is_pt"):
+        if column in result:
+            barrier = unknown | (trading & result[column].isna())
+            state = (
+                result[column]
+                .groupby(
+                    [lives, barrier.groupby(lives, sort=False).cumsum()], sort=False
+                )
+                .ffill()
+            )
+            result[column] = result[column].where(
+                ~suspended | result[column].notna(), state
+            )
     for close_column, price_columns in (
         ("close", ("close", "open", "high", "low")),
         ("adj_close", ("adj_close", "adj_open")),
@@ -1245,6 +1265,13 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     for column in ("after_hours_volume", "after_hours_amount"):
         if column not in result:
             result[column] = np.nan
+    if "a_float_shares" in result:
+        valuation = result.close * result.a_float_shares.where(
+            result.a_float_shares.gt(0) & result.close.gt(0)
+        )
+        result["float_market_cap"] = result.float_market_cap.where(
+            ~suspended | result.float_market_cap.notna(), valuation
+        )
     for column in (
         "period_return",
         "volume",
