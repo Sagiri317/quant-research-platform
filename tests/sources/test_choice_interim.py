@@ -1493,3 +1493,35 @@ def test_raw_request_order_preserves_sorted_versions_and_source_evidence(
     assert list(interim._rows(reverse_index, data_id, None)) == rows
     assert reverse_identities == identities
     assert _file_hashes(raw_root) == before
+
+
+def test_additive_response_metadata_does_not_change_consumed_financial_facts(tmp_path):
+    import json
+
+    results = []
+    for variant in ("original", "extended"):
+        layout = StorageLayout(tmp_path / variant)
+        with choice_session(SDK(response())) as session:
+            _disclosure(session, layout)
+            snapshot, _ = _snapshot(
+                session, layout, "2020-01-30", [100.0] * len(FIELDS)
+            )
+        if variant == "extended":
+            sidecar = Path(native_filesystem_path(snapshot / "response.metadata.json"))
+            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+            metadata["metadata"]["response"]["ProviderNote"] = (
+                "additional source context"
+            )
+            sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+        result = interim.materialize_interim_data(
+            output_roots={
+                "financial_balance": layout.interim_data_root(
+                    "choice", "financial_balance"
+                )
+            },
+            raw_root=layout.raw_source_root("choice"),
+            data_ids=("financial_balance",),
+        )
+        results.append(_read(result)["financial_balance"])
+    pd.testing.assert_frame_equal(results[0], results[1])
+    assert results[1].total_assets.tolist() == [100.0]

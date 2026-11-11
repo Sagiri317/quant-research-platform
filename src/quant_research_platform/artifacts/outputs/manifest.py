@@ -5,10 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from quant_research_platform.artifacts.outputs.evaluation_validation import (
-    EVALUATION_ARTIFACTS,
-    validate_evaluation_output_metadata_shape,
-)
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     PREDICTION_FACT_ALIASES,
     prediction_fact_aliases,
@@ -30,6 +26,12 @@ _OUTPUT_MANIFEST_KEYS = frozenset(
         "metadata",
         "files",
     }
+)
+EVALUATION_ARTIFACTS = (
+    "metrics.parquet",
+    "grouped_label_values.parquet",
+    "ic_summary.parquet",
+    "group_spread_summary.parquet",
 )
 PREDICTION_ARTIFACTS = ("prediction.parquet",)
 _OUTPUT_DEFINITION_FILES = {
@@ -54,14 +56,8 @@ def validate_output_manifest(
         raise ValueError("output_manifest_metadata_invalid")
     if output_definition_id == "prediction_outputs":
         validate_prediction_output_metadata_shape(metadata)
-    elif output_definition_id == "evaluation_outputs":
-        validate_evaluation_output_metadata_shape(metadata)
-    else:
+    elif output_definition_id != "evaluation_outputs":
         raise ValueError("output_manifest_definition_id_invalid")
-    if "run_type" in metadata and metadata[
-        "run_type"
-    ] != output_definition_id.removesuffix("_outputs"):
-        raise ValueError("output_manifest_metadata_invalid")
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":
         facts = metadata["model_facts"]
@@ -140,7 +136,6 @@ def evaluation_output_metadata(
     return {
         **(dict(science) if science is not None else {}),
         "evaluation_id": spec.evaluation_id,
-        "run_type": spec.run_type,
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
         "evaluation_axis": spec.evaluation_axis,

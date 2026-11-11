@@ -4,8 +4,11 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.asof import (
+    combine_derived_versions,
     iter_latest_report_keys,
     latest_observations,
+    observation_versions,
+    revision_snapshots,
     rolling_available_at,
 )
 from quant_research_platform.contracts.factors import FactorDefinition
@@ -97,15 +100,52 @@ def definitions():
 
 
 def share_states(frame, *, session_days, session_groups=None):
-    keys = ["asset_id", "timestamp"]
-    grouped = frame.groupby(keys, sort=False)
-    work = (
-        grouped.shares_outstanding.first()
-        .where(grouped.shares_outstanding.nunique(dropna=False).le(1))
-        .to_frame()
+    if not len(session_days):
+        return _share_states(
+            frame.iloc[:0], session_days=session_days, session_groups=session_groups
+        )
+    versions = []
+    for released, snapshots, updated in revision_snapshots(
+        {"shares": (frame, ("asset_id", "timestamp"), ("shares_outstanding",))}
+    ):
+        current = snapshots["shares"]
+        if released is None:
+            states = _share_states(
+                current, session_days=session_days, session_groups=session_groups
+            )
+        else:
+            affected = []
+            relevant = updated["shares"].loc[
+                updated["shares"].timestamp.isin(session_days)
+            ]
+            for asset, changed in relevant.groupby("asset_id", sort=False):
+                first = session_days.searchsorted(changed.timestamp.min())
+                last = session_days.searchsorted(changed.timestamp.max())
+                start = session_days[max(0, first - 21)]
+                stop = session_days[min(len(session_days) - 1, last + 21)]
+                block = current.loc[
+                    current.asset_id.eq(asset) & current.timestamp.between(start, stop)
+                ]
+                values = _share_states(
+                    block, session_days=session_days, session_groups=session_groups
+                )
+                affected.append(
+                    values.loc[values.timestamp.ge(changed.timestamp.min())]
+                )
+            if not affected:
+                continue
+            states = pd.concat(affected, ignore_index=True)
+        versions.append((released, states))
+    if len(versions) == 1:
+        return versions[0][1]
+    return combine_derived_versions(
+        versions, columns=("shares_outstanding", *ETF[:4], "_share_delta_1d")
     )
-    work["available_at"] = grouped.available_at.max()
-    work = work.reset_index().sort_values(keys, kind="stable")
+
+
+def _share_states(frame, *, session_days, session_groups):
+    """Calculate the declared session formulas on one coherent source version."""
+    work = frame.sort_values(["asset_id", "timestamp"], kind="stable").copy()
     if len(work):
         work = pd.concat(
             [
@@ -161,6 +201,49 @@ def share_states(frame, *, session_days, session_groups=None):
             at, "etf_share_change_1d_available_at"
         ].to_numpy()
     return work.drop(columns="_calendar_group")
+
+
+def _pcf_versions(parts, headers, fields):
+    """Select whole source baskets; later files replace, never add constituents."""
+    keys = ["fund_code", "timestamp"]
+    versions = [name for name in ("source", "source_sha256") if name in parts]
+    if "source_sha256" not in parts:
+        versions.append("available_at")
+    records = []
+    header_groups = {} if headers is None else headers.groupby(keys, sort=False).indices
+    for _, block in parts.groupby([*keys, *versions], sort=False, dropna=False):
+        fund, day = block.fund_code.iloc[0], block.timestamp.iloc[0]
+        released = block.available_at.max(skipna=False)
+        complete = pd.NaT
+        if headers is not None:
+            proof = headers.iloc[header_groups.get((fund, day), [])]
+            for field in ("source", "source_sha256"):
+                if field in proof and field in block:
+                    proof = proof.loc[proof[field].eq(block[field].iloc[0])]
+            if block.component_code.nunique() == len(block):
+                proof = proof.loc[proof.declared_component_count.eq(len(block))]
+                if (
+                    len(proof)
+                    and pd.notna(released)
+                    and proof.available_at.notna().any()
+                ):
+                    complete = max(released, proof.available_at.min())
+        payload = tuple(
+            block.sort_values("component_code", kind="stable")
+            .loc[:, list(fields)]
+            .itertuples(index=False, name=None)
+        )
+        records.append((fund, day, released, payload, complete))
+    frame = pd.DataFrame(
+        records, columns=[*keys, "available_at", "_payload", "_complete_at"]
+    )
+    # Identical content needs only one complete-source proof. A missing header
+    # in another copy cannot withdraw that proof; its clock still gates zeroes.
+    proof = frame.groupby(
+        [*keys, "_payload"], sort=False, dropna=False
+    )._complete_at.min()
+    versions = observation_versions(frame, keys=tuple(keys), columns=("_payload",))
+    return versions.join(proof, on=[*keys, "_payload"])
 
 
 def complete_mainland_stock_reports(headers):
@@ -600,74 +683,120 @@ def calculate(decisions, sources, *, columns, parameters=None):
             ETF[5]
         ].to_numpy()
     if ETF[4] in usable:
-        prices = sources["public_domestic_etf_prices"][
-            ["asset_id", "timestamp", "close", "available_at"]
-        ].rename(columns={"available_at": "_price_available"})
-        state = sources["public_fund_nav"][
-            ["asset_id", "timestamp", "nav_cny", "available_at"]
-        ].merge(prices, on=["asset_id", "timestamp"], how="inner")
-        state["available_at"] = state[["available_at", "_price_available"]].max(
-            axis=1, skipna=False
+        versions = []
+        for released, snapshots, _updated in revision_snapshots(
+            {
+                "nav": (
+                    sources["public_fund_nav"],
+                    ("asset_id", "timestamp"),
+                    ("nav_cny",),
+                ),
+                "prices": (
+                    sources["public_domestic_etf_prices"],
+                    ("asset_id", "timestamp"),
+                    ("close",),
+                ),
+            }
+        ):
+            prices = snapshots["prices"].rename(
+                columns={"available_at": "_price_available"}
+            )
+            state = snapshots["nav"].merge(
+                prices, on=["asset_id", "timestamp"], how="inner"
+            )
+            state["available_at"] = state[["available_at", "_price_available"]].max(
+                axis=1, skipna=False
+            )
+            state[ETF[4]] = state.close / state.nav_cny.where(state.nav_cny > 0) - 1
+            versions.append((released, state))
+        state = (
+            versions[0][1]
+            if len(versions) == 1
+            else combine_derived_versions(versions, columns=(ETF[4],))
         )
-        state[ETF[4]] = state.close / state.nav_cny.where(state.nav_cny > 0) - 1
         result[ETF[4]] = latest_observations(state, work, columns=(ETF[4],))[
             ETF[4]
         ].to_numpy()
     if usable & set(ETF[6:]):
-        parts = sources["public_etf_pcf_components"].loc[
-            :,
-            [
-                "fund_code",
-                "timestamp",
-                "available_at",
-                "component_code",
-                "component_kind",
-                "component_quantity_unit",
-                "component_quantity",
-                "creation_unit_fund_shares",
-            ],
-        ]
-        baskets = parts.groupby(["fund_code", "timestamp"], sort=False).indices
-        equity_funds = parts.loc[
-            parts.component_kind.eq("equity_security"), "fund_code"
-        ].unique()
-        complete_at = pd.Series(dtype="datetime64[ns]")
-        if "public_etf_pcf_baskets" in sources:
-            keys = ["fund_code", "timestamp"]
-            grouped = parts.groupby(keys, sort=False)
-            counts = grouped.component_code.agg(["size", "nunique"])
-            counts["_components_available"] = grouped.available_at.max().where(
-                grouped.available_at.count().eq(counts["size"])
+        parts = sources["public_etf_pcf_components"]
+        basket_fields = (
+            "component_code",
+            "component_kind",
+            "component_quantity_unit",
+            "component_quantity",
+            "creation_unit_fund_shares",
+        )
+        versions = _pcf_versions(
+            parts, sources.get("public_etf_pcf_baskets"), basket_fields
+        )
+        baskets = {
+            key: group.sort_values("available_at", kind="stable")
+            for key, group in versions.loc[versions.available_at.notna()].groupby(
+                ["fund_code", "timestamp"], sort=False
             )
-            headers = sources["public_etf_pcf_baskets"]
-            proof = headers.merge(counts, on=keys, how="inner")
-            proof = proof.loc[
-                proof.declared_component_count.eq(proof["size"])
-                & proof["size"].eq(proof["nunique"])
-            ].copy()
-            proof["_complete_at"] = proof[
-                ["available_at", "_components_available"]
-            ].max(axis=1, skipna=False)
-            complete_at = proof.groupby(keys, sort=False)._complete_at.min()
+        }
+        equity_known = versions._payload.map(
+            lambda rows: (
+                isinstance(rows, tuple)
+                and any(row[1] == "equity_security" for row in rows)
+            )
+        )
+        first_equity_release = (
+            versions.loc[equity_known].groupby("fund_code").available_at.min()
+        )
+        share_positions = shares.groupby(["asset_id", "timestamp"], sort=False).indices
+        share_reports = iter_latest_report_keys(
+            shares.assign(available_at=shares._share_delta_1d_available_at),
+            work.timestamp.drop_duplicates().tolist(),
+            entity="asset_id",
+        )
+        widths = tuple(
+            width
+            for width in (1, 5)
+            if any(
+                f"{scope}_passive_flow_pressure_{width}d" in usable
+                for scope in ("stock", "industry")
+            )
+        )
         for date, at in work.groupby("timestamp", sort=False).indices.items():
             block = work.iloc[at]
-            probes = pd.DataFrame({"asset_id": equity_funds, "timestamp": date})
-            latest = latest_observations(
-                shares.assign(available_at=shares._share_delta_1d_available_at),
-                probes,
-                columns=("_share_delta_1d",),
-            )
-            flow = probes.assign(_date=latest.observation_date.to_numpy())
+            flow = next(share_reports).rename(columns={"_report": "_date"})
+            flow = flow.loc[
+                flow.asset_id.isin(
+                    first_equity_release.index[first_equity_release.le(date)]
+                )
+            ]
             if "avg_volume_20d" not in block:
                 continue
-            for width in (1, 5):
+            for width in widths:
                 history = []
                 for fund, cutoff in flow[["asset_id", "_date"]].itertuples(
                     index=False, name=None
                 ):
-                    tail = shares.loc[
-                        shares.asset_id.eq(fund) & shares.timestamp.le(cutoff)
-                    ].tail(width)
+                    needed = session_days[session_days <= cutoff][-width:]
+                    positions = [
+                        share_positions.get((fund, day), np.empty(0, dtype=int))
+                        for day in needed
+                    ]
+                    selected_shares = (
+                        shares.iloc[np.concatenate(positions)]
+                        if positions
+                        else shares.iloc[:0]
+                    )
+                    tail = (
+                        selected_shares.loc[
+                            selected_shares._share_delta_1d_available_at.le(date)
+                        ]
+                        .sort_values(
+                            ["timestamp", "_share_delta_1d_available_at"], kind="stable"
+                        )
+                        .drop_duplicates("timestamp", keep="last")
+                        .set_index("timestamp")
+                        .reindex(needed)
+                        .assign(asset_id=fund)
+                        .rename_axis("timestamp")
+                        .reset_index()
+                    )
                     if (
                         len(tail) == width
                         and tail._share_delta_1d.notna().all()
@@ -679,14 +808,29 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 if not history:
                     continue
                 delta = pd.concat(history, ignore_index=True)
-                positions = [
-                    baskets.get((fund, day), np.empty(0, dtype=int))
-                    for fund, day in delta[["asset_id", "timestamp"]].itertuples(
-                        index=False, name=None
+                selected_baskets, completion = [], []
+                for fund, day in delta[["asset_id", "timestamp"]].itertuples(
+                    index=False, name=None
+                ):
+                    reports = baskets.get((fund, day))
+                    position = (
+                        0
+                        if reports is None
+                        else reports.available_at.searchsorted(date, side="right")
                     )
-                ]
-                eligible = parts.iloc[np.concatenate(positions)]
-                eligible = eligible.loc[eligible.available_at.le(date)]
+                    record = None if not position else reports.iloc[position - 1]
+                    if record is None or not isinstance(record._payload, tuple):
+                        completion.append(pd.NaT)
+                        continue
+                    completion.append(record._complete_at)
+                    selected_baskets.append(
+                        pd.DataFrame(record._payload, columns=basket_fields).assign(
+                            fund_code=fund, timestamp=day
+                        )
+                    )
+                if not selected_baskets:
+                    continue
+                eligible = pd.concat(selected_baskets, ignore_index=True)
                 p = delta.merge(
                     eligible,
                     left_on=["asset_id", "timestamp"],
@@ -712,12 +856,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     contributions.count().eq(contributions.size())
                 )
                 mapped = block.asset_id.map(quantity)
-                cohort = pd.MultiIndex.from_frame(
-                    delta[["asset_id", "timestamp"]].rename(
-                        columns={"asset_id": "fund_code"}
-                    )
-                )
-                known = complete_at.reindex(cohort)
+                known = pd.Series(completion, dtype="datetime64[ns]")
                 if known.notna().all() and known.le(date).all():
                     # Absence is zero only in a complete, publication-visible PCF list.
                     mapped = mapped.where(block.asset_id.isin(quantity.index), 0)

@@ -74,7 +74,9 @@ def test_missing_quote_uses_known_company_halt_and_past_status_only(evidence):
 def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     has_raw_history,
 ) -> None:
-    from quant_research_platform.research.filtering import a_share_eligibility
+    from quant_research_platform.markets.implementations.a_share.stock_pool import (
+        a_share_eligibility,
+    )
 
     frame = pd.DataFrame(
         {

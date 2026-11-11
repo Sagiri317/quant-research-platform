@@ -382,7 +382,6 @@ def test_paired_confidence_is_used_by_hac_and_persisted(tmp_path, confidence, ki
                 "family_id": "one",
                 "sample_role": "test",
                 "status": "DEFINED",
-                "asset_coverage_id": "a" * 64,
                 "observation_count": 100,
                 "loss": 0.0,
             }

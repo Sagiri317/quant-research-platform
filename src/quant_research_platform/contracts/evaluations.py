@@ -180,7 +180,6 @@ class EvaluationSpec:
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
     top_quantile: float | None = None
-    run_type: str = "evaluation"
 
     def __post_init__(self) -> None:
         if (
@@ -229,8 +228,6 @@ class EvaluationSpec:
         if self.n_groups < 2:
             raise ValueError("evaluation_n_groups_too_small")
         _validate_signal_label_separation(self.signals, self.label_columns)
-        if type(self.run_type) is not str or not self.run_type:
-            raise ValueError("evaluation_run_type_required")
 
 
 @dataclass(frozen=True)

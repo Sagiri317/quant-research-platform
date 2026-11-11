@@ -56,13 +56,15 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
     compute_market_panel,
     validate_market_bar_calendar,
 )
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    A_SHARE_ELIGIBILITY_FACTS,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors import engine as factor_engine
 from quant_research_platform.research.factors.expectations.calculations import (
     FORECAST_FRESHNESS_DAYS,
     _prepare_expectations,
 )
-from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.labels.forward_returns import (
     add_on_id_decomposition,

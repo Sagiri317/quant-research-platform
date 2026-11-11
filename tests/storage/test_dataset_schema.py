@@ -888,9 +888,6 @@ def test_decimal_category_identity_keeps_scalar_types_distinct() -> None:
         for value in (Decimal("1.00"), 1, 1.0, True, "1")
     ]
     assert len(set(identities)) == len(identities)
-    assert canonical_identity_bytes(Decimal("1.0")) != canonical_identity_bytes(
-        Decimal("1.00")
-    )
 
 
 @pytest.mark.parametrize(

@@ -413,6 +413,8 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 `model_statistics` 的 `model_losses` 分析同时发布 `model_prediction_metrics.parquet`，
 主键为 `timestamp, family_id`，每行是一家族在一个实际输入日期的描述统计。
 字段和结构定义统一维护在 [statistics.py](../src/quant_research_platform/artifacts/statistics.py)。
+`model_losses.parquet` 保存各家族的负RankIC、实际配对观测数、共同域计数与状态，不保存证券集合哈希。
+正式比较直接用双方预测与成熟标签确定共同证券并重新排名，不能只凭观测数相等判定样本一致。
 
 | 字段 | 单位与定义 |
 | --- | --- |

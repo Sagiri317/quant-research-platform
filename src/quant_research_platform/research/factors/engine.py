@@ -120,7 +120,9 @@ def _market_model_frames(
         strict_integer_series,
         strict_timestamp_series,
     )
-    from quant_research_platform.research.filtering import a_share_eligibility
+    from quant_research_platform.markets.implementations.a_share.stock_pool import (
+        a_share_eligibility,
+    )
 
     open_markets = None
     if trading_calendar is not None:

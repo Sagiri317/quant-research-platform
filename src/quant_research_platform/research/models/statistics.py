@@ -21,7 +21,6 @@ from quant_research_platform.contracts.experiments import (
     legal_training_rows,
 )
 from quant_research_platform.contracts.ids import validate_input_market
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     CLASSIFICATION_METRICS,
     _prediction_loss_reason,
@@ -453,14 +452,6 @@ def build_a_share_statistics_tables(
                     column = family_columns[family_id]
                     value = daily[column]
                     defined = bool(np.isfinite(value))
-                    paired_assets = (
-                        mature.loc[
-                            mature[[column, primary_label]].notna().all(axis=1),
-                            "asset_id",
-                        ]
-                        .astype(str)
-                        .sort_values()
-                    )
                     loss_records.append(
                         {
                             "timestamp": timestamp,
@@ -471,10 +462,9 @@ def build_a_share_statistics_tables(
                                 "model_id"
                             ],
                             "loss": -float(value) if defined else np.nan,
-                            "observation_count": len(paired_assets),
-                            "asset_coverage_id": canonical_json_hash(
-                                paired_assets.tolist()
-                            ),
+                            "observation_count": int(correlations.at[column, "n_obs"])
+                            if not correlation_input.empty
+                            else 0,
                             "status": "DEFINED" if defined else "UNDEFINED",
                             "reason": None
                             if defined

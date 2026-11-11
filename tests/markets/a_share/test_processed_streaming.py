@@ -16,8 +16,10 @@ from quant_research_platform.markets.implementations.a_share.processed import pr
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    a_share_eligibility,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.filtering import a_share_eligibility
 from quant_research_platform.research.protocols.a_share import factor_catalog
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage.datasets.reading import (

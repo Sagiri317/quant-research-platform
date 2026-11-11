@@ -7,7 +7,6 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.factors.statistics import (
     build_a_share_factor_statistics_tables,
@@ -401,7 +400,7 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
     assert len(lost) == len(dates)
     assert lost.status.eq("UNDEFINED").all()
     assert lost.reason.eq("family_selection_undefined").all()
-    assert lost.asset_coverage_id.eq(canonical_json_hash([])).all()
+    assert lost.observation_count.eq(0).all()
     assert lost.config_id.eq("").all()
     assert set(tables["model_trials"].family_id) == {"working", "failed"}
     unselected_trials = tables["model_trials"].loc[

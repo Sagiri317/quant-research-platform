@@ -82,15 +82,18 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
         output[name] = np.nan
     if trades is None or trades.empty:
         return output
+    trade_groups = trades.loc[trades.event_kind.isin(("trade", "unknown"))].groupby(
+        "asset_id", sort=False
+    )
     for asset, at in quotes.groupby("asset_id", sort=False).indices.items():
         at = np.asarray(at)
         q = quotes.iloc[at].sort_values("timestamp")
         positions = q.index.to_numpy()
-        t = trades.loc[
-            trades.asset_id.eq(asset) & trades.event_kind.isin(("trade", "unknown"))
-        ].sort_values(["timestamp", "source_row"], kind="stable")
-        if t.empty:
+        if asset not in trade_groups.indices:
             continue
+        t = trade_groups.get_group(asset).sort_values(
+            ["timestamp", "source_row"], kind="stable"
+        )
         price = pd.to_numeric(t.price).to_numpy(float)
         quantity = pd.to_numeric(t.volume).to_numpy(float)
         valid = (
@@ -526,17 +529,22 @@ def calculate(
             "risk_residual_drawdown_20d",
         ),
     }
+    paths = tuple(
+        dict.fromkeys(
+            path for name, (path, _) in interactions.items() if name in columns
+        )
+    )
+    if paths:
+        aligned = (
+            path_factors(work, columns=paths)
+            .set_index(["asset_id", "timestamp"])
+            .reindex(pd.MultiIndex.from_frame(work[["asset_id", "timestamp"]]))
+        )
     for name, (path, context) in interactions.items():
         if name in columns:
-            values = path_factors(work, columns=(path,)).set_index(
-                ["asset_id", "timestamp"]
-            )[path]
-            aligned = values.reindex(
-                pd.MultiIndex.from_frame(work[["asset_id", "timestamp"]])
-            ).to_numpy()
             state = pd.to_numeric(daily[context])
             state = 1 - state if "low_position" in name else state
-            result[name] = aligned * state
+            result[name] = aligned[path].to_numpy() * state
             if "_activity_x_depth_recovery" in name:
                 result[name] *= relative_activity
     if "prior_financing_x_intraday_liquidity_stress" in columns:

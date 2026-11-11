@@ -121,7 +121,9 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.research.filtering import a_share_eligibility
+    from quant_research_platform.markets.implementations.a_share.stock_pool import (
+        a_share_eligibility,
+    )
 
     dates = pd.bdate_range("2020-01-02", periods=650).as_unit("ns")
     frames = _synthetic_interim_frames(dates)
@@ -270,7 +272,9 @@ def test_listing_age_keeps_prior_market_sessions_in_native_narrow_panel(
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
-    from quant_research_platform.research.filtering import a_share_eligibility
+    from quant_research_platform.markets.implementations.a_share.stock_pool import (
+        a_share_eligibility,
+    )
 
     dates = pd.bdate_range("2020-01-02", periods=256).as_unit("ns")
     frames = _synthetic_interim_frames(dates)

@@ -392,6 +392,41 @@ def _calculate_values(
         mask = source > 0 if factor == "positive_return_fraction_20d" else source <= 0
         output[first - start :][valid] = window_count(mask)[valid] / size
         return output
+    semivolatility = factor.startswith("downside_volatility_") or factor == (
+        "upside_volatility_20d"
+    )
+    if semivolatility or factor == "amplitude_20d" or factor.startswith("amihud_"):
+        required = slice(first - size + 1, stop)
+        sample, known = source[required], numeric[required]
+        if semivolatility:
+            clipped = (
+                np.minimum(sample, 0.0)
+                if factor.startswith("downside")
+                else np.maximum(sample, 0.0)
+            )
+            contributions = clipped * clipped
+        else:
+            numerator = (
+                sample - values["low"][required]
+                if factor == "amplitude_20d"
+                else np.abs(sample)
+            )
+            denominator = values["close" if factor == "amplitude_20d" else "amount"][
+                required
+            ]
+            contributions = np.divide(
+                numerator, denominator, out=np.full(len(sample), np.nan), where=known
+            )
+        means = (
+            pd.Series(np.where(known, contributions, np.nan))
+            .rolling(size, min_periods=1)
+            .mean()
+            .to_numpy()[size - 1 :]
+        )
+        output[first - start :][valid] = (
+            np.sqrt(means[valid]) if semivolatility else means[valid]
+        )
+        return output
     matrix = window(np.where(numeric, source, np.nan)) if partial else window(source)
     if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
         valid &= np.min(
@@ -405,13 +440,6 @@ def _calculate_values(
         "turnover_volatility_20d",
     }:
         result = _sample_standard_deviation(current)
-    elif factor.startswith("downside_volatility_") or factor == "upside_volatility_20d":
-        clipped = (
-            np.minimum(current, 0.0)
-            if factor.startswith("downside")
-            else np.maximum(current, 0.0)
-        )
-        result = np.sqrt(np.nansum(clipped * clipped, axis=1) / sample_counts)
     elif factor == "top5_return_mean_20d":
         top = np.partition(current, -5, axis=1)[:, -5:]
         result = np.mean(top, axis=1)
@@ -436,12 +464,6 @@ def _calculate_values(
             )
     elif factor == "drawdown_60d":
         result = np.min(current / np.maximum.accumulate(current, axis=1) - 1.0, axis=1)
-    elif factor == "amplitude_20d" or factor.startswith("amihud_"):
-        numerator = (
-            current - extra["low"] if factor == "amplitude_20d" else np.abs(current)
-        )
-        denominator = extra["close"] if factor == "amplitude_20d" else extra["amount"]
-        result = np.nanmean(numerator / denominator, axis=1)
     elif factor == "trend_efficiency_60d":
         result = np.abs(
             path_efficiency(current.sum(axis=1), np.abs(current).sum(axis=1))
