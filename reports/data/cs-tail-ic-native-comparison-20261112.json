@@ -1,0 +1,70 @@
+{
+  "scope": {
+    "authority_sources": 170,
+    "selected_combinations": 15064,
+    "cross_sectional_sources": 45,
+    "cross_sectional_combinations": 6370,
+    "re_evaluated_sources": 33,
+    "direct_fixed_native_sources": 12
+  },
+  "input": "按当前选中的signal和label投影各来源原完整EVAL与对应新截面EVAL的ic_summary；直接fixed来源复用本身。",
+  "compared_mean_fields": [
+    "mean_ic",
+    "mean_rankic",
+    "mean_long_ic",
+    "mean_short_ic",
+    "mean_long_rankic",
+    "mean_short_rankic"
+  ],
+  "compared_count_fields": [
+    "valid_ic_count",
+    "valid_rankic_count",
+    "valid_long_ic_count",
+    "valid_short_ic_count",
+    "valid_long_rankic_count",
+    "valid_short_rankic_count"
+  ],
+  "result": {
+    "changed_mean_fields": 0,
+    "changed_count_fields": 0,
+    "max_finite_mean_absolute_difference": 0.0
+  },
+  "examples": [
+    {
+      "source": "results/factor-expansion-95ad4a83/price_volume_facts_known_halts_corrected",
+      "signal": "failed_up_breakout_20d",
+      "label": "forward_return_5d",
+      "old_and_new": {
+        "mean_ic": -0.008122455615368335,
+        "mean_rankic": -0.01033686043578075,
+        "mean_long_ic": -0.008514156710267486,
+        "mean_long_rankic": -0.01134128294867371,
+        "valid_long_ic_count": 3108,
+        "valid_long_rankic_count": 3108,
+        "mean_short_ic": null,
+        "mean_short_rankic": null,
+        "valid_short_ic_count": 0,
+        "valid_short_rankic_count": 0
+      }
+    },
+    {
+      "source": "results/factor-expansion-95ad4a83/price_volume_facts_known_halts_corrected",
+      "signal": "volume_change_20d",
+      "label": "forward_return_5d",
+      "old_and_new": {
+        "mean_ic": -0.029374126916811648,
+        "mean_rankic": -0.03505641573117069,
+        "mean_long_ic": -0.04512568892615255,
+        "mean_short_ic": 0.005596024694205916,
+        "mean_long_rankic": -0.08267968084108968,
+        "mean_short_rankic": 0.004804117621802297,
+        "valid_long_ic_count": 3111,
+        "valid_short_ic_count": 3105,
+        "valid_long_rankic_count": 3111,
+        "valid_short_rankic_count": 3105
+      }
+    }
+  ],
+  "conclusion": "本次新五层分组收益对齐既有高低值组选择；当前选域的总体及高低值组IC、RankIC均值与有效次数没有实际变化，保留仅刷新截面分层的设计。",
+  "limits": "这是一次主动独立比较，不加入每次增量运行期门槛；没有重算因子或近期STAT，不包含尚未发布的新股票高频来源。"
+}
