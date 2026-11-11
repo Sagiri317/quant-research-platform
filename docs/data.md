@@ -489,7 +489,8 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 | `public_fund_shares` | 交易所ETF总份额；上交所万份换算为份，深交所XLSX按其“份”字段读取 |
 | `public_etf_pcf_baskets`／`public_etf_pcf_components` | 每申赎单位基金份额、估值日NAV／现金差额及交付篮子；股票股数与黄金克数分列，不能当实际持仓或指数权重。各基金规则对应各自可用时钟，逐原件URL／哈希／取得时刻保留 |
 | `public_futures_daily` | IF／IH／IC／IM逐合约行情，价格为指数点，成交量与持仓为合约数；不混入期权或小计 |
-| `public_fund_holdings` | 报告期、基金、股票、股数、CNY公允价值、NAV百分比、全持仓／前十大范围；同报告期不同披露版本分别保留 |
+| `public_fund_holdings` | 报告期、经济组合、报告版本、真实证券市场与股票代码、股数、CNY公允价值、NAV百分比及披露范围；原始行与章节共同标识持仓，不混同港股和A股代码 |
+| `public_fund_holdings_reports` | 完整股票表状态、明确无股票声明、股票行数、经济组合及报告版本；零持仓报告独立于持仓行保存，未知解析状态不能当作零仓 |
 | `public_13f_holdings`／`public_nport_holdings` | 按申报编号和持仓行保留版本与修订；13F金额按实际申报日适用的美元／千美元规则换算；N-PORT保留报告币种 |
 | `public_cftc_positions` | TFF交易者类别和持仓合约数；期货单独与期货＋期权分别标识 |
 | `public_finra_margin` | 月度融资账户统计，单位百万USD；观察月份不是发布日期 |

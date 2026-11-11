@@ -210,6 +210,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     result = LIBRARIES[spec.data_id].calculate(
         frame, sources, columns=selected, parameters=json.loads(spec.parameters_json)
     )
+    result = result.astype(dict.fromkeys(selected, "Float64"))
     metadata = {"producer_diagnostics": result.attrs}
     yield (
         (

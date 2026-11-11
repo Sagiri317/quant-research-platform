@@ -250,6 +250,82 @@ def test_share_history_keeps_missing_declared_sessions():
     assert result.etf_share_change_5d.iloc[5] == pytest.approx(0.5)
 
 
+def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_older():
+    headers = pd.DataFrame(
+        [
+            (
+                "h0",
+                "2023-06-30",
+                "2023-08-01",
+                "full_stock_table_reconciled",
+                "false",
+                2,
+            ),
+            (
+                "h1",
+                "2023-12-31",
+                "2024-03-01",
+                "explicit_no_stock_statement",
+                "true",
+                0,
+            ),
+            (
+                "h2",
+                "2023-06-30",
+                "2024-04-01",
+                "full_stock_table_reconciled",
+                "false",
+                1,
+            ),
+        ],
+        columns=[
+            "report_version_identity",
+            "timestamp",
+            "available_at",
+            "stock_disclosure_status",
+            "explicit_no_stock",
+            "stock_rows",
+        ],
+    ).assign(
+        economic_portfolio_id="portfolio",
+        fund_code="f",
+        disclosure_scope="full_stock_holdings",
+    )
+    for field in ("timestamp", "available_at"):
+        headers[field] = pd.to_datetime(headers[field])
+    holdings = pd.DataFrame(
+        [("h0", "CN_MAINLAND", 10.0), ("h0", "HK", 999.0), ("h2", "CN_MAINLAND", 99.0)],
+        columns=["report_version_identity", "stock_market", "shares_held"],
+    ).assign(stock_code="s", economic_portfolio_id="portfolio")
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="s",
+            a_float_shares=100.0,
+            timestamp=pd.to_datetime(
+                ["2023-07-31", "2023-08-02", "2024-03-02", "2024-04-02"]
+            ),
+        )
+    )
+    fields = [
+        "cn_fund_ownership_float_share",
+        "cn_fund_holder_concentration",
+        "cn_disclosed_ownership_change",
+    ]
+    result = calculate(
+        decisions,
+        dict(public_fund_holdings=holdings, public_fund_holdings_reports=headers),
+        columns=fields,
+    )
+    assert result.loc[0, fields].isna().all()
+    assert result.loc[1, fields[0]] == pytest.approx(0.1)
+    assert result.loc[1, fields[1]] == 1
+    assert result.loc[2, fields[0]] == 0
+    assert result.loc[2, fields[2]] == pytest.approx(-0.1)
+    assert result.loc[3, fields[0]] == 0
+    assert pd.isna(result.loc[3, fields[1]])
+
+
 def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id():
     dates = pd.bdate_range("2024-01-02", periods=7)
     shares = pd.DataFrame(
@@ -292,8 +368,16 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
     np.testing.assert_allclose(result.loc[0, fields].to_numpy(float), [0.01, 0.05])
     industry = [name.replace("stock_", "industry_") for name in fields]
     unknown = calculate(
-        decision,
-        dict(public_fund_shares=shares, public_etf_pcf_components=baskets),
+        decision.astype({"industry_standard_id": "str", "industry_level1_code": "str"}),
+        dict(
+            public_fund_shares=shares.astype({"shares_outstanding": "Float64"}),
+            public_etf_pcf_components=baskets.astype(
+                {
+                    "component_quantity": "Float64",
+                    "creation_unit_fund_shares": "Float64",
+                }
+            ),
+        ),
         columns=fields + industry,
     )
     np.testing.assert_allclose(unknown.loc[0, fields].to_numpy(float), [0.01, 0.05])

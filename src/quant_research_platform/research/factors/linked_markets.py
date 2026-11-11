@@ -426,6 +426,8 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 states, signal_open, (US[3], "us_relative_sector_shock"), ids=ids
             )
             for _, positions in work.groupby("asset_id", sort=False).indices.items():
+                if not ids.iloc[positions].notna().any():
+                    continue
                 block = work.iloc[positions]
                 x = values.iloc[positions][US[3]].to_numpy(float)
                 relative = values.iloc[positions]["us_relative_sector_shock"].to_numpy(

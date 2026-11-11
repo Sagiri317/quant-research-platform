@@ -12,6 +12,86 @@ from quant_research_platform.sources.public_research.normalization import normal
 from quant_research_platform.storage.datasets.reading import read_dataset
 
 
+def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp_path):
+    shared = dict(
+        primary_fund_code="000001",
+        economic_portfolio_id="portfolio",
+        report_version_identity="report",
+        report_period_end="2024-06-30",
+        disclosure_scope="full_stock_holdings",
+        published_at=None,
+        source_sha256="a" * 64,
+        source_url="https://example.org/report",
+        source_path="report.html",
+        source_retrieved_at="2026-11-11T00:00:00Z",
+        report_declared_send_date="2024-08-20",
+    )
+    positions = tmp_path / "holdings.csv"
+    pd.DataFrame(
+        [
+            dict(
+                shared,
+                stock_code="000002",
+                stock_market="CN_MAINLAND",
+                shares_held="1234",
+                fair_value_cny="10000",
+                nav_weight_percent="1.25",
+                published_date="2024-08-19",
+                source_row_index="2",
+                html_section_anchor="stock-table",
+            )
+        ]
+    ).to_csv(positions, index=False)
+    headers = tmp_path / "headers.json"
+    headers.write_text(
+        json.dumps(
+            dict(
+                records=[
+                    dict(
+                        shared,
+                        publication_date="2024-08-19",
+                        stock_rows=0,
+                        stock_disclosure_status="explicit_no_stock_reported",
+                        explicit_no_stock_statement_in_stock_section=True,
+                    )
+                ]
+            )
+        )
+    )
+    records = []
+    for path, source in [
+        (positions, "cn_fund_report_full_holdings_csv_evidence"),
+        (headers, "cn_fund_report_descriptors_extracted"),
+    ]:
+        records.append(
+            dict(
+                path=path.name,
+                source=source,
+                status="downloaded",
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                bytes=path.stat().st_size,
+            )
+        )
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(dict(schema_version=1, records=records))
+    )
+    outputs = {
+        name: str(tmp_path / name)
+        for name in ("public_fund_holdings", "public_fund_holdings_reports")
+    }
+    prepare_source(
+        dict(source_id="public_research", raw_root=str(tmp_path), outputs=outputs)
+    )
+    holding, report = (read_dataset(outputs[name]) for name in outputs)
+    assert holding.shares_held.tolist() == [1234]
+    assert holding.asset_id.tolist() == ["report:stock-table:2:CN_MAINLAND:000002"]
+    assert holding.economic_portfolio_id.tolist() == ["portfolio"]
+    assert report.explicit_no_stock.tolist() == ["true"]
+    assert report.stock_rows.tolist() == [0]
+    assert report.available_at.iloc[0] == pd.Timestamp("2024-08-20T16:00:00Z")
+    assert report.published_at.isna().all()
+
+
 def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
     path = tmp_path / "cells.csv"
     pd.DataFrame(

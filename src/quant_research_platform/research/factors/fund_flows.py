@@ -47,9 +47,16 @@ RECIPES = {
         ETF[6:],
         ("public_fund_shares", "public_etf_pcf_components"),
     ),
-    **dict.fromkeys((*FUNDS[:4], FUNDS[9], FUNDS[15]), ("public_fund_holdings",)),
+    **dict.fromkeys(
+        (*FUNDS[:4], FUNDS[9], FUNDS[15]),
+        ("public_fund_holdings", "public_fund_holdings_reports"),
+    ),
     **dict.fromkeys(FUNDS[4:8], ("public_fund_financial_cells",)),
-    FUNDS[8]: ("public_fund_financial_cells", "public_fund_holdings"),
+    FUNDS[8]: (
+        "public_fund_financial_cells",
+        "public_fund_holdings",
+        "public_fund_holdings_reports",
+    ),
     **dict.fromkeys(FUNDS[10:13], ("public_13f_holdings", "public_13f_filings")),
     FUNDS[13]: (
         "public_nport_funds",
@@ -613,7 +620,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                             block.industry_standard_id.notna()
                             & block.industry_level1_code.notna()
                         )
-                        .to_numpy()
+                        .to_numpy(dtype=float, na_value=np.nan)
                     )
     financial = (
         financial_states(sources["public_fund_financial_cells"])
@@ -644,25 +651,41 @@ def calculate(decisions, sources, *, columns, parameters=None):
     holdings = sources.get("public_fund_holdings")
     ownership = set((*FUNDS[:4], FUNDS[8], FUNDS[9], FUNDS[15]))
     if holdings is not None and usable & ownership:
-        h = holdings.loc[holdings.disclosure_scope.str.startswith("full_report")].copy()
+        headers = sources["public_fund_holdings_reports"]
+        headers = headers.loc[
+            headers.economic_portfolio_id.notna()
+            & (
+                (
+                    headers.disclosure_scope.eq("full_stock_holdings")
+                    & headers.stock_disclosure_status.eq("full_stock_table_reconciled")
+                )
+                | (headers.explicit_no_stock.eq("true") & headers.stock_rows.eq(0))
+            )
+        ]
+        h = holdings.loc[
+            holdings.stock_market.eq("CN_MAINLAND")
+            & holdings.report_version_identity.isin(headers.report_version_identity)
+        ]
         reports = iter_latest_report_keys(
-            h, work.timestamp.drop_duplicates().tolist(), entity="fund_code"
+            headers,
+            work.timestamp.drop_duplicates().tolist(),
+            entity="economic_portfolio_id",
         )
         for date, at in work.groupby("timestamp", sort=False).indices.items():
             block = work.iloc[at]
             keys = next(reports)
-            known = keys.merge(
-                h,
-                left_on=["fund_code", "_report", "_available"],
-                right_on=["fund_code", "timestamp", "available_at"],
+            latest_headers = keys.merge(
+                headers,
+                left_on=["economic_portfolio_id", "_report", "_available"],
+                right_on=["economic_portfolio_id", "timestamp", "available_at"],
                 how="inner",
                 suffixes=("_decision", ""),
             )
-            if known.empty:
+            if latest_headers.empty:
                 continue
-            known = known.drop_duplicates(
-                ["fund_code", "stock_code", "timestamp", "shares_held"]
-            )
+            known = h.loc[
+                h.report_version_identity.isin(latest_headers.report_version_identity)
+            ]
             total = known.groupby("stock_code", sort=False).shares_held.sum(min_count=1)
             squared = (
                 (known.shares_held**2)
@@ -670,7 +693,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 .sum(min_count=1)
             )
             hhi = squared / total.where(total > 0) ** 2
-            values = block.asset_id.map(total)
+            values = block.asset_id.map(total).fillna(0)
             for name in usable & ownership:
                 if name == FUNDS[0] and "a_float_shares" in block:
                     result.loc[at, name] = (
@@ -684,7 +707,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                         lambda x: x > 0
                     )
                     others = (
-                        fractions.groupby(known.fund_code).transform(
+                        fractions.groupby(known.economic_portfolio_id).transform(
                             lambda s: s.sum(min_count=len(s))
                         )
                         - fractions
@@ -692,21 +715,32 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     exposure = (
                         (fractions * others).groupby(known.stock_code).sum(min_count=1)
                     )
-                    result.loc[at, name] = block.asset_id.map(exposure).to_numpy()
+                    result.loc[at, name] = (
+                        block.asset_id.map(exposure).fillna(0).to_numpy()
+                    )
                 elif name == FUNDS[3]:
-                    earlier = h.loc[h.available_at.le(date)].merge(
-                        keys[["fund_code", "_report"]], on="fund_code", how="inner"
+                    earlier = headers.loc[headers.available_at.le(date)].merge(
+                        keys[["economic_portfolio_id", "_report"]],
+                        on="economic_portfolio_id",
+                        how="inner",
                     )
                     earlier = earlier.loc[earlier.timestamp.lt(earlier._report)]
-                    previous_period = earlier.groupby("fund_code").timestamp.transform(
-                        "max"
-                    )
+                    previous_period = earlier.groupby(
+                        "economic_portfolio_id"
+                    ).timestamp.transform("max")
                     earlier = earlier.loc[earlier.timestamp.eq(previous_period)]
                     previous_release = earlier.groupby(
-                        "fund_code"
+                        "economic_portfolio_id"
                     ).available_at.transform("max")
                     earlier = earlier.loc[earlier.available_at.eq(previous_release)]
-                    common = known.loc[known.fund_code.isin(earlier.fund_code)]
+                    if earlier.empty:
+                        continue
+                    common = known.loc[
+                        known.economic_portfolio_id.isin(earlier.economic_portfolio_id)
+                    ]
+                    earlier = h.loc[
+                        h.report_version_identity.isin(earlier.report_version_identity)
+                    ]
                     changes = (
                         common.groupby("stock_code")
                         .shares_held.sum(min_count=1)
@@ -717,7 +751,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     )
                     if "a_float_shares" in block:
                         result.loc[at, name] = (
-                            block.asset_id.map(changes)
+                            block.asset_id.map(changes).fillna(0)
                             / block.a_float_shares.where(block.a_float_shares > 0)
                         ).to_numpy()
                 elif name == FUNDS[9] and "peak_drawdown_20d" in block:
@@ -750,17 +784,18 @@ def calculate(decisions, sources, *, columns, parameters=None):
                         current.groupby("asset_id").available_at.transform("max")
                     )
                 ]
-                prior = h.merge(
+                prior = headers.merge(
                     current[
                         [
-                            "fund_code",
+                            "asset_id",
                             "timestamp",
                             "available_at",
                             "_redemption_rate",
                             "_flow_period_start",
                         ]
                     ],
-                    on="fund_code",
+                    left_on="economic_portfolio_id",
+                    right_on="asset_id",
                     suffixes=("", "_flow"),
                 )
                 prior = prior.loc[
@@ -769,14 +804,23 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 ]
                 prior = prior.loc[
                     prior.timestamp.eq(
-                        prior.groupby("fund_code").timestamp.transform("max")
+                        prior.groupby("economic_portfolio_id").timestamp.transform(
+                            "max"
+                        )
                     )
                 ]
                 prior = prior.loc[
                     prior.available_at.eq(
-                        prior.groupby("fund_code").available_at.transform("max")
+                        prior.groupby("economic_portfolio_id").available_at.transform(
+                            "max"
+                        )
                     )
                 ]
+                prior = h.merge(
+                    prior[["report_version_identity", "_redemption_rate"]],
+                    on="report_version_identity",
+                    how="inner",
+                )
                 quantities = (
                     (prior.shares_held * prior._redemption_rate)
                     .groupby(prior.stock_code)

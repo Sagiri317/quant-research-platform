@@ -103,12 +103,24 @@ DATASETS = {
     },
     "public_fund_holdings": {
         "fund_code": "identifier",
+        "economic_portfolio_id": "identifier",
+        "report_version_identity": "identifier",
         "stock_code": "identifier",
+        "stock_market": "identifier",
         "shares_held": "shares",
         "fair_value_cny": "CNY",
         "nav_weight_percent": "percent",
         "disclosure_scope": "text",
         "report_path": "text",
+    },
+    "public_fund_holdings_reports": {
+        "fund_code": "identifier",
+        "economic_portfolio_id": "identifier",
+        "report_version_identity": "identifier",
+        "disclosure_scope": "text",
+        "stock_disclosure_status": "text",
+        "explicit_no_stock": "identifier",
+        "stock_rows": "count",
     },
     "public_13f_holdings": {
         "accession": "identifier",
@@ -274,7 +286,9 @@ SOURCES = {
     "public_fund_holdings": {
         "chinaamc_extracted_holdings",
         "cn_fund_report_holdings_extracted",
+        "cn_fund_report_full_holdings_csv_evidence",
     },
+    "public_fund_holdings_reports": {"cn_fund_report_descriptors_extracted"},
     "public_13f_holdings": {"sec_13f", "sec_13f_target_holdings_extracted"},
     "public_nport_holdings": {"sec_nport", "sec_nport_target_holdings_extracted"},
     "public_margin_balances": {"sse_margin", "szse_margin"},
@@ -335,6 +349,12 @@ def accepts(data_id, record):
     if data_id == "public_option_put_call":
         return path.endswith(".csv")
     if data_id == "public_fund_holdings":
+        return path.endswith(
+            ".csv"
+            if record["source"] == "cn_fund_report_full_holdings_csv_evidence"
+            else ".json"
+        )
+    if data_id == "public_fund_holdings_reports":
         return path.endswith(".json")
     if data_id == "public_cftc_positions":
         return path.endswith(".zip")
@@ -757,6 +777,83 @@ def normalize(data_id, path, record):
         _numbers(result, ("put_call_ratio",))
         result["asset_id"] = result.ratio_name
         yield result
+    elif source in {
+        "cn_fund_report_full_holdings_csv_evidence",
+        "cn_fund_report_descriptors_extracted",
+    }:
+        if data_id == "public_fund_holdings":
+            frames = pd.read_csv(path, dtype="str", chunksize=50000)
+        else:
+            frames = (
+                pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"]),
+            )
+        for frame in frames:
+            if frame.empty:
+                continue
+            mapping = {
+                "primary_fund_code": "fund_code",
+                "economic_portfolio_id": "economic_portfolio_id",
+                "report_version_identity": "report_version_identity",
+                "report_period_end": "timestamp",
+                "disclosure_scope": "disclosure_scope",
+                "published_at": "published_at",
+                "source_url": "source_url",
+                "source_sha256": "source_sha256",
+                "source_retrieved_at": "retrieved_at",
+            }
+            if data_id == "public_fund_holdings":
+                mapping.update(
+                    {
+                        field: field
+                        for field in (
+                            "stock_code",
+                            "stock_market",
+                            "shares_held",
+                            "fair_value_cny",
+                            "nav_weight_percent",
+                        )
+                    }
+                )
+                mapping["source_path"] = "report_path"
+            else:
+                mapping.update(
+                    {
+                        "stock_disclosure_status": "stock_disclosure_status",
+                        "stock_rows": "stock_rows",
+                    }
+                )
+            result = _rename(frame, mapping)
+            result["publication_date"] = pd.concat(
+                [
+                    pd.to_datetime(
+                        frame[
+                            "published_date"
+                            if data_id == "public_fund_holdings"
+                            else "publication_date"
+                        ]
+                    ),
+                    pd.to_datetime(frame.report_declared_send_date),
+                ],
+                axis=1,
+            ).max(axis=1)
+            result["asset_id"] = result.report_version_identity
+            if data_id == "public_fund_holdings":
+                result["asset_id"] += (
+                    ":"
+                    + frame.html_section_anchor
+                    + ":"
+                    + frame.source_row_index
+                    + ":"
+                    + result.stock_market
+                    + ":"
+                    + result.stock_code
+                )
+            else:
+                flags = frame.explicit_no_stock_statement_in_stock_section
+                if not flags.map(lambda value: type(value) is bool).all():
+                    raise ValueError("public_fund_no_stock_flag_invalid")
+                result["explicit_no_stock"] = flags.map({True: "true", False: "false"})
+            yield result
     elif source in {"chinaamc_extracted_holdings", "cn_fund_report_holdings_extracted"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"])
         result = _rename(
@@ -777,6 +874,12 @@ def normalize(data_id, path, record):
             },
         )
         result["asset_id"] = result.fund_code + ":" + result.stock_code
+        for field in (
+            "economic_portfolio_id",
+            "report_version_identity",
+            "stock_market",
+        ):
+            result[field] = frame[field] if field in frame else pd.NA
         yield result
     elif source in {"sec_13f", "sec_nport"}:
         yield from _sec(path, source, data_id=data_id)

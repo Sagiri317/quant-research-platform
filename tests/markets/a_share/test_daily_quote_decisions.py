@@ -124,6 +124,64 @@ def test_native_market_states_count_stock_replicas_once_without_style_input(tmp_
     assert result.market_up_fraction.iloc[0] == 0.5
 
 
+def test_native_unknown_linked_factor_is_numeric_after_persistence(tmp_path):
+    import numpy as np
+
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.research.test_prepare_selection import _input
+
+    prices, calendar = inputs()
+    decision = daily_quotes.daily_decisions(prices, calendar)
+    us = pd.DataFrame(
+        dict(
+            asset_id=["SPY"],
+            timestamp=pd.Timestamp("2024-01-05"),
+            available_at=pd.Timestamp("2024-01-06"),
+            adjusted_close=[100.0],
+        )
+    )
+    us_root = tmp_path / "us"
+    write_dataset(
+        us_root,
+        us,
+        spec=DataSpec(
+            data_id="public_etf_prices",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=("asset_id", "timestamp"),
+            partition_columns=(),
+            column_roles={
+                k: "timestamp"
+                if k == "timestamp"
+                else "key"
+                if k == "asset_id"
+                else "context"
+                for k in us
+            },
+        ),
+    )
+    path = prepare(
+        dict(
+            market_id="a_share",
+            data_id="linked_market_factors",
+            inputs=dict(
+                decision_panel=_input(
+                    tmp_path, "etf_daily_panel", decision, native=True
+                ),
+                public_etf_prices=str(us_root),
+            ),
+            factor_columns=["us_sector_etf_return_shock_1d"],
+            time_window=dict(start="2024-01-08", end="2024-01-08"),
+            output_root=str(tmp_path / "unknown-factor"),
+        )
+    )
+    result = read_dataset(path).us_sector_etf_return_shock_1d
+    assert result.isna().all()
+    assert not np.isfinite(result).any()
+
+
 def test_benchmark_selector_does_not_require_the_whole_input_to_be_one_index(tmp_path):
     from dataclasses import replace
 
