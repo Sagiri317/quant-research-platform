@@ -176,7 +176,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
                         publication_date="2024-08-19",
                         stock_rows=0,
                         stock_disclosure_status="explicit_no_stock_reported",
-                        explicit_no_stock_statement_in_stock_section=True,
+                        explicit_no_stock_statement_in_official_report=True,
                     ),
                     dict(
                         shared,
@@ -186,7 +186,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
                         report_declared_send_date=None,
                         stock_rows=None,
                         stock_disclosure_status="unresolved",
-                        explicit_no_stock_statement_in_stock_section=None,
+                        explicit_no_stock_statement_in_official_report=None,
                     ),
                 ]
             )

@@ -981,7 +981,7 @@ def normalize(data_id, path, record):
                     + result.stock_code
                 )
             else:
-                flags = frame.explicit_no_stock_statement_in_stock_section
+                flags = frame.explicit_no_stock_statement_in_official_report
                 if not flags.dropna().map(lambda value: type(value) is bool).all():
                     raise ValueError("public_fund_no_stock_flag_invalid")
                 result["explicit_no_stock"] = flags.map({True: "true", False: "false"})

@@ -520,6 +520,8 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 
 A 股持仓计算只要求境内股票消费域完整。全基金无条件声明未持有境内股票时，报告头可用 `disclosure_scope=mainland_stock_holdings`、`stock_disclosure_status=explicit_no_mainland_stock_reported`、`stock_rows=0` 表达，不把全球 `explicit_no_stock` 改成真。海外持仓未知不阻碍该境内零仓事实；只针对某行业或流通受限股票的声明不足以清除全部境内仓位。结构化财务与完整持仓 CSV 均支持 `.csv.gz`，直接分块读取，不要求先落地解压副本。
 
+结构化报告头的 `explicit_no_stock_statement_in_official_report` 保存官方报告对全基金无条件未持有股票的明确声明；声明可出现在持仓表或财务附注，提取层保留原文及位置。只说某类股票、某项收益为零或没有解析到持仓，不能据此设真。当前报告头已统一使用此字段，原生 `explicit_no_stock` 含义不变。
+
 `financing_factors`消费结构化`public_margin_balances`和`decision_panel`；默认
 `observation_lag_sessions=1`并要求`trading_calendar`定位观察日及1／5日变化。
 显式设0时，日历仅用于1／5日变化，不限制无日历时的余额及买入强度。可用列和公式由融资因子owner声明，
