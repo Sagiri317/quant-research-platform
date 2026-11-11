@@ -837,20 +837,20 @@ def test_processed_narrow_output_uses_existing_panel_history(
         if definition.output_column in spec.required_columns
     ]
     assert actual.loc[actual.timestamp.eq(core[0]), columns].notna().any().any()
-    lookback = producer.factor_engine.factor_lookback_bars(
-        tuple(
-            definition
-            for definition in factor_catalog().list()
-            if definition.output_column in spec.required_columns
+    definitions = tuple(
+        definition
+        for definition in factor_catalog().list()
+        if definition.output_column in spec.required_columns
+    )
+    lookback = producer.factor_engine.factor_lookback_bars(definitions)
+    if target == "price_volume_facts" and any(d.full_history for d in definitions):
+        assert input_sessions == [len(dates)]
+    else:
+        assert input_sessions and max(input_sessions) <= (
+            100 if target == "market_model_factors" else lookback + len(core)
         )
-    )
-    assert input_sessions and max(input_sessions) <= (
-        100 if target == "market_model_factors" else lookback + len(core)
-    )
-    assert max(input_sessions) < len(dates)
+        assert max(input_sessions) < len(dates)
     assert materialized_sessions == input_sessions
-    if target == "price_volume_facts":
-        assert input_sessions == [lookback + len(core)]
 
 
 def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_path):
