@@ -103,9 +103,19 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
         size = maximum - minimum + 1
         times = pd.DatetimeIndex(q.timestamp)
         events = pd.DatetimeIndex(t.timestamp)
-        assigned = times.searchsorted(events, side="left")
-        usable = valid & (assigned < len(q))
-        contributions = np.zeros((len(q), size))
+        observed_days = pd.DatetimeIndex(times.normalize().unique())
+        days = observed_days
+        if session_days is not None:
+            first = max(0, session_days.searchsorted(observed_days.min()) - 4)
+            days = session_days[
+                first : session_days.searchsorted(observed_days.max(), side="right")
+            ]
+        # Retain prior-day totals without assigning their trades to today's first quote.
+        grid = times.union(days - pd.Timedelta(1, "ns")).sort_values()
+        current_rows = grid.get_indexer(times)
+        assigned = grid.searchsorted(events, side="left")
+        usable = valid & (assigned < len(grid))
+        contributions = np.zeros((len(grid), size))
         np.add.at(
             contributions,
             (
@@ -116,28 +126,21 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
         )
         cumulative = contributions.cumsum(axis=0)
         bad = np.bincount(
-            assigned[(~valid) & (assigned < len(q))], minlength=len(q)
+            assigned[(~valid) & (assigned < len(grid))], minlength=len(grid)
         ).cumsum()
-        observed_days = pd.DatetimeIndex(times.normalize().unique())
-        days = (
-            observed_days
-            if session_days is None
-            else session_days[
-                (session_days >= observed_days.min())
-                & (session_days <= observed_days.max())
-            ]
-        )
         for width in (1, 5):
             selected = [name for name in columns if name.endswith(f"_{width}d")]
             if not selected:
                 continue
             day_positions = days.get_indexer(times.normalize())
             start = days[np.maximum(day_positions - width + 1, 0)]
-            before = times.searchsorted(start, side="left") - 1
-            history = cumulative - np.where(
+            before = grid.searchsorted(start, side="left") - 1
+            history = cumulative[current_rows] - np.where(
                 (before >= 0)[:, None], cumulative[np.maximum(before, 0)], 0
             )
-            unknown = bad - np.where(before >= 0, bad[np.maximum(before, 0)], 0)
+            unknown = bad[current_rows] - np.where(
+                before >= 0, bad[np.maximum(before, 0)], 0
+            )
             total = history.sum(axis=1)
             known = (day_positions >= width - 1) & (unknown == 0) & (total > 0)
             if width == 5:

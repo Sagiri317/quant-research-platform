@@ -26,6 +26,35 @@ def panel():
     )
 
 
+def test_current_day_quote_profiles_use_five_trade_days_without_mixing_daily_volume():
+    days = pd.bdate_range("2024-01-02", periods=5)
+    quotes = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=[days[-1] + pd.Timedelta(hours=1, minutes=30, seconds=1)],
+            mid=10.0,
+        )
+    )
+    trades = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=days + pd.Timedelta(hours=1, minutes=30),
+            source_row=np.arange(5),
+            event_kind="trade",
+            price=[11.0, 11.0, 11.0, 11.0, 10.0],
+            volume=10.0,
+        )
+    )
+    columns = ["trade_profile_concentration_1d", "trade_profile_concentration_5d"]
+    result = trade_profiles(quotes, trades, columns=columns, session_days=days)
+    np.testing.assert_allclose(result[columns].to_numpy(float), [[1.0, 0.8]])
+    trades.loc[2, "event_kind"] = "unknown"
+    partial = trade_profiles(quotes, trades, columns=columns, session_days=days)
+    assert partial[columns[0]].iloc[0] == 1
+    assert pd.isna(partial[columns[1]].iloc[0])
+
+
 def test_opening_path_freezes_at_observation_boundary_and_is_scale_invariant():
     frame = panel()
     names = (
