@@ -26,7 +26,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
         source_retrieved_at="2026-11-11T00:00:00Z",
         report_declared_send_date="2024-08-20",
     )
-    positions = tmp_path / "holdings.csv"
+    positions = tmp_path / "holdings.csv.gz"
     pd.DataFrame(
         [
             dict(

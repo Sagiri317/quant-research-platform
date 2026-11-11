@@ -349,10 +349,10 @@ def accepts(data_id, record):
     if data_id == "public_option_put_call":
         return path.endswith(".csv")
     if data_id == "public_fund_holdings":
-        return path.endswith(
-            ".csv"
+        return (
+            path.endswith((".csv", ".csv.gz"))
             if record["source"] == "cn_fund_report_full_holdings_csv_evidence"
-            else ".json"
+            else path.endswith(".json")
         )
     if data_id == "public_fund_holdings_reports":
         return path.endswith(".json")
