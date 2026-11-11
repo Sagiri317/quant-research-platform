@@ -498,6 +498,7 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 | `public_finra_margin` | 月度融资账户统计，单位百万USD；观察月份不是发布日期 |
 | `public_finra_short_volume` | 场所内卖空成交、豁免成交与对应总成交；不是空头持仓或全市场净卖出；合法代码`NA`不是缺失值 |
 | `public_option_put_call` | Cboe不同范围的Put／Call比率分别保留，不混成一种投资者情绪 |
+| `public_option_prices` | 深交所逐合约日线OHLC为CNY/基金份额，成交量为期权合约数、成交额为CNY；`asset_id`是数值合约编码，`contract_id`是交易代码，另保留标的代码 |
 | `public_etf_prices`／`public_etf_actions` | 市场OHLCV、调整收盘和企业行动分别保存；Yahoo的拆股调整收盘与含分配调整收盘不同，当前复权版本不等于历史冻结版本 |
 | `public_etf_nav` | SSGA官方NAV、份额和净资产，不能用NAV代替市场收盘价 |
 
@@ -510,6 +511,8 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 修订使用自己的申报日，不从报告期末统一加60天，也不回填非公开财政月份。
 该结论不外推到2027/28以后新制度或本批次没有的保密申报。
 规范化成功不表示该源已满足PIT因子或历史成分映射的输入条件。机制、研究范围和处理规则见[因子假设清单](factor-hypotheses.md)。
+
+`source=szse_option_daily_prices`从官方历史行情JSON的`data.picupdata`读取观察日、开收低高价、成交量和成交额，核对响应合约编码与清单身份。数值沿原生公共数值边界解释，源报零价及零成交保留；合约基金份额单位由`public_option_contracts`提供，不能把成交合约数当基金份额。该来源不提供IV或Greeks，价格不写入`public_option_risk`。现有批次只含采集时存续的159915合约，2026年的这些日价不代表完整已到期合约历史，也不覆盖2023—2024研究窗口；历史首发时刻未知，按显式release CSV保留同日末估计上界，不以取得时刻回填。
 
 `prepare-source`可显式传入`release_csv`补充有依据的历史可用时间。字段为`source`、
 `observation_date`、`estimated_available_at`、`availability_basis`、`evidence_url`，

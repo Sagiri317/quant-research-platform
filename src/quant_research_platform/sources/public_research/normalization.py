@@ -40,6 +40,16 @@ DATASETS = {
         "original_exercise_price": "CNY_per_fund_unit",
         "original_contract_unit": "fund_units",
     },
+    "public_option_prices": {
+        "underlying_id": "identifier",
+        "contract_id": "identifier",
+        "open": "CNY_per_fund_unit",
+        "high": "CNY_per_fund_unit",
+        "low": "CNY_per_fund_unit",
+        "close": "CNY_per_fund_unit",
+        "volume": "contracts",
+        "amount": "CNY",
+    },
     "public_domestic_etf_prices": {
         "open": "CNY_per_fund_unit",
         "close": "CNY_per_fund_unit",
@@ -282,6 +292,7 @@ SOURCES = {
         "sse_option_contract_updates",
         "szse_option_contract_events_extracted",
     },
+    "public_option_prices": {"szse_option_daily_prices"},
     "public_domestic_etf_actions": {"eastmoney_cn_etf_corporate_actions_extracted"},
     "public_domestic_etf_prices": {"eastmoney_cn_etf_daily"},
     "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
@@ -324,7 +335,10 @@ def accepts(data_id, record):
     path = record["path"]
     if data_id == "public_index_weights":
         return path.endswith((".csv", ".csv.gz"))
-    if record["source"] == "szse_option_contract_events_extracted":
+    if record["source"] in {
+        "szse_option_contract_events_extracted",
+        "szse_option_daily_prices",
+    }:
         return path.endswith(".json")
     if data_id in {"public_option_risk", "public_option_contracts"}:
         return path.endswith(".json") and record.get("artifact_role", "").startswith(
@@ -415,6 +429,30 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
+    if source == "szse_option_daily_prices":
+        payload = json.loads(path.read_bytes())
+        if not isinstance(payload, dict) or payload.get("code") != "0":
+            raise ValueError("public_option_price_response_invalid")
+        data = payload.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("picupdata"), list):
+            raise ValueError("public_option_price_response_invalid")
+        asset_id = str(data["code"])
+        if asset_id != record["contract_id"]:
+            raise ValueError("public_option_price_identity_mismatch")
+        rows = data["picupdata"]
+        if any(not isinstance(row, list) or len(row) < 9 for row in rows):
+            raise ValueError("public_option_price_response_invalid")
+        if not rows:
+            return
+        result = pd.DataFrame(
+            [row[:5] + row[7:9] for row in rows],
+            columns=("timestamp", "open", "close", "low", "high", "volume", "amount"),
+        )
+        result["asset_id"] = asset_id
+        result["underlying_id"] = record["underlying_security_code"]
+        result["contract_id"] = record["trading_code_as_reported"]
+        yield result
+        return
     if source == "eastmoney_margin_detail":
         payload = json.loads(
             gzip.decompress(path.read_bytes())

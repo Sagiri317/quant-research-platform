@@ -13,6 +13,140 @@ from quant_research_platform.sources.public_research.normalization import normal
 from quant_research_platform.storage.datasets.reading import read_dataset
 
 
+def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
+    tmp_path,
+):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    security_id = "90007411"
+    trading_code = "159915C2612M003400"
+    payload = json.dumps(
+        {
+            "code": "0",
+            "data": {
+                "code": security_id,
+                "picupdata": [
+                    [
+                        "2026-04-23",
+                        "0.10",
+                        "0.12",
+                        "0.09",
+                        "0.13",
+                        "--",
+                        "--",
+                        2,
+                        2400.0,
+                        "unused",
+                    ],
+                    ["2026-04-24", "0", "0", "0", "0", "--", "--", 0, 0],
+                ],
+                "picdowndata": [],
+            },
+        }
+    ).encode()
+    (raw / "prices.json").write_bytes(payload)
+    record = {
+        "path": "prices.json",
+        "source": "szse_option_daily_prices",
+        "status": "downloaded",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "bytes": len(payload),
+        "retrieved_at": "2026-11-11T12:00:00Z",
+        "contract_id": security_id,
+        "underlying_security_code": "159915",
+        "trading_code_as_reported": trading_code,
+    }
+    (raw / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": [record]}), encoding="utf-8"
+    )
+    clocks = raw / "release.csv"
+    pd.DataFrame(
+        [
+            {
+                "source": "szse_option_daily_prices",
+                "observation_date": day,
+                "estimated_available_at": day + "T23:59:59+08:00",
+                "availability_basis": "estimated_same_day_end_snapshot_assumption",
+                "evidence_url": "https://example.org/source",
+                "published_at": None,
+            }
+            for day in ("2026-04-23", "2026-04-24")
+        ]
+    ).to_csv(clocks, index=False)
+    output = tmp_path / "prices"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(raw),
+            "release_csv": str(clocks),
+            "outputs": {"public_option_prices": str(output)},
+        }
+    )
+    frame = read_dataset(output)
+    assert frame.asset_id.tolist() == [security_id] * 2
+    assert frame.contract_id.tolist() == [trading_code] * 2
+    assert frame.underlying_id.tolist() == ["159915"] * 2
+    assert frame.timestamp.tolist() == list(
+        pd.to_datetime(["2026-04-23", "2026-04-24"])
+    )
+    assert frame.open.tolist() == [0.10, 0.0]
+    assert frame.high.tolist() == [0.13, 0.0]
+    assert frame.low.tolist() == [0.09, 0.0]
+    assert frame.close.tolist() == [0.12, 0.0]
+    assert frame.volume.tolist() == [2.0, 0.0]
+    assert frame.amount.tolist() == [2400.0, 0.0]
+    # Two contracts of 10,000 fund units at 0.12 CNY/unit cost 2,400 CNY.
+    assert frame.amount.iloc[0] / frame.volume.iloc[0] / 10000 == pytest.approx(
+        frame.close.iloc[0]
+    )
+    assert frame.published_at.isna().all()
+    assert frame.available_at.tolist() == list(
+        pd.to_datetime(["2026-04-23T15:59:59Z", "2026-04-24T15:59:59Z"])
+    )
+    assert frame.availability_basis.eq(
+        "estimated_same_day_end_snapshot_assumption"
+    ).all()
+    assert "implied_volatility" not in frame
+    spec = json.loads((output / "spec.json").read_text())
+    assert spec["column_units"]["close"] == "CNY_per_fund_unit"
+    assert spec["column_units"]["volume"] == "contracts"
+    assert spec["column_units"]["amount"] == "CNY"
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ({"code": "1", "data": None}, "public_option_price_response_invalid"),
+        (
+            {"code": "0", "data": {"code": "90007412", "picupdata": []}},
+            "public_option_price_identity_mismatch",
+        ),
+        (
+            {"code": "0", "data": {"code": "90007411", "picupdata": [["2026-04-23"]]}},
+            "public_option_price_response_invalid",
+        ),
+    ],
+)
+def test_szse_daily_option_prices_reject_failed_or_misidentified_response(
+    tmp_path, payload, error
+):
+    path = tmp_path / "prices.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match=error):
+        list(
+            normalize(
+                "public_option_prices",
+                path,
+                {
+                    "source": "szse_option_daily_prices",
+                    "contract_id": "90007411",
+                    "underlying_security_code": "159915",
+                    "trading_code_as_reported": "159915C2612M003400",
+                },
+            )
+        )
+
+
 def test_szse_contract_listing_retains_identity_and_units_without_inventing_iv(
     tmp_path,
 ):
