@@ -12,7 +12,10 @@ from quant_research_platform.sources.public_research.normalization import normal
 from quant_research_platform.storage.datasets.reading import read_dataset
 
 
-def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp_path):
+@pytest.mark.parametrize("anchor", ("stock-table", None))
+def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
+    tmp_path, anchor
+):
     shared = dict(
         primary_fund_code="000001",
         economic_portfolio_id="portfolio",
@@ -38,7 +41,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
                 nav_weight_percent="1.25",
                 published_date="2024-08-19",
                 source_row_index="2",
-                html_section_anchor="stock-table",
+                html_section_anchor=anchor,
                 source_leaf_table_index=str(leaf),
             )
             for leaf in (0, 1)
@@ -99,7 +102,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
     holding, report = (read_dataset(outputs[name]) for name in outputs)
     assert holding.shares_held.tolist() == [1234, 1234]
     assert holding.asset_id.tolist() == [
-        f"report:{leaf}:stock-table:2:CN_MAINLAND:000002" for leaf in (0, 1)
+        f"report:{leaf}:{anchor or ''}:2:CN_MAINLAND:000002" for leaf in (0, 1)
     ]
     assert holding.economic_portfolio_id.tolist() == ["portfolio", "portfolio"]
     assert report.explicit_no_stock.iloc[0] == "true"

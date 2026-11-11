@@ -847,7 +847,7 @@ def normalize(data_id, path, record):
                     ":"
                     + leaf
                     + ":"
-                    + frame.html_section_anchor
+                    + frame.html_section_anchor.fillna("")
                     + ":"
                     + frame.source_row_index
                     + ":"
