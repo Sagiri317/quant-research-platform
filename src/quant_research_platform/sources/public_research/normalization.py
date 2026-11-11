@@ -194,6 +194,7 @@ DATASETS = {
     },
     "public_etf_pcf_baskets": {
         "fund_code": "identifier",
+        "declared_component_count": "count",
         "valuation_date": "date",
         "creation_unit_fund_shares": "fund_units",
         "nav_cny": "CNY_per_fund_unit",
@@ -729,6 +730,9 @@ def normalize(data_id, path, record):
                 )
             },
         }
+        if data_id == "public_etf_pcf_baskets":
+            mapping.pop("declared_component_count")
+            mapping["original_component_count"] = "declared_component_count"
         result = _rename(frame, mapping)
         result["asset_id"] = result.fund_code
         if data_id == "public_etf_pcf_components":

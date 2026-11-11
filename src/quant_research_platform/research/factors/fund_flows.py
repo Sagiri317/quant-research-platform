@@ -558,11 +558,30 @@ def calculate(decisions, sources, *, columns, parameters=None):
             ],
         ]
         baskets = parts.groupby(["fund_code", "timestamp"], sort=False).indices
+        equity_funds = parts.loc[
+            parts.component_kind.eq("equity_security"), "fund_code"
+        ].unique()
+        complete_at = pd.Series(dtype="datetime64[ns]")
+        if "public_etf_pcf_baskets" in sources:
+            keys = ["fund_code", "timestamp"]
+            grouped = parts.groupby(keys, sort=False)
+            counts = grouped.component_code.agg(["size", "nunique"])
+            counts["_components_available"] = grouped.available_at.max().where(
+                grouped.available_at.count().eq(counts["size"])
+            )
+            headers = sources["public_etf_pcf_baskets"]
+            proof = headers.merge(counts, on=keys, how="inner")
+            proof = proof.loc[
+                proof.declared_component_count.eq(proof["size"])
+                & proof["size"].eq(proof["nunique"])
+            ].copy()
+            proof["_complete_at"] = proof[
+                ["available_at", "_components_available"]
+            ].max(axis=1, skipna=False)
+            complete_at = proof.groupby(keys, sort=False)._complete_at.min()
         for date, at in work.groupby("timestamp", sort=False).indices.items():
             block = work.iloc[at]
-            probes = pd.DataFrame(
-                {"asset_id": shares.asset_id.unique(), "timestamp": date}
-            )
+            probes = pd.DataFrame({"asset_id": equity_funds, "timestamp": date})
             latest = latest_observations(
                 shares, probes, columns=("_share_delta_1d", "_share_delta_5d")
             )
@@ -598,10 +617,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     right_on=["fund_code", "timestamp"],
                     how="inner",
                 )
-                p = p.loc[
-                    p.component_kind.eq("equity_security")
-                    & p.component_quantity_unit.eq("share")
-                ]
+                p = p.loc[p.component_kind.eq("equity_security")]
                 # Every constituent day must have its actual historical creation basket.
                 covered = (
                     p[["asset_id", "timestamp"]]
@@ -611,18 +627,25 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 )
                 p = p.loc[p.asset_id.map(covered).eq(width)]
                 units = pd.to_numeric(p.creation_unit_fund_shares)
-                quantity = (
-                    (
-                        pd.to_numeric(p.component_quantity)
-                        * p._share_delta_1d
-                        / units.where(units > 0)
+                contributions = (
+                    pd.to_numeric(p.component_quantity)
+                    * p._share_delta_1d
+                    / units.where((units > 0) & p.component_quantity_unit.eq("share"))
+                ).groupby(p.component_code)
+                quantity = contributions.sum(min_count=1).where(
+                    contributions.count().eq(contributions.size())
+                )
+                mapped = block.asset_id.map(quantity)
+                cohort = pd.MultiIndex.from_frame(
+                    delta[["asset_id", "timestamp"]].rename(
+                        columns={"asset_id": "fund_code"}
                     )
-                    .groupby(p.component_code)
-                    .sum(min_count=1)
                 )
-                pressure = block.asset_id.map(quantity) / block.avg_volume_20d.where(
-                    block.avg_volume_20d > 0
-                )
+                known = complete_at.reindex(cohort)
+                if known.notna().all() and known.le(date).all():
+                    # Absence is zero only in a complete, publication-visible PCF list.
+                    mapped = mapped.where(block.asset_id.isin(quantity.index), 0)
+                pressure = mapped / block.avg_volume_20d.where(block.avg_volume_20d > 0)
                 name = f"stock_passive_flow_pressure_{width}d"
                 if name in usable:
                     result.loc[at, name] = pressure.to_numpy()

@@ -383,7 +383,9 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
                 published_at=None,
             )
             if suffix == "baskets":
+                row.pop("declared_component_count")
                 row.update(
+                    original_component_count="1",
                     valuation_date="2024-01-02",
                     nav_cny="1.25",
                     nav_per_creation_unit_cny="375000",
@@ -445,6 +447,7 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
     assert baskets.published_at.isna().all()
     assert baskets.retrieved_at.eq(pd.Timestamp("2026-11-09T19:00:00Z")).all()
     assert baskets.valuation_date.eq(pd.Timestamp("2024-01-02")).all()
+    assert baskets.declared_component_count.tolist() == [1, 1]
     assert components.asset_id.tolist() == ["510300:000001", "518880:Au9999"]
     assert components.component_quantity.tolist() == [1200, 3000]
     assert components.component_quantity_unit.tolist() == ["share", "gram"]

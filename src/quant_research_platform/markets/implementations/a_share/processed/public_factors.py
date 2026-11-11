@@ -33,7 +33,7 @@ def processed_spec(data_id):
         )
     )
     if data_id == "fund_flow_factors":
-        sources = (*sources, "trading_calendar")
+        sources = (*sources, "trading_calendar", "public_etf_pcf_baskets")
     return ProcessedDataSpec(
         data_id=data_id,
         market_id="a_share",
@@ -101,6 +101,12 @@ def configured_spec(spec, config):
     sources = tuple(name for name in spec.source_input_data_ids if name in dependencies)
     if spec.data_id == "fund_flow_factors" and "trading_calendar" in config["inputs"]:
         sources = (*sources, "trading_calendar")
+    if (
+        spec.data_id == "fund_flow_factors"
+        and set(selected) & set(fund_flows.ETF[6:])
+        and "public_etf_pcf_baskets" in config["inputs"]
+    ):
+        sources = (*sources, "public_etf_pcf_baskets")
     return replace(
         spec,
         column_roles={

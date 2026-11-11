@@ -1,0 +1,17 @@
+{
+  "market_id": "a_share",
+  "data_id": "macro_liquidity_factors",
+  "inputs": {
+    "decision_panel": "data/processed/a_share/macro_decision_panel",
+    "macro_observations": "data/interim/macro_liquidity/new-observations",
+    "trading_calendar": "data/interim/csmar/trading_calendar"
+  },
+  "factor_columns": ["ml_cn_m2_beta", "ml_cn_m2_partial_beta"],
+  "parameters": {
+    "beta_window": 756,
+    "beta_min_observations": 378,
+    "beta_min_changes": 20
+  },
+  "time_window": {"start": "2014-01-01", "end": "2026-10-30"},
+  "output_root": "data/processed/a_share/monthly_macro_beta"
+}

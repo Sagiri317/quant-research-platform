@@ -501,3 +501,82 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
     )
     np.testing.assert_allclose(unknown.loc[0, fields].to_numpy(float), [0.01, 0.05])
     assert unknown[industry].isna().all().all()
+
+
+@pytest.mark.parametrize(
+    "case", ["complete", "partial", "unpublished", "unknown_quantity"]
+)
+def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
+    dates = pd.bdate_range("2024-01-02", periods=7)
+    shares = pd.DataFrame(
+        dict(
+            asset_id="f",
+            timestamp=dates,
+            available_at=dates + pd.Timedelta(hours=16),
+            shares_outstanding=100 + 10 * np.arange(7),
+        )
+    )
+    parts = pd.DataFrame(
+        dict(
+            fund_code="f",
+            timestamp=dates,
+            available_at=dates + pd.Timedelta(hours=16),
+            component_code="s",
+            component_kind="equity_security",
+            component_quantity_unit="share",
+            component_quantity=np.nan if case == "unknown_quantity" else 10.0,
+            creation_unit_fund_shares=100.0,
+        )
+    )
+    headers = pd.DataFrame(
+        dict(
+            fund_code="f",
+            timestamp=dates,
+            available_at=dates
+            + pd.Timedelta(days=20 if case == "unpublished" else 0, hours=16),
+            declared_component_count=2 if case == "partial" else 1,
+        )
+    )
+    decision = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["s", "outside_basket"],
+            timestamp=dates[-1] + pd.Timedelta(days=1),
+            avg_volume_20d=100.0,
+            industry_standard_id="standard",
+            industry_level1_code="industry",
+        )
+    )
+    columns = [
+        f"{scope}_passive_flow_pressure_{width}d"
+        for scope in ("stock", "industry")
+        for width in (1, 5)
+    ]
+    result = calculate(
+        decision,
+        dict(
+            public_fund_shares=shares,
+            public_etf_pcf_components=parts,
+            public_etf_pcf_baskets=headers,
+        ),
+        columns=columns,
+    ).set_index("asset_id")
+    if case == "unknown_quantity":
+        assert result.loc["s", columns[:2]].isna().all()
+    else:
+        # Ten new fund shares / 100 per creation unit * ten stock shares / volume 100.
+        np.testing.assert_allclose(
+            result.loc["s", columns[:2]].to_numpy(float), [0.01, 0.05]
+        )
+    if case in {"complete", "unknown_quantity"}:
+        np.testing.assert_array_equal(
+            result.loc["outside_basket", columns[:2]].to_numpy(float), [0, 0]
+        )
+    else:
+        assert result.loc["outside_basket", columns[:2]].isna().all()
+    if case == "complete":
+        np.testing.assert_allclose(
+            result[columns[2:]].to_numpy(float), [[0.01, 0.05], [0.01, 0.05]]
+        )
+    else:
+        assert result[columns[2:]].isna().all().all()
