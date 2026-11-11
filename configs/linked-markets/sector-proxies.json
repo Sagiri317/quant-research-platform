@@ -1,0 +1,32 @@
+{
+  "market_id": "a_share",
+  "data_id": "linked_market_factors",
+  "inputs": {
+    "decision_panel": "data/processed/a_share/market_context",
+    "public_etf_prices": "data/interim/public_research/public_etf_prices"
+  },
+  "factor_columns": [
+    "us_sector_etf_return_shock_1d",
+    "us_sector_etf_return_shock_5d",
+    "us_relative_sector_shock",
+    "us_sector_own_beta",
+    "us_sector_shock_x_own_beta",
+    "us_relative_sector_shock_x_own_beta"
+  ],
+  "parameters": {
+    "industry_etfs": {
+      "CSRC2012:D": "XLU", "CAPCO:D": "XLU",
+      "CSRC2012:E": "XLI", "CAPCO:E": "XLI",
+      "CSRC2012:G": "XLI", "CAPCO:G": "XLI",
+      "CSRC2012:H": "XLY", "CAPCO:H": "XLY",
+      "CSRC2012:I": "XLK", "CAPCO:I": "XLK",
+      "CSRC2012:J": "XLF", "CAPCO:J": "XLF",
+      "CSRC2012:K": "XLRE", "CAPCO:K": "XLRE",
+      "CSRC2012:P": "XLY", "CAPCO:P": "XLY",
+      "CSRC2012:Q": "XLV", "CAPCO:Q": "XLV",
+      "CSRC2012:R": "XLC", "CAPCO:R": "XLC"
+    }
+  },
+  "time_window": {"start": "2012-01-01", "end": "2026-10-30"},
+  "output_root": "data/processed/a_share/us_sector_proxies"
+}
