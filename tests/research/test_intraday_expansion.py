@@ -26,6 +26,97 @@ def panel():
     )
 
 
+@pytest.mark.parametrize("direction", (1, -1))
+def test_intraday_acceleration_has_quadratic_reference_and_no_future_prices(direction):
+    frame = panel().iloc[:112].copy()
+    x = np.arange(len(frame), dtype=float)
+    frame["mid"] = 10 * np.exp(direction * (0.0001 * x + 0.000001 * x**2))
+    names = [f"price_{side}_acceleration_30s" for side in ("up", "down")]
+    result = compute_factors(frame, columns=names)
+    selected = names[0 if direction > 0 else 1]
+    assert result.loc[:9, names].isna().all(axis=None)
+    # Eleven prices cover ten 3-second increments; log-price curvature is 2e-6.
+    rms = np.sqrt(np.mean((0.0001 + 0.000001 * (2 * np.arange(1, 11) - 1)) ** 2))
+    assert result.loc[10, selected] == pytest.approx(2e-6 / rms, rel=1e-8)
+    assert result.loc[10, names[1 if direction > 0 else 0]] == 0
+    prefix = compute_factors(frame.iloc[:31], columns=names)
+    pd.testing.assert_frame_equal(result.iloc[:31].reset_index(drop=True), prefix)
+    np.testing.assert_allclose(
+        result[names],
+        compute_factors(frame.assign(mid=frame.mid * 5), columns=names)[names],
+        equal_nan=True,
+        atol=1e-10,
+    )
+    missing = frame.drop(index=range(3, 7))
+    assert compute_factors(missing, columns=names).loc[6, names].isna().all()
+    assert (
+        compute_factors(frame.assign(mid=1.0), columns=names)[names]
+        .isna()
+        .all(axis=None)
+    )
+
+
+@pytest.mark.parametrize("direction", (1, -1))
+def test_price_flow_divergence_keeps_one_signed_expression(direction):
+    frame = panel().iloc[:12].copy()
+    frame["mid"] = np.exp(direction * np.arange(len(frame)) * 0.001)
+    frame["observed_signed_trade_volume"] = -direction * 2.0
+    name = "price_flow_divergence_30s"
+    result = compute_factors(frame, columns=(name,))
+    assert result[name].iloc[10] == pytest.approx(direction * 0.01 * 0.2)
+    frame["observed_signed_trade_volume"] *= -1
+    assert compute_factors(frame, columns=(name,))[name].iloc[10] == 0
+
+
+def test_drawdown_activity_recovery_uses_prior_known_context_and_local_missingness():
+    frame = (
+        panel()
+        .iloc[:112]
+        .assign(
+            bid_px1=0.99,
+            ask_px1=1.01,
+            bid_vol1=100.0,
+            ask_vol1=100.0,
+            exchange="SSE",
+            instrument_type="stock",
+        )
+    )
+    frame.loc[90, ["bid_vol1", "ask_vol1"]] = 25.0
+    frame.loc[101:, "observed_trade_volume"] = 20.0
+    context = pd.DataFrame(
+        dict(
+            asset_id=["a"],
+            timestamp=pd.Timestamp("2024-01-02 01:00"),
+            signal_session=pd.Timestamp("2023-12-29"),
+            peak_drawdown_20d=0.2,
+            risk_residual_drawdown_20d=0.1,
+            cn_fund_holder_concentration=0.6,
+        )
+    )
+    names = [
+        "prior_drawdown_x_activity_x_depth_recovery",
+        "prior_residual_drawdown_x_activity_x_depth_recovery",
+    ]
+    result = calculate(frame, columns=names, daily_context=context)
+    np.testing.assert_allclose(result.loc[110, names].to_numpy(float), [0.4, 0.2])
+    missing = calculate(
+        frame,
+        columns=names,
+        daily_context=context.drop(columns="risk_residual_drawdown_20d"),
+    )
+    assert missing[names[0]].iloc[110] == pytest.approx(0.4)
+    assert missing[names[1]].isna().all()
+    future = context.assign(timestamp=pd.Timestamp("2024-01-02 02:00"))
+    assert (
+        calculate(frame, columns=names, daily_context=future)[names]
+        .isna()
+        .all(axis=None)
+    )
+    name = "prior_ownership_crowding_x_intraday_liquidity_stress"
+    assert calculate(frame, columns=[name], daily_context=context)[name].iloc[90] == 0.6
+    assert calculate(frame, columns=[name])[name].isna().all()
+
+
 def test_current_day_quote_profiles_use_five_trade_days_without_mixing_daily_volume():
     days = pd.bdate_range("2024-01-02", periods=5)
     quotes = pd.DataFrame(

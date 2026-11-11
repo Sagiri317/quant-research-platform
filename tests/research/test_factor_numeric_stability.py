@@ -257,7 +257,6 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
     assert fsum(values[1:21]) == 0.0
     columns = (
         "avg_amount_20d",
-        "log_avg_amount_20d",
         "amount_shock_20d",
         "volume_shock_20d",
     )
@@ -271,8 +270,7 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
     )
     actual = calculate_price_volume_factors(frame, factor_columns=columns)
     assert actual.avg_amount_20d.iloc[20] == 0.0
-    assert np.isnan(actual.log_avg_amount_20d.iloc[20])
-    assert actual.loc[21, list(columns[2:])].isna().all()
+    assert actual.loc[21, list(columns[1:])].isna().all()
     clipped = calculate_price_volume_factors(frame.iloc[1:], factor_columns=columns)
     np.testing.assert_allclose(
         actual.loc[21, list(columns)].to_numpy(dtype=float),
@@ -298,7 +296,7 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
         assert np.isnan(result.abnormal_turnover_20_250)
 
     # Small same-sign observations are not numerical zero; ordinary signed
-    # nonzero and negative means retain their original ratio/log domains.
+    # nonzero and negative means retain their original ratio domains.
     signed = values.copy()
     signed[20] += 0.125
     for amounts in (np.full(22, 1e-8), signed, -np.ones(22)):
@@ -316,10 +314,6 @@ def test_signed_rolling_baselines_keep_zero_masks_without_erasing_small_values()
         assert result.amount_shock_20d.iloc[21] == pytest.approx(
             (amounts[21] - mean) / mean, rel=1e-12, abs=1e-14
         )
-        if mean > 0:
-            assert result.log_avg_amount_20d.iloc[20] == pytest.approx(np.log(mean))
-        else:
-            assert np.isnan(result.log_avg_amount_20d.iloc[20])
 
 
 @pytest.mark.parametrize("scale", (1e4, 1e6))

@@ -8,10 +8,22 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataSpec
-from quant_research_platform.contracts.time import time_window_timestamp_interval
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.markets.implementations.a_share.calendar import (
     next_trading_sessions,
     unified_trading_sessions,
+)
+from quant_research_platform.research.factors.price_volume.calculations import (
+    calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.definitions import (
+    PRICE_VOLUME_LIBRARY,
+    PRICE_VOLUME_PATH_FACTORS,
+    PRICE_VOLUME_UNITS,
+    price_volume_factor_definitions,
 )
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -31,6 +43,16 @@ CONTEXT = (
     "open",
     "close",
     "period_return",
+)
+ETF_PRICE_VOLUME_FACTORS = tuple(
+    item.output_column
+    for item in price_volume_factor_definitions(
+        market_id="a_share",
+        required_input_data_id="etf_daily_panel",
+        factor_columns=(*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS),
+    )
+    if set(item.input_columns) - {"filling_flag"}
+    <= {"adj_close", "close", "high", "low", "volume", "amount", "period_return"}
 )
 
 
@@ -131,10 +153,57 @@ def processed_specs():
                 else (),
             )
         )
+    result.append(
+        ProcessedDataSpec(
+            data_id="etf_price_volume_factors",
+            market_id="a_share",
+            kind="factor",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=KEY,
+            partition_columns=("year",),
+            column_roles={
+                **dict.fromkeys(KEY, "key"),
+                "timestamp": "timestamp",
+                **dict.fromkeys(ETF_PRICE_VOLUME_FACTORS, "factor"),
+            },
+            column_units={
+                name: PRICE_VOLUME_UNITS[name] for name in ETF_PRICE_VOLUME_FACTORS
+            },
+            processed_input_data_ids=("etf_daily_panel",),
+        )
+    )
     return tuple(result)
 
 
 def configured_spec(spec, config):
+    if spec.data_id == "etf_price_volume_factors":
+        selected = config.get("factor_columns", list(ETF_PRICE_VOLUME_FACTORS))
+        params = config.get("parameters", {})
+        if (
+            type(selected) is not list
+            or not selected
+            or len(set(selected)) != len(selected)
+            or not set(selected) <= set(ETF_PRICE_VOLUME_FACTORS)
+        ):
+            raise ValueError("data_operation_factor_columns_invalid")
+        if (
+            type(params) is not dict
+            or set(params) - {"min_fresh_fraction"}
+            or type(params.get("min_fresh_fraction", 0.75)) not in (int, float)
+            or not 0 < params.get("min_fresh_fraction", 0.75) <= 1
+        ):
+            raise ValueError("price_volume_parameters_invalid")
+        return replace(
+            spec,
+            parameters_json=json.dumps(params),
+            column_roles={
+                **dict.fromkeys(KEY, "key"),
+                "timestamp": "timestamp",
+                **dict.fromkeys(selected, "factor"),
+            },
+            column_units={name: PRICE_VOLUME_UNITS[name] for name in selected},
+        )
     params = config.get("parameters", {})
     if (
         type(params) is not dict
@@ -241,6 +310,72 @@ def daily_decisions(prices, calendar, *, actions=None):
 
 @contextmanager
 def produce(spec, *, inputs, time_window, processed_catalog):
+    if spec.data_id == "etf_price_volume_factors":
+        start, end, closed = time_window_timestamp_interval(time_window)
+        source = open_dataset_session(
+            **_dataset_input_options(inputs["etf_daily_panel"])
+        )
+        if source.spec["data_id"] != "etf_daily_panel":
+            raise ValueError("etf_price_volume_requires_etf_daily_panel")
+        selected = tuple(
+            name for name, role in spec.column_roles.items() if role == "factor"
+        )
+        definitions = price_volume_factor_definitions(
+            market_id="a_share",
+            required_input_data_id="etf_daily_panel",
+            factor_columns=selected,
+        )
+        fields = tuple(
+            dict.fromkeys(
+                (
+                    *KEY,
+                    "signal_session",
+                    *(
+                        name
+                        for definition in definitions
+                        for name in definition.input_columns
+                        if name != "filling_flag"
+                    ),
+                )
+            )
+        )
+        frame = (
+            materialize_dataset_session(
+                source.filtered_view(
+                    TimeWindow(
+                        pd.Timestamp.min, end if closed else end - pd.Timedelta(1, "ns")
+                    )
+                ).projected_view(fields)
+            )
+            .sort_values(["asset_id", "timestamp"], kind="stable")
+            .reset_index(drop=True)
+        )
+        result = calculate_price_volume_factors(
+            frame.assign(timestamp=frame.signal_session),
+            factor_columns=selected,
+            **json.loads(spec.parameters_json),
+        )
+        result["timestamp"] = frame.timestamp
+        result["market_id"] = frame.market_id
+        yield (
+            (
+                result.loc[
+                    result.timestamp.ge(start)
+                    & (
+                        result.timestamp.le(end) if closed else result.timestamp.lt(end)
+                    ),
+                    list(spec.column_roles),
+                ],
+            ),
+            {
+                "producer_diagnostics": {
+                    "formula_owner": "price_volume",
+                    "decision_clock": "inherited_etf_daily_panel",
+                    "stock_eligibility_filters": False,
+                }
+            },
+        )
+        return
     source = (
         "public_domestic_etf_prices"
         if spec.data_id == "etf_daily_panel"

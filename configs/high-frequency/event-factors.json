@@ -20,7 +20,7 @@
     "volume_window": 10000,
     "history_window": 200,
     "large_quantile": 0.9,
-    "order_link_field": null
+    "order_link_field": "ex_order_id"
   },
   "time_window": {
     "start": "2018-02-14",

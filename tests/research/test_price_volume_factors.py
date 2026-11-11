@@ -83,9 +83,9 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs(timestamp
             "total_market_cap": x * 2000.0,
         }
     )
-    names = (*PV25_FACTORS, *UNIQUE_FACTORS)
+    names = tuple(dict.fromkeys((*PV25_FACTORS, *UNIQUE_FACTORS)))
     definitions = price_volume_factor_definitions(**binding, factor_columns=names)
-    assert len(definitions) == 40
+    assert len(definitions) == 39
     window = TimeWindow(
         panel.timestamp.iloc[280].date(), panel.timestamp.iloc[-1].date()
     )
@@ -874,7 +874,6 @@ def test_rolling_means_match_scalar_windows_with_numeric_tolerance(case):
     cases = (
         ("avg_amount_20d", 20, 0),
         ("avg_amount_126d", 126, 0),
-        ("log_avg_amount_20d", 20, 0),
         ("turnover_20d", 20, 0),
         ("turnover_60d", 60, 0),
         ("turnover_250d", 250, 0),
@@ -903,8 +902,6 @@ def test_rolling_means_match_scalar_windows_with_numeric_tolerance(case):
                         else np.nan
                     )
                     if shift
-                    else (np.log(average) if average > 0 else np.nan)
-                    if name == "log_avg_amount_20d"
                     else average
                 )
         np.testing.assert_allclose(
@@ -1415,8 +1412,7 @@ def test_path_factors_complete_windows_zero_path_and_future_isolation():
 
 @pytest.mark.parametrize("scale", (1.0, 1e8))
 @pytest.mark.parametrize("positive_count", (10, 15, 20))
-def test_shock_and_log_use_positive_window_mean(scale, positive_count):
-    from decimal import Decimal, localcontext
+def test_shock_and_mean_use_positive_window_mean(scale, positive_count):
     from fractions import Fraction
 
     amounts = [scale] * positive_count + [0.0] * (20 - positive_count) + [scale]
@@ -1428,16 +1424,13 @@ def test_shock_and_log_use_positive_window_mean(scale, positive_count):
             "volume": amounts,
         }
     )
-    names = ("amount_shock_20d", "volume_shock_20d", "log_avg_amount_20d")
+    names = ("amount_shock_20d", "volume_shock_20d", "avg_amount_20d")
     actual = calculate_price_volume_factors(panel, factor_columns=names)
     center = sum(map(Fraction, amounts[:20])) / 20
     expected = float(Fraction(scale) / center - 1)
     assert actual.amount_shock_20d.iloc[-1] == pytest.approx(expected, abs=1e-14)
     assert actual.volume_shock_20d.iloc[-1] == pytest.approx(expected, abs=1e-14)
-    with localcontext() as context:
-        context.prec = 100
-        log_mean = float((Decimal(center.numerator) / Decimal(center.denominator)).ln())
-    assert actual.log_avg_amount_20d.iloc[19] == pytest.approx(log_mean, abs=1e-12)
+    assert actual.avg_amount_20d.iloc[19] == pytest.approx(float(center), rel=1e-12)
 
 
 def test_rolling_mean_factors_do_not_materialize_sliding_windows(monkeypatch):

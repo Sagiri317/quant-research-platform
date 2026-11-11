@@ -36,6 +36,14 @@ US = (
     "us_relative_sector_shock_x_own_beta",
 )
 RECIPES = {
+    **dict.fromkeys(
+        (
+            f"index_group_{kind}_{w}d"
+            for kind in ("positive_fraction", "leader_gap")
+            for w in (5, 20)
+        ),
+        ("index_market", "trading_calendar"),
+    ),
     "implied_minus_past_realized_variance_20d": (),
     "implied_minus_past_realized_variance_60d": (),
     "index_positive_participation_5d": (
@@ -61,6 +69,8 @@ RECIPES = {
     **dict.fromkeys(US[3:], ("public_etf_prices",)),
 }
 UNITS = dict.fromkeys(RECIPES, "dimensionless")
+for _width in (5, 20):
+    UNITS[f"index_group_leader_gap_{_width}d"] = "decimal_return"
 for _width in (20, 60):
     UNITS[f"implied_minus_past_realized_variance_{_width}d"] = "annualized_variance"
 for _name in (
@@ -98,6 +108,11 @@ def definitions():
                 "exchange expiry and actual calendar days. US short-sale volume "
                 "is activity, not short interest. Pair and foreign beta estimates"
                 " use only preceding sessions."
+                " Fixed index-group participation uses all explicitly configured "
+                "members and actual market-session endpoint returns; leader gap "
+                "is the maximum return minus the mean of the other returns. "
+                "No member is dropped on missing data; pre-publication backcasts "
+                "are excluded by the configured first-publication dates."
             ),
             timing_semantics="available_at_before_explicit_decision",
             null_policy="only_actual_dependencies; unknown_mapping_or_clock_undefined",
@@ -199,6 +214,50 @@ def calculate(decisions, sources, *, columns, parameters=None):
         for name in columns
     }
     usable = {name for name in selected if not missing[name]}
+    group_names = {name for name in usable if name.startswith("index_group_")}
+    if group_names:
+        from quant_research_platform.markets.implementations.a_share.calendar import (
+            unified_trading_sessions,
+        )
+
+        group = parameters.get("index_group", {})
+        if not group:
+            for name in group_names:
+                missing[name] = ["parameters.index_group"]
+        else:
+            raw = sources["index_market"]
+            axis = unified_trading_sessions(
+                sources["trading_calendar"].loc[
+                    sources["trading_calendar"].source_market_type.isin((1, 4))
+                ]
+            )
+            prices = (
+                raw.loc[raw.source_asset_id.isin(group)]
+                .pivot(index="timestamp", columns="source_asset_id", values="close")
+                .reindex(index=axis, columns=list(group))
+            )
+            for asset, first_published in group.items():
+                prices.loc[prices.index < pd.Timestamp(first_published), asset] = np.nan
+            signal = pd.DatetimeIndex(work.signal_session)
+            for width in (5, 20):
+                changes = prices / prices.shift(width).where(lambda x: x > 0) - 1
+                complete = changes.notna().all(axis=1)
+                for kind, values in (
+                    ("positive_fraction", changes.gt(0).mean(axis=1)),
+                    (
+                        "leader_gap",
+                        (len(group) * changes.max(axis=1) - changes.sum(axis=1))
+                        / (len(group) - 1),
+                    ),
+                ):
+                    name = f"index_group_{kind}_{width}d"
+                    if name in group_names:
+                        value = values.where(complete).reindex(signal).to_numpy()
+                        # Index closes become visible after the signal day's close.
+                        visible = work.timestamp.ge(
+                            work.signal_session + pd.Timedelta(hours=7, seconds=1)
+                        )
+                        result[name] = np.where(visible, value, np.nan)
     if usable & set(US[3:]) and "adjusted_close" not in sources["public_etf_prices"]:
         for name in usable & set(US[3:]):
             missing[name] = ["public_etf_prices.adjusted_close"]

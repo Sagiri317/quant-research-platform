@@ -41,6 +41,35 @@ def panel(prices):
     )
 
 
+@pytest.mark.parametrize("side", (1, -1))
+def test_breakout_activity_divergence_is_signed_causal_and_scale_free(side):
+    prices = np.r_[np.full(20, 100.0), 100 * np.exp(side * 0.02), 500.0]
+    frame = panel(prices)
+    frame.loc[20, "amount"] = 500
+    name = "breakout_activity_divergence_20d"
+    result = calculate_price_volume_factors(frame, factor_columns=(name,))
+    assert result[name].iloc[:20].isna().all()
+    assert result[name].iloc[20] == pytest.approx(side * 0.02 * np.log(2))
+    scaled = frame.assign(adj_close=frame.adj_close * 3, amount=frame.amount * 7)
+    np.testing.assert_allclose(
+        calculate_price_volume_factors(scaled, factor_columns=(name,))[name],
+        result[name],
+        equal_nan=True,
+        atol=1e-14,
+    )
+    prefix = calculate_price_volume_factors(frame.iloc[:21], factor_columns=(name,))
+    np.testing.assert_allclose(prefix[name], result[name].iloc[:21], equal_nan=True)
+    frame.loc[20, "amount"] = np.nan
+    assert pd.isna(
+        calculate_price_volume_factors(frame, factor_columns=(name,))[name].iloc[20]
+    )
+    frame.loc[20, "adj_close"] = 100
+    assert (
+        calculate_price_volume_factors(frame, factor_columns=(name,))[name].iloc[20]
+        == 0
+    )
+
+
 def test_compression_retains_direction_and_unknown_flat_denominator():
     frame = panel(np.ones(60))
     frame["period_return"] = [-0.02, 0.02] * 20 + [0.001] * 20

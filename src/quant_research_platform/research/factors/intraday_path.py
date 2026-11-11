@@ -3,7 +3,10 @@
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.history import path_efficiency
+from quant_research_platform.compute.dataframe.history import (
+    path_efficiency,
+    quadratic_log_trend,
+)
 from quant_research_platform.markets.implementations.a_share import calendar
 
 PRICE = ("mid",)
@@ -30,6 +33,12 @@ INPUTS = {
     **{f"hf_downside_variance_fraction_{w}": PRICE for w in ("30m", "1d")},
     "daily_continuous_variation": PRICE,
     "daily_jump_variation_fraction": PRICE,
+    **{
+        f"price_{side}_acceleration_{w}s": PRICE
+        for side in ("up", "down")
+        for w in (30, 300)
+    },
+    **{f"price_flow_divergence_{w}s": (*PRICE, *FLOW) for w in (30, 300)},
 }
 UNITS = {
     name: "squared_log_return"
@@ -47,6 +56,14 @@ DESCRIPTION = (
     "(spread >=2x or depth <=half); zero without a known shock. Variation "
     "uses observed log returns; bipower variation is pi/2 times adjacent "
     "absolute-return products, not a claim to noise-free continuous variance."
+    " Acceleration fits the same quadratic-log-price kernel as daily factors "
+    "on a trailing 30/300-second grid sampled every 3 seconds by causal as-of "
+    "quotes with maximum age 6 seconds, within the same continuous segment. "
+    "Twice curvature / RMS grid log return is positive only when slope and "
+    "curvature have the named direction; a flat path is undefined. Price-flow "
+    "divergence is log(mid/current-window-start-mid) times the positive part "
+    "of opposite-direction signed trade-volume imbalance over that window. "
+    "These are QRP hypotheses, not formulas claimed from a published paper."
 )
 
 
@@ -140,6 +157,75 @@ def calculate(panel, *, columns):
             segment = work.iloc[at]
             t = pd.DatetimeIndex(segment.timestamp)
             elapsed = (t - t[0]).total_seconds().to_numpy()
+            for width in (30, 300):
+                names = {
+                    side: f"price_{side}_acceleration_{width}s"
+                    for side in ("up", "down")
+                }
+                if requested & set(names.values()):
+                    grid = t.to_numpy()[:, None] - np.arange(width, -1, -3).astype(
+                        "timedelta64[s]"
+                    )
+                    observed = t.to_numpy()
+                    indices = observed.searchsorted(grid, side="right") - 1
+                    lag = np.maximum(indices, 0)
+                    prices = price[at][lag]
+                    known = (
+                        (indices >= 0)
+                        & (grid - observed[lag] <= np.timedelta64(6, "s"))
+                        & np.isfinite(prices)
+                        & (prices > 0)
+                    ).all(axis=1)
+                    slope, curvature = quadratic_log_trend(prices[known])
+                    for side, direction in (("up", 1), ("down", -1)):
+                        name = names[side]
+                        if name in requested:
+                            values = np.full(len(at), np.nan)
+                            values[known] = np.where(
+                                np.isfinite(curvature),
+                                np.where(
+                                    direction * slope > 0,
+                                    np.maximum(direction * curvature, 0),
+                                    0,
+                                ),
+                                np.nan,
+                            )
+                            result.loc[at, name] = values
+                name = f"price_flow_divergence_{width}s"
+                if name in requested:
+                    index = (
+                        t.searchsorted(t - pd.Timedelta(seconds=width), side="right")
+                        - 1
+                    )
+                    lag = np.maximum(index, 0)
+                    gross = volume.iloc[at].rolling(f"{width}s").sum()
+                    net = signed.iloc[at].rolling(f"{width}s").sum()
+                    known = (
+                        (index >= 0)
+                        & (
+                            (t - pd.Timedelta(seconds=width) - t[lag]).total_seconds()
+                            <= 6
+                        )
+                        & volume.iloc[at]
+                        .isna()
+                        .rolling(f"{width}s")
+                        .sum()
+                        .eq(0)
+                        .to_numpy()
+                        & signed.iloc[at]
+                        .isna()
+                        .rolling(f"{width}s")
+                        .sum()
+                        .eq(0)
+                        .to_numpy()
+                    )
+                    change = np.log(price[at] / price[at][lag])
+                    imbalance = (net / gross.where(gross > 0)).to_numpy()
+                    result.loc[at, name] = np.where(
+                        known,
+                        change * np.maximum(-np.sign(change) * imbalance, 0),
+                        np.nan,
+                    )
             book_needed = any(set(INPUTS[name]) & set(BOOK) for name in columns)
             if book_needed:
                 spread = pd.Series(

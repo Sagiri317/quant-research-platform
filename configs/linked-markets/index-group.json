@@ -1,0 +1,15 @@
+{
+  "factor_columns": [
+    "index_group_positive_fraction_5d",
+    "index_group_positive_fraction_20d",
+    "index_group_leader_gap_5d",
+    "index_group_leader_gap_20d"
+  ],
+  "parameters": {
+    "index_group": {
+      "000300": "2005-04-08",
+      "000905": "2007-01-15",
+      "000852": "2014-10-17"
+    }
+  }
+}

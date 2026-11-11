@@ -86,7 +86,11 @@ def prepare(config: Mapping) -> Path:
             from .implementations.a_share.processed.market_states import produce
 
             producer, kwargs = produce, {}
-        elif spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
+        elif spec.data_id in {
+            "etf_daily_panel",
+            "benchmark_daily_panel",
+            "etf_price_volume_factors",
+        }:
             from .implementations.a_share.processed.daily_quotes import produce
 
             producer, kwargs = produce, {}
@@ -168,7 +172,11 @@ def _configured_spec(spec, config):
 
         return configured_spec(spec, config)
 
-    if spec.data_id in {"etf_daily_panel", "benchmark_daily_panel"}:
+    if spec.data_id in {
+        "etf_daily_panel",
+        "benchmark_daily_panel",
+        "etf_price_volume_factors",
+    }:
         from .implementations.a_share.processed.daily_quotes import configured_spec
 
         return configured_spec(spec, config)

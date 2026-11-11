@@ -10,6 +10,49 @@ from quant_research_platform.research.factors.linked_markets import (
 )
 
 
+@pytest.mark.parametrize("case", ("known", "missing_member", "not_published", "early"))
+def test_fixed_index_group_does_not_shrink_or_use_prepublication_backcasts(case):
+    days = pd.bdate_range("2024-01-02", periods=7)
+    raw = pd.concat(
+        [
+            pd.DataFrame(
+                dict(source_asset_id=asset, timestamp=days, close=[100.0] * 6 + [last])
+            )
+            for asset, last in (("a", 110), ("b", 90), ("c", 100))
+        ],
+        ignore_index=True,
+    )
+    if case == "missing_member":
+        raw = raw.loc[~(raw.source_asset_id.eq("c") & raw.timestamp.eq(days[-1]))]
+    group = {asset: "2024-01-01" for asset in ("a", "b", "c")}
+    if case == "not_published":
+        group["c"] = days[-1].date().isoformat()
+    clock = days[-1] + pd.Timedelta(hours=6 if case == "early" else 8)
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["index"],
+            signal_session=days[-1],
+            timestamp=clock,
+        )
+    )
+    calendar = pd.DataFrame(
+        dict(calendar_date=days, source_market_type=1, is_trading_day=True)
+    )
+    names = [f"index_group_{kind}_5d" for kind in ("positive_fraction", "leader_gap")]
+    result = calculate(
+        decisions,
+        {"index_market": raw, "trading_calendar": calendar},
+        columns=names,
+        parameters={"index_group": group},
+    )
+    if case == "known":
+        assert result[names[0]].iloc[0] == pytest.approx(1 / 3)
+        assert result[names[1]].iloc[0] == pytest.approx(0.15)
+    else:
+        assert result[names].isna().all(axis=None)
+
+
 @pytest.mark.parametrize(
     "case", ["known", "late_weights", "unknown_return", "member_change"]
 )

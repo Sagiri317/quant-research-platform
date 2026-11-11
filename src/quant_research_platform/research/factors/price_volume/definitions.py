@@ -27,7 +27,6 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "skewness_60d": (("period_return",), (60,)),
     "drawdown_60d": (("adj_close",), (60,)),
     "amplitude_20d": (("high", "low", "close"), (20,)),
-    "log_avg_amount_20d": (("amount",), (20,)),
     "turnover_20d": (("turnover",), (20,)),
     "turnover_60d": (("turnover",), (60,)),
     "turnover_volatility_20d": (("turnover",), (20,)),
@@ -376,6 +375,19 @@ for _width in (20, 60, 252):
         PRICE_VOLUME_THEME_DESCRIPTIONS[_column] = _description
 
 for _width in (20, 60):
+    _name = f"breakout_activity_divergence_{_width}d"
+    _PRICE_VOLUME_INPUT_WINDOWS[_name] = (("adj_close", "amount"), (_width + 1,))
+    PRICE_VOLUME_THEME_DESCRIPTIONS[_name] = (
+        "QRP price-volume hypothesis: signed log-price excess outside the "
+        "preceding window's adjusted-close range times max(log(prior-window "
+        "mean amount / current amount),0). Zero inside the known price range; "
+        "an actual breakout requires complete nonnegative prior amounts and "
+        "positive current and mean amounts. Positive is a weak-activity upward "
+        "break; negative is a weak-activity downward break, not a forecast sign. "
+        "The volume-information mechanism is motivated by Blume, Easley and "
+        "O'Hara (1994), not their original factor formula: "
+        "https://doi.org/10.1111/j.1540-6261.1994.tb04424.x."
+    )
     for _side in ("up", "down"):
         _name = f"price_{_side}_acceleration_{_width}d"
         _PRICE_VOLUME_INPUT_WINDOWS[_name] = (("adj_close",), (_width,))
@@ -447,7 +459,6 @@ for _name in PRICE_VOLUME_UNITS:
     elif _name in {
         "log_float_market_cap",
         "log_total_market_cap",
-        "log_avg_amount_20d",
     }:
         PRICE_VOLUME_UNITS[_name] = "log_CNY"
     elif _name in {
@@ -479,7 +490,6 @@ PRICE_VOLUME_PARTIAL_STATISTICS = frozenset(
         or factor.endswith("_corr_20d")
         or factor
         in {
-            "log_avg_amount_20d",
             "turnover_20d",
             "turnover_60d",
             "turnover_250d",

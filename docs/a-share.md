@@ -637,7 +637,7 @@ max_return_20d
 skewness_60d
 drawdown_60d
 amplitude_20d
-log_avg_amount_20d
+avg_amount_20d
 turnover_20d
 turnover_60d
 turnover_volatility_20d

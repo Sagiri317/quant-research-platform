@@ -37,6 +37,50 @@ def inputs():
     return prices, calendar
 
 
+def test_native_etf_price_volume_reuses_math_and_keeps_decision_clock(tmp_path):
+    import numpy as np
+
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2024-01-02", periods=23)
+    frame = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="510300",
+            signal_session=days[:22],
+            timestamp=days[1:] + pd.Timedelta(hours=1),
+            adj_close=[100.0] * 20 + [110.0, 120.0],
+            amount=[1000.0] * 20 + [500.0, 1000.0],
+            next_session_intraday_return=0.0,
+            next_session_intraday_return_available_at=days[1:] + pd.Timedelta(hours=7),
+        )
+    )
+    name = "breakout_activity_divergence_20d"
+    config = dict(
+        market_id="a_share",
+        data_id="etf_price_volume_factors",
+        inputs={
+            "etf_daily_panel": _input(tmp_path, "etf_daily_panel", frame, native=True)
+        },
+        factor_columns=[name],
+        time_window=dict(start="2024-01-02", end="2024-02-05"),
+        output_root=str(tmp_path / "etf-factors"),
+    )
+    result = read_dataset(prepare(config))
+    assert result[name].iloc[:20].isna().all()
+    assert result[name].iloc[20] == pytest.approx(np.log(1.1) * np.log(2))
+    assert result.timestamp.tolist() == frame.timestamp.tolist()
+    missing = frame.copy()
+    missing.loc[19, "adj_close"] = np.nan
+    config["inputs"]["etf_daily_panel"] = _input(
+        tmp_path / "missing", "etf_daily_panel", missing, native=True
+    )
+    config["output_root"] = str(tmp_path / "missing-etf-factors")
+    assert read_dataset(prepare(config))[name].iloc[20:].isna().all()
+
+
 def test_etf_intraday_label_is_next_declared_session_and_cash_adjustment_cancels():
     prices, calendar = inputs()
     result = daily_quotes.daily_decisions(prices, calendar)

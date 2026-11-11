@@ -68,10 +68,29 @@ def configured_spec(spec, config):
             "us_assets",
             "asset_us_tickers",
             "index_id",
+            "index_group",
         }
     )
     if type(params) is not dict or set(params) - allowed:
         raise ValueError("linked_market_parameters_invalid")
+    if "index_group" in params:
+        group = params["index_group"]
+        if (
+            type(group) is not dict
+            or len(group) < 2
+            or any(
+                type(k) is not str or not k or type(v) is not str
+                for k, v in group.items()
+            )
+        ):
+            raise ValueError("linked_index_group_invalid")
+        for value in group.values():
+            try:
+                date = pd.Timestamp(value)
+            except ValueError as error:
+                raise ValueError("linked_index_group_release_date_invalid") from error
+            if pd.isna(date) or date.tz is not None or date != date.normalize():
+                raise ValueError("linked_index_group_release_date_invalid")
     if params.get("future_product", "IF") not in {"IF", "IC", "IH", "IM"}:
         raise ValueError("linked_future_product_invalid")
     if type(params.get("index_id", "000300")) is not str or not params.get(

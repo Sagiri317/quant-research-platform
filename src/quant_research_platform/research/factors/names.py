@@ -3,6 +3,8 @@
 import re
 
 _NAMES = {
+    "index_group_positive_fraction": "固定指数集合上涨参与度",
+    "index_group_leader_gap": "固定指数集合最强指数领先幅度",
     "financing_balance_change": "融资余额变化率",
     "financing_balance_to_float_cap": "融资余额占流通市值比",
     "financing_buy_after_drawdown": "回撤后的融资买入强度",
@@ -124,7 +126,8 @@ _NAMES = {
     "intraday_return": "日内开盘至收盘收益率",
     "kurtosis": "收益峰度",
     "largest_daily_contribution": "最大单日收益贡献占比",
-    "log_avg_amount": "平均成交额对数",
+    "breakout_activity_divergence": "突破幅度×成交活跃度衰减",
+    "price_flow_divergence": "价格与有符号成交流背离",
     "log_float_market_cap": "流通市值对数",
     "log_total_market_cap": "总市值对数",
     "low_position_turnover_upshock": "低位放量上涨冲击",
@@ -225,7 +228,14 @@ _NAMES = {
     "opening_gap_repair_fraction": "开盘段跳空修复比例",
     "opening_relative_activity": "开盘段相对成交活跃度",
     "prior_drawdown_x_sell_pressure_decay": "前期回撤×日内卖压衰减",
+    "prior_drawdown_x_activity_x_depth_recovery": "前期回撤×异常成交×盘口恢复",
+    "prior_residual_drawdown_x_activity_x_depth_recovery": (
+        "前期残差回撤×异常成交×盘口恢复"
+    ),
     "prior_financing_x_intraday_liquidity_stress": "前期融资暴露×日内流动性压力",
+    "prior_ownership_crowding_x_intraday_liquidity_stress": (
+        "此前公募持有集中度×日内流动性压力"
+    ),
     "prior_low_position_x_depth_recovery": "前期低位暴露×盘口深度恢复",
     "trade_profile_above_price_fraction": "当前价上方历史逐笔成交占比",
     "trade_profile_concentration": "逐笔成交价格分布集中度",

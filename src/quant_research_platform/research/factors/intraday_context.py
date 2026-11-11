@@ -18,7 +18,10 @@ FACTORS = (
     "late_session_relative_activity",
     "prior_low_position_x_depth_recovery",
     "prior_drawdown_x_sell_pressure_decay",
+    "prior_drawdown_x_activity_x_depth_recovery",
+    "prior_residual_drawdown_x_activity_x_depth_recovery",
     "prior_financing_x_intraday_liquidity_stress",
+    "prior_ownership_crowding_x_intraday_liquidity_stress",
     "intraday_positive_return_fraction",
     "intraday_positive_flow_fraction",
     "intraday_liquidity_stress_fraction",
@@ -54,7 +57,9 @@ DAILY_FIELDS = (
     "industry_level1_code",
     "price_position_60d",
     "peak_drawdown_20d",
+    "risk_residual_drawdown_20d",
     "financing_balance_to_float_cap",
+    "cn_fund_holder_concentration",
     "lending_days_to_cover_20d",
     "lending_net_cover_fraction_5d",
     "financing_balance_change_5d",
@@ -232,6 +237,7 @@ def calculate(
     flows = {w: pd.Series(np.nan, index=work.index) for w in (30, 60)}
     stress = pd.Series(np.nan, index=work.index)
     activities = {}
+    relative_activity = pd.Series(np.nan, index=work.index)
     late_samples = []
     for (asset, date), at in work.groupby(
         [work.asset_id, day], sort=False
@@ -357,6 +363,24 @@ def calculate(
             )
         volume = pd.Series(block.observed_trade_volume.to_numpy(), index=times)
         signed = pd.Series(block.observed_signed_trade_volume.to_numpy(), index=times)
+        if any("_activity_x_depth_recovery" in name for name in columns):
+            baseline = (
+                volume.rolling("300s")
+                .sum()
+                .where(volume.isna().rolling("300s").sum().eq(0))
+            )
+            baseline = _lag(baseline, times, 30)
+            gross = (
+                volume.rolling("30s")
+                .sum()
+                .where(volume.isna().rolling("30s").sum().eq(0))
+                .to_numpy()
+            )
+            relative_activity.loc[at] = np.where(
+                (times - times[0]).total_seconds() >= 330,
+                10 * gross / np.where(baseline > 0, baseline, np.nan),
+                np.nan,
+            )
         for width in (30, 60):
             gross = volume.rolling(f"{width}s").sum()
             net = signed.rolling(f"{width}s").sum()
@@ -493,6 +517,14 @@ def calculate(
             "observed_sell_pressure_decay_60s",
             "peak_drawdown_20d",
         ),
+        "prior_drawdown_x_activity_x_depth_recovery": (
+            "observed_depth_recovery_60s",
+            "peak_drawdown_20d",
+        ),
+        "prior_residual_drawdown_x_activity_x_depth_recovery": (
+            "observed_depth_recovery_60s",
+            "risk_residual_drawdown_20d",
+        ),
     }
     for name, (path, context) in interactions.items():
         if name in columns:
@@ -505,9 +537,15 @@ def calculate(
             state = pd.to_numeric(daily[context])
             state = 1 - state if "low_position" in name else state
             result[name] = aligned * state
+            if "_activity_x_depth_recovery" in name:
+                result[name] *= relative_activity
     if "prior_financing_x_intraday_liquidity_stress" in columns:
         result["prior_financing_x_intraday_liquidity_stress"] = (
             pd.to_numeric(daily.financing_balance_to_float_cap) * stress
+        )
+    if "prior_ownership_crowding_x_intraday_liquidity_stress" in columns:
+        result["prior_ownership_crowding_x_intraday_liquidity_stress"] = (
+            pd.to_numeric(daily.cn_fund_holder_concentration) * stress
         )
     if "intraday_short_squeeze_pressure" in columns:
         result["intraday_short_squeeze_pressure"] = (
@@ -549,6 +587,11 @@ def definitions():
                 "the value area expands from the point of control to cover 70%. "
                 "Nominal trade prices are not investor cost basis. Only explicit "
                 "historical data and known prior daily context are consumed."
+                " Drawdown/activity/depth-recovery interactions multiply the "
+                "known prior 20-session raw or risk-residual drawdown by "
+                "10 * volume(t-30,t] / volume(t-330,t-30] and the observed "
+                "60-second depth recovery. A missing residual background affects "
+                "only the residual interaction. These are QRP hypotheses."
             ),
             timing_semantics="known_before_quote_time",
             null_policy="missing_only_invalidates_actual_dependencies",

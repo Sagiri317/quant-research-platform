@@ -166,6 +166,20 @@ def _calculate_values(
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
     if factor == "return_acceleration_6m6m":
         return sums[factor][start:stop].copy()
+    if factor.startswith("breakout_activity_divergence_"):
+        width = windows[0] - 1
+        price = pd.Series(values["adj_close"]).where(lambda x: x > 0)
+        prior = price.shift().rolling(width, min_periods=width)
+        excess = np.log(price / prior.max()).clip(lower=0) + np.log(
+            price / prior.min()
+        ).clip(upper=0)
+        amount = pd.Series(values["amount"]).where(lambda x: x >= 0)
+        mean = amount.shift().rolling(width, min_periods=width).mean()
+        shortfall = np.log(mean.where(mean > 0) / amount.where(amount > 0)).clip(
+            lower=0
+        )
+        result = (excess * shortfall).where(excess.ne(0), 0)
+        return result.to_numpy()[start:stop].copy()
     if factor.startswith(("price_up_acceleration_", "price_down_acceleration_")):
         width = windows[0]
         key = ("quadratic_log_trend", width)
@@ -335,7 +349,6 @@ def _calculate_values(
         return sums[key][first - shift : stop - shift]
 
     if shift or factor in {
-        "log_avg_amount_20d",
         "avg_amount_20d",
         "avg_volume_20d",
         "avg_amount_126d",
@@ -348,8 +361,6 @@ def _calculate_values(
             valid &= means != 0
             with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
                 result = (source[first:stop][valid] - means[valid]) / means[valid]
-        elif factor == "log_avg_amount_20d":
-            result = _log(means[valid])
         else:
             result = means[valid]
         output[first - start :][valid] = result
