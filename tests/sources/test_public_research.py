@@ -109,6 +109,36 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
     assert report.available_at.iloc[0] == pd.Timestamp("2024-08-20T16:00:00Z")
     assert report.published_at.isna().all()
     assert pd.isna(report.available_at.iloc[1])
+    release = tmp_path / "release.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="cn_fund_report:unknown-report",
+                observation_date="2024-06-30",
+                estimated_available_at="2024-08-31T23:59:59+08:00",
+                availability_basis="assumption_timely_report_by_declared_deadline",
+                evidence_url="https://example.org/rule",
+            )
+        ]
+    ).to_csv(release, index=False)
+    target = tmp_path / "assumed-reports"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            outputs=dict(public_fund_holdings_reports=str(target)),
+            release_csv=str(release),
+        )
+    )
+    assumed = read_dataset(target)
+    assert assumed.available_at.iloc[0] == report.available_at.iloc[0]
+    assert assumed.available_at.iloc[1] == pd.Timestamp("2024-08-31T15:59:59Z")
+    assert assumed.publication_date.iloc[1] is pd.NaT
+    assert assumed.published_at.isna().all()
+    assert (
+        assumed.availability_basis.iloc[1]
+        == "assumption_timely_report_by_declared_deadline"
+    )
 
 
 def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
@@ -161,6 +191,114 @@ def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path
     assert frame.asset_id.tolist() == ["report1:balance_sheet:1:2:3"]
     assert frame.economic_portfolio_id.isna().all()
     assert frame.value_observation_date.isna().all()
+
+
+def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
+    tmp_path,
+):
+    cells = tmp_path / "cells.csv"
+    pd.DataFrame(
+        [
+            dict(
+                primary_fund_code="001001",
+                economic_portfolio_id="portfolio",
+                share_class_header_as_provided=None,
+                report_period_end="2023-06-30",
+                value_observation_date=date,
+                table_kind="balance_sheet",
+                field="net_assets",
+                unit="CNY",
+                denominator=None,
+                value_decimal=str(100 + row),
+                report_version_identity="report",
+                leaf_table_index="1",
+                source_row_index=str(row),
+                expanded_column_index="3",
+                source_retrieved_at="2026-11-11T00:00:00Z",
+                source_url="https://example.org/report",
+                source_sha256="a" * 64,
+                published_at=None,
+                publication_date=None,
+                report_declared_send_date=None,
+            )
+            for row, date in enumerate(["2023-06-30", "2023-05-26", "2022-12-31"])
+        ]
+    ).to_csv(cells, index=False)
+    metadata = tmp_path / "metadata.json"
+    metadata.write_text(
+        json.dumps(
+            dict(
+                records=[
+                    dict(
+                        original_report_source_sha256="a" * 64,
+                        actual_report_period_end="2023-05-26",
+                    )
+                ]
+            )
+        )
+    )
+    corrections = tmp_path / "corrections.csv"
+    pd.DataFrame(
+        [
+            dict(
+                original_report_source_sha256="a" * 64,
+                report_version_identity="report",
+                table_kind="balance_sheet",
+                leaf_table_index="1",
+                source_row_index="0",
+                expanded_column_index="3",
+                corrected_value_observation_date="2023-05-26",
+            )
+        ]
+    ).to_csv(corrections, index=False)
+    records = [
+        dict(
+            path=path.name,
+            source=source,
+            status="downloaded",
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+            bytes=path.stat().st_size,
+        )
+        for path, source in [
+            (cells, "csrc_official_fund_financial_cells_extracted"),
+            (metadata, "cn_fund_report_observation_metadata_extracted"),
+            (corrections, "cn_fund_financial_observation_date_corrections_extracted"),
+        ]
+    ]
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(dict(schema_version=1, records=records))
+    )
+    release = tmp_path / "release.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="cn_fund_report:report",
+                observation_date="2023-05-26",
+                estimated_available_at="2023-08-30T23:59:59+08:00",
+                availability_basis="report_declared_send_date_upper_bound",
+                evidence_url="https://example.org/report",
+            )
+        ]
+    ).to_csv(release, index=False)
+    output = tmp_path / "native"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(release),
+            outputs=dict(public_fund_financial_cells=str(output)),
+        )
+    )
+    result = read_dataset(output).sort_values("asset_id")
+    assert result.timestamp.eq(pd.Timestamp("2023-05-26")).all()
+    assert result.report_period_end.eq(pd.Timestamp("2023-05-26")).all()
+    assert result.value_observation_date.tolist() == list(
+        pd.to_datetime(["2023-05-26", "2023-05-26", "2022-12-31"])
+    )
+    assert result.value.tolist() == [100, 101, 102]
+    assert result.available_at.eq(pd.Timestamp("2023-08-30T15:59:59Z")).all()
+    assert result.published_at.isna().all()
+    assert result.publication_date.isna().all()
 
 
 def test_domestic_etf_actions_can_be_announced_before_the_ex_date(tmp_path):

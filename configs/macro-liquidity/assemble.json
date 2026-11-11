@@ -19,7 +19,7 @@
     "ml_us_vxn_vix_ratio_level",
     "ml_us_vxeem_vix_ratio_level",
     "ml_us_vvix_zscore",
-    "ml_us_skew_risk_neutral_skewness",
+    "ml_us_skew_level",
     "ml_us_skew_zscore",
     "ml_us_vix_skew_zscore_product",
     "ml_us_vix_vvix_zscore_product",

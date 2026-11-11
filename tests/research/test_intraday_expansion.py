@@ -267,3 +267,48 @@ def test_native_intraday_publication_does_not_require_unused_optional_inputs(tmp
     result = read_dataset(path)
     assert result[name].iloc[-1] == 1
     assert result.opening_relative_activity_5m.isna().all()
+
+
+def test_native_intraday_skips_unobserved_day_with_history_prefix(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.a_share_sources import _calendar_input
+    from tests.research.test_prepare_selection import _input
+
+    frame = (
+        panel()
+        .iloc[:21]
+        .assign(
+            bid_px1=0.99,
+            ask_px1=1.01,
+            bid_vol1=100.0,
+            ask_vol1=100.0,
+            exchange="SSE",
+            instrument_type="stock",
+        )
+    )
+    first = frame.iloc[:8]
+    second = frame.assign(timestamp=frame.timestamp + pd.Timedelta(days=1))
+    source = pd.concat([first, second], ignore_index=True)
+    name = "intraday_positive_return_fraction"
+    path = prepare(
+        dict(
+            market_id="a_share",
+            data_id="hft_research_factors",
+            inputs=dict(
+                hft_panel=_input(tmp_path, "hft_panel", source, native=True),
+                trading_calendar=str(
+                    _calendar_input(
+                        tmp_path, {1: pd.bdate_range("2024-01-02", periods=3)}
+                    )
+                ),
+            ),
+            factor_columns=[name, "opening_relative_activity_5m"],
+            time_window=dict(start="2024-01-02", end="2024-01-04"),
+            output_root=str(tmp_path / "fractions"),
+        )
+    )
+    result = read_dataset(path)
+    assert result.loc[result.timestamp.dt.day.eq(2), name].isna().all()
+    assert result[name].iloc[-1] == 1
+    assert not result.timestamp.dt.day.eq(4).any()

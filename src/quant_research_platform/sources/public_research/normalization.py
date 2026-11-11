@@ -569,6 +569,7 @@ def normalize(data_id, path, record):
                 },
             )
             result["timestamp"] = result.report_period_end
+            result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
             result["publication_date"] = pd.concat(
                 [
                     pd.to_datetime(frame.publication_date),
@@ -837,6 +838,7 @@ def normalize(data_id, path, record):
                 axis=1,
             ).max(axis=1)
             result["asset_id"] = result.report_version_identity
+            result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
             if data_id == "public_fund_holdings":
                 leaf = frame.get(
                     "source_leaf_table_index", pd.Series("", index=frame.index)

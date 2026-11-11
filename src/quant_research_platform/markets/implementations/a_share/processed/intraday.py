@@ -162,7 +162,8 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 .filtered_view(window)
                 .projected_view(panel_columns)
             )
-            if panel.empty:
+            current = panel.loc[panel.timestamp.ge(day)]
+            if current.empty:
                 continue
             daily = None
             if "daily_context" in sessions:
@@ -215,7 +216,6 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     .filtered_view(TimeWindow(day, end))
                     .projected_view(("asset_id", "timestamp", "segment_id", "mid"))
                 )
-            current = panel.loc[panel.timestamp.ge(day)]
             result = current.loc[:, list(KEY)].copy()
             groups = (
                 (activity, panel),

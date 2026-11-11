@@ -111,6 +111,9 @@ def materialize_interim_data(
         raise ValueError("public_source_path_duplicate")
     catalog = interim_catalog()
     clocks, clock_hash = _release_clocks(release_csv)
+    report_dates, cell_dates, correction_evidence = _report_observation_corrections(
+        raw_root, records, data_ids
+    )
     fund_identities = None
     if fund_identity_csv is not None and "public_fund_nav" in data_ids:
         fund_identities = pd.read_csv(
@@ -127,7 +130,7 @@ def materialize_interim_data(
     roots = {}
     skipped = []
     for data_id in data_ids:
-        evidence = []
+        evidence = correction_evidence.get(data_id, []).copy()
         numeric_counts = {}
         complete_archives = set()
 
@@ -201,6 +204,20 @@ def materialize_interim_data(
                     )
                     if frame.timestamp.isna().any():
                         raise ValueError("public_observation_date_invalid")
+                    if data_id in correction_evidence:
+                        corrected = pd.to_datetime(
+                            frame.source_sha256.map(report_dates)
+                        )
+                        frame["timestamp"] = corrected.fillna(frame.timestamp)
+                        if data_id == "public_fund_financial_cells":
+                            frame["report_period_end"] = frame.timestamp
+                            keys = pd.MultiIndex.from_arrays(
+                                [frame.source_sha256, frame.asset_id]
+                            )
+                            revised = cell_dates.reindex(keys).set_axis(frame.index)
+                            frame["value_observation_date"] = revised.fillna(
+                                pd.to_datetime(frame.value_observation_date)
+                            )
                     if start_date is not None:
                         frame = frame.loc[frame.timestamp.ge(pd.Timestamp(start_date))]
                     if end_date is not None:
@@ -367,6 +384,70 @@ def materialize_interim_data(
         )
         roots[data_id] = target
     return PublicImportResult(roots, tuple(skipped))
+
+
+def _report_observation_corrections(raw_root, records, data_ids):
+    """Apply explicit structured report evidence, retaining comparative cell dates."""
+    dependents = set(data_ids) & {
+        "public_fund_holdings",
+        "public_fund_holdings_reports",
+        "public_fund_financial_cells",
+    }
+    report_dates, cells, evidence = {}, {}, {}
+    for record in records:
+        source = record["source"]
+        targets = (
+            dependents
+            if source == "cn_fund_report_observation_metadata_extracted"
+            else dependents & {"public_fund_financial_cells"}
+            if source == "cn_fund_financial_observation_date_corrections_extracted"
+            else set()
+        )
+        if not targets or record["status"] != "downloaded":
+            continue
+        path = raw_root / record["path"]
+        payload = path.read_bytes()
+        if (
+            hashlib.sha256(payload).hexdigest() != record["sha256"]
+            or len(payload) != record["bytes"]
+        ):
+            raise ValueError("public_source_integrity_mismatch")
+        for target in targets:
+            evidence.setdefault(target, []).append(
+                {k: record[k] for k in ("path", "sha256")}
+            )
+        if source == "cn_fund_report_observation_metadata_extracted":
+            for row in json.loads(payload)["records"]:
+                key = row["original_report_source_sha256"]
+                date = pd.Timestamp(row["actual_report_period_end"])
+                if pd.isna(date) or (key in report_dates and report_dates[key] != date):
+                    raise ValueError("public_report_observation_correction_invalid")
+                report_dates[key] = date
+        else:
+            frame = pd.read_csv(path, dtype="str")
+            for row in frame.itertuples(index=False):
+                asset = ":".join(
+                    [
+                        row.report_version_identity,
+                        row.table_kind,
+                        row.leaf_table_index,
+                        row.source_row_index,
+                        row.expanded_column_index,
+                    ]
+                )
+                key = (row.original_report_source_sha256, asset)
+                date = pd.Timestamp(row.corrected_value_observation_date)
+                if pd.isna(date) or (key in cells and cells[key] != date):
+                    raise ValueError("public_report_observation_correction_invalid")
+                cells[key] = date
+    cell_dates = pd.Series(
+        list(cells.values()),
+        index=pd.MultiIndex.from_tuples(
+            list(cells), names=["source_sha256", "asset_id"]
+        ),
+        dtype="datetime64[ns]",
+    )
+    return report_dates, cell_dates, evidence
 
 
 def _source_timezone(source):

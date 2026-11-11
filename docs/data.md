@@ -516,6 +516,8 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。窗口外业务时钟异常不阻塞当前导入，来源路径、格式和观察日结构仍须合法。规则文件哈希进入原生
 元数据。原有实际发布时间优先，已有不可变产物不原地修改，应写新输出路径。
 
+中国公募报告可用 `source=cn_fund_report:<report_version_identity>` 指定逐报告时钟，观察日使用报告期末，不能用财务单元格的比较期替代。明确选择的结构化 `cn_fund_report_observation_metadata_extracted` 修正该原件哈希对应的实际报告期末；`cn_fund_financial_observation_date_corrections_extracted` 按报告、表、行和列坐标修正财务单元格日期，比较期及数值保持原样。目录中的半年末、年末标签不能覆盖提前终止报告的实际期末。日期上界或合规期限假设只填可用时刻与依据，不补造真实发布时间；清盘事件也不证明股票持仓已经归零。
+
 `financing_factors`消费结构化`public_margin_balances`和`decision_panel`；默认
 `observation_lag_sessions=1`并要求`trading_calendar`定位观察日及1／5日变化。
 显式设0时，日历仅用于1／5日变化，不限制无日历时的余额及买入强度。可用列和公式由融资因子owner声明，
