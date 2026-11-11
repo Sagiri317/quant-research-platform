@@ -686,6 +686,11 @@ def calculate(decisions, sources, *, columns, parameters=None):
             known = h.loc[
                 h.report_version_identity.isin(latest_headers.report_version_identity)
             ]
+            known = (
+                known.groupby(["economic_portfolio_id", "stock_code"], sort=False)
+                .shares_held.sum(min_count=1)
+                .reset_index()
+            )
             total = known.groupby("stock_code", sort=False).shares_held.sum(min_count=1)
             squared = (
                 (known.shares_held**2)

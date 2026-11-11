@@ -259,7 +259,7 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
                 "2023-08-01",
                 "full_stock_table_reconciled",
                 "false",
-                2,
+                3,
             ),
             (
                 "h1",
@@ -294,7 +294,12 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
     for field in ("timestamp", "available_at"):
         headers[field] = pd.to_datetime(headers[field])
     holdings = pd.DataFrame(
-        [("h0", "CN_MAINLAND", 10.0), ("h0", "HK", 999.0), ("h2", "CN_MAINLAND", 99.0)],
+        [
+            ("h0", "CN_MAINLAND", 10.0),
+            ("h0", "CN_MAINLAND", 5.0),
+            ("h0", "HK", 999.0),
+            ("h2", "CN_MAINLAND", 99.0),
+        ],
         columns=["report_version_identity", "stock_market", "shares_held"],
     ).assign(stock_code="s", economic_portfolio_id="portfolio")
     decisions = pd.DataFrame(
@@ -318,10 +323,10 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
         columns=fields,
     )
     assert result.loc[0, fields].isna().all()
-    assert result.loc[1, fields[0]] == pytest.approx(0.1)
+    assert result.loc[1, fields[0]] == pytest.approx(0.15)
     assert result.loc[1, fields[1]] == 1
     assert result.loc[2, fields[0]] == 0
-    assert result.loc[2, fields[2]] == pytest.approx(-0.1)
+    assert result.loc[2, fields[2]] == pytest.approx(-0.15)
     assert result.loc[3, fields[0]] == 0
     assert pd.isna(result.loc[3, fields[1]])
 

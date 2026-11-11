@@ -838,8 +838,13 @@ def normalize(data_id, path, record):
             ).max(axis=1)
             result["asset_id"] = result.report_version_identity
             if data_id == "public_fund_holdings":
+                leaf = frame.get(
+                    "source_leaf_table_index", pd.Series("", index=frame.index)
+                ).fillna("")
                 result["asset_id"] += (
                     ":"
+                    + leaf
+                    + ":"
                     + frame.html_section_anchor
                     + ":"
                     + frame.source_row_index

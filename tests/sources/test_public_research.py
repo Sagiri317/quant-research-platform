@@ -39,7 +39,9 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
                 published_date="2024-08-19",
                 source_row_index="2",
                 html_section_anchor="stock-table",
+                source_leaf_table_index=str(leaf),
             )
+            for leaf in (0, 1)
         ]
     ).to_csv(positions, index=False)
     headers = tmp_path / "headers.json"
@@ -49,6 +51,8 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
                 records=[
                     dict(
                         shared,
+                        report_version_identity="empty-report",
+                        source_sha256="b" * 64,
                         publication_date="2024-08-19",
                         stock_rows=0,
                         stock_disclosure_status="explicit_no_stock_reported",
@@ -83,9 +87,11 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
         dict(source_id="public_research", raw_root=str(tmp_path), outputs=outputs)
     )
     holding, report = (read_dataset(outputs[name]) for name in outputs)
-    assert holding.shares_held.tolist() == [1234]
-    assert holding.asset_id.tolist() == ["report:stock-table:2:CN_MAINLAND:000002"]
-    assert holding.economic_portfolio_id.tolist() == ["portfolio"]
+    assert holding.shares_held.tolist() == [1234, 1234]
+    assert holding.asset_id.tolist() == [
+        f"report:{leaf}:stock-table:2:CN_MAINLAND:000002" for leaf in (0, 1)
+    ]
+    assert holding.economic_portfolio_id.tolist() == ["portfolio", "portfolio"]
     assert report.explicit_no_stock.tolist() == ["true"]
     assert report.stock_rows.tolist() == [0]
     assert report.available_at.iloc[0] == pd.Timestamp("2024-08-20T16:00:00Z")
