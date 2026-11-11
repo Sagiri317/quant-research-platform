@@ -168,11 +168,6 @@ def _market_model_frames(
                 if open_markets is None
                 else open_markets[timestamp.normalize()],
                 asset_market_types=membership,
-                market_input_complete=(
-                    bool(cross["_panel_observed"].all())
-                    if "_panel_observed" in cross
-                    else True
-                ),
             )
             piece = cross.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
             piece["beta_252d"] = piece.asset_id.map(styles.beta)

@@ -258,6 +258,7 @@ def test_native_market_model_selection_preserves_declared_composition_and_recove
     panel = bars.rename(columns={"source_asset_id": "asset_id"}).assign(
         market_id="a_share",
         listing_date=pd.Timestamp("2000-01-01"),
+        delisting_date=pd.NaT,
         is_a_share_scope=True,
         is_trading=True,
         is_st=False,
@@ -327,7 +328,7 @@ def test_market_model_output_window_preserves_historical_market_state(
         )
         if asset == "000002":
             if history == "delisted":
-                panel = panel.iloc[:350].assign(delisting_date=dates[349])
+                panel = panel.iloc[:350].assign(delisting_date=dates[350])
             else:
                 panel.loc[40:349, "filling_flag"] = 1
                 panel.loc[40:349, "is_trading"] = False

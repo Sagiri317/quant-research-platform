@@ -139,6 +139,7 @@ def factor_catalog() -> FactorCatalog:
                             (
                                 "period_return",
                                 "float_market_cap",
+                                "delisting_date",
                                 *A_SHARE_ELIGIBILITY_FACTS,
                             )
                         )

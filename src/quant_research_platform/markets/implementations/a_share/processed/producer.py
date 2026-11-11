@@ -820,6 +820,7 @@ def _calendar_panel_axis(
     peer_starts = []
     historical_context = bool(market_lookback or peer_lookback)
     if "delisting_date" in panel:
+        columns.append("delisting_date")
         # Exit facts are local to their asset, listing and known-state run.
         listing = [panel.asset_id, panel.listing_date]
         if "delisting_date_unresolved" in panel:
@@ -835,6 +836,7 @@ def _calendar_panel_axis(
             panel.timestamp.where(exit_changed).groupby(listing, sort=False).ffill()
         )
         panel["_calendar_exit"] = exit_date.where(exit_date.ge(known_at), known_at)
+        panel["delisting_date"] = exit_date
     for _, asset_rows in panel.groupby("asset_id", sort=False):
         # Exit knowledge controls filling, not the observed history halo.
         # Collect both admission intervals and real unknown-bound observations
@@ -976,6 +978,11 @@ def _calendar_panel_axis(
                         "listing_date": row.listing_date,
                         "market_type": row.market_type,
                         "_calendar_segment": row["_calendar_segment"],
+                        **(
+                            {"delisting_date": row.delisting_date}
+                            if "delisting_date" in panel
+                            else {}
+                        ),
                     }
                 )
             )

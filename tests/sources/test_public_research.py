@@ -455,6 +455,69 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
     assert components.cash_substitution_flag_as_provided.tolist() == ["2", "2"]
 
 
+@pytest.mark.parametrize("invalid_weight", [False, True])
+def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
+    tmp_path, invalid_weight
+):
+    root = tmp_path / "raw"
+    root.mkdir()
+    frame = pd.DataFrame(
+        dict(
+            index_code="000300",
+            constituent_code=["000001", "600000"],
+            observation_date="2024-01-02",
+            weight_percent=[160 if invalid_weight else 60, 40],
+            source_url="https://example.org/frozen-index-weights",
+            source_sha256="a" * 64,
+            retrieved_at="2026-11-11T00:00:00Z",
+            publication_date=None,
+            published_at=None,
+        )
+    )
+    file = root / ("weights.csv" if invalid_weight else "weights.csv.gz")
+    frame.to_csv(file, index=False)
+    (root / "manifest.json").write_text(
+        json.dumps(
+            dict(
+                schema_version=1,
+                records=[
+                    dict(
+                        path=file.name,
+                        source="public_index_weight_history_extracted",
+                        status="downloaded",
+                        sha256=hashlib.sha256(file.read_bytes()).hexdigest(),
+                        bytes=file.stat().st_size,
+                        url="https://example.org/frozen-index-weights",
+                        retrieved_at="2026-11-11T00:00:00Z",
+                    )
+                ],
+            )
+        )
+    )
+    clock = root / "clocks.csv"
+    clock.write_text(
+        "source,observation_date,estimated_available_at,availability_basis,evidence_url\npublic_index_weight_history_extracted,2024-01-02,2024-01-03T18:00:00+08:00,assumed_next_session_end,https://example.org/assumption\n"
+    )
+    output = tmp_path / "native"
+    config = dict(
+        source_id="public_research",
+        raw_root=str(root),
+        release_csv=str(clock),
+        outputs=dict(public_index_weights=str(output)),
+    )
+    if invalid_weight:
+        with pytest.raises(ValueError, match="public_index_weight_percent_invalid"):
+            prepare_source(config)
+        assert not (output / "_manifest/manifest.json").exists()
+    else:
+        prepare_source(config)
+        result = read_dataset(output).sort_values("asset_id")
+        assert result.asset_id.tolist() == ["000300:000001", "000300:600000"]
+        assert result.weight.tolist() == pytest.approx([0.6, 0.4])
+        assert result.available_at.eq(pd.Timestamp("2024-01-03T10:00:00Z")).all()
+        assert result.published_at.isna().all()
+
+
 def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     source = tmp_path / "raw"
     source.mkdir()

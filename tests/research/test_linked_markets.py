@@ -10,6 +10,91 @@ from quant_research_platform.research.factors.linked_markets import (
 )
 
 
+@pytest.mark.parametrize(
+    "case", ["known", "late_weights", "unknown_return", "member_change"]
+)
+def test_index_breadth_and_concentration_use_a_visible_full_member_baseline(case):
+    dates = pd.bdate_range("2024-01-02", periods=7)
+    decision = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="index",
+            signal_session=dates[-1],
+            timestamp=[dates[-1] + pd.Timedelta(hours=9)],
+        )
+    )
+    prices = pd.concat(
+        [
+            pd.DataFrame(dict(asset_id=asset, timestamp=dates, adj_close=values))
+            for asset, values in [
+                ("a", [100.0] * 6 + [110.0]),
+                ("b", [100.0] * 5 + [75.0, 90.0]),
+                ("c", [100.0] * 6 + [110.0]),
+            ]
+        ],
+        ignore_index=True,
+    )
+    if case == "unknown_return":
+        prices.loc[
+            prices.asset_id.eq("b") & prices.timestamp.eq(dates[-1]), "adj_close"
+        ] = np.nan
+    events = pd.DataFrame(
+        dict(
+            source_asset_id=["000300"],
+            constituent_stock_code=["a"],
+            security_type=[1],
+            effective_date=[dates[1]],
+            announcement_date=[dates[0]],
+            change_type=[1],
+        )
+    )
+    if case == "member_change":
+        events = pd.concat(
+            [
+                events,
+                pd.DataFrame(
+                    dict(
+                        source_asset_id="000300",
+                        constituent_stock_code=["a", "c"],
+                        security_type=1,
+                        effective_date=dates[-1],
+                        announcement_date=dates[-2],
+                        change_type=[2, 1],
+                    )
+                ),
+            ],
+            ignore_index=True,
+        )
+    weights = pd.DataFrame(
+        dict(
+            source_asset_id="000300",
+            constituent_asset_id=["a", "b"],
+            timestamp=dates[0],
+            available_at=dates[-1] + pd.Timedelta(hours=10)
+            if case == "late_weights"
+            else dates[0] + pd.Timedelta(hours=18),
+            weight=[0.6, 0.4],
+        )
+    )
+    columns = ["index_positive_participation_5d", "index_positive_return_concentration"]
+    result = calculate(
+        decision,
+        dict(market_panel_1d=prices, index_membership=events, index_weights=weights),
+        columns=columns,
+    )
+    if case in {"late_weights", "unknown_return"}:
+        assert result[columns].isna().all().all()
+    else:
+        # Unchanged member b stays in the denominator without a change event.
+        assert result[columns[0]].iloc[0] == pytest.approx(0.5)
+        if case == "member_change":
+            assert result[columns[1]].isna().all()
+        else:
+            assert result[columns[1]].iloc[0] == pytest.approx(
+                (0.06 / 0.14) ** 2 + (0.08 / 0.14) ** 2
+            )
+
+
 def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     date = pd.Timestamp("2024-01-02")
     f = pd.DataFrame(

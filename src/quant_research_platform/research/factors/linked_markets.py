@@ -38,8 +38,16 @@ US = (
 RECIPES = {
     "implied_minus_past_realized_variance_20d": (),
     "implied_minus_past_realized_variance_60d": (),
-    "index_positive_participation_5d": ("market_panel_1d", "index_membership"),
-    "index_positive_participation_20d": ("market_panel_1d", "index_membership"),
+    "index_positive_participation_5d": (
+        "market_panel_1d",
+        "index_membership",
+        "index_weights",
+    ),
+    "index_positive_participation_20d": (
+        "market_panel_1d",
+        "index_membership",
+        "index_weights",
+    ),
     "index_positive_return_concentration": (
         "market_panel_1d",
         "index_membership",
@@ -320,14 +328,36 @@ def calculate(decisions, sources, *, columns, parameters=None):
         ).sort_index()
         for signal, at in work.groupby("signal_session", sort=False).indices.items():
             decision = work.iloc[at].timestamp.min()
+            raw = sources["index_weights"]
+            weights = raw.loc[
+                raw.source_asset_id.eq(index_id) & raw.timestamp.lt(signal)
+            ]
+            if "available_at" in weights:
+                weights = weights.loc[weights.available_at.le(decision)]
+            if weights.empty:
+                continue
+            snapshot_date = weights.timestamp.max()
+            weights = (
+                weights.loc[weights.timestamp.eq(snapshot_date)]
+                .set_index("constituent_asset_id")
+                .weight
+            )
             visible = events.loc[
-                events.effective_date.le(signal) & events._release.le(decision)
+                events.effective_date.gt(snapshot_date)
+                & events.effective_date.le(signal)
+                & events._release.le(decision)
             ].sort_values(["effective_date", "_release"], kind="stable")
             current = visible.drop_duplicates("constituent_stock_code", keep="last")
-            members = current.loc[
+            additions = current.loc[
                 pd.to_numeric(current.change_type, errors="coerce").eq(1),
                 "constituent_stock_code",
             ]
+            removals = current.loc[
+                pd.to_numeric(current.change_type, errors="coerce").eq(2),
+                "constituent_stock_code",
+            ]
+            # Change events alone omit constituents that have never changed.
+            members = weights.index.difference(removals).union(additions)
             if not len(members) or signal not in prices.index:
                 continue
             position = prices.index.get_loc(signal)
@@ -339,21 +369,10 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 current_price = selected_prices.iloc[position]
                 old = selected_prices.iloc[position - width]
                 returns = current_price / old.where(old > 0) - 1
-                if returns.notna().any():
-                    result.loc[at, name] = returns.gt(0).where(returns.notna()).mean()
+                if returns.notna().all():
+                    result.loc[at, name] = returns.gt(0).mean()
             name = "index_positive_return_concentration"
             if name in usable and position:
-                raw = sources["index_weights"]
-                weights = raw.loc[
-                    raw.source_asset_id.eq(index_id) & raw.timestamp.lt(signal)
-                ]
-                if weights.empty:
-                    continue
-                weights = (
-                    weights.loc[weights.timestamp.eq(weights.timestamp.max())]
-                    .set_index("constituent_asset_id")
-                    .weight
-                )
                 values = (
                     selected_prices.iloc[position]
                     / selected_prices.iloc[position - 1].where(lambda x: x > 0)

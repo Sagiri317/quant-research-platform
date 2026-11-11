@@ -12,6 +12,11 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 
 DATASETS = {
+    "public_index_weights": {
+        "source_asset_id": "identifier",
+        "constituent_asset_id": "identifier",
+        "weight": "ratio",
+    },
     "public_option_risk": {
         "underlying_id": "identifier",
         "contract_id": "identifier",
@@ -270,6 +275,7 @@ DATASETS = {
     },
 }
 SOURCES = {
+    "public_index_weights": {"public_index_weight_history_extracted"},
     "public_option_risk": {"sse_option_risk_indicators"},
     "public_option_contracts": {"sse_option_contract_updates"},
     "public_domestic_etf_actions": {"eastmoney_cn_etf_corporate_actions_extracted"},
@@ -312,6 +318,8 @@ def accepts(data_id, record):
     if record["source"] not in SOURCES[data_id]:
         return False
     path = record["path"]
+    if data_id == "public_index_weights":
+        return path.endswith((".csv", ".csv.gz"))
     if data_id in {"public_option_risk", "public_option_contracts"}:
         return path.endswith(".json") and record.get("artifact_role", "").startswith(
             "official_"
@@ -713,6 +721,33 @@ def normalize(data_id, path, record):
             validate="one_to_one",
         )
         result["asset_id"] = result.fund_code
+        yield result
+    elif source == "public_index_weight_history_extracted":
+        frame = pd.read_csv(path, dtype="str")
+        result = _rename(
+            frame,
+            {
+                "index_code": "source_asset_id",
+                "constituent_code": "constituent_asset_id",
+                "observation_date": "timestamp",
+                "weight_percent": "weight",
+                **{
+                    name: name
+                    for name in (
+                        "source_url",
+                        "source_sha256",
+                        "retrieved_at",
+                        "publication_date",
+                        "published_at",
+                    )
+                },
+            },
+        )
+        _numbers(result, ("weight",))
+        if not result.weight.between(0, 100).all():
+            raise ValueError("public_index_weight_percent_invalid")
+        result["weight"] /= 100
+        result["asset_id"] = result.source_asset_id + ":" + result.constituent_asset_id
         yield result
     elif source.startswith("etf_pcf_"):
         frame = pd.read_csv(path, dtype="str")

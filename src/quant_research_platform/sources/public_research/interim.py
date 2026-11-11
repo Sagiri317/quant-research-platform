@@ -464,6 +464,7 @@ def _source_timezone(source):
                 "eastmoney_",
                 "csf_",
                 "csrc_",
+                "public_index_weight_",
             )
         )
         else "America/New_York"

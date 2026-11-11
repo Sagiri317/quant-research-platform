@@ -71,6 +71,8 @@ class MarketModelRiskState:
         }
         if open_market_types is not None:
             required.add("market_type")
+        if isinstance(panel, pd.DataFrame) and "delisting_date" in panel:
+            required.add("timestamp")
         if not isinstance(panel, pd.DataFrame) or not required.issubset(panel.columns):
             raise ValueError("market_model_risk_columns_invalid")
         if "eligible" in panel.columns:
@@ -82,6 +84,9 @@ class MarketModelRiskState:
         optional = [
             name
             for name in (
+                "timestamp",
+                "delisting_date",
+                "_panel_observed",
                 "eligible",
                 "_calendar_segment",
                 "filling_flag",
@@ -91,7 +96,7 @@ class MarketModelRiskState:
                 "is_pt",
                 "has_252_trading_sessions",
             )
-            if name in panel
+            if name in panel and name not in required
         ]
         frame = panel.loc[:, list(required) + optional].copy()
         # A bad cap is unavailable only to consumers of that asset's weight.
@@ -119,6 +124,16 @@ class MarketModelRiskState:
             if name in frame:
                 unknown_quote |= frame[name].isna()
                 known_excluded |= frame[name].eq(excluded_value).fillna(False)
+        if "delisting_date" in frame:
+            ended = frame.timestamp.ge(frame.delisting_date)
+            known_excluded |= ended
+            frame["eligible"] = (
+                frame["eligible"] if "eligible" in frame else True
+            ) & ~ended
+        if "_panel_observed" in frame:
+            market_input_complete &= bool(
+                (frame["_panel_observed"] | known_excluded).all()
+            )
         frame["unknown_quote"] = unknown_quote & ~known_excluded
         # Today's proxy consumes lagged caps; today's absent cap only makes
         # the next session's weight unknown, unless membership is excluded.

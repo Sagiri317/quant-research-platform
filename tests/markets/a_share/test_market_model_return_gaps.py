@@ -17,6 +17,42 @@ from tests.helpers.a_share_sources import (
 )
 
 
+@pytest.mark.parametrize("known_exit", [True, False])
+def test_formal_delisting_day_does_not_require_a_market_quote(known_exit):
+    state = MarketModelRiskState(window=2, residual_window=1)
+    dates = pd.bdate_range("2024-01-02", periods=3)
+    panel = pd.DataFrame(
+        dict(
+            asset_id=["a", "b"],
+            listing_date=pd.Timestamp("2000-01-01"),
+            period_return=0.01,
+            float_market_cap=100.0,
+            eligible=True,
+        )
+    )
+    for i in range(2):
+        state.observe(panel.assign(timestamp=dates[i], delisting_date=pd.NaT))
+    terminal = panel.assign(
+        timestamp=dates[-1],
+        delisting_date=pd.to_datetime([None, dates[-1] if known_exit else None]),
+    )
+    terminal["period_return"] = [0.04, np.nan]
+    terminal["float_market_cap"] = [100.0, np.nan]
+    terminal["_panel_observed"] = [True, False]
+    result = state.observe(terminal)
+    if known_exit:
+        assert result.market_return == pytest.approx(0.04)
+        assert state.observe(
+            panel.iloc[:1].assign(
+                timestamp=dates[-1] + pd.Timedelta(days=1),
+                period_return=0.05,
+                delisting_date=pd.NaT,
+            )
+        ).market_return == pytest.approx(0.05)
+    else:
+        assert np.isnan(result.market_return)
+
+
 @pytest.mark.parametrize("missing_column", ("period_return", "float_market_cap"))
 def test_native_market_model_gap_persists_and_recovers_complete_windows(
     tmp_path,
