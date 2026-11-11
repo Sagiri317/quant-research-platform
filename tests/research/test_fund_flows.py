@@ -326,6 +326,57 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
     assert pd.isna(result.loc[3, fields[1]])
 
 
+@pytest.mark.parametrize("zero", [False, True])
+def test_cn_redemption_uses_only_holdings_visible_before_flow_period(zero):
+    headers = pd.DataFrame(
+        dict(
+            economic_portfolio_id="f",
+            fund_code="001001",
+            report_version_identity=["old", "late"],
+            timestamp=pd.to_datetime(["2023-06-30", "2023-12-31"]),
+            available_at=pd.to_datetime(["2023-08-20", "2024-03-20"]),
+            disclosure_scope="full_stock_holdings",
+            stock_disclosure_status=[
+                "explicit_no_stock_reported" if zero else "full_stock_table_reconciled",
+                "full_stock_table_reconciled",
+            ],
+            explicit_no_stock=["true" if zero else "false", "false"],
+            stock_rows=[0 if zero else 1, 1],
+        )
+    )
+    h = pd.DataFrame(
+        dict(
+            economic_portfolio_id="f",
+            report_version_identity=["old", "late"],
+            stock_market="CN_MAINLAND",
+            stock_code="s",
+            shares_held=[10.0, 999.0],
+        )
+    )
+    if zero:
+        h = h.loc[h.report_version_identity.ne("old")]
+    d = pd.DataFrame(
+        dict(
+            market_id=["a_share"],
+            asset_id=["s"],
+            timestamp=pd.Timestamp("2024-08-21"),
+            avg_volume_20d=100.0,
+        )
+    )
+    result = calculate(
+        d,
+        dict(
+            public_fund_holdings=h,
+            public_fund_holdings_reports=headers,
+            public_fund_financial_cells=cells(),
+        ),
+        columns=["cn_redemption_stock_pressure"],
+    )
+    assert result.cn_redemption_stock_pressure.iloc[0] == pytest.approx(
+        0.0 if zero else 0.01
+    )
+
+
 def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id():
     dates = pd.bdate_range("2024-01-02", periods=7)
     shares = pd.DataFrame(

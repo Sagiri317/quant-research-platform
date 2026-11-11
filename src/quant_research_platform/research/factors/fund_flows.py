@@ -800,7 +800,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 )
                 prior = prior.loc[
                     prior.timestamp.lt(prior._flow_period_start)
-                    & prior.available_at.le(prior.available_at_flow)
+                    & prior.available_at.le(prior._flow_period_start)
                 ]
                 prior = prior.loc[
                     prior.timestamp.eq(
@@ -816,19 +816,24 @@ def calculate(decisions, sources, *, columns, parameters=None):
                         )
                     )
                 ]
+                if prior.empty:
+                    continue
                 prior = h.merge(
                     prior[["report_version_identity", "_redemption_rate"]],
                     on="report_version_identity",
                     how="inner",
                 )
-                quantities = (
-                    (prior.shares_held * prior._redemption_rate)
-                    .groupby(prior.stock_code)
-                    .sum(min_count=1)
+                grouped = (prior.shares_held * prior._redemption_rate).groupby(
+                    prior.stock_code
+                )
+                quantities = grouped.sum(min_count=1).where(
+                    grouped.count().eq(grouped.size())
+                )
+                mapped = block.asset_id.map(quantities).where(
+                    block.asset_id.isin(quantities.index), 0
                 )
                 result.loc[at, FUNDS[8]] = (
-                    block.asset_id.map(quantities)
-                    / block.avg_volume_20d.where(block.avg_volume_20d > 0)
+                    mapped / block.avg_volume_20d.where(block.avg_volume_20d > 0)
                 ).to_numpy()
     if FUNDS[14] in usable:
         f = sources["public_nport_funds"]
