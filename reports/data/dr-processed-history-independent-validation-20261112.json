@@ -1,0 +1,82 @@
+{
+  "code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+  "decision_date": "2026-07-28",
+  "checks": [
+    {
+      "check": "macro_repo_rates_processed_beta_history_2026:ml_cn_dr007_beta",
+      "sample_kind": "mature_history",
+      "observations": 252,
+      "nonzero_shocks": 251,
+      "defined": true,
+      "abs_error": 9.540979117872439e-18,
+      "passed": true
+    },
+    {
+      "check": "macro_repo_rates_processed_beta_history_2026:ml_cn_dr007_beta",
+      "sample_kind": "actual_recent_listing",
+      "observations": 45,
+      "nonzero_shocks": 45,
+      "defined": false,
+      "abs_error": null,
+      "passed": true
+    },
+    {
+      "check": "macro_repo_rates_processed_partial_beta_history_2026:ml_cn_dr007_partial_beta",
+      "sample_kind": "mature_history",
+      "observations": 230,
+      "nonzero_shocks": 229,
+      "defined": true,
+      "abs_error": 6.071532165918825e-18,
+      "passed": true
+    },
+    {
+      "check": "macro_repo_rates_processed_partial_beta_history_2026:ml_cn_dr007_partial_beta",
+      "sample_kind": "actual_recent_listing",
+      "observations": 45,
+      "nonzero_shocks": 45,
+      "defined": false,
+      "abs_error": null,
+      "passed": true
+    }
+  ],
+  "private_rows_exported": false,
+  "completed_native_replacement": {
+    "status": "completed",
+    "code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+    "window": {
+      "start": "2026-07-28",
+      "end": "2026-10-30"
+    },
+    "decision_dates": 63,
+    "factors": 2,
+    "selected_features": 4,
+    "signal_label_pairs": 28,
+    "output": "results/factor-expansion-95ad4a83/macro_repo_rates_beta_history_complete-mad-industry_five_style",
+    "replacements": {
+      "ml_cn_dr007_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 325880
+      },
+      "ml_cn_dr007_partial_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 325441
+      },
+      "feature_pre_neutral_ml_cn_dr007_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 310400
+      },
+      "feature_pre_neutral_ml_cn_dr007_partial_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 310400
+      },
+      "feature_ml_cn_dr007_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 302638
+      },
+      "feature_ml_cn_dr007_partial_beta": {
+        "replaced_rows": 328586,
+        "material_changed_rows": 302638
+      }
+    }
+  }
+}

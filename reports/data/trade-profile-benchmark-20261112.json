@@ -1,0 +1,21 @@
+{
+  "status": "completed",
+  "before": "c24f81a719d5e4237232344eece50f10a24148f0",
+  "current": "3830e18d00fcfdc91db950deadd4acdb2b24e1b5",
+  "assets": 32,
+  "sessions": 2,
+  "quote_rows": 230285,
+  "trade_rows": 1891602,
+  "factors": 8,
+  "finite_factor_cells": 912954,
+  "seconds": {
+    "before": 2.4253526367247105,
+    "current": 1.1581248845905066
+  },
+  "ratio_current_over_before": 0.4775078341409697,
+  "measured_repetitions": 3,
+  "peak_rss_mib": 639.5,
+  "rtol": 1e-12,
+  "atol": 1e-14,
+  "scope_zh": "仅同机同数据成交分组计算核；不外推股票全任务耗时。五日因子因只有两日历史保留缺值。"
+}
