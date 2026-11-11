@@ -13,7 +13,6 @@
     "ml_us_net_liquidity_zscore_x_amihud_60d",
     "ml_us_vix_level",
     "ml_us_vix_change",
-    "ml_us_vix_implied_variance",
     "ml_us_vix3m_vix_ratio_level",
     "ml_us_vix9d_vix_ratio_level",
     "ml_us_vxn_vix_ratio_level",

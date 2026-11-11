@@ -170,8 +170,6 @@ def _history_features(history, transforms, unit, frequency, window, config):
         values = {}
         if "level" in selected:
             values["level"] = x
-        if "log_level" in selected:
-            values["log_level"] = np.log(x) if x > 0 else np.nan
         if previous_transforms:
             previous = state[dates[-2]] if len(dates) >= 2 else np.nan
             if "change" in selected:
@@ -208,8 +206,6 @@ def _history_features(history, transforms, unit, frequency, window, config):
                 values["yoy_growth"] = (
                     x / year_value - 1 if x > 0 and year_value > 0 else np.nan
                 )
-        if "implied_variance" in selected:
-            values["implied_variance"] = (x / 100) ** 2 if x >= 0 else np.nan
         if current_transforms or prior_transforms or volatility:
             tail = np.asarray(
                 [state[day] for day in dates[-(window + 1) :]], dtype=float

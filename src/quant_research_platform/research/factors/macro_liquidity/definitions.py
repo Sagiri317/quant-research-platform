@@ -174,6 +174,8 @@ MATCHED_SHOCK_VARIABLES = (
 def recipes():
     output = {}
     for name, (_, frequency) in VARIABLES.items():
+        if name == "us_target_lower":
+            continue
         if name in PUBLIC_SERIES:
             for transform in PUBLIC_SERIES[name][5]:
                 output[f"ml_{name}_{transform}"] = ("series", name, transform)
@@ -189,9 +191,7 @@ def recipes():
         }:
             transforms += ("sum",)
         if name in POSITIVE_VARIABLES:
-            transforms += ("log_level", "growth", "yoy_growth")
-        if name in VOLATILITY_INDICES:
-            transforms += ("implied_variance",)
+            transforms += ("growth", "yoy_growth")
         for transform in transforms:
             output[f"ml_{name}_{transform}"] = ("series", name, transform)
     for name in (
@@ -205,8 +205,11 @@ def recipes():
     ):
         output[f"ml_{name}"] = ("state", name)
     for state in STATE_FACTORS:
-        for exposure in EXPOSURES:
-            output[f"ml_{state}_x_{exposure}"] = ("interaction", state, exposure)
+        if state not in {"us_vix3m_vix_ratio_level", "us_vix9d_vix_ratio_level"}:
+            for exposure in EXPOSURES:
+                output[f"ml_{state}_x_{exposure}"] = ("interaction", state, exposure)
+        if state == "us_vix9d_vix_ratio_level":
+            continue
         for exposure in ("volatility_60d", "amihud_60d", "beta_252d"):
             output[f"ml_{state}_x_industry_{exposure}"] = (
                 "industry_interaction",
@@ -281,15 +284,12 @@ def factor_unit(name):
     if recipe[0] == "series":
         _, variable, transform = recipe
         unit = VARIABLES[variable][0]
-        if transform == "implied_variance":
-            return "annualized_variance"
         if transform in {
             "zscore",
             "percentile",
             "innovation_zscore",
             "growth",
             "yoy_growth",
-            "log_level",
         }:
             return "dimensionless"
         return "bp" if unit == "percent" and transform != "level" else unit
