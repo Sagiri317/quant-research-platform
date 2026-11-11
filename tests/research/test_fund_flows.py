@@ -250,9 +250,16 @@ def test_share_history_keeps_missing_declared_sessions():
     assert result.etf_share_change_5d.iloc[5] == pytest.approx(0.5)
 
 
-@pytest.mark.parametrize("zero_scope", ("global", "mainland", "restricted"))
+@pytest.mark.parametrize(
+    "zero_scope", ("global", "mainland", "all_equity", "restricted")
+)
+@pytest.mark.parametrize(
+    "full_status",
+    ("full_stock_table_reconciled", "full_stock_table_as_reported_unreconciled"),
+)
 def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_older(
     zero_scope,
+    full_status,
 ):
     headers = pd.DataFrame(
         [
@@ -260,7 +267,7 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
                 "h0",
                 "2023-06-30",
                 "2023-08-01",
-                "full_stock_table_reconciled",
+                full_status,
                 "false",
                 3,
             ),
@@ -276,7 +283,7 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
                 "h2",
                 "2023-06-30",
                 "2024-04-01",
-                "full_stock_table_reconciled",
+                full_status,
                 "false",
                 1,
             ),
@@ -309,12 +316,16 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
         zero = headers.report_version_identity.eq("h1")
         headers.loc[zero, "disclosure_scope"] = (
             "mainland_stock_holdings"
-            if zero_scope == "mainland"
+            if zero_scope in {"mainland", "all_equity"}
             else "restricted_stock_holdings"
         )
         headers.loc[zero, "stock_disclosure_status"] = (
-            "explicit_no_mainland_stock_reported"
-            if zero_scope == "mainland"
+            (
+                "complete_all_equity_table_no_mainland_security_reported"
+                if zero_scope == "all_equity"
+                else "explicit_no_mainland_stock_reported"
+            )
+            if zero_scope in {"mainland", "all_equity"}
             else "no_restricted_stock_reported"
         )
         headers.loc[zero, "explicit_no_stock"] = pd.NA

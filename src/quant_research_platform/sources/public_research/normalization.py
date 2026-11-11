@@ -1,5 +1,6 @@
 """Source-specific schemas; NAV, market prices and trading activity stay distinct."""
 
+import gzip
 import io
 import json
 import re
@@ -277,7 +278,10 @@ DATASETS = {
 SOURCES = {
     "public_index_weights": {"public_index_weight_history_extracted"},
     "public_option_risk": {"sse_option_risk_indicators"},
-    "public_option_contracts": {"sse_option_contract_updates"},
+    "public_option_contracts": {
+        "sse_option_contract_updates",
+        "szse_option_contract_events_extracted",
+    },
     "public_domestic_etf_actions": {"eastmoney_cn_etf_corporate_actions_extracted"},
     "public_domestic_etf_prices": {"eastmoney_cn_etf_daily"},
     "public_13f_filings": {"sec_13f_submission_metadata_extracted"},
@@ -298,7 +302,7 @@ SOURCES = {
     "public_fund_holdings_reports": {"cn_fund_report_descriptors_extracted"},
     "public_13f_holdings": {"sec_13f", "sec_13f_target_holdings_extracted"},
     "public_nport_holdings": {"sec_nport", "sec_nport_target_holdings_extracted"},
-    "public_margin_balances": {"sse_margin", "szse_margin"},
+    "public_margin_balances": {"sse_margin", "szse_margin", "eastmoney_margin_detail"},
     "public_fund_shares": {"sse_etf_shares", "szse_etf_shares"},
     "public_fund_nav": {"eastmoney_fund_history_extracted"},
     "public_nport_funds": {"sec_nport"},
@@ -320,6 +324,8 @@ def accepts(data_id, record):
     path = record["path"]
     if data_id == "public_index_weights":
         return path.endswith((".csv", ".csv.gz"))
+    if record["source"] == "szse_option_contract_events_extracted":
+        return path.endswith(".json")
     if data_id in {"public_option_risk", "public_option_contracts"}:
         return path.endswith(".json") and record.get("artifact_role", "").startswith(
             "official_"
@@ -372,6 +378,8 @@ def accepts(data_id, record):
     if data_id == "public_finra_short_volume":
         return path.endswith(".txt")
     if data_id in {"public_fund_shares", "public_margin_balances"}:
+        if record["source"] == "eastmoney_margin_detail":
+            return path.endswith((".json", ".json.gz"))
         return path.endswith(
             ".json" if record["source"].startswith("sse_") else ".xlsx"
         )
@@ -407,7 +415,83 @@ def _rename(frame, mapping):
 
 def normalize(data_id, path, record):
     source = record["source"]
-    if source in {"sse_option_risk_indicators", "sse_option_contract_updates"}:
+    if source == "eastmoney_margin_detail":
+        payload = json.loads(
+            gzip.decompress(path.read_bytes())
+            if path.name.endswith(".gz")
+            else path.read_bytes()
+        )
+        if (
+            type(payload) is not dict
+            or payload.get("success") is not True
+            or type(payload.get("result")) is not dict
+            or type(payload["result"].get("data")) is not list
+        ):
+            raise ValueError("public_margin_response_invalid")
+        frame = pd.DataFrame(payload["result"]["data"])
+        if frame.empty:
+            return
+        mapping = {
+            "DATE": "timestamp",
+            "SCODE": "asset_id",
+            "RZYE": "financing_balance",
+            "RZMRE": "financing_buy_amount",
+            "RZCHE": "financing_repayment_amount",
+            "RQYL": "lending_quantity",
+            "RQMCL": "lending_sell_quantity",
+            "RQCHL": "lending_repayment_quantity",
+        }
+        if "RQYE" in frame:
+            mapping["RQYE"] = "lending_balance"
+        result = _rename(frame, mapping)
+        if "RQYE" not in frame:
+            result["lending_balance"] = pd.NA
+        result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
+        _numbers(result, DATASETS[data_id])
+        yield result
+    elif source == "szse_option_contract_events_extracted":
+        payload = json.loads(path.read_bytes())
+        for table in payload["tables"]:
+            if table["table_kind"] != "listing" or not table["records"]:
+                continue
+            frame = pd.DataFrame(table["records"])
+            result = _rename(
+                frame,
+                {
+                    "标的证券代码": "underlying_id",
+                    "合约编码": "security_id",
+                    "合约代码": "contract_id",
+                    "类型": "option_type",
+                    "到期日": "expiry_date",
+                    "挂牌日期": "start_date",
+                    "行权价": "exercise_price",
+                    "合约单位": "contract_unit",
+                    "原合约代码": "original_contract_id",
+                    "原行权价": "original_exercise_price",
+                    "原合约单位": "original_contract_unit",
+                },
+            )
+            for field in ("underlying_id", "security_id", "contract_id"):
+                result[field] = result[field].astype("str")
+            result["timestamp"] = result.start_date
+            result["asset_id"] = (
+                result.security_id
+                + ":"
+                + result.contract_id
+                + ":"
+                + frame.source_excel_row_index.astype("str")
+            )
+            _numbers(
+                result,
+                (
+                    "exercise_price",
+                    "contract_unit",
+                    "original_exercise_price",
+                    "original_contract_unit",
+                ),
+            )
+            yield result
+    elif source in {"sse_option_risk_indicators", "sse_option_contract_updates"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["result"])
         if frame.empty:
             return

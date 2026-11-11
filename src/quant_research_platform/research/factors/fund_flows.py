@@ -148,13 +148,21 @@ def complete_mainland_stock_reports(headers):
         & (
             (
                 headers.disclosure_scope.eq("full_stock_holdings")
-                & headers.stock_disclosure_status.eq("full_stock_table_reconciled")
+                & headers.stock_disclosure_status.isin(
+                    (
+                        "full_stock_table_reconciled",
+                        "full_stock_table_as_reported_unreconciled",
+                    )
+                )
             )
             | (headers.explicit_no_stock.eq("true") & headers.stock_rows.eq(0))
             | (
                 headers.disclosure_scope.eq("mainland_stock_holdings")
-                & headers.stock_disclosure_status.eq(
-                    "explicit_no_mainland_stock_reported"
+                & headers.stock_disclosure_status.isin(
+                    (
+                        "explicit_no_mainland_stock_reported",
+                        "complete_all_equity_table_no_mainland_security_reported",
+                    )
                 )
                 & headers.stock_rows.eq(0)
             )

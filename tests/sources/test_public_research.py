@@ -1,5 +1,6 @@
 """Official field units, filing clocks and immutable source evidence."""
 
+import gzip
 import hashlib
 import json
 import zipfile
@@ -10,6 +11,124 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.public_research.normalization import normalize
 from quant_research_platform.storage.datasets.reading import read_dataset
+
+
+def test_szse_contract_listing_retains_identity_and_units_without_inventing_iv(
+    tmp_path,
+):
+    row = {
+        "source_excel_row_index": 2,
+        "标的证券代码": "159915",
+        "合约编码": "90000001",
+        "合约代码": "159915C2406M02000",
+        "类型": "认购",
+        "到期日": "2024-06-26",
+        "挂牌日期": "2024-03-01",
+        "行权价": "2.0",
+        "合约单位": "10000",
+        "原合约代码": "",
+        "原行权价": "--",
+        "原合约单位": "--",
+    }
+    payload = dict(
+        tables=[
+            dict(table_kind="listing", records=[row]),
+            dict(table_kind="delisting", records=[{"unconsumed": True}]),
+        ]
+    )
+    path = tmp_path / "contracts.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    result = next(
+        normalize(
+            "public_option_contracts",
+            path,
+            {"source": "szse_option_contract_events_extracted"},
+        )
+    )
+    assert result.security_id.tolist() == ["90000001"]
+    assert result.contract_id.tolist() == ["159915C2406M02000"]
+    assert result.option_type.tolist() == ["认购"]
+    assert result.exercise_price.tolist() == [2.0]
+    assert result.contract_unit.tolist() == [10000.0]
+    assert result.original_exercise_price.isna().all()
+    assert "implied_volatility" not in result
+
+
+@pytest.mark.parametrize("compressed", (False, True))
+@pytest.mark.parametrize("with_balance", (False, True))
+def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
+    tmp_path, compressed, with_balance
+):
+    row = dict(
+        DATE="2024-01-02 00:00:00",
+        SCODE="000001",
+        RZYE=100.0,
+        RZMRE=12.0,
+        RZCHE=7.5,
+        RQYL=50.0,
+        RQMCL=4.0,
+        RQCHL="--",
+    )
+    if with_balance:
+        row["RQYE"] = 600.0
+    payload = json.dumps(dict(success=True, result=dict(data=[row], count=1))).encode()
+    data = gzip.compress(payload) if compressed else payload
+    source = tmp_path / "raw"
+    source.mkdir()
+    name = "margin.json.gz" if compressed else "margin.json"
+    (source / name).write_bytes(data)
+    (source / "manifest.json").write_text(
+        json.dumps(
+            dict(
+                schema_version=1,
+                records=[
+                    dict(
+                        path=name,
+                        source="eastmoney_margin_detail",
+                        status="downloaded",
+                        sha256=hashlib.sha256(data).hexdigest(),
+                        bytes=len(data),
+                        url="https://example.org/margin",
+                        retrieved_at="2026-11-11T00:00:00Z",
+                    )
+                ],
+            )
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "interim"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(source),
+            outputs={"public_margin_balances": str(output)},
+        )
+    )
+    frame = read_dataset(output)
+    assert frame.asset_id.tolist() == ["000001"]
+    assert frame.financing_repayment_amount.tolist() == [7.5]
+    assert frame.financing_buy_amount.tolist() == [12.0]
+    assert frame.lending_quantity.tolist() == [50.0]
+    assert frame.lending_repayment_quantity.isna().all()
+    if with_balance:
+        assert frame.lending_balance.tolist() == [600.0]
+    else:
+        assert frame.lending_balance.isna().all()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ({"success": False, "result": None}, {"success": True, "result": {"data": None}}),
+)
+def test_eastmoney_margin_api_failure_is_not_empty_history(tmp_path, payload):
+    path = tmp_path / "failed.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="public_margin_response_invalid"):
+        list(
+            normalize(
+                "public_margin_balances", path, {"source": "eastmoney_margin_detail"}
+            )
+        )
 
 
 @pytest.mark.parametrize("anchor", ("stock-table", None))
