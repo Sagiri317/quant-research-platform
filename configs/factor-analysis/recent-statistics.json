@@ -1,0 +1,11 @@
+{
+  "evaluation_inputs": ["results/factor-evaluation"],
+  "output": "results/factor-recent-2022-202610",
+  "window": {"start": "2022-01-01", "end": "2026-10-30"},
+  "analyses": ["stratified_ic"],
+  "statistics": {
+    "hac_lag": 20,
+    "fdr_method": "BY",
+    "fdr_alpha": 0.05
+  }
+}
