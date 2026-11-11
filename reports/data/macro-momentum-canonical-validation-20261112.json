@@ -1,0 +1,101 @@
+{
+  "impact_comparison": {
+    "source": "results/factor-expansion-95ad4a83/macro_momentum",
+    "cutoff_count": 3597,
+    "selected_signals": 11,
+    "signal_impacts": {
+      "ml_cn_funding_pressure_x_momentum_60d": {
+        "state": "ml_cn_funding_pressure",
+        "changed_sessions": 1225,
+        "first_changed": "2021-03-16T01:00:00",
+        "last_changed": "2026-10-30T01:00:00"
+      },
+      "ml_global_liquidity_x_momentum_60d": {
+        "state": "ml_global_liquidity",
+        "changed_sessions": 0,
+        "first_changed": null,
+        "last_changed": null
+      },
+      "ml_us_broad_dollar_change_x_momentum_60d": {
+        "state": "ml_us_broad_dollar_change",
+        "changed_sessions": 106,
+        "first_changed": "2019-07-09T01:00:00",
+        "last_changed": "2026-07-13T01:00:00"
+      },
+      "ml_us_cn_pressure_difference_x_momentum_60d": {
+        "state": "ml_us_cn_pressure_difference",
+        "changed_sessions": 1109,
+        "first_changed": "2021-10-26T01:00:00",
+        "last_changed": "2026-10-30T01:00:00"
+      },
+      "ml_us_funding_pressure_x_momentum_60d": {
+        "state": "ml_us_funding_pressure",
+        "changed_sessions": 1109,
+        "first_changed": "2021-10-26T01:00:00",
+        "last_changed": "2026-10-30T01:00:00"
+      },
+      "ml_us_net_liquidity_zscore_x_momentum_60d": {
+        "state": "ml_us_net_liquidity_zscore",
+        "changed_sessions": 894,
+        "first_changed": "2014-04-04T01:00:00",
+        "last_changed": "2025-07-03T01:00:00"
+      },
+      "ml_us_real_treasury_10y_change_x_momentum_60d": {
+        "state": "ml_us_real_treasury_10y_change",
+        "changed_sessions": 0,
+        "first_changed": null,
+        "last_changed": null
+      },
+      "ml_us_skew_zscore_x_momentum_60d": {
+        "state": "ml_us_skew_zscore",
+        "changed_sessions": 0,
+        "first_changed": null,
+        "last_changed": null
+      },
+      "ml_us_vix_change_x_momentum_60d": {
+        "state": "ml_us_vix_change",
+        "changed_sessions": 198,
+        "first_changed": "2012-01-17T01:00:00",
+        "last_changed": "2026-04-07T01:00:00"
+      },
+      "ml_us_vix_zscore_x_momentum_60d": {
+        "state": "ml_us_vix_zscore",
+        "changed_sessions": 2961,
+        "first_changed": "2012-01-05T01:00:00",
+        "last_changed": "2026-06-26T01:00:00"
+      },
+      "ml_us_vvix_change_x_momentum_60d": {
+        "state": "ml_us_vvix_change",
+        "changed_sessions": 0,
+        "first_changed": null,
+        "last_changed": null
+      }
+    },
+    "rtol": 1e-10,
+    "atol": 1e-12
+  },
+  "independent_cross_section": {
+    "rows": 5096,
+    "columns": 7,
+    "max_abs_errors": {
+      "ml_cn_funding_pressure_x_momentum_60d": 1.4210854715202004e-14,
+      "ml_us_broad_dollar_change_x_momentum_60d": 3.552713678800501e-15,
+      "ml_us_cn_pressure_difference_x_momentum_60d": 2.1316282072803006e-14,
+      "ml_us_funding_pressure_x_momentum_60d": 7.105427357601002e-15,
+      "ml_us_net_liquidity_zscore_x_momentum_60d": 1.7763568394002505e-14,
+      "ml_us_vix_change_x_momentum_60d": 2.7755575615628914e-16,
+      "ml_us_vix_zscore_x_momentum_60d": 1.2434497875801753e-14
+    },
+    "rtol": 1e-10,
+    "atol": 1e-12
+  },
+  "native_evaluation": {
+    "status": "completed",
+    "seconds": 429.25,
+    "code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+    "factors": 7,
+    "signal_label_pairs": 49,
+    "filter_mode": "unfiltered",
+    "output": "results/factor-expansion-95ad4a83/macro_momentum_repo_rates_complete"
+  }
+}
