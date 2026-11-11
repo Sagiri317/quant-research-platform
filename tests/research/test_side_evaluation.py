@@ -222,22 +222,6 @@ def test_default_native_sides_match_hand_domains_before_missing_labels(
             )
 
 
-def test_side_rankic_keeps_large_integer_ties_and_directed_order(tmp_path):
-    frame = _frame(
-        pd.array([2**63 + i for i in (0, 1, 1, 2, 3, 4, 4, 5)], dtype="UInt64"),
-        [3, 2, 4, 1, 8, 5, 7, 6],
-    )
-    spec = replace(
-        _spec(top_quantile=0.375),
-        signals=(replace(_spec().signals[0], direction="lower_is_better"),),
-    )
-    _, tables = read_evaluation_outputs(_save(tmp_path, frame, spec))
-    side = _sides(tables["metrics"]).set_index("side")
-    assert side.n_selected.to_dict() == {"long": 3, "short": 3}
-    assert side.loc["long", "rankic"] == pytest.approx(0)
-    assert side.loc["short", "rankic"] == pytest.approx(0)
-
-
 @pytest.mark.parametrize(
     "case", ["zero", "one", "constant_signal", "constant_label", "missing_signal"]
 )

@@ -33,7 +33,7 @@ def processed_spec(data_id):
         )
     )
     if data_id == "fund_flow_factors":
-        sources = (*sources, "trading_calendar", "public_etf_pcf_baskets")
+        sources = (*sources, "public_etf_pcf_baskets")
     return ProcessedDataSpec(
         data_id=data_id,
         market_id="a_share",
@@ -117,9 +117,15 @@ def configured_spec(spec, config):
     ):
         raise ValueError("data_operation_factor_columns_invalid")
     dependencies = {source for name in selected for source in library.RECIPES[name]}
+    if spec.data_id == "linked_market_factors" and set(selected) & set(
+        linked_markets.FUTURES
+    ):
+        dependencies.update(
+            name
+            for name in ("public_futures_contracts", "index_market")
+            if name in config["inputs"]
+        )
     sources = tuple(name for name in spec.source_input_data_ids if name in dependencies)
-    if spec.data_id == "fund_flow_factors" and "trading_calendar" in config["inputs"]:
-        sources = (*sources, "trading_calendar")
     if (
         spec.data_id == "fund_flow_factors"
         and set(selected) & set(fund_flows.ETF[6:])

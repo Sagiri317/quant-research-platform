@@ -138,6 +138,8 @@ BALANCE_CHANGE_WINDOWS.update(
 )
 FACTOR_UNITS = dict.fromkeys(RECIPES, "dimensionless")
 FACTOR_UNITS["lending_days_to_cover_20d"] = "trading_days"
+REPORT_IDENTITY = ("asset_id", "timestamp", "source", "available_at")
+SOURCE_PRIORITY = (("sse_margin", "szse_margin"), ("eastmoney_margin_detail",))
 
 
 def decision_columns(columns):
@@ -161,7 +163,12 @@ def factor_definitions():
             market_id="a_share",
             factor_set="standard",
             family="financing",
-            input_columns=(recipe[0], "available_at", *decision_columns((name,))),
+            input_columns=(
+                recipe[0],
+                "source",
+                "available_at",
+                *decision_columns((name,)),
+            ),
             output_column=name,
             required_input_data_id="financing_factors",
             required_windows=(BALANCE_CHANGE_WINDOWS[name],)
@@ -181,6 +188,7 @@ def calculate(
     *,
     factor_columns=None,
     sessions=None,
+    session_successors=None,
     observation_lag_sessions=0,
 ):
     """Match each report field/version to the known daily signal session.
@@ -188,6 +196,10 @@ def calculate(
     Decisions use UTC instants and retain signal_session/listing_date. A missing
     current report does not silently become yesterday's balance. Exact lagged
     observations come from the declared market calendar, never compressed rows.
+    Standalone sessions declare a complete axis; native callers supply proven
+    session_successors so unknown calendar dates cannot become closed days.
+    Resolve each source's available version before applying official priority;
+    supplements fill unreported official cells, never disputed official values.
     """
     columns = tuple(RECIPES if factor_columns is None else factor_columns)
     if type(observation_lag_sessions) is not int or observation_lag_sessions not in (
@@ -246,6 +258,10 @@ def calculate(
         if sessions is None
         else pd.DatetimeIndex(sessions).as_unit("ns").sort_values().unique()
     )
+    gaps = None
+    if axis is not None and session_successors is not None:
+        proved = session_successors.reindex(axis[:-1]).eq(axis[1:]).to_numpy()
+        gaps = np.r_[0, np.cumsum(~proved)]
 
     def observation_dates(lag):
         if not lag:
@@ -254,6 +270,9 @@ def calculate(
         if axis is not None:
             positions = axis.get_indexer(dates)
             valid = positions >= lag
+            if gaps is not None:
+                current = positions[valid]
+                valid[valid] = gaps[current] == gaps[current - lag]
             target.loc[valid] = axis.take(positions[valid] - lag)
         return target
 
@@ -274,11 +293,9 @@ def calculate(
             .set_axis(frame.index)
         )
     fields = tuple(dict.fromkeys(RECIPES[name][0] for name in columns))
-    if not {"asset_id", "timestamp", "available_at"} <= set(observations):
+    if not set(REPORT_IDENTITY) <= set(observations):
         raise ValueError("financing_report_identity_missing")
-    facts = observations.reindex(
-        columns=["asset_id", "timestamp", "available_at", *fields]
-    ).copy()
+    facts = observations.reindex(columns=[*REPORT_IDENTITY, *fields]).copy()
     facts["asset_id"] = strict_string_series(
         facts.asset_id, error="financing_asset_id_invalid"
     )
@@ -291,6 +308,8 @@ def calculate(
         .dt.tz_localize(None)
     )
     facts = facts.loc[facts._clock.notna() & facts._obs.notna()]
+    if not facts.source.isin(sum(SOURCE_PRIORITY, ())).all():
+        raise ValueError("financing_source_unsupported")
     # Completed daily reports cannot be used before the local after-hours close.
     closing = facts._obs + pd.Timedelta(hours=7, minutes=30)
     facts["_clock"] = facts._clock.where(facts._clock.ge(closing), closing)
@@ -302,13 +321,17 @@ def calculate(
         valid = np.isfinite(numeric) & numeric.ge(0)
         counts[field] = int((raw.notna() & ~valid).sum())
         facts[field] = numeric.where(valid)
-    key = ["asset_id", "_obs", "_clock"]
-    # Identical archives may overlap; conflicting cells stay unknown at that clock.
+    key = ["asset_id", "_obs", "source", "_clock"]
+    # Keep conflicts distinct from unreported fields: neither stale versions nor
+    # a lower-authority supplement may fill a disputed official cell.
     grouped = facts.groupby(key, sort=False, dropna=False)[list(fields)]
-    values = grouped.first().where(grouped.nunique(dropna=False).le(1)).reset_index()
+    conflicts = grouped.nunique(dropna=False).gt(1).add_suffix("_conflict")
+    conflict_columns = list(conflicts)
+    values = grouped.first().join(conflicts).reset_index()
     # pandas group keys may infer StringDtype when reset, unlike canonical PANEL keys.
     values["asset_id"] = values.asset_id.astype("object")
     values = values.sort_values("_clock", kind="mergesort")
+    versions = dict(tuple(values.groupby("source", sort=False)))
     cache = {}
 
     def known(field, lag=0):
@@ -331,15 +354,34 @@ def calculate(
         )
         result = pd.DataFrame(np.nan, index=frame.index, columns=selected)
         if len(left) and len(values):
-            joined = pd.merge_asof(
-                left,
-                values[[*key, *selected]],
-                left_on="_cutoff",
-                right_on="_clock",
-                by=["asset_id", "_obs"],
-                direction="backward",
-            )
-            result.loc[joined._row] = joined[list(selected)].to_numpy()
+            chosen = np.full((len(left), len(selected)), np.nan)
+            resolved = np.zeros(chosen.shape, dtype=bool)
+            for sources in SOURCE_PRIORITY:
+                current = np.full(chosen.shape, np.nan)
+                disputed = np.zeros(chosen.shape, dtype=bool)
+                for source in sources:
+                    if source not in versions:
+                        continue
+                    joined = pd.merge_asof(
+                        left,
+                        versions[source],
+                        left_on="_cutoff",
+                        right_on="_clock",
+                        by=["asset_id", "_obs"],
+                        direction="backward",
+                    )
+                    incoming = joined[list(selected)].to_numpy()
+                    disputed |= joined[conflict_columns].fillna(False).to_numpy(
+                        dtype=bool
+                    ) | (
+                        np.isfinite(current)
+                        & np.isfinite(incoming)
+                        & (current != incoming)
+                    )
+                    current = np.where(np.isnan(current), incoming, current)
+                chosen = np.where(~resolved & ~disputed, current, chosen)
+                resolved |= disputed | np.isfinite(current)
+            result.loc[left._row] = chosen
         cache[lag] = result
         return result[field]
 

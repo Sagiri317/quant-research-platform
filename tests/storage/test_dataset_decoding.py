@@ -30,7 +30,6 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_stat,
-    filesystem_walk,
     filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
@@ -40,16 +39,6 @@ from tests.storage.low_level_fixtures import (
     make_default_dataset_frame,
     make_processed_dataset_spec,
 )
-
-
-def _file_bytes(root: Path) -> dict[Path, bytes]:
-    return {
-        (parent / name).relative_to(root): Path(
-            native_filesystem_path(parent / name)
-        ).read_bytes()
-        for parent, _directories, files in filesystem_walk(root)
-        for name in files
-    }
 
 
 @pytest.mark.parametrize("filtered", (False, True))

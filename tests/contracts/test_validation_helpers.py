@@ -170,24 +170,6 @@ def test_strict_finite_numeric_series_preserves_values_and_identity(dtype, allow
     pd.testing.assert_series_equal(source, original)
 
 
-@pytest.mark.parametrize("value", [[], {}, set(), "missing", None])
-def test_strict_membership_series_rejects_invalid_members(value: object) -> None:
-    with pytest.raises(ValueError, match="invalid_contract_membership"):
-        validation.strict_membership_series(
-            pd.Series([value]),
-            allowed={"known"},
-            error="invalid_contract_membership",
-        )
-
-
-def test_strict_membership_series_accepts_known_hashable_members() -> None:
-    assert validation.strict_membership_series(
-        pd.Series(["known"]),
-        allowed={"known"},
-        error="invalid_contract_membership",
-    ).tolist() == ["known"]
-
-
 @pytest.mark.parametrize("value", [[], {}, set(), None, pd.NA])
 def test_strict_hashable_key_series_rejects_invalid_keys(value: object) -> None:
     with pytest.raises(ValueError, match="invalid_contract_key"):

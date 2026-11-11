@@ -384,6 +384,14 @@ def _calculate_values(
             result = rolling_mean(short)[valid] / means[valid]
         output[first - start :][valid] = result
         return output
+    if factor in {"max_return_20d", "min_return_20d"}:
+        reducer = np.max if factor == "max_return_20d" else np.min
+        output[first - start :][valid] = reducer(window(source), axis=1)[valid]
+        return output
+    if factor in {"positive_return_fraction_20d", "zero_amount_ratio_20d"}:
+        mask = source > 0 if factor == "positive_return_fraction_20d" else source <= 0
+        output[first - start :][valid] = window_count(mask)[valid] / size
+        return output
     matrix = window(np.where(numeric, source, np.nan)) if partial else window(source)
     if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
         valid &= np.min(
@@ -404,13 +412,9 @@ def _calculate_values(
             else np.maximum(current, 0.0)
         )
         result = np.sqrt(np.nansum(clipped * clipped, axis=1) / sample_counts)
-    elif factor == "max_return_20d":
-        result = np.max(current, axis=1)
     elif factor == "top5_return_mean_20d":
         top = np.partition(current, -5, axis=1)[:, -5:]
         result = np.mean(top, axis=1)
-    elif factor == "min_return_20d":
-        result = np.min(current, axis=1)
     elif factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
         centered = _centered_values(current, np.isfinite(current))
         centered /= np.max(np.abs(centered), axis=1, keepdims=True)
@@ -456,8 +460,6 @@ def _calculate_values(
             out=np.full(len(current), np.nan),
             where=denominator != 0,
         )
-    elif factor == "positive_return_fraction_20d":
-        result = np.mean(current > 0.0, axis=1)
     elif factor in {"largest_daily_contribution_20d", "path_roughness_20d"}:
         denominator = np.sum(np.abs(current), axis=1)
         result = (
@@ -467,8 +469,6 @@ def _calculate_values(
         )
         if factor == "path_roughness_20d":
             result = 1.0 - result
-    elif factor == "zero_amount_ratio_20d":
-        result = np.mean(current <= 0.0, axis=1)
     else:
         raise ValueError("price_volume_calculation_missing")
     output[first - start :][valid] = result

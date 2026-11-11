@@ -6,14 +6,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from statsmodels.api import OLS, WLS, add_constant
-from statsmodels.stats.multitest import multipletests
 
 from quant_research_platform.research.statistics import (
     aligned_candidate_matrix,
     cscv_pbo,
     fama_macbeth_period,
     fdr_adjust,
-    hac_mean,
     model_confidence_set,
     probabilistic_and_deflated_sharpe,
     spa_reality_check,
@@ -48,21 +46,22 @@ def test_common_candidate_coverage_is_intersection_without_imputation() -> None:
 
 
 @pytest.mark.parametrize(
-    ("method", "owner_method"), (("BH", "fdr_bh"), ("BY", "fdr_by"))
+    ("method", "expected", "rejected"),
+    (
+        ("BH", [0.2, 0.03, 0.06], [False, True, False]),
+        ("BY", [11 / 30, 0.055, 0.11], [False, False, False]),
+    ),
 )
-def test_hac_and_fdr_delegate_to_statsmodels(method: str, owner_method: str) -> None:
-    values = np.array([0.2, -0.1, 0.3, 0.0, 0.4, 0.1], dtype="float64")
-    expected_fit = OLS(values, np.ones((len(values), 1))).fit(
-        cov_type="HAC", cov_kwds={"maxlags": 1}
-    )
-    result = hac_mean(values, max_lags=1)
-    adjusted = fdr_adjust([0.01, 0.04, 0.2], method=method, alpha=0.05)
-    expected = multipletests([0.01, 0.04, 0.2], alpha=0.05, method=owner_method)
-    assert result.mean == pytest.approx(expected_fit.params[0])
-    assert result.standard_error == pytest.approx(expected_fit.bse[0])
-    assert result.p_value == pytest.approx(expected_fit.pvalues[0])
-    np.testing.assert_array_equal(adjusted.rejected, expected[0])
-    np.testing.assert_allclose(adjusted.adjusted_p_values, expected[1])
+def test_fdr_matches_hand_computed_adjustments_in_input_order(
+    method, expected, rejected
+) -> None:
+    # Sorted BH values are 3*p/rank; BY multiplies by 1 + 1/2 + 1/3.
+    adjusted = fdr_adjust([0.2, 0.01, 0.04], method=method, alpha=0.05)
+    np.testing.assert_array_equal(adjusted.rejected, rejected)
+    np.testing.assert_allclose(adjusted.adjusted_p_values, expected)
+
+
+def test_fdr_rejects_invalid_alpha() -> None:
     with pytest.raises(ValueError, match="^alpha_invalid$"):
         fdr_adjust([0.1], method="BH", alpha=-1.0)
 
@@ -85,10 +84,9 @@ def test_fdr_uses_fixed_family_size_without_persisting_missing_hypotheses() -> N
     )
     observed = result.loc[result["timestamp"].eq("observed")].iloc[0]
     missing = result.loc[result["timestamp"].eq("missing")].iloc[0]
+    # One observed hypothesis and 24 planned missing hypotheses (p=1).
     assert observed["fdr_adjusted_p_value"] == pytest.approx(
-        multipletests([observed["p_value"], *[1.0] * 24], alpha=0.05, method="fdr_bh")[
-            1
-        ][0]
+        min(25 * observed["p_value"], 1.0)
     )
     assert missing["status"] == "UNDEFINED"
     assert pd.isna(missing["p_value"])

@@ -36,6 +36,7 @@ def inputs():
     observations = pd.DataFrame(
         {
             "asset_id": "000001",
+            "source": "szse_margin",
             "timestamp": sessions[:6],
             "available_at": sessions[1:7] + pd.Timedelta(minutes=30),
             "financing_balance": [50.0, 60, 70, 80, 90, 100],
@@ -143,6 +144,84 @@ def test_lifecycle_and_unrelated_fields_do_not_gate_buy_activity():
     assert selected.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
 
 
+@pytest.mark.parametrize("listing_position", [4, 6])
+def test_balance_changes_do_not_reuse_reports_from_an_earlier_listing(
+    listing_position,
+):
+    decisions, observations, sessions = inputs()
+    decisions.loc[1, "listing_date"] = sessions[listing_position]
+    result = calculate(
+        decisions,
+        observations,
+        factor_columns=("financing_balance_change_1d", "financing_balance_change_5d"),
+        sessions=sessions,
+    )
+    assert result.financing_balance_change_1d.iloc[0] == pytest.approx(100 / 90 - 1)
+    assert result.financing_balance_change_5d.iloc[0] == pytest.approx(1.0)
+    assert pd.isna(result.financing_balance_change_5d.iloc[1])
+    if listing_position == 4:
+        assert result.financing_balance_change_1d.iloc[1] == pytest.approx(100 / 90 - 1)
+    else:
+        assert pd.isna(result.financing_balance_change_1d.iloc[1])
+
+
+@pytest.mark.parametrize("unknown_date", ["2024-01-02", "2024-01-06"])
+def test_calendar_gap_only_limits_changes_that_cross_it(unknown_date):
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        next_trading_sessions,
+        unified_trading_sessions,
+    )
+
+    sessions = pd.bdate_range("2023-12-26", "2024-01-08")
+    days = pd.date_range(sessions.min(), sessions.max())
+    calendar = pd.DataFrame(
+        dict(
+            calendar_date=days,
+            source_market_type=4,
+            is_trading_day=days.isin(sessions),
+        )
+    )
+    calendar = calendar.loc[calendar.calendar_date.ne(pd.Timestamp(unknown_date))]
+    axis = unified_trading_sessions(calendar)
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="000001",
+            timestamp=[pd.Timestamp("2024-01-09 01:00")],
+            signal_session=sessions[-1],
+            listing_date=sessions[0],
+            eligible=True,
+            float_market_cap=1000.0,
+        )
+    )
+    reports = pd.DataFrame(
+        dict(
+            asset_id="000001",
+            timestamp=sessions,
+            source="szse_margin",
+            available_at=sessions + pd.Timedelta(hours=8),
+            financing_balance=100.0 + 10 * np.arange(len(sessions)),
+        )
+    )
+    result = calculate(
+        decisions,
+        reports,
+        sessions=axis,
+        session_successors=pd.Series(next_trading_sessions(calendar, axis), index=axis),
+        factor_columns=(
+            "financing_balance_to_float_cap",
+            "financing_balance_change_1d",
+            "financing_balance_change_5d",
+        ),
+    ).iloc[0]
+    assert result.financing_balance_to_float_cap == pytest.approx(0.19)
+    assert pd.isna(result.financing_balance_change_5d)
+    if unknown_date == "2024-01-02":
+        assert result.financing_balance_change_1d == pytest.approx(190 / 180 - 1)
+    else:
+        assert pd.isna(result.financing_balance_change_1d)
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_same_clock_report_withdrawal_only_invalidates_its_field(reverse):
     decisions, observations, sessions = inputs()
@@ -153,6 +232,22 @@ def test_same_clock_report_withdrawal_only_invalidates_its_field(reverse):
     result = calculate(decisions, reports, sessions=sessions)
     assert result.financing_buy_intensity.isna().all()
     assert result.financing_balance_to_float_cap.tolist() == pytest.approx([0.1, 0.1])
+
+
+def test_same_clock_platform_report_only_fills_unreported_official_fields():
+    decisions, observations, sessions = inputs()
+    supplement = observations.iloc[[-1]].assign(
+        source="eastmoney_margin_detail",
+        financing_balance=900.0,
+        financing_buy_amount=np.nan,
+        financing_repayment_amount=10.0,
+    )
+    result = calculate(
+        decisions, pd.concat([observations, supplement]), sessions=sessions
+    )
+    assert result.financing_balance_to_float_cap.tolist() == pytest.approx([0.1, 0.1])
+    assert result.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
+    assert result.financing_repayment_intensity.tolist() == pytest.approx([0.05, 0.05])
 
 
 def test_invalid_business_numeric_cells_only_limit_their_financing_dependents():
@@ -234,11 +329,15 @@ def test_native_string_key_carriers_have_the_same_financing_identity(
     assert result.financing_buy_intensity.tolist() == pytest.approx([0.1, 0.1])
 
 
-def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
+@pytest.mark.parametrize("prior_session_state", ["open", "closed", "unknown"])
+def test_native_preparation_keeps_public_clock_and_selected_factor(
+    tmp_path, prior_session_state
+):
     from quant_research_platform.contracts.data import ProcessedDataSpec
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.sources.public_research.interim import interim_catalog
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
 
     decisions, observations, sessions = inputs()
     # PANEL's strict string owner and public raw normalization use different carriers.
@@ -252,9 +351,17 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
     roles.update(
         market_id="key", asset_id="key", timestamp="timestamp", eligible="mask"
     )
+    unrelated = decisions.iloc[[0]].assign(
+        timestamp=pd.Timestamp("2000-01-04 01:00"),
+        signal_session=pd.Timestamp("2000-01-03"),
+        execution_session=pd.Timestamp("2000-01-04"),
+        return_available_at=pd.Timestamp("2000-01-03 07:30"),
+        listing_date=pd.Timestamp("1999-01-01"),
+        amount=-100.0,
+    )
     write_dataset(
         path,
-        decisions,
+        pd.concat([unrelated, decisions], ignore_index=True),
         spec=ProcessedDataSpec(
             data_id="decision_panel",
             market_id="a_share",
@@ -299,6 +406,12 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
     assert read_dataset(result).financing_buy_intensity.tolist() == pytest.approx(
         [0.1, 0.1]
     )
+    assert (
+        open_dataset_session(result).manifest["producer_diagnostics"][
+            "input_invalid_numeric_cells"
+        ]["amount"]
+        == 0
+    )
     from quant_research_platform.sources.csmar.interim import interim_catalog as csmar
 
     preceding = decisions.iloc[[0]].assign(
@@ -309,10 +422,17 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
         amount=100.0,
         float_market_cap=500.0,
     )
+    older = preceding.assign(
+        timestamp=sessions[4] + pd.Timedelta(hours=1),
+        signal_session=sessions[3],
+        execution_session=sessions[4],
+        return_available_at=sessions[3] + pd.Timedelta(hours=7, minutes=30),
+        amount=50.0,
+    )
     historical = tmp_path / "historical_decisions"
     write_dataset(
         historical,
-        pd.concat([preceding, decisions], ignore_index=True),
+        pd.concat([unrelated, older, preceding, decisions], ignore_index=True),
         spec=ProcessedDataSpec(
             data_id="decision_panel",
             market_id="a_share",
@@ -325,16 +445,23 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
         ),
     )
     calendar_path = tmp_path / "calendar"
+    dates = pd.date_range(sessions.min(), sessions.max())
     calendar = pd.DataFrame(
         {
-            "timestamp": sessions,
-            "calendar_date": sessions,
+            "timestamp": dates,
+            "calendar_date": dates,
             "source_market_type": 4,
-            "is_trading_day": True,
-            "source_day_of_week": sessions.dayofweek + 1,
-            "source_state": "open",
+            "is_trading_day": dates.isin(sessions),
+            "source_day_of_week": dates.day_of_week + 1,
+            "source_state": "synthetic",
         }
     )
+    # An unrelated old gap cannot gate the currently required predecessor.
+    calendar = calendar.loc[calendar.calendar_date.ne(sessions[1])]
+    if prior_session_state == "unknown":
+        calendar = calendar.loc[calendar.calendar_date.ne(sessions[4])]
+    elif prior_session_state == "closed":
+        calendar.loc[calendar.calendar_date.eq(sessions[4]), "is_trading_day"] = False
     write_dataset(calendar_path, calendar, spec=csmar().get("trading_calendar"))
     lagged = prepare(
         {
@@ -350,6 +477,15 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(tmp_path):
             "output_root": str(tmp_path / "lagged_factors"),
         }
     )
-    assert read_dataset(lagged).financing_buy_intensity.tolist() == pytest.approx(
-        [0.2, 0.2]
+    result = read_dataset(lagged).financing_buy_intensity
+    if prior_session_state == "unknown":
+        assert result.isna().all()
+    else:
+        expected = 0.2 if prior_session_state == "open" else 0.4
+        assert result.tolist() == pytest.approx([expected, expected])
+    assert (
+        open_dataset_session(lagged).manifest["producer_diagnostics"][
+            "input_invalid_numeric_cells"
+        ]["amount"]
+        == 0
     )

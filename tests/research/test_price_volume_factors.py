@@ -1643,3 +1643,48 @@ def test_selected_output_keeps_order_nulls_and_empty_shapes():
         calculate_price_volume_factors(frame, factor_columns=(), output_window=window),
         expected.loc[:, ["asset_id", "timestamp"]],
     )
+
+
+def test_rolling_extrema_and_proportions_keep_complete_lifecycle_windows():
+    names = (
+        "max_return_20d",
+        "min_return_20d",
+        "positive_return_fraction_20d",
+        "zero_amount_ratio_20d",
+    )
+    dates = pd.bdate_range("2024-01-01", periods=90).as_unit("ns")
+    returns = np.resize([-0.02, 0.0, 0.01, 0.03], len(dates))
+    amounts = np.resize([0.0, 100.0, 250.0], len(dates))
+    returns[22], amounts[25] = np.nan, np.nan
+    frame = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=dates,
+            listing_date=np.where(np.arange(len(dates)) < 45, dates[0], dates[45]),
+            period_return=returns,
+            amount=amounts,
+            filling_flag=1,
+        )
+    )
+    expected = np.full((len(frame), len(names)), np.nan)
+    for start, stop in ((0, 45), (45, len(frame))):
+        for end in range(start + 20, stop + 1):
+            sample = returns[end - 20 : end].tolist()
+            volume = amounts[end - 20 : end].tolist()
+            if all(pd.notna(value) for value in sample):
+                expected[end - 1, :3] = (
+                    max(sample),
+                    min(sample),
+                    sum(value > 0 for value in sample) / 20,
+                )
+            if all(pd.notna(value) for value in volume):
+                expected[end - 1, 3] = sum(value <= 0 for value in volume) / 20
+    for lower, upper in ((0, 89), (18, 30), (41, 70)):
+        result = calculate_price_volume_factors(
+            frame.iloc[::-1],
+            factor_columns=names,
+            history_keys=("asset_id", "listing_date"),
+            output_window=TimeWindow(dates[lower], dates[upper]),
+        )
+        np.testing.assert_array_equal(result.timestamp, dates[lower : upper + 1])
+        np.testing.assert_array_equal(result.loc[:, names], expected[lower : upper + 1])

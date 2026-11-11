@@ -38,18 +38,10 @@ def _compute_ic_and_grouped_label_values(
     spec,
     *,
     n_groups=5,
-    ordinal_signals=None,
     top_quantile=None,
     include_groups=True,
 ):
     panel = validate_compute_panel(frame, spec)
-    if ordinal_signals is not None:
-        keys = [spec.timestamp_column, spec.asset_column]
-        ordinal_signals = (
-            ordinal_signals.set_index(keys)
-            .reindex(pd.MultiIndex.from_frame(panel[keys]))
-            .reset_index(drop=True)
-        )
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
     if n_groups < 2:
@@ -63,7 +55,6 @@ def _compute_ic_and_grouped_label_values(
             label_columns=spec.label_columns,
             timestamp=timestamp,
             n_groups=n_groups,
-            ordinal_signals=ordinal_signals,
             top_quantile=top_quantile,
             include_groups=include_groups,
         )
@@ -91,7 +82,6 @@ def _correlation_records(
     label_columns,
     timestamp,
     n_groups=5,
-    ordinal_signals=None,
     top_quantile=None,
     include_groups=True,
 ):
@@ -102,19 +92,15 @@ def _correlation_records(
         source = frame[signal]
         values = source.to_numpy(dtype="float64", na_value=np.nan)
         predicted = np.isfinite(values)
-        reverse = ordinal_signals is not None and signal in ordinal_signals
-        order = ordinal_signals.loc[frame.index, signal] if reverse else source
-        codes = _rank_codes(order, predicted)
+        codes = _rank_codes(source, predicted)
         if include_groups:
             ranks = _average_ranks_from_codes(codes[predicted])
-            if reverse:
-                ranks = len(ranks) + 1 - ranks
             groups = _assign_groups_from_ranks(ranks, n_groups)
         else:
             groups = np.empty(0, dtype="int64")
         domains = {"all": (predicted, int(predicted.sum()))}
         if top_quantile is not None:
-            for side, ascending in (("long", reverse), ("short", not reverse)):
+            for side, ascending in (("long", False), ("short", True)):
                 selected = np.zeros(len(predicted), dtype=bool)
                 selected[predicted] = _select_quantile_boundary(
                     codes[predicted], top_quantile, ascending=ascending
@@ -126,7 +112,6 @@ def _correlation_records(
             codes,
             groups,
             np.unique(groups),
-            reverse,
             domains,
             {},
         )
@@ -142,7 +127,6 @@ def _correlation_records(
             codes,
             groups,
             group_ids,
-            reverse,
             domains,
             signal_ranks_by_mask,
         ) in signals.items():
@@ -160,8 +144,9 @@ def _correlation_records(
                     # classes. Selection never depends on label availability.
                     mask_key = valid_mask.tobytes()
                     if mask_key not in signal_ranks_by_mask:
-                        ranks = _average_ranks_from_codes(codes[valid_mask])
-                        signal_ranks_by_mask[mask_key] = -ranks if reverse else ranks
+                        signal_ranks_by_mask[mask_key] = _average_ranks_from_codes(
+                            codes[valid_mask]
+                        )
                     if mask_key not in label_ranks_by_mask:
                         label_ranks_by_mask[mask_key] = _average_ranks_from_codes(
                             label_codes[valid_mask]

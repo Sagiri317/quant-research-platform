@@ -13,6 +13,13 @@ from quant_research_platform.research.factors.fund_flows import (
 )
 
 
+def _calendar(days):
+    dates = pd.date_range(days.min(), days.max())
+    return pd.DataFrame(
+        dict(calendar_date=dates, source_market_type=1, is_trading_day=dates.isin(days))
+    )
+
+
 def cells():
     values = {
         ("balance_sheet", "total_assets"): 1000.0,
@@ -94,7 +101,7 @@ def test_etf_share_growth_and_nav_premium_require_same_economic_day():
             shares_outstanding=100 + np.arange(24) * 10,
         )
     )
-    states = share_states(shares)
+    states = share_states(shares, session_days=dates)
     assert states.etf_share_change_5d.iloc[-1] == pytest.approx(330 / 280 - 1)
     d = pd.DataFrame(
         dict(
@@ -499,7 +506,11 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
     fields = ["stock_passive_flow_pressure_1d", "stock_passive_flow_pressure_5d"]
     result = calculate(
         decision,
-        dict(public_fund_shares=shares, public_etf_pcf_components=baskets),
+        dict(
+            public_fund_shares=shares,
+            public_etf_pcf_components=baskets,
+            trading_calendar=_calendar(dates),
+        ),
         columns=fields,
     )
     np.testing.assert_allclose(result.loc[0, fields].to_numpy(float), [0.01, 0.05])
@@ -508,6 +519,7 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
         decision.astype({"industry_standard_id": "str", "industry_level1_code": "str"}),
         dict(
             public_fund_shares=shares.astype({"shares_outstanding": "Float64"}),
+            trading_calendar=_calendar(dates),
             public_etf_pcf_components=baskets.astype(
                 {
                     "component_quantity": "Float64",
@@ -576,6 +588,7 @@ def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
             public_fund_shares=shares,
             public_etf_pcf_components=parts,
             public_etf_pcf_baskets=headers,
+            trading_calendar=_calendar(dates),
         ),
         columns=columns,
     ).set_index("asset_id")

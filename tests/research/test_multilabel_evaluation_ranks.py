@@ -17,8 +17,7 @@ from tests.research.evaluation_test_support import (
 
 
 def _ranks(values):
-    # Count strict predecessors and half the tie class, without sorting or float
-    # conversion. This also protects nullable integers above float64 precision.
+    # Count strict predecessors and half the tie class without the production sort.
     return [
         1
         + sum(other < value for other in values)
@@ -39,23 +38,11 @@ def _correlation(left, right):
 def test_native_multilabel_ranks_preserve_pairwise_ties_and_prediction_groups(
     tmp_path, direction
 ):
-    offset = 2**53
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2024-01-02"),
             "asset_id": list("abcdefg"),
-            "x": pd.Series(
-                [
-                    offset,
-                    offset + 1,
-                    offset + 1,
-                    offset + 3,
-                    offset + 4,
-                    None,
-                    offset + 6,
-                ],
-                dtype="Int64",
-            ),
+            "x": pd.Series([0, 1, 1, 3, 4, None, 6], dtype="Int64"),
             "z": [3.0, np.nan, 2.0, 2.0, 5.0, 7.0, 1.0],
             "y1": [2.0, 2.0, 1.0, np.nan, 4.0, 3.0, 0.0],
             "y2": [np.nan, 4.0, 1.0, 2.0, np.nan, 5.0, 3.0],

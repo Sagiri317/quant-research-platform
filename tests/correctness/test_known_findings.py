@@ -1,7 +1,7 @@
 """Independent regression oracles for execution and statistical boundaries."""
 
 import pickle
-from math import sqrt
+from math import erfc, sqrt
 
 import numpy as np
 import pandas as pd
@@ -174,6 +174,7 @@ def test_hac_hand_computed_bartlett_oracle_and_degeneracies():
     assert result.mean == pytest.approx(2.5)
     assert result.standard_error == pytest.approx(sqrt(6.25 / 16))
     assert result.t_statistic == pytest.approx(4.0)
+    assert result.p_value == pytest.approx(erfc(4 / sqrt(2)))
     assert result.confidence_interval == pytest.approx(
         (1.275022509662466, 3.724977490337534)
     )

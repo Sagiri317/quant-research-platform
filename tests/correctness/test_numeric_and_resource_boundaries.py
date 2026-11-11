@@ -16,12 +16,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
 )
 from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.compute.panels import ComputePanelSpec
-from quant_research_platform.contracts.evaluations import (
-    EvaluationSpec,
-    strict_non_negative_count_series,
-    strict_non_negative_count_value,
-    strict_positive_group_series,
-)
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.signals import SignalSpec
@@ -175,16 +170,6 @@ def test_real_number_nullable_values_are_preserved():
     pd.testing.assert_series_equal(
         result, pd.Series([2.5, pd.NA, pd.NA], dtype="Float64")
     )
-
-
-@pytest.mark.parametrize("dtype", ["int64", "uint64", "object"])
-def test_evaluation_counts_keep_exact_int64_identity(dtype):
-    values = pd.Series([2**53 + 1, 2**63 - 1], dtype=dtype)
-    for validate in (strict_non_negative_count_series, strict_positive_group_series):
-        assert validate(values).tolist() == values.tolist()
-    assert strict_non_negative_count_value(2**53 + 1) == 2**53 + 1
-    with pytest.raises(ValueError):
-        strict_non_negative_count_series(pd.Series([2**63], dtype="uint64"))
 
 
 def test_decimal_metadata_rejects_exponents_without_expansion():

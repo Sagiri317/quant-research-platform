@@ -11,12 +11,14 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
+    next_trading_sessions,
     unified_trading_sessions,
 )
 from quant_research_platform.research.factors.financing import (
     BALANCE_CHANGE_WINDOWS,
     FACTOR_UNITS,
     RECIPES,
+    REPORT_IDENTITY,
     calculate,
     decision_columns,
 )
@@ -66,33 +68,47 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     source = source.projected_view(
         tuple(name for name in source.logical_columns if name in required)
     )
-    frame = materialize_dataset_session(
-        source.filtered_view(
-            TimeWindow(
-                pd.Timestamp.min, end_at if closed else end_at - pd.Timedelta(1, "ns")
-            )
-        )
-    )
+    frame = materialize_dataset_session(source.filtered_view(time_window))
     sessions = None
+    session_successors = None
     calendar_needed = config["observation_lag_sessions"] or any(
         name in BALANCE_CHANGE_WINDOWS for name in selected
     )
     if calendar_needed and "trading_calendar" in inputs:
-        sessions = unified_trading_sessions(
-            materialize_dataset_session(
-                open_dataset_session(
-                    **_dataset_input_options(inputs["trading_calendar"])
-                )
-            )
+        calendar = materialize_dataset_session(
+            open_dataset_session(**_dataset_input_options(inputs["trading_calendar"]))
+        )
+        sessions = unified_trading_sessions(calendar)
+        session_successors = pd.Series(
+            next_trading_sessions(calendar, sessions), index=sessions
         )
     start = frame.signal_session.min()
     if sessions is not None and len(frame):
-        position = sessions.get_indexer([start])[0]
-        if position >= 0:
+        positions = sessions.get_indexer(frame.signal_session)
+        valid = positions >= config["observation_lag_sessions"]
+        if valid.any():
+            position = positions[valid].min()
+            # Only same-observation denominators need earlier decision rows.
+            # The calendar, not observed row counts, locates that dependency.
+            history_start = sessions[position - config["observation_lag_sessions"]]
+            if (
+                config["observation_lag_sessions"]
+                and any(RECIPES[name][1] for name in selected)
+                and history_start < start_at
+            ):
+                history = materialize_dataset_session(
+                    source.filtered_view(
+                        TimeWindow(history_start, start_at - pd.Timedelta(1, "ns"))
+                    )
+                )
+                frame = pd.concat([history, frame], ignore_index=True)
             lookback = max(BALANCE_CHANGE_WINDOWS.get(name, 0) for name in selected)
-            start = sessions[
-                max(0, position - lookback - config["observation_lag_sessions"])
-            ]
+            start = min(
+                start,
+                sessions[
+                    max(0, position - lookback - config["observation_lag_sessions"])
+                ],
+            )
     fields = tuple(dict.fromkeys(RECIPES[name][0] for name in selected))
     observations = None
     if len(frame):
@@ -100,9 +116,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             **_dataset_input_options(inputs["public_margin_balances"])
         )
         fields = tuple(
-            c
-            for c in ("asset_id", "timestamp", "available_at", *fields)
-            if c in reports.logical_columns
+            c for c in (*REPORT_IDENTITY, *fields) if c in reports.logical_columns
         )
         observations = materialize_dataset_session(
             reports.filtered_view(
@@ -127,7 +141,12 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     }
     if len(frame):
         result = calculate(
-            frame, observations, factor_columns=selected, sessions=sessions, **config
+            frame,
+            observations,
+            factor_columns=selected,
+            sessions=sessions,
+            session_successors=session_successors,
+            **config,
         )
         metadata["producer_diagnostics"]["input_invalid_numeric_cells"] = result.attrs[
             "input_invalid_numeric_cells"

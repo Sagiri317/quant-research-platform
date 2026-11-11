@@ -3,7 +3,10 @@
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.asof import latest_observations
+from quant_research_platform.compute.dataframe.asof import (
+    latest_observations,
+    rolling_available_at,
+)
 from quant_research_platform.contracts.factors import FactorDefinition
 
 FUTURES = (
@@ -64,6 +67,11 @@ RECIPES = {
     **dict.fromkeys(
         FUTURES, ("public_futures_daily", "public_futures_contracts", "index_market")
     ),
+    "index_future_calendar_spread": (
+        "public_futures_daily",
+        "public_futures_contracts",
+    ),
+    **dict.fromkeys((*FUTURES[5:9], FUTURES[10]), ("public_futures_daily",)),
     **dict.fromkeys(PAIRS, ("market_panel_1d",)),
     **dict.fromkeys(US[:3], ("public_finra_short_volume",)),
     **dict.fromkeys(US[3:], ("public_etf_prices",)),
@@ -138,7 +146,37 @@ def _align(states, decisions, fields, *, ids=None):
     left = decisions.loc[:, ["asset_id", "timestamp"]].copy()
     if ids is not None:
         left["asset_id"] = ids
-    return latest_observations(states, left, columns=tuple(fields))
+    result = pd.DataFrame(index=decisions.index)
+    for field in fields:
+        clock = states.get(f"{field}_available_at", states.available_at)
+        result[field] = latest_observations(
+            states.assign(available_at=clock), left, columns=(field,)
+        )[field]
+    return result
+
+
+def _quote_session_rows(frame, sessions):
+    """Retain interior quote gaps on the supplied common market observations."""
+    return (
+        pd.concat(
+            [
+                block.set_index("timestamp")
+                .reindex(
+                    sessions[
+                        (sessions >= block.timestamp.min())
+                        & (sessions <= block.timestamp.max())
+                    ]
+                )
+                .assign(asset_id=asset)
+                .rename_axis("timestamp")
+                .reset_index()
+                for asset, block in frame.groupby("asset_id", sort=False)
+            ],
+            ignore_index=True,
+        )
+        if len(frame)
+        else frame.copy()
+    )
 
 
 def futures_states(futures, contracts, index_prices, *, product="IF"):
@@ -147,40 +185,94 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
         futures.loc[futures["product"].eq(product)],
         ("close", "volume", "open_interest"),
     )
-    c = contracts.loc[contracts["product"].eq(product)]
-    if f.empty or c.empty:
+    if f.empty:
         return pd.DataFrame(columns=["asset_id", "timestamp", "available_at", *FUTURES])
-    coordinates = f[["asset_id", "timestamp"]].assign(
-        timestamp=lambda d: d.timestamp + pd.Timedelta(days=1) - pd.Timedelta(1, "ns")
+    sessions = pd.DatetimeIndex(f.timestamp.unique()).sort_values()
+    if index_prices is None:
+        i = pd.DataFrame(columns=["timestamp", "spot", "_spot_available"])
+        i["timestamp"] = i["_spot_available"] = pd.Series(dtype="datetime64[ns]")
+    else:
+        i = index_prices.loc[
+            index_prices.source_asset_id.eq(index_id), ["timestamp", "close"]
+        ].rename(columns={"close": "spot"})
+        # Native index closes use the existing declared after-close upper bound.
+        i["_spot_available"] = i.timestamp + pd.Timedelta(hours=7, seconds=1)
+        if "available_at" in index_prices:
+            i["_spot_available"] = index_prices.loc[
+                index_prices.source_asset_id.eq(index_id), "available_at"
+            ].to_numpy()
+        sessions = sessions.union(pd.DatetimeIndex(i.timestamp))
+    f = _quote_session_rows(f, sessions)
+    # Metadata observation dates select the applicable contract facts. Their
+    # publication clocks gate derived results, not inclusion of daily quotes.
+    c = (
+        contracts.loc[contracts["product"].eq(product)]
+        if contracts is not None
+        else pd.DataFrame()
     )
-    expiry = _align(c, coordinates, ("expiry_date",))
-    f["expiry_date"] = pd.to_datetime(expiry.expiry_date).to_numpy()
-    i = index_prices.loc[
-        index_prices.source_asset_id.eq(index_id), ["timestamp", "close"]
-    ].rename(columns={"close": "spot"})
+    if c.empty:
+        f["expiry_date"] = f["_contract_available"] = pd.NaT
+    else:
+        fields = ("expiry_date", "open_date") if "open_date" in c else ("expiry_date",)
+        c = _canonical(c, fields).rename(
+            columns={"available_at": "_contract_available"}
+        )
+        f["_in_quote_span"] = True
+        observed_start = f.groupby("asset_id", sort=False).timestamp.min()
+        expected = []
+        for asset, block in c.groupby("asset_id", sort=False):
+            start = block.open_date.min() if "open_date" in block else pd.NaT
+            if pd.isna(start):
+                start = observed_start.get(asset, pd.NaT)
+            if pd.notna(start):
+                dates = sessions[
+                    (sessions >= max(start, block.timestamp.min()))
+                    & (sessions <= block.expiry_date.max())
+                ]
+                expected.extend((asset, date) for date in dates)
+        if expected:
+            f = pd.concat(
+                [f, pd.DataFrame(expected, columns=["asset_id", "timestamp"])],
+                ignore_index=True,
+            ).drop_duplicates(["asset_id", "timestamp"], keep="first")
+        f = pd.merge_asof(
+            f.sort_values("timestamp", kind="stable"),
+            c.sort_values("timestamp", kind="stable"),
+            on="timestamp",
+            by="asset_id",
+            direction="backward",
+        )
+        active = f.expiry_date.ge(f.timestamp)
+        if "open_date" in f:
+            active &= f.open_date.le(f.timestamp) | (
+                f.open_date.isna() & f.timestamp.ge(f.asset_id.map(observed_start))
+            )
+        f = f.loc[f._in_quote_span.eq(True) | active].copy()
     f = f.merge(i, on="timestamp", how="left", validate="many_to_one")
-    f = f.loc[f.expiry_date.ge(f.timestamp)].copy()
     f["_basis"] = f["close"] / f.spot.where(f.spot > 0) - 1
+    f["_basis_available"] = f[["available_at", "_spot_available"]].max(
+        axis=1, skipna=False
+    )
     f = f.sort_values(["asset_id", "timestamp"], kind="stable")
     for w in (1, 5):
         f[f"_basis_change_{w}"] = f.groupby("asset_id", sort=False)._basis.diff(w)
+        f[f"_basis_change_{w}_available"] = pd.concat(
+            [
+                f._basis_available,
+                f.groupby("asset_id", sort=False)._basis_available.shift(w),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=False)
     output = []
     for date, group in f.groupby("timestamp", sort=True):
-        front = group.sort_values(["expiry_date", "asset_id"], kind="stable")
-        first = front.iloc[0]
         oi = group.open_interest.sum(min_count=len(group))
-        days = (first.expiry_date - date).days
         row = {
             "asset_id": product,
             "timestamp": date,
-            "available_at": group.available_at.max(),
-            "index_future_near_basis": first._basis,
-            "index_future_calendar_spread": front["close"].iloc[1] / first["close"] - 1
-            if len(front) > 1 and first["close"] > 0
-            else np.nan,
-            "index_future_annualized_basis": first._basis * 365 / days
-            if days > 0
-            else np.nan,
+            "available_at": group.available_at.max(skipna=False),
+            "index_future_near_basis": np.nan,
+            "index_future_calendar_spread": np.nan,
+            "index_future_annualized_basis": np.nan,
             "index_future_volume_to_oi": group.volume.sum(min_count=len(group)) / oi
             if oi > 0
             else np.nan,
@@ -189,14 +281,54 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
             else np.nan,
             "_oi": oi,
         }
-        for w in (1, 5):
-            row[f"index_future_basis_change_{w}d"] = first[f"_basis_change_{w}"]
+        for name in FUTURES[:5]:
+            row[f"{name}_available_at"] = pd.NaT
+        for width in (1, 5):
+            row[f"index_future_basis_change_{width}d"] = np.nan
+        eligible = group.expiry_date.ge(date)
+        if "open_date" in group:
+            # Existing quote history proves listing even without an open date.
+            eligible &= group.open_date.le(date) | group.open_date.isna()
+        front = group.loc[eligible].sort_values(
+            ["expiry_date", "asset_id"], kind="stable"
+        )
+        metadata_known = group.expiry_date.notna().all()
+        if len(front) and metadata_known:
+            first = front.iloc[0]
+            days = (first.expiry_date - date).days
+            # All expiries determine the front contract; far-month quotes do not
+            # enter its basis. Spread consumes only the first two quote prices.
+            selection_clock = group._contract_available.max(skipna=False)
+            basis_clock = pd.Series([selection_clock, first._basis_available]).max(
+                skipna=False
+            )
+            row["index_future_near_basis"] = first._basis
+            row["index_future_near_basis_available_at"] = basis_clock
+            row["index_future_annualized_basis"] = (
+                first._basis * 365 / days if days > 0 else np.nan
+            )
+            row["index_future_annualized_basis_available_at"] = basis_clock
+            if len(front) > 1 and first["close"] > 0:
+                row["index_future_calendar_spread"] = (
+                    front["close"].iloc[1] / first["close"] - 1
+                )
+                row["index_future_calendar_spread_available_at"] = pd.Series(
+                    [selection_clock, *front.available_at.iloc[:2]]
+                ).max(skipna=False)
+            for w in (1, 5):
+                row[f"index_future_basis_change_{w}d"] = first[f"_basis_change_{w}"]
+                row[f"index_future_basis_change_{w}d_available_at"] = pd.Series(
+                    [selection_clock, first[f"_basis_change_{w}_available"]]
+                ).max(skipna=False)
         output.append(row)
     states = pd.DataFrame(output)
     for w in (1, 5):
         states[f"index_future_oi_change_{w}d"] = (
             states._oi / states._oi.shift(w).where(states._oi.shift(w) > 0) - 1
         )
+        states[f"index_future_oi_change_{w}d_available_at"] = pd.concat(
+            [states.available_at, states.available_at.shift(w)], axis=1
+        ).max(axis=1, skipna=False)
     return states
 
 
@@ -271,8 +403,8 @@ def calculate(decisions, sources, *, columns, parameters=None):
         product = parameters.get("future_product", "IF")
         states = futures_states(
             sources["public_futures_daily"],
-            sources["public_futures_contracts"],
-            sources["index_market"],
+            sources.get("public_futures_contracts"),
+            sources.get("index_market"),
             product=product,
         )
         fields = [
@@ -287,6 +419,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
         exposure = work.get("hedging_beta")
         if (
             exposure is None
+            and "index_market" in sources
             and any(name.endswith("hedging_exposure") for name in usable)
             and {"period_return", "signal_session"} <= set(work)
         ):
@@ -448,8 +581,13 @@ def calculate(decisions, sources, *, columns, parameters=None):
         raw = sources["public_finra_short_volume"].copy()
         raw["asset_id"] = raw.asset_id.str.split(":").str[0]
         grouped = raw.groupby(["asset_id", "timestamp"], sort=False)
-        states = grouped[["short_volume", "total_volume"]].sum(min_count=1)
-        states["available_at"] = grouped.available_at.max()
+        volumes = grouped[["short_volume", "total_volume"]]
+        states = volumes.sum(min_count=1).where(
+            volumes.count().eq(grouped.size(), axis=0)
+        )
+        states["available_at"] = grouped.available_at.max().where(
+            grouped.available_at.count().eq(grouped.size())
+        )
         states = states.reset_index().sort_values(
             ["asset_id", "timestamp"], kind="stable"
         )
@@ -457,9 +595,19 @@ def calculate(decisions, sources, *, columns, parameters=None):
             states.total_volume > 0
         )
         states[US[1]] = states.groupby("asset_id", sort=False)[US[0]].diff(5)
+        states[f"{US[1]}_available_at"] = pd.concat(
+            [
+                states.available_at,
+                states.groupby("asset_id", sort=False).available_at.shift(5),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=False)
         states[US[2]] = states.groupby("asset_id", sort=False)[US[0]].transform(
             lambda s: s.rolling(756, min_periods=756).rank(pct=True)
         )
+        states[f"{US[2]}_available_at"] = states.groupby(
+            "asset_id", sort=False
+        ).available_at.transform(lambda s: rolling_available_at(s, 756))
         fields = tuple(usable & set(US[:3]))
         benchmark = parameters.get("us_activity_asset", "SPY")
         result[list(fields)] = _align(
@@ -467,15 +615,30 @@ def calculate(decisions, sources, *, columns, parameters=None):
         )[list(fields)].to_numpy()
     if usable & set(US[3:]):
         raw = _canonical(sources["public_etf_prices"], ("adjusted_close",))
-        states = raw.copy()
+        states = _quote_session_rows(
+            raw, pd.DatetimeIndex(raw.timestamp.unique()).sort_values()
+        )
         prices = states.groupby("asset_id", sort=False).adjusted_close
         states[US[3]] = states.adjusted_close / prices.shift() - 1
         states[US[4]] = states.adjusted_close / prices.shift(5) - 1
-        spy = states.loc[states.asset_id.eq("SPY"), ["timestamp", US[3]]].rename(
-            columns={US[3]: "_market"}
+        for name, width in ((US[3], 1), (US[4], 5)):
+            states[f"{name}_available_at"] = pd.concat(
+                [
+                    states.available_at,
+                    states.groupby("asset_id", sort=False).available_at.shift(width),
+                ],
+                axis=1,
+            ).max(axis=1, skipna=False)
+        spy = states.loc[
+            states.asset_id.eq("SPY"), ["timestamp", US[3], f"{US[3]}_available_at"]
+        ].rename(
+            columns={US[3]: "_market", f"{US[3]}_available_at": "_market_available"}
         )
         states = states.merge(spy, on="timestamp", how="left", validate="many_to_one")
         states["us_relative_sector_shock"] = states[US[3]] - states._market
+        states["us_relative_sector_shock_available_at"] = states[
+            [f"{US[3]}_available_at", "_market_available"]
+        ].max(axis=1, skipna=False)
         mapping = parameters.get("industry_etfs", {})
         ids = (
             (

@@ -6,6 +6,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.asof import (
     iter_latest_report_keys,
     latest_observations,
+    rolling_available_at,
 )
 from quant_research_platform.contracts.factors import FactorDefinition
 
@@ -40,12 +41,12 @@ FUNDS = (
     "ownership_crowding_x_liquidity_stress",
 )
 RECIPES = {
-    **dict.fromkeys(ETF[:4], ("public_fund_shares",)),
+    **dict.fromkeys(ETF[:4], ("public_fund_shares", "trading_calendar")),
     ETF[4]: ("public_fund_nav", "public_domestic_etf_prices"),
-    ETF[5]: ("public_fund_shares",),
+    ETF[5]: ("public_fund_shares", "trading_calendar"),
     **dict.fromkeys(
         ETF[6:],
-        ("public_fund_shares", "public_etf_pcf_components"),
+        ("public_fund_shares", "public_etf_pcf_components", "trading_calendar"),
     ),
     **dict.fromkeys(
         (*FUNDS[:4], FUNDS[9], FUNDS[15]),
@@ -95,7 +96,7 @@ def definitions():
     )
 
 
-def share_states(frame, *, session_days=None):
+def share_states(frame, *, session_days, session_groups=None):
     keys = ["asset_id", "timestamp"]
     grouped = frame.groupby(keys, sort=False)
     work = (
@@ -105,7 +106,7 @@ def share_states(frame, *, session_days=None):
     )
     work["available_at"] = grouped.available_at.max()
     work = work.reset_index().sort_values(keys, kind="stable")
-    if session_days is not None:
+    if len(work):
         work = pd.concat(
             [
                 block.set_index("timestamp")
@@ -122,23 +123,44 @@ def share_states(frame, *, session_days=None):
             ],
             ignore_index=True,
         )
-    for _, at in work.groupby("asset_id", sort=False).indices.items():
+    work["_calendar_group"] = (
+        0 if session_groups is None else work.timestamp.map(session_groups)
+    )
+    for name in (*ETF[:4], "_share_delta_1d"):
+        work[name] = np.nan
+        work[f"{name}_available_at"] = pd.Series(
+            pd.NaT, index=work.index, dtype="datetime64[ns]"
+        )
+    for _, at in work.groupby(
+        ["asset_id", "_calendar_group"], sort=False
+    ).indices.items():
         at = np.asarray(at)
         block = work.iloc[at]
         shares = block.shares_outstanding
+        clocks = block.available_at
         for width in (1, 5, 20):
             previous = shares.shift(width)
             work.loc[at, f"etf_share_change_{width}d"] = (
                 shares / previous.where(previous > 0) - 1
             ).to_numpy()
+            work.loc[at, f"etf_share_change_{width}d_available_at"] = (
+                pd.concat([clocks, clocks.shift(width)], axis=1)
+                .max(axis=1, skipna=False)
+                .to_numpy()
+            )
         change = shares / shares.shift().where(shares.shift() > 0) - 1
         history = change.shift().rolling(20, min_periods=20)
         work.loc[at, "etf_share_change_surprise_20d"] = (
             (change - history.mean()) / history.std().where(lambda x: x > 0)
         ).to_numpy()
+        work.loc[at, "etf_share_change_surprise_20d_available_at"] = (
+            rolling_available_at(clocks, 22).to_numpy()
+        )
         work.loc[at, "_share_delta_1d"] = shares.diff().to_numpy()
-        work.loc[at, "_share_delta_5d"] = shares.diff(5).to_numpy()
-    return work
+        work.loc[at, "_share_delta_1d_available_at"] = work.loc[
+            at, "etf_share_change_1d_available_at"
+        ].to_numpy()
+    return work.drop(columns="_calendar_group")
 
 
 def complete_mainland_stock_reports(headers):
@@ -193,7 +215,7 @@ def financial_states(cells):
     values = grouped.first().where(grouped.nunique(dropna=False).le(1)).reset_index()
     reports = []
     for (portfolio, fund, date, available), block in values.groupby(
-        keys[:4], sort=False
+        keys[:4], sort=False, dropna=False
     ):
         row = {
             "asset_id": str(portfolio),
@@ -261,18 +283,34 @@ def financial_states(cells):
         return states
     states = states.sort_values(
         ["asset_id", "timestamp", "available_at"], kind="stable"
-    )
-    states["cn_fund_redemption_stress"] = np.nan
-    for _, at in states.groupby("asset_id", sort=False).indices.items():
-        rate = (
-            states.iloc[at]._redemption_rate
-            / pd.to_datetime(states.iloc[at].timestamp).dt.month
-        )
-        prior = rate.shift().rolling(8, min_periods=4)
-        states.loc[at, "cn_fund_redemption_stress"] = (
-            (rate - prior.mean()) / prior.std().where(lambda x: x > 0)
-        ).to_numpy()
+    ).reset_index(drop=True)
     return states
+
+
+def _financial_history_states(financial):
+    """Recompute the latest report's stress only at actual publication events."""
+    output = []
+    for _, block in financial.groupby("asset_id", sort=False):
+        known = {}
+        for released, versions in block.groupby("available_at", sort=True):
+            for row in versions.to_dict("records"):
+                known[row["timestamp"]] = row
+            current = max(known)
+            window = sorted(known)[-9:]
+            latest = known[current].copy()
+            latest["available_at"] = released
+            latest["cn_fund_redemption_stress"] = np.nan
+            rates = pd.Series(
+                [known[period]["_redemption_rate"] / period.month for period in window]
+            )
+            previous = rates.iloc[:-1]
+            deviation = previous.std()
+            if previous.count() >= 4 and deviation > 0:
+                latest["cn_fund_redemption_stress"] = (
+                    rates.iloc[-1] - previous.mean()
+                ) / deviation
+            output.append(latest)
+    return pd.DataFrame(output, columns=[*financial, "cn_fund_redemption_stress"])
 
 
 def us_ownership_states(holdings, filings, *, assets):
@@ -502,13 +540,24 @@ def calculate(decisions, sources, *, columns, parameters=None):
         for name in columns
     }
     usable = {name for name in columns if not missing[name]}
-    session_days = None
+    session_days = session_groups = None
     if "trading_calendar" in sources:
         from quant_research_platform.markets.implementations.a_share.calendar import (
+            CURRENT_MARKET_TYPES,
+            next_trading_sessions,
             unified_trading_sessions,
         )
 
-        session_days = unified_trading_sessions(sources["trading_calendar"])
+        calendar = sources["trading_calendar"].loc[
+            sources["trading_calendar"].source_market_type.isin(CURRENT_MARKET_TYPES)
+        ]
+        session_days = unified_trading_sessions(calendar)
+        successors = next_trading_sessions(calendar, session_days)
+        session_groups = (
+            pd.Series(session_days, index=session_days)
+            .ne(pd.Series(successors, index=session_days).shift())
+            .cumsum()
+        )
     shares = (
         share_states(
             sources["public_fund_shares"].loc[
@@ -522,14 +571,20 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 )
             ],
             session_days=session_days,
+            session_groups=session_groups,
         )
         if usable & set(ETF[:4] + ETF[5:])
         else None
     )
     if usable & set(ETF[:4]):
         fields = tuple(usable & set(ETF[:4]))
-        matched = latest_observations(shares, work, columns=fields)
-        result[list(fields)] = matched[list(fields)].to_numpy()
+        for name in fields:
+            matched = latest_observations(
+                shares.assign(available_at=shares[f"{name}_available_at"]),
+                work,
+                columns=(name,),
+            )
+            result[name] = matched[name].to_numpy()
     if ETF[5] in usable and {"secondary_flow_imbalance", "signal_session"} <= set(work):
         flow = work[
             ["asset_id", "signal_session", "timestamp", "secondary_flow_imbalance"]
@@ -537,9 +592,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
             columns={"timestamp": "_flow_available", "signal_session": "timestamp"}
         )
         state = shares.merge(flow, on=["asset_id", "timestamp"], how="inner")
-        state["available_at"] = state[["available_at", "_flow_available"]].max(
-            axis=1, skipna=False
-        )
+        state["available_at"] = state[
+            ["etf_share_change_1d_available_at", "_flow_available"]
+        ].max(axis=1, skipna=False)
         state[ETF[5]] = state.etf_share_change_1d - state.secondary_flow_imbalance
         result[ETF[5]] = latest_observations(state, work, columns=(ETF[5],))[
             ETF[5]
@@ -598,7 +653,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
             block = work.iloc[at]
             probes = pd.DataFrame({"asset_id": equity_funds, "timestamp": date})
             latest = latest_observations(
-                shares, probes, columns=("_share_delta_1d", "_share_delta_5d")
+                shares.assign(available_at=shares._share_delta_1d_available_at),
+                probes,
+                columns=("_share_delta_1d",),
             )
             flow = probes.assign(_date=latest.observation_date.to_numpy())
             if "avg_volume_20d" not in block:
@@ -611,7 +668,11 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     tail = shares.loc[
                         shares.asset_id.eq(fund) & shares.timestamp.le(cutoff)
                     ].tail(width)
-                    if len(tail) == width and tail._share_delta_1d.notna().all():
+                    if (
+                        len(tail) == width
+                        and tail._share_delta_1d.notna().all()
+                        and tail._share_delta_1d_available_at.le(date).all()
+                    ):
                         history.append(
                             tail[["asset_id", "timestamp", "_share_delta_1d"]]
                         )
@@ -688,11 +749,16 @@ def calculate(decisions, sources, *, columns, parameters=None):
     )
     if financial is not None and not financial.empty:
         dates = work.timestamp.drop_duplicates().tolist()
-        report_keys = iter_latest_report_keys(financial, dates, entity="asset_id")
+        aggregates = (
+            _financial_history_states(financial)
+            if "cn_fund_redemption_stress" in usable
+            else financial
+        )
+        report_keys = iter_latest_report_keys(aggregates, dates, entity="asset_id")
         for _date, at in work.groupby("timestamp", sort=False).indices.items():
             known = next(report_keys)
             latest = known.merge(
-                financial,
+                aggregates,
                 left_on=["asset_id", "_report", "_available"],
                 right_on=["asset_id", "timestamp", "available_at"],
                 how="inner",

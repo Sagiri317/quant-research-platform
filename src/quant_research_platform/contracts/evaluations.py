@@ -25,7 +25,6 @@ from quant_research_platform.contracts.time import TimeWindow, time_value_isofor
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
-    strict_integer_series,
     strict_timestamp_series,
 )
 
@@ -308,37 +307,6 @@ class EvaluationDiagnostics:
             )
         ):
             raise ValueError("invalid_evaluation_timestamp_range")
-
-
-def strict_non_negative_count_series(
-    values: pd.Series,
-    *,
-    error: str = "invalid_evaluation_observation_counts",
-) -> pd.Series:
-    numeric = strict_integer_series(values, error=error)
-    if numeric.lt(0).any():
-        raise ValueError(error)
-    return numeric
-
-
-def strict_positive_group_series(
-    values: pd.Series,
-    *,
-    error: str = "evaluation_group_out_of_range",
-) -> pd.Series:
-    numeric = strict_non_negative_count_series(values, error=error)
-    if numeric.le(0).any():
-        raise ValueError(error)
-    return numeric
-
-
-def strict_non_negative_count_value(
-    value: object,
-    *,
-    error: str = "invalid_evaluation_diagnostics_count",
-) -> int:
-    series = strict_non_negative_count_series(pd.Series([value]), error=error)
-    return int(series.iloc[0])
 
 
 def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:

@@ -6,10 +6,8 @@ from __future__ import annotations
 
 import math
 import warnings
-from collections.abc import Iterable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -89,21 +87,6 @@ def strict_string_series(
             raise ValueError(error)
         output.append(text)
     return pd.Series(output, index=result.index, dtype="object")
-
-
-def strict_membership_series(
-    values: pd.Series,
-    *,
-    allowed: Iterable[Any],
-    error: str,
-    allow_null: bool = False,
-) -> pd.Series:
-    allowed_set = set(allowed)
-    result = strict_hashable_key_series(values, error=error, allow_null=allow_null)
-    non_null = result.dropna()
-    if not bool(non_null.isin(allowed_set).all()):
-        raise ValueError(error)
-    return result
 
 
 def strict_timestamp_series(

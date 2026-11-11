@@ -21,27 +21,14 @@ from tests.research.evaluation_test_support import (
 )
 
 
-@pytest.mark.parametrize(
-    "offset,dtype,direction",
-    [(0, "Int64", "higher_is_better"), (2**63, "UInt64", "lower_is_better")],
-)
-def test_native_evaluation_keeps_order_ties_and_pair_domain(
-    tmp_path, offset, dtype, direction
-):
+@pytest.mark.parametrize("direction", ["higher_is_better", "lower_is_better"])
+def test_native_evaluation_keeps_order_ties_and_pair_domain(tmp_path, direction):
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": list("abcdefg"),
-            "x": pd.array(
-                [
-                    offset + v if v is not None else None
-                    for v in [0, 1, 1, 2, 3, 4, None]
-                ],
-                dtype=dtype,
-            ),
-            "label": pd.array(
-                [2**53 + v for v in [4, 0, 2, 1, 3, 5, 6]], dtype="int64"
-            ),
+            "x": pd.array([0, 0.1, 0.1, 0.2, 0.3, 0.4, None], dtype="Float64"),
+            "label": [0.04, 0.0, 0.02, 0.01, 0.03, 0.05, 0.06],
             "eligible": True,
             "label_available_at": pd.Timestamp("2020-01-01"),
         }
@@ -119,7 +106,7 @@ def test_native_evaluation_keeps_order_ties_and_pair_domain(
 
 
 def test_quantile_boundary_and_local_invalid_strata_preserve_order():
-    signal = pd.Series([2**63, 2**63 + 1, 2**63 + 2], index=list("abc"), dtype="uint64")
+    signal = pd.Series([0.1, 0.2, 0.3], index=list("abc"))
     weights = build_simple_target_weights(
         signal, eligible=pd.Series(True, index=signal.index), top_quantile=1 / 3
     )
@@ -127,7 +114,7 @@ def test_quantile_boundary_and_local_invalid_strata_preserve_order():
     frame = pd.DataFrame(
         {
             "label": 1.0,
-            "amount": pd.Series([2**53, 2**53 + 1, 2**53 + 2, -1], dtype="int64"),
+            "amount": [1e6, 2e6, 3e6, -1],
         }
     )
     groups, quality = _evaluation_strata(
@@ -138,15 +125,15 @@ def test_quantile_boundary_and_local_invalid_strata_preserve_order():
     assert quality["liquidity_invalid"] == 1
 
 
-def test_native_response_uses_exact_frozen_integer_boundaries(tmp_path):
+def test_native_response_uses_frozen_boundaries_after_direction(tmp_path):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.research.evaluations.engine import (
         training_quantile_cutpoints,
     )
     from quant_research_platform.storage.datasets import write_dataset
 
-    values = pd.Series([2**63 + i for i in range(4)], dtype="uint64")
-    assert training_quantile_cutpoints(values, n_groups=2) == [2**63 + 1]
+    values = pd.Series([0.1, 0.2, 0.3, 0.4])
+    assert training_quantile_cutpoints(values, n_groups=2) == [0.2]
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range("2020-01-01", periods=4, freq="s"),
@@ -180,8 +167,8 @@ def test_native_response_uses_exact_frozen_integer_boundaries(tmp_path):
         ),
     )
     for direction, edge, counts, means in [
-        ("higher_is_better", 2**63 + 1, [2, 2], [1.5, 3.5]),
-        ("lower_is_better", -(2**63 + 1), [3, 1], [3.0, 1.0]),
+        ("higher_is_better", 0.2, [2, 2], [1.5, 3.5]),
+        ("lower_is_better", -0.2, [3, 1], [3.0, 1.0]),
     ]:
         spec = EvaluationSpec(
             evaluation_id="ordinal",

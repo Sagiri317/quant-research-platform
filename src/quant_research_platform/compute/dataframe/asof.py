@@ -1,7 +1,34 @@
 """Point-in-time alignment of explicitly released, versioned observations."""
 
+from collections import deque
+
 import numpy as np
 import pandas as pd
+
+
+def rolling_available_at(clocks, window):
+    """Latest dependency clock in a rolling numerical window, preserving NaT."""
+    clocks = (
+        pd.to_datetime(clocks, utc=True).dt.tz_localize(None).astype("datetime64[ns]")
+    )
+    values = clocks.to_numpy().view("int64")
+    missing = np.isnat(clocks.to_numpy())
+    result = np.full(len(values), np.datetime64("NaT"), dtype="datetime64[ns]")
+    maxima = deque()
+    unknown = 0
+    for i, value in enumerate(values):
+        unknown += missing[i]
+        if i >= window:
+            unknown -= missing[i - window]
+        if not missing[i]:
+            while maxima and values[maxima[-1]] <= value:
+                maxima.pop()
+            maxima.append(i)
+        while maxima and maxima[0] <= i - window:
+            maxima.popleft()
+        if i + 1 >= window and not unknown:
+            result[i] = clocks.iloc[maxima[0]].to_datetime64()
+    return pd.Series(result, index=clocks.index)
 
 
 def _visible_updates(observations, columns, by):
