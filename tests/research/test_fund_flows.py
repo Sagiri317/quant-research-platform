@@ -250,7 +250,10 @@ def test_share_history_keeps_missing_declared_sessions():
     assert result.etf_share_change_5d.iloc[5] == pytest.approx(0.5)
 
 
-def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_older():
+@pytest.mark.parametrize("zero_scope", ("global", "mainland", "restricted"))
+def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_older(
+    zero_scope,
+):
     headers = pd.DataFrame(
         [
             (
@@ -302,6 +305,21 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
         ],
         columns=["report_version_identity", "stock_market", "shares_held"],
     ).assign(stock_code="s", economic_portfolio_id="portfolio")
+    if zero_scope != "global":
+        zero = headers.report_version_identity.eq("h1")
+        headers.loc[zero, "disclosure_scope"] = (
+            "mainland_stock_holdings"
+            if zero_scope == "mainland"
+            else "restricted_stock_holdings"
+        )
+        headers.loc[zero, "stock_disclosure_status"] = (
+            "explicit_no_mainland_stock_reported"
+            if zero_scope == "mainland"
+            else "no_restricted_stock_reported"
+        )
+        headers.loc[zero, "explicit_no_stock"] = pd.NA
+        # A mainland-only zero leaves the fund's foreign positions intact.
+        holdings.loc[len(holdings)] = ["h1", "HK", 777.0, "s", "portfolio"]
     decisions = pd.DataFrame(
         dict(
             market_id="a_share",
@@ -325,10 +343,13 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
     assert result.loc[0, fields].isna().all()
     assert result.loc[1, fields[0]] == pytest.approx(0.15)
     assert result.loc[1, fields[1]] == 1
-    assert result.loc[2, fields[0]] == 0
-    assert result.loc[2, fields[2]] == pytest.approx(-0.15)
-    assert result.loc[3, fields[0]] == 0
-    assert pd.isna(result.loc[3, fields[1]])
+    if zero_scope == "restricted":
+        np.testing.assert_allclose(result.loc[2:, fields[0]], [0.15, 0.99])
+    else:
+        assert result.loc[2, fields[0]] == 0
+        assert result.loc[2, fields[2]] == pytest.approx(-0.15)
+        assert result.loc[3, fields[0]] == 0
+        assert pd.isna(result.loc[3, fields[1]])
 
 
 @pytest.mark.parametrize("zero", [False, True])

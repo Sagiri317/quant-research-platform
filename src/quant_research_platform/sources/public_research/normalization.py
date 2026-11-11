@@ -325,7 +325,7 @@ def accepts(data_id, record):
     }:
         return path.endswith(".csv")
     if data_id == "public_fund_financial_cells":
-        return path.endswith(".csv")
+        return path.endswith((".csv", ".csv.gz"))
     if data_id in {"public_futures_contracts", "public_futures_member_positions"}:
         return path.endswith(".xml")
     if data_id == "public_refinancing_balances":

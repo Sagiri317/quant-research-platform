@@ -144,8 +144,11 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
     )
 
 
-def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
-    path = tmp_path / "cells.csv"
+@pytest.mark.parametrize("suffix", (".csv", ".csv.gz"))
+def test_report_cell_identity_does_not_require_known_economic_portfolio(
+    tmp_path, suffix
+):
+    path = tmp_path / ("cells" + suffix)
     pd.DataFrame(
         [
             dict(
@@ -194,6 +197,7 @@ def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path
     assert frame.asset_id.tolist() == ["report1:balance_sheet:1:2:3"]
     assert frame.economic_portfolio_id.isna().all()
     assert frame.value_observation_date.isna().all()
+    assert frame.value.tolist() == [100]
 
 
 def test_structured_report_date_corrections_keep_comparatives_and_release_clock(

@@ -141,6 +141,27 @@ def share_states(frame, *, session_days=None):
     return work
 
 
+def complete_mainland_stock_reports(headers):
+    """Select complete mainland evidence independently of foreign holdings."""
+    return headers.loc[
+        headers.economic_portfolio_id.notna()
+        & (
+            (
+                headers.disclosure_scope.eq("full_stock_holdings")
+                & headers.stock_disclosure_status.eq("full_stock_table_reconciled")
+            )
+            | (headers.explicit_no_stock.eq("true") & headers.stock_rows.eq(0))
+            | (
+                headers.disclosure_scope.eq("mainland_stock_holdings")
+                & headers.stock_disclosure_status.eq(
+                    "explicit_no_mainland_stock_reported"
+                )
+                & headers.stock_rows.eq(0)
+            )
+        )
+    ]
+
+
 def financial_states(cells):
     work = cells.loc[cells.value_observation_date.eq(cells.report_period_end)].copy()
     work["value"] = work.value.to_numpy(dtype=float, na_value=np.nan)
@@ -651,17 +672,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
     holdings = sources.get("public_fund_holdings")
     ownership = set((*FUNDS[:4], FUNDS[8], FUNDS[9], FUNDS[15]))
     if holdings is not None and usable & ownership:
-        headers = sources["public_fund_holdings_reports"]
-        headers = headers.loc[
-            headers.economic_portfolio_id.notna()
-            & (
-                (
-                    headers.disclosure_scope.eq("full_stock_holdings")
-                    & headers.stock_disclosure_status.eq("full_stock_table_reconciled")
-                )
-                | (headers.explicit_no_stock.eq("true") & headers.stock_rows.eq(0))
-            )
-        ]
+        headers = complete_mainland_stock_reports(
+            sources["public_fund_holdings_reports"]
+        )
         h = holdings.loc[
             holdings.stock_market.eq("CN_MAINLAND")
             & holdings.report_version_identity.isin(headers.report_version_identity)
