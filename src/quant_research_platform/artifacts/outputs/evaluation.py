@@ -15,10 +15,8 @@ from quant_research_platform.artifacts.outputs.evaluation_daily import (
     METRICS_SCHEMA,
     daily_frame,
 )
-from quant_research_platform.artifacts.outputs.evaluation_validation import (
-    EVALUATION_ARTIFACTS,
-)
 from quant_research_platform.artifacts.outputs.manifest import (
+    EVALUATION_ARTIFACTS,
     evaluation_output_metadata,
     output_manifest_payload,
 )
@@ -29,6 +27,10 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_METRICS_COLUMNS,
     EvaluationDiagnostics,
     EvaluationSpec,
+)
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -60,6 +62,17 @@ def write_evaluation_outputs_from_chunks(
     def write(staging):
         _write_evaluation_artifact_chunks(chunks, temp_root=staging, science=science)
         diagnostics, ic_summary, group_spread_summary = summary_factory()
+        if science is not None and "window" in science and diagnostics.min_timestamp:
+            start, stop, closed = time_window_timestamp_interval(
+                TimeWindow(**science["window"])
+            )
+            maximum = pd.Timestamp(diagnostics.max_timestamp)
+            if pd.Timestamp(diagnostics.min_timestamp) < pd.Timestamp(start) or (
+                maximum > pd.Timestamp(stop)
+                if closed
+                else maximum >= pd.Timestamp(stop)
+            ):
+                raise ValueError("evaluation_diagnostics_outside_window")
         if classification_summary is not None:
             science["classification_metrics"] = classification_summary()
         write_parquet(ic_summary, staging / "ic_summary.parquet")

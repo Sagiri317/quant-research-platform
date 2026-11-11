@@ -26,6 +26,10 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    a_share_eligibility,
+    a_share_eligibility_columns,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.risk import (
     prepare_asof_risk_sessions,
@@ -34,10 +38,6 @@ from quant_research_platform.research.datasets.risk import (
 )
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
-)
-from quant_research_platform.research.filtering import (
-    a_share_eligibility,
-    a_share_eligibility_columns,
 )
 from quant_research_platform.research.labels.targets import a_share_model_target
 from quant_research_platform.research.risk import FactorRiskState

@@ -33,7 +33,7 @@
 
 股票截面复用 `research.factors.statistics.factor_statistics` 的 `evaluation_inputs` 与 `window`，读取已发布EVAL的每日指标，发布新的STAT产物。它不重新读取因子面板、计算因子或重新划分每日多空组，也不能从全区间平均IC反推子区间。窗口必须在原评估范围内；原信号时点、筛选方式、标签及成熟截止不变。因子或检验口径已经修正时，先使用修正后的EVAL。
 
-[近期检验配置](../configs/factor-analysis/recent-statistics.json)选择2022年起至2026年10月最后一个交易日，复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方替换 `evaluation_inputs` 与新 `output` 路径即可；其他子区间直接修改 `window`，不新增统计器、配置继承或调度层。
+[日表统计配置](../configs/statistics-stratified-a-share.json)复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方明确 `evaluation_inputs`、新 `output` 路径及 `window`；近期检验使用2022-01-01至2026-10-30，其他子区间直接修改窗口，不另存按日期区分的模板。
 
 `analyses=["stratified_ic"]` 复用已有全体、long、short的IC和RankIC，输出均值、有效日数、配对观测数及可定义时的HAC推断与BY校正；原评估已有额外分层时同时保留。缺失导致推断未定义时，仍保留独立可用的均值和样本数。多重检验范围是本次明确输入的原生评估，不冒称覆盖其他研究。
 
@@ -50,7 +50,10 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.storage.datasets import read_dataset
 
-config = json.loads(Path("configs/factor-analysis/recent-statistics.json").read_text())
+config = json.loads(Path("configs/statistics-stratified-a-share.json").read_text())
+config["evaluation_inputs"] = ["results/factor-evaluation"]
+config["output"] = "results/factor-recent-2022-202610"
+config["window"] = {"start": "2022-01-01", "end": "2026-10-30"}
 calendar = read_dataset(
     "data/interim/csmar/trading_calendar",
     columns=["timestamp", "calendar_date", "source_market_type", "is_trading_day"],

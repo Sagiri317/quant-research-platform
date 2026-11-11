@@ -67,7 +67,7 @@ def test_csv_acceptance_verifies_consumed_digest_without_draining_on_close(
     assert read_manifest(root / "response.metadata.json") == manifest
 
 
-def test_raw_cell_codec_preserves_types_and_canonical_bytes():
+def test_raw_cell_codec_preserves_types_and_readable_json():
     from quant_research_platform.storage.raw_snapshots import (
         decode_raw_cell,
         encode_raw_cell,
@@ -88,9 +88,11 @@ def test_raw_cell_codec_preserves_types_and_canonical_bytes():
         decoded = decode_raw_cell(encoded)
         assert type(decoded) is type(value)
         assert decoded == value
-    for invalid in (" 1", "1 ", "1e0", '"\\u4e2d"', '{"other":1}'):
-        with pytest.raises(ValueError):
-            decode_raw_cell(invalid)
+    for text, expected in ((" 1", 1), ("1 ", 1), ("1e0", 1.0), ('"\\u4e2d"', "中")):
+        actual = decode_raw_cell(text)
+        assert actual == expected and type(actual) is type(expected)
+    with pytest.raises(ValueError, match="raw_csv_value_type_invalid"):
+        decode_raw_cell('{"other":1}')
     value = "x" * (1024 * 1024 + 1)
     assert decode_raw_cell(encode_raw_cell(value)) == value
     nested = b"bytes"
@@ -140,3 +142,20 @@ def test_raw_snapshot_long_cell_and_record_roundtrip(tmp_path):
 
     write_csv_snapshot(root, columns=("value",), rows=((value,),), metadata={})
     assert read(root) == [(value,)]
+
+
+def test_source_byte_audit_accepts_readable_serialization_with_matching_evidence(
+    tmp_path,
+):
+    import hashlib
+
+    root = tmp_path / "readable"
+    write_csv_snapshot(root, columns=("value",), rows=((1.0,),), metadata={})
+    payload = b"value\r\n1e0"
+    (root / "response.csv").write_bytes(payload)
+    manifest = read_manifest(root / "response.metadata.json")
+    manifest.update(sha256=hashlib.sha256(payload).hexdigest(), byte_count=len(payload))
+    assert list(iter_csv_snapshot(root, expected_manifest=manifest)) == [(1.0,)]
+    manifest["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="raw_csv_content_invalid"):
+        list(iter_csv_snapshot(root, expected_manifest=manifest))

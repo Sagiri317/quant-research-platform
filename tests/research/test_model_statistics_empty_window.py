@@ -180,27 +180,19 @@ def test_prediction_only_skips_unrequested_comparison_and_domain_work(
     )
 
     def unexpected(*args, **kwargs):
-        raise AssertionError("unrequested common rank, domain hash, or comparison")
+        raise AssertionError("unrequested common rank or comparison")
 
     for name in (
         "_common_model_rank_ic",
-        "canonical_json_hash",
         "_model_comparison",
         "_paired_group_rankic",
     ):
         monkeypatch.setattr(model_stats, name, unexpected)
-    original = pd.DataFrame.from_records
-
-    def records(*args, **kwargs):
-        assert "asset_coverage_id" not in kwargs.get("columns", ())
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(pd.DataFrame, "from_records", records)
     artifact = read_statistics_artifact(model_stats.model_statistics(config))
     assert set(artifact._members) == {"prediction_diagnostics.parquet"}
 
 
-def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
+def test_requested_comparison_keeps_common_rank_without_unrequested_losses(
     tmp_path, monkeypatch, saved_candidates
 ):
     config = _config(
@@ -221,11 +213,7 @@ def test_requested_comparison_keeps_common_rank_without_unrequested_loss_hashes(
         calls.append(1)
         return original(*args, **kwargs)
 
-    def unexpected(*args, **kwargs):
-        raise AssertionError("unrequested loss domain hash")
-
     monkeypatch.setattr(model_stats, "_common_model_rank_ic", common)
-    monkeypatch.setattr(model_stats, "canonical_json_hash", unexpected)
     artifact = read_statistics_artifact(model_stats.model_statistics(config))
     assert len(calls) == 3
     assert set(artifact._members) == {

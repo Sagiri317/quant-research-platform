@@ -407,7 +407,6 @@ def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
             dict(
                 timestamp=date,
                 family_id=family,
-                asset_coverage_id="a" * 64,
                 observation_count=100,
                 sample_role="test",
                 status="DEFINED",

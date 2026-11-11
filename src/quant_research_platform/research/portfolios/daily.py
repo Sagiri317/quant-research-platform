@@ -50,13 +50,13 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.markets.implementations.a_share.execution import (
     stock_order_limits,
 )
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    A_SHARE_ELIGIBILITY_FACTS,
+    a_share_eligibility,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
-)
-from quant_research_platform.research.filtering import (
-    A_SHARE_ELIGIBILITY_FACTS,
-    a_share_eligibility,
 )
 from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,

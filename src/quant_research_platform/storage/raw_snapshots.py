@@ -55,11 +55,8 @@ def encode_raw_cell(value: object) -> str:
     return _CELL_ENCODER.encode(native(value))
 
 
-def decode_raw_cell(text: str, *, require_canonical: bool = True) -> object:
-    value = _CELL_DECODER.decode(text)
-    if require_canonical and encode_raw_cell(value) != text:
-        raise ValueError("raw_csv_cell_not_canonical")
-    return value
+def decode_raw_cell(text: str) -> object:
+    return _CELL_DECODER.decode(text)
 
 
 def _record(values: Iterable[str]) -> bytes:
@@ -129,7 +126,7 @@ def iter_csv_snapshot(
     verify_bytes: bool = True,
     content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[object, ...]]:
-    """Decode typed rows, with canonical byte verification for source acceptance."""
+    """Decode typed rows and optionally verify consumed bytes against the source."""
     root = Path(root)
     if verify_bytes and set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
@@ -164,16 +161,12 @@ def iter_csv_snapshot(
         def records() -> Iterator[list[str]]:
             csv.field_size_limit(sys.maxsize)
             while line := handle.readline():
-                if verify_bytes and not line.endswith(b"\n"):
-                    raise ValueError("raw_csv_record_invalid")
                 if digest is not None:
                     digest.update(line)
                 try:
                     values = next(csv.reader([line.decode("utf-8")], strict=True))
                 except (csv.Error, UnicodeError) as exc:
                     raise ValueError("raw_csv_record_invalid") from exc
-                if verify_bytes and _record(values) != line:
-                    raise ValueError("raw_csv_record_not_canonical")
                 yield values
 
         stream = records()
@@ -185,10 +178,7 @@ def iter_csv_snapshot(
             for row in stream:
                 if len(row) != len(manifest["columns"]):
                     raise ValueError("raw_csv_row_width_invalid")
-                value = tuple(
-                    decode_raw_cell(cell, require_canonical=verify_bytes)
-                    for cell in row
-                )
+                value = tuple(decode_raw_cell(cell) for cell in row)
                 count += 1
                 yield value
 

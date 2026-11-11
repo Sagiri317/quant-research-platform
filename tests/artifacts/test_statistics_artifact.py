@@ -86,7 +86,6 @@ def tables(request):
         white_undefined_period_count=0,
         common_date=1,
         common_observation_count=32,
-        asset_coverage_id="d" * 64,
         block_size=20,
         repetitions=10000,
         alpha=0.05,
@@ -317,18 +316,6 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata)
     with artifact.table("model_group_comparison.parquet") as frame:
         assert frame.observation_count.tolist() == [count]
         assert frame.calendar_count.tolist() == [count]
-
-
-@pytest.mark.parametrize("value", [None, "", "not-a-domain", "A" * 64])
-def test_model_asset_domain_is_required_at_write(tmp_path, tables, metadata, value):
-    tables["model_losses"].loc[0, "asset_coverage_id"] = value
-    _assert_rejected_at_write(
-        tmp_path,
-        tables,
-        metadata,
-        "model_losses.parquet",
-        error="statistics_model_loss_invalid",
-    )
 
 
 @pytest.mark.parametrize("tables", ["factor"], indirect=True)
@@ -694,7 +681,6 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
                 reason=np.where(values.notna(), "", "cross_sectional_rankic_undefined"),
                 common_date=values.notna().astype(int).to_numpy(),
                 common_observation_count=3,
-                asset_coverage_id="d" * 64,
             )
         )
         for group, values in ranks.items()
@@ -1003,7 +989,6 @@ def test_paired_group_fdr_methods_reach_native_artifact(
             "family_id": "family",
             "loss": [0.1, 0.2, -0.1, 0.3, 0.1, -0.2, 0.05, 0.1],
             "status": "DEFINED",
-            "asset_coverage_id": "a" * 64,
             "observation_count": 3,
             "sample_role": "test",
         }

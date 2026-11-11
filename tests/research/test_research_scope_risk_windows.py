@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.filtering import (
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
     a_share_eligibility,
     a_share_eligibility_columns,
 )

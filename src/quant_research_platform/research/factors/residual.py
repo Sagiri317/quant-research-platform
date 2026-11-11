@@ -7,7 +7,9 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import leave_one_out_mean
 from quant_research_platform.compute.dataframe.history import HistoryWindow
-from quant_research_platform.research.filtering import a_share_eligibility
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    a_share_eligibility,
+)
 from quant_research_platform.research.risk import (
     FactorExposureSession,
     FactorRiskState,

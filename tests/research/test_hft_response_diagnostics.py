@@ -317,6 +317,24 @@ def test_missing_reference_bins_do_not_hide_valid_correlation(tmp_path):
     assert tables["metrics"].ic.notna().all()
 
 
+def test_daily_group_return_analysis_keeps_only_requested_own_daily_means(tmp_path):
+    config = _native_config(tmp_path)
+    config["response_diagnostics"]["analysis"] = "daily_group_returns"
+    manifest, tables = read_evaluation_outputs(
+        evaluate(config), tables=("response_groups",)
+    )
+    assert set(manifest["metadata"]["optional_member_rows"]) == {"response_groups"}
+    assert "response_metrics.parquet" not in manifest["files"]
+    groups = tables["response_groups"]
+    assert len(groups) == 8
+    assert groups.period.eq("daily").all() and groups.sample_scope.eq("own").all()
+    assert groups.median_return_bp.isna().all()
+    assert groups.median_reason.eq("not_requested").all()
+    first = _rows(groups, label="r100", timestamp=pd.Timestamp("2026-01-02T00:00:03"))
+    assert first.n_obs.tolist() == [2, 2]
+    assert first.mean_return_bp.tolist() == pytest.approx([1.5, 3.5])
+
+
 @pytest.mark.parametrize("change", ["duplicate_edges", "bool_edge", "unit"])
 def test_bad_response_request_is_rejected_before_publication(tmp_path, change):
     config = _native_config(tmp_path)

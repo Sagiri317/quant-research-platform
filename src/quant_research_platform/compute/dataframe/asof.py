@@ -11,8 +11,9 @@ def rolling_available_at(clocks, window):
     clocks = (
         pd.to_datetime(clocks, utc=True).dt.tz_localize(None).astype("datetime64[ns]")
     )
-    values = clocks.to_numpy().view("int64")
-    missing = np.isnat(clocks.to_numpy())
+    timestamps = clocks.to_numpy()
+    values = timestamps.view("int64")
+    missing = np.isnat(timestamps)
     result = np.full(len(values), np.datetime64("NaT"), dtype="datetime64[ns]")
     maxima = deque()
     unknown = 0
@@ -27,7 +28,7 @@ def rolling_available_at(clocks, window):
         while maxima and maxima[0] <= i - window:
             maxima.popleft()
         if i + 1 >= window and not unknown:
-            result[i] = clocks.iloc[maxima[0]].to_datetime64()
+            result[i] = timestamps[maxima[0]]
     return pd.Series(result, index=clocks.index)
 
 
@@ -115,3 +116,97 @@ def iter_latest_report_keys(observations, cutoffs, *, entity):
         frame["_available"] = pd.to_datetime(frame._available).astype("datetime64[ns]")
         frame["timestamp"] = cutoff
         yield frame
+
+
+def observation_versions(frame, *, keys, columns):
+    """Resolve simultaneous source conflicts, preserving real publication changes.
+
+    Equal later copies do not postpone the first known value. Unknown release
+    clocks remain unavailable and cannot revise a known observation.
+    """
+    coordinates = [*keys, "available_at"]
+    grouped = frame.groupby(coordinates, sort=False, dropna=False)[list(columns)]
+    versions = grouped.first().where(grouped.nunique(dropna=False).le(1)).reset_index()
+    versions = versions.sort_values([*keys, "available_at"], kind="stable")
+    previous = versions.groupby(list(keys), sort=False, dropna=False)[
+        list(columns)
+    ].shift()
+    same = (
+        versions[list(columns)].eq(previous)
+        | (versions[list(columns)].isna() & previous.isna())
+    ).all(axis=1)
+    first = ~versions.duplicated(list(keys))
+    return versions.loc[first | (~same & versions.available_at.notna())].reset_index(
+        drop=True
+    )
+
+
+def revision_snapshots(inputs):
+    """Yield the earliest observations once, then only genuine revision snapshots.
+
+    Future first observations retain their own release clocks. Numerical callers
+    still gate every dependency and decide the finite recalculation window.
+    """
+    snapshots, changes = {}, []
+    for name, (frame, keys, columns) in inputs.items():
+        versions = observation_versions(frame, keys=keys, columns=columns)
+        first = ~versions.duplicated(list(keys))
+        snapshots[name] = versions.loc[first].set_index(list(keys))
+        revised = versions.loc[~first].copy()
+        revised["_input"] = name
+        changes.append(revised)
+    yield None, {name: frame.reset_index() for name, frame in snapshots.items()}, {}
+    revisions = pd.concat(changes, ignore_index=True) if changes else pd.DataFrame()
+    if revisions.empty:
+        return
+    for released, batch in revisions.groupby("available_at", sort=True):
+        updated = {}
+        for name, block in batch.groupby("_input", sort=False):
+            keys, columns = inputs[name][1:]
+            rows = block.loc[:, [*keys, "available_at", *columns]].set_index(list(keys))
+            snapshots[name].loc[rows.index, rows.columns] = rows
+            updated[name] = rows.reset_index()
+        yield (
+            released,
+            {name: frame.reset_index() for name, frame in snapshots.items()},
+            updated,
+        )
+
+
+def combine_derived_versions(versions, *, columns, keys=("asset_id", "timestamp")):
+    """Publish scalar dependency clocks, replacing computed ties at the producer."""
+    pieces = []
+    for column in columns:
+        batches = []
+        clock = f"{column}_available_at"
+        prior_clocks = None
+        for released, frame in versions:
+            values = frame.loc[:, [*keys, column]].copy()
+            values[clock] = frame.get(clock, frame.available_at)
+            if released is not None:
+                previous = prior_clocks.reindex(
+                    pd.MultiIndex.from_frame(values[list(keys)])
+                ).set_axis(values.index)
+                withdrawn = values[clock].isna() & previous.notna()
+                values.loc[withdrawn, column] = np.nan
+                values[clock] = values[clock].fillna(previous)
+                known = values[clock].notna()
+                values.loc[known, clock] = values.loc[known, clock].clip(lower=released)
+            batches.append(values)
+            clocks = values.set_index(list(keys))[clock]
+            prior_clocks = (
+                clocks
+                if prior_clocks is None
+                else pd.concat([prior_clocks, clocks]).loc[
+                    lambda x: ~x.index.duplicated(keep="last")
+                ]
+            )
+        values = pd.concat(batches, ignore_index=True)
+        values = values.drop_duplicates([*keys, clock], keep="last")
+        values["_release"] = values[clock]
+        pieces.append(values.set_index([*keys, "_release"]))
+    result = pd.concat(pieces, axis=1).reset_index()
+    result["available_at"] = result.pop("_release")
+    return result.sort_values([*keys, "available_at"], kind="stable").reset_index(
+        drop=True
+    )

@@ -7,12 +7,8 @@ import json
 import math
 import struct
 from collections.abc import Mapping
-from datetime import date, datetime
-from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, NoReturn
-
-import pandas as pd
 
 _LENGTH_BYTES = 8
 _JSON_INDENT = 2
@@ -87,7 +83,7 @@ def canonical_json_hash(value: object) -> str:
 
 
 def canonical_identity_bytes(value: object) -> bytes:
-    """Encode one typed, collision-framed canonical identity."""
+    """Encode JSON values and frozen tuples without conflating scalar types."""
     active: set[int] = set()
 
     def encode(item: object) -> bytes:
@@ -103,28 +99,6 @@ def canonical_identity_bytes(value: object) -> bytes:
             return _frame(b"r", struct.pack(">d", 0.0 if item == 0.0 else item))
         if isinstance(item, str):
             return _frame(b"s", _utf8_bytes(str(item)))
-        if type(item) is bytes:
-            return _frame(b"b", item)
-        if item is pd.NaT:
-            raise ValueError("canonical_json_invalid_timestamp")
-        if type(item) is Decimal:
-            if not item.is_finite():
-                raise ValueError("canonical_json_nonfinite_number")
-            parts = item.as_tuple()
-            sign = parts.sign if any(parts.digits) else 0
-            return _frame(
-                b"d",
-                bytes((sign,))
-                + _uint64(len(parts.digits))
-                + bytes(parts.digits)
-                + _frame(b"e", str(parts.exponent).encode("ascii")),
-            )
-        if type(item) is pd.Timestamp:
-            return _frame(b"p", _timestamp_payload(item))
-        if type(item) is datetime:
-            return _frame(b"z", _datetime_payload(item))
-        if type(item) is date:
-            return _frame(b"a", _date_payload(item))
         if type(item) not in {list, tuple, dict}:
             raise ValueError("canonical_json_unsupported_value")
         identity = id(item)
@@ -264,73 +238,6 @@ def _frame(tag: bytes, payload: bytes) -> bytes:
 
 def _uint64(value: int) -> bytes:
     return value.to_bytes(_LENGTH_BYTES, byteorder="big", signed=False)
-
-
-def _timestamp_payload(value: pd.Timestamp) -> bytes:
-    unit = value.unit
-    integer_value = int(value.asm8.view("i8"))
-    return b"".join(
-        (
-            _frame(b"q", unit.encode("ascii")),
-            _frame(b"v", str(integer_value).encode("ascii")),
-            _frame(b"o", _timezone_payload(value.tzinfo, value)),
-        )
-    )
-
-
-def _datetime_payload(value: datetime) -> bytes:
-    components = (
-        value.year,
-        value.month,
-        value.day,
-        value.hour,
-        value.minute,
-        value.second,
-        value.microsecond,
-        value.fold,
-    )
-    return b"".join(
-        (
-            _frame(
-                b"c",
-                b",".join(str(item).encode("ascii") for item in components),
-            ),
-            _frame(b"o", _timezone_payload(value.tzinfo, value)),
-        )
-    )
-
-
-def _date_payload(value: date) -> bytes:
-    return b",".join(
-        str(item).encode("ascii") for item in (value.year, value.month, value.day)
-    )
-
-
-def _timezone_payload(tzinfo: object | None, value: datetime) -> bytes:
-    if tzinfo is None:
-        return b""
-    timezone_type = type(tzinfo)
-    offset = value.utcoffset()
-    offset_microseconds = (
-        None if offset is None else int(offset.total_seconds() * 1_000_000)
-    )
-    name = value.tzname()
-    return b"".join(
-        (
-            _frame(b"j", _utf8_bytes(timezone_type.__module__)),
-            _frame(b"h", _utf8_bytes(timezone_type.__qualname__)),
-            _frame(b"x", _utf8_bytes(str(tzinfo))),
-            _frame(
-                b"w",
-                (
-                    b""
-                    if offset_microseconds is None
-                    else str(offset_microseconds).encode("ascii")
-                ),
-            ),
-            _frame(b"y", b"" if name is None else _utf8_bytes(name)),
-        )
-    )
 
 
 def _utf8_bytes(value: str) -> bytes:

@@ -170,7 +170,7 @@ def read_choice_response(
 
 
 def _validate_response_metadata(value: dict[str, object]) -> None:
-    if set(value) != set(_RESPONSE_FIELDS):
+    if not set(_RESPONSE_FIELDS) <= set(value):
         raise ValueError("choice_response_fields_invalid")
     for name in ("ErrorCode", "RequestID", "SerialID"):
         if type(value[name]) is not int:

@@ -419,6 +419,8 @@ def evaluate(config):
                 "stratum_domains": {},
                 "optional_member_rows": {}
                 if response is None
+                else {"response_groups": 0}
+                if response.get("analysis") == "daily_group_returns"
                 else {"response_metrics": 0, "response_groups": 0},
                 **({"response_diagnostics": response} if response is not None else {}),
                 "common_rule": "mask_only_no_retransform",

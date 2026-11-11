@@ -181,7 +181,6 @@ class EvaluationSpec:
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = DEFAULT_N_GROUPS
     top_quantile: float | None = None
-    run_type: str = "evaluation"
 
     def __post_init__(self) -> None:
         if (
@@ -236,8 +235,6 @@ class EvaluationSpec:
             MappingProxyType(dict(sorted(availability.items()))),
         )
         _validate_signal_label_separation(self.signals, self.label_columns)
-        if type(self.run_type) is not str or not self.run_type:
-            raise ValueError("evaluation_run_type_required")
 
 
 @dataclass(frozen=True)
@@ -362,9 +359,12 @@ def validate_response_diagnostics(value, *, signals=None):
     if (
         type(value) is not dict
         or "cutpoints" not in value
-        or set(value) - {"cutpoints", "reference_window"}
+        or set(value) - {"cutpoints", "reference_window", "analysis"}
     ):
         raise ValueError("evaluation_response_config_invalid")
+    analysis = value.get("analysis", "response")
+    if type(analysis) is not str or analysis not in {"response", "daily_group_returns"}:
+        raise ValueError("evaluation_response_analysis_invalid")
     if "reference_window" in value:
         TimeWindow(**value["reference_window"])
     cuts = value["cutpoints"]

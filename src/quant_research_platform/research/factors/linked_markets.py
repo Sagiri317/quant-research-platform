@@ -4,7 +4,9 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.asof import (
+    combine_derived_versions,
     latest_observations,
+    revision_snapshots,
     rolling_available_at,
 )
 from quant_research_platform.contracts.factors import FactorDefinition
@@ -180,6 +182,44 @@ def _quote_session_rows(frame, sessions):
 
 
 def futures_states(futures, contracts, index_prices, *, product="IF"):
+    """Keep each published quote/contract version out of earlier decisions."""
+    inputs = {
+        "futures": (
+            futures.loc[futures["product"].eq(product)],
+            ("asset_id", "timestamp"),
+            ("close", "volume", "open_interest"),
+        )
+    }
+    if contracts is not None:
+        fields = (
+            ("expiry_date", "open_date")
+            if "open_date" in contracts
+            else ("expiry_date",)
+        )
+        inputs["contracts"] = (
+            contracts.loc[contracts["product"].eq(product)],
+            ("asset_id", "timestamp"),
+            fields,
+        )
+    if index_prices is not None and "available_at" in index_prices:
+        inputs["index"] = (index_prices, ("source_asset_id", "timestamp"), ("close",))
+    versions = []
+    for released, snapshots, _updated in revision_snapshots(inputs):
+        states = _futures_states(
+            snapshots["futures"].assign(product=product),
+            snapshots["contracts"].assign(product=product)
+            if "contracts" in snapshots
+            else contracts,
+            snapshots.get("index", index_prices),
+            product=product,
+        )
+        versions.append((released, states))
+    if len(versions) == 1:
+        return versions[0][1]
+    return combine_derived_versions(versions, columns=FUTURES[:9])
+
+
+def _futures_states(futures, contracts, index_prices, *, product):
     index_id = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}[product]
     f = _canonical(
         futures.loc[futures["product"].eq(product)],
@@ -329,6 +369,94 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
         states[f"index_future_oi_change_{w}d_available_at"] = pd.concat(
             [states.available_at, states.available_at.shift(w)], axis=1
         ).max(axis=1, skipna=False)
+    return states
+
+
+def foreign_price_states(prices):
+    """Derive visible foreign returns before any historical beta alignment."""
+    versions = []
+    for released, snapshots, _updated in revision_snapshots(
+        {"prices": (prices, ("asset_id", "timestamp"), ("adjusted_close",))}
+    ):
+        versions.append((released, _foreign_price_states(snapshots["prices"])))
+    if len(versions) == 1:
+        return versions[0][1]
+    return combine_derived_versions(
+        versions, columns=(US[3], US[4], "us_relative_sector_shock")
+    )
+
+
+def _foreign_price_states(raw):
+    states = _quote_session_rows(
+        raw, pd.DatetimeIndex(raw.timestamp.unique()).sort_values()
+    )
+    prices = states.groupby("asset_id", sort=False).adjusted_close
+    states[US[3]] = states.adjusted_close / prices.shift() - 1
+    states[US[4]] = states.adjusted_close / prices.shift(5) - 1
+    for name, width in ((US[3], 1), (US[4], 5)):
+        states[f"{name}_available_at"] = pd.concat(
+            [
+                states.available_at,
+                states.groupby("asset_id", sort=False).available_at.shift(width),
+            ],
+            axis=1,
+        ).max(axis=1, skipna=False)
+    spy = states.loc[
+        states.asset_id.eq("SPY"), ["timestamp", US[3], f"{US[3]}_available_at"]
+    ].rename(columns={US[3]: "_market", f"{US[3]}_available_at": "_market_available"})
+    states = states.merge(spy, on="timestamp", how="left", validate="many_to_one")
+    states["us_relative_sector_shock"] = states[US[3]] - states._market
+    states["us_relative_sector_shock_available_at"] = states[
+        [f"{US[3]}_available_at", "_market_available"]
+    ].max(axis=1, skipna=False)
+    return states
+
+
+def short_volume_states(volumes):
+    """Revise each venue's observations before aggregating trading activity."""
+    versions = []
+    for released, snapshots, _updated in revision_snapshots(
+        {
+            "volumes": (
+                volumes,
+                ("asset_id", "timestamp"),
+                ("short_volume", "total_volume"),
+            )
+        }
+    ):
+        versions.append((released, _short_volume_states(snapshots["volumes"])))
+    if len(versions) == 1:
+        return versions[0][1]
+    return combine_derived_versions(versions, columns=US[:3])
+
+
+def _short_volume_states(raw):
+    raw = raw.copy()
+    raw["asset_id"] = raw.asset_id.str.split(":").str[0]
+    grouped = raw.groupby(["asset_id", "timestamp"], sort=False)
+    volumes = grouped[["short_volume", "total_volume"]]
+    states = volumes.sum(min_count=1).where(volumes.count().eq(grouped.size(), axis=0))
+    states["available_at"] = grouped.available_at.max().where(
+        grouped.available_at.count().eq(grouped.size())
+    )
+    states = states.reset_index().sort_values(["asset_id", "timestamp"], kind="stable")
+    states[US[0]] = states.short_volume / states.total_volume.where(
+        states.total_volume > 0
+    )
+    states[US[1]] = states.groupby("asset_id", sort=False)[US[0]].diff(5)
+    states[f"{US[1]}_available_at"] = pd.concat(
+        [
+            states.available_at,
+            states.groupby("asset_id", sort=False).available_at.shift(5),
+        ],
+        axis=1,
+    ).max(axis=1, skipna=False)
+    states[US[2]] = states.groupby("asset_id", sort=False)[US[0]].transform(
+        lambda s: s.rolling(756, min_periods=756).rank(pct=True)
+    )
+    states[f"{US[2]}_available_at"] = states.groupby(
+        "asset_id", sort=False
+    ).available_at.transform(lambda s: rolling_available_at(s, 756))
     return states
 
 
@@ -578,67 +706,14 @@ def calculate(decisions, sources, *, columns, parameters=None):
                             (contribution / contribution.sum()) ** 2
                         )
     if usable & set(US[:3]):
-        raw = sources["public_finra_short_volume"].copy()
-        raw["asset_id"] = raw.asset_id.str.split(":").str[0]
-        grouped = raw.groupby(["asset_id", "timestamp"], sort=False)
-        volumes = grouped[["short_volume", "total_volume"]]
-        states = volumes.sum(min_count=1).where(
-            volumes.count().eq(grouped.size(), axis=0)
-        )
-        states["available_at"] = grouped.available_at.max().where(
-            grouped.available_at.count().eq(grouped.size())
-        )
-        states = states.reset_index().sort_values(
-            ["asset_id", "timestamp"], kind="stable"
-        )
-        states[US[0]] = states.short_volume / states.total_volume.where(
-            states.total_volume > 0
-        )
-        states[US[1]] = states.groupby("asset_id", sort=False)[US[0]].diff(5)
-        states[f"{US[1]}_available_at"] = pd.concat(
-            [
-                states.available_at,
-                states.groupby("asset_id", sort=False).available_at.shift(5),
-            ],
-            axis=1,
-        ).max(axis=1, skipna=False)
-        states[US[2]] = states.groupby("asset_id", sort=False)[US[0]].transform(
-            lambda s: s.rolling(756, min_periods=756).rank(pct=True)
-        )
-        states[f"{US[2]}_available_at"] = states.groupby(
-            "asset_id", sort=False
-        ).available_at.transform(lambda s: rolling_available_at(s, 756))
+        states = short_volume_states(sources["public_finra_short_volume"])
         fields = tuple(usable & set(US[:3]))
         benchmark = parameters.get("us_activity_asset", "SPY")
         result[list(fields)] = _align(
             states, work, fields, ids=np.repeat(benchmark, len(work))
         )[list(fields)].to_numpy()
     if usable & set(US[3:]):
-        raw = _canonical(sources["public_etf_prices"], ("adjusted_close",))
-        states = _quote_session_rows(
-            raw, pd.DatetimeIndex(raw.timestamp.unique()).sort_values()
-        )
-        prices = states.groupby("asset_id", sort=False).adjusted_close
-        states[US[3]] = states.adjusted_close / prices.shift() - 1
-        states[US[4]] = states.adjusted_close / prices.shift(5) - 1
-        for name, width in ((US[3], 1), (US[4], 5)):
-            states[f"{name}_available_at"] = pd.concat(
-                [
-                    states.available_at,
-                    states.groupby("asset_id", sort=False).available_at.shift(width),
-                ],
-                axis=1,
-            ).max(axis=1, skipna=False)
-        spy = states.loc[
-            states.asset_id.eq("SPY"), ["timestamp", US[3], f"{US[3]}_available_at"]
-        ].rename(
-            columns={US[3]: "_market", f"{US[3]}_available_at": "_market_available"}
-        )
-        states = states.merge(spy, on="timestamp", how="left", validate="many_to_one")
-        states["us_relative_sector_shock"] = states[US[3]] - states._market
-        states["us_relative_sector_shock_available_at"] = states[
-            [f"{US[3]}_available_at", "_market_available"]
-        ].max(axis=1, skipna=False)
+        states = foreign_price_states(sources["public_etf_prices"])
         mapping = parameters.get("industry_etfs", {})
         ids = (
             (

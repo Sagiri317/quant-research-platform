@@ -218,7 +218,6 @@ _ARROW_SCHEMAS = {
             pa.field("reason", pa.string()),
             pa.field("common_date", pa.int64()),
             pa.field("common_observation_count", pa.int64()),
-            pa.field("asset_coverage_id", pa.string()),
         ]
     ),
     "model_comparison.parquet": pa.schema(
@@ -1091,11 +1090,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, metadata) -> pd.DataFr
         and result.duplicated(["timestamp", "family_id"]).any()
     ):
         raise ValueError("statistics_table_duplicate_keys")
-    if (
-        member == "model_losses.parquet"
-        and not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
-    ):
-        raise ValueError("statistics_model_loss_invalid")
     if member in _COMPARISON_MEMBERS:
         if (
             not result.reference_kind.isin(("benchmark", "control")).all()

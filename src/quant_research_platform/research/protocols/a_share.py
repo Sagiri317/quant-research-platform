@@ -22,6 +22,9 @@ from quant_research_platform.contracts.risk import (
     RISK_STYLE_COLUMNS as RISK_STYLE_COLUMNS,
 )
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
+from quant_research_platform.markets.implementations.a_share.stock_pool import (
+    A_SHARE_ELIGIBILITY_FACTS,
+)
 from quant_research_platform.research.factors.expectations.definitions import (
     ALL_EXPECTATIONS_FACTORS,
     expectations_factor_definitions,
@@ -37,7 +40,6 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     price_volume_factor_definitions,
 )
 from quant_research_platform.research.factors.residual import RESIDUAL_FACTOR_WINDOWS
-from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
     forward_return_label_column,

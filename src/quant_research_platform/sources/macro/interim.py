@@ -1,5 +1,6 @@
 """Normalize macro vintages with explicit historical publication assumptions."""
 
+import csv
 import hashlib
 import io
 import json
@@ -100,23 +101,33 @@ def _frame(name, values, dates, *, record, timezone, vintage=None, end_dates=Non
     return output
 
 
+def _read_selected_csv(source, required, *, error, **options):
+    """Project consumed fields without letting pandas rename ambiguous headers."""
+    with io.TextIOWrapper(source, encoding="utf-8-sig", newline="") as text:
+        header = next(csv.reader(text), ())
+        if any(header.count(column) != 1 for column in required):
+            raise ValueError(error)
+        text.seek(0)
+        return pd.read_csv(text, usecols=list(required), **options)
+
+
 def normalize_alfred(payload, name, record):
     """Retain each new or revised value at its archive vintage's conservative cutoff."""
     series = SERIES[name]
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        data = pd.read_csv(
-            archive.open("obs._by_real-time_period.csv"),
-            na_values=["."],
-            dtype={"realtime_end_date": "str"},
-        )
     required = {
         "period_start_date",
         series.code,
         "realtime_start_date",
         "realtime_end_date",
     }
-    if set(data) != required:
-        raise ValueError("alfred_observation_columns_invalid")
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        data = _read_selected_csv(
+            archive.open("obs._by_real-time_period.csv"),
+            required,
+            error="alfred_observation_columns_invalid",
+            na_values=["."],
+            dtype={"realtime_end_date": "str"},
+        )
     return _frame(
         name,
         data[series.code],
@@ -146,20 +157,13 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             )
         ]
     if source == "chinabond":
-        data = pd.read_csv(io.BytesIO(payload), na_values=["--"])
-        if tuple(data.columns) != (
-            "曲线名称",
-            "日期",
-            "3月",
-            "6月",
-            "1年",
-            "3年",
-            "5年",
-            "7年",
-            "10年",
-            "30年",
-        ):
-            raise ValueError("chinabond_structured_columns_invalid")
+        tenors = {name: name.rsplit("_", 1)[1].replace("y", "年") for name in names}
+        data = _read_selected_csv(
+            io.BytesIO(payload),
+            {"曲线名称", "日期", *tenors.values()},
+            error="chinabond_structured_columns_invalid",
+            na_values=["--"],
+        )
         frames = []
         for name in names:
             curve = (
@@ -171,7 +175,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             frames.append(
                 _frame(
                     name,
-                    selected[name.rsplit("_", 1)[1].replace("y", "年")],
+                    selected[tenors[name]],
                     selected["日期"],
                     record=record,
                     timezone="Asia/Shanghai",

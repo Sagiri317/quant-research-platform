@@ -1091,6 +1091,7 @@ def _response_tables(frame, *, spec, config, dates=None):
     def median_bp(values):
         return finite(np.median(values) * 10000) if len(values) else np.nan
 
+    groups_only = config.get("analysis") == "daily_group_returns"
     all_values = frame.loc[:, list(spec.label_columns)].to_numpy(dtype="float64")
     all_mature = np.isfinite(all_values).all(axis=1)
     timestamps = pd.DatetimeIndex(frame.timestamp)
@@ -1103,7 +1104,7 @@ def _response_tables(frame, *, spec, config, dates=None):
         ("daily", stamp, by_day.get(day, np.empty(0, dtype="int64")))
         for day, stamp in sorted(dates.items())
     ]
-    if len(dates):
+    if len(dates) and not groups_only:
         periods.append(("pooled", max(dates.values()), slice(None)))
     for signal, edges in config["cutpoints"].items():
         unavailable = edges is None
@@ -1127,7 +1128,7 @@ def _response_tables(frame, *, spec, config, dates=None):
                 all_mature[positions],
                 all_groups[positions],
             )
-            for scope in ("common", "own"):
+            for scope in ("own",) if groups_only else ("common", "own"):
                 denominator = int(selected.sum())
                 for index, label in enumerate(spec.label_columns):
                     valid = selected & (
@@ -1136,9 +1137,10 @@ def _response_tables(frame, *, spec, config, dates=None):
                         else np.isfinite(labels[:, index])
                     )
                     count = int(valid.sum())
-                    ic, reason = _pearson_correlation_result(
-                        scores[valid], labels[valid, index]
-                    )
+                    if not groups_only:
+                        ic, reason = _pearson_correlation_result(
+                            scores[valid], labels[valid, index]
+                        )
                     key = dict(
                         timestamp=timestamp,
                         period=period,
@@ -1149,7 +1151,8 @@ def _response_tables(frame, *, spec, config, dates=None):
                     means, counts = [], []
                     for group in range(1, n_groups + 1):
                         values = labels[valid & (groups == group), index]
-                        average, median = mean_bp(values), median_bp(values)
+                        average = mean_bp(values)
+                        median = np.nan if groups_only else median_bp(values)
                         means.append(average)
                         counts.append(len(values))
                         grouped.append(
@@ -1170,7 +1173,9 @@ def _response_tables(frame, *, spec, config, dates=None):
                                 else "no_valid_observations"
                                 if not len(values)
                                 else "nonfinite_result",
-                                median_reason="no_finite_reference"
+                                median_reason="not_requested"
+                                if groups_only
+                                else "no_finite_reference"
                                 if unavailable
                                 else None
                                 if math.isfinite(median)
@@ -1179,6 +1184,8 @@ def _response_tables(frame, *, spec, config, dates=None):
                                 else "nonfinite_result",
                             )
                         )
+                    if groups_only:
+                        continue
                     spread_reason = (
                         "no_finite_reference"
                         if unavailable
@@ -1211,7 +1218,7 @@ def _response_tables(frame, *, spec, config, dates=None):
                             spread_reason=spread_reason,
                         )
                     )
-    if len(dates):
+    if len(dates) and not groups_only:
         # Summary rows are explicitly means of daily estimates, never pooled IC.
         for records, value, dispersion, keys in (
             (metrics, "ic", "ic_std", ["sample_scope", "signal", "label"]),
@@ -1281,7 +1288,11 @@ def _response_tables(frame, *, spec, config, dates=None):
                 if row["period"] == "pooled":
                     row["valid_day_count"] = counts[tuple(row[key] for key in keys)]
     result = {}
-    for name, records in (("response_metrics", metrics), ("response_groups", grouped)):
+    for name, records in (
+        (("response_groups", grouped),)
+        if groups_only
+        else (("response_metrics", metrics), ("response_groups", grouped))
+    ):
         result[name] = (
             daily_frame(records, name)
             .sort_values(

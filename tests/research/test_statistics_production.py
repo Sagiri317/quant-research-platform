@@ -15,7 +15,6 @@ from quant_research_platform.artifacts.statistics import (
     write_statistics_artifact,
 )
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.factors.statistics import (
     build_a_share_factor_statistics_tables,
@@ -200,7 +199,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     with artifact.table("model_losses.parquet") as table:
         assert len(table) == len(dates) * len(families)
         assert table.common_date.eq(1).all()
-        assert table.asset_coverage_id.eq(canonical_json_hash(sorted(assets))).all()
+        assert table.observation_count.eq(len(assets)).all()
         losses = (
             table.pivot(index="timestamp", columns="family_id", values="loss")
             .loc[:, list(families)]
@@ -959,7 +958,6 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
     columns = (
         "timestamp",
         "family_id",
-        "asset_coverage_id",
         "observation_count",
         "sample_role",
         "loss",
@@ -970,7 +968,6 @@ def test_paired_model_rankic_consumes_explicit_comparison_config(has_observation
             (
                 pd.Timestamp("2023-01-03"),
                 family,
-                "a" * 64,
                 2,
                 "validation",
                 -0.5,

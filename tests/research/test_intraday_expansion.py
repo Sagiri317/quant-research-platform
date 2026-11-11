@@ -307,6 +307,35 @@ def test_trade_profile_uses_recorded_volume_and_never_reads_future_events():
     assert changed[name].iloc[1:].isna().all()
 
 
+def test_trade_profiles_group_each_assets_own_recorded_trades():
+    quotes = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["b", "missing", "a"],
+            timestamp=pd.Timestamp("2024-01-02 01:30:03"),
+            mid=[20.0, 10.0, 11.0],
+        )
+    )
+    trades = pd.DataFrame(
+        dict(
+            asset_id=["a", "b", "a", "b", "b"],
+            timestamp=pd.to_datetime(
+                ["2024-01-02 01:30:03", "2024-01-02 01:30:00"] * 2
+                + ["2024-01-02 01:30:02"]
+            ),
+            source_row=[2, 1, 1, 2, 3],
+            event_kind=["trade", "trade", "trade", "trade", "cancel"],
+            price=[11.0, 20.0, 10.0, 20.0, 21.0],
+            volume=[300.0, 50.0, 100.0, 50.0, 1000.0],
+        )
+    )
+    name = "trade_profile_concentration_1d"
+    result = trade_profiles(quotes, trades, columns=[name])
+    # A has 300/400 in one bin; B's two trades share a bin, excluding cancellation.
+    np.testing.assert_allclose(result[name], [1.0, np.nan, 0.75], equal_nan=True)
+    pd.testing.assert_frame_equal(result.drop(columns=name), quotes.drop(columns="mid"))
+
+
 def test_intraday_return_does_not_cross_overnight_when_segment_ids_repeat():
     one = (
         panel()
