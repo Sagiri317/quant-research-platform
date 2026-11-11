@@ -1,0 +1,54 @@
+{
+  "checked_at": "2026-11-11T22:27:41.310499+00:00",
+  "code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+  "raw_manifest": "data/raw/macro_liquidity/cfets-repo-daily-weighted-20261112/manifest.json",
+  "raw_manifest_sha256": "0aec176c27fc7ad4f0bb4c66e6aa247732834a348a115d88a7c7487aa29ffc69",
+  "raw_response_files": 28,
+  "raw_response_bytes": 31277,
+  "native": "data/interim/macro-cfets-repo-official-20261112/macro_observations",
+  "native_rows": 20,
+  "series": {
+    "cn_dr007": {
+      "acquired_observations": 10,
+      "finite_observations": 10,
+      "overlap_observations": 9,
+      "overlap_units_match": true,
+      "overlap_equal_within_1e_10": 9,
+      "overlap_max_abs_difference": 0.0,
+      "new_finite_dates": [
+        "2026-11-11"
+      ],
+      "date_min": "2026-10-29",
+      "date_max": "2026-11-11",
+      "overlap_equal_available_at": 0,
+      "overlap_available_at_drift_seconds_min": 1.0,
+      "overlap_available_at_drift_seconds_max": 14167.0
+    },
+    "cn_r007": {
+      "acquired_observations": 10,
+      "finite_observations": 10,
+      "overlap_observations": 9,
+      "overlap_units_match": true,
+      "overlap_equal_within_1e_10": 9,
+      "overlap_max_abs_difference": 0.0,
+      "new_finite_dates": [
+        "2026-11-11"
+      ],
+      "date_min": "2026-10-29",
+      "date_max": "2026-11-11",
+      "overlap_equal_available_at": 0,
+      "overlap_available_at_drift_seconds_min": 1.0,
+      "overlap_available_at_drift_seconds_max": 14167.0
+    }
+  },
+  "actual_publication_timestamps_known": 0,
+  "estimated_availability_rows": 20,
+  "exact_raw_to_native_values_and_clocks_passed": true,
+  "canonical_modified": false,
+  "coverage_qualification": "14-calendar-day public window only; two old historical queries return zero rows; not continuous long history",
+  "current_factor_evaluation_affected": false,
+  "earliest_successful_endpoint_probe_at": "2026-11-11T21:47:45.694996+00:00",
+  "native_retrieved_at_min": "2026-11-11T21:51:31.194351+00:00",
+  "native_retrieved_at_max": "2026-11-11T21:51:37.076544+00:00",
+  "independent_original_json_values_dates_and_estimated_clocks_checked": 20
+}

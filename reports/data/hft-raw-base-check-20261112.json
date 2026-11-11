@@ -1,0 +1,20 @@
+{
+  "status": "completed",
+  "assets": 2,
+  "days": 2,
+  "code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+  "cases": [
+    {
+      "case": "member_panel_base",
+      "status": "failed",
+      "error_code": "non_monotonic_time_chunk_order",
+      "seconds": 26.219
+    },
+    {
+      "case": "native_factor_base",
+      "status": "completed",
+      "rows": 14810,
+      "seconds": 30.001
+    }
+  ]
+}
