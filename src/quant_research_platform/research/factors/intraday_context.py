@@ -451,7 +451,11 @@ def calculate(
     ):
         if name in columns:
             result[name] = (
-                (values.gt(0).where(values.notna())).groupby(cohort).transform("mean")
+                values.gt(0)
+                .astype(float)
+                .where(values.notna())
+                .groupby(cohort)
+                .transform("mean")
             )
     if linked_panel is not None:
         for width in (30, 60):

@@ -159,6 +159,36 @@ def test_industry_catchup_excludes_self_and_unknown_calendar_does_not_gate_peers
     )
 
 
+def test_intraday_breadth_has_numeric_partial_history_and_hand_counted_stress():
+    blocks = []
+    for asset in ("a", "b"):
+        block = (
+            panel()
+            .iloc[:22]
+            .assign(
+                asset_id=asset,
+                bid_px1=1.0,
+                ask_px1=1.01,
+                bid_vol1=100.0,
+                ask_vol1=100.0,
+            )
+        )
+        if asset == "a":
+            block.loc[20:, ["ask_px1", "bid_vol1", "ask_vol1"]] = [1.04, 25.0, 25.0]
+        blocks.append(block)
+    names = [
+        "intraday_positive_return_fraction",
+        "intraday_positive_flow_fraction",
+        "intraday_liquidity_stress_fraction",
+    ]
+    result = calculate(pd.concat(blocks, ignore_index=True), columns=names)
+    assert all(pd.api.types.is_numeric_dtype(result[name]) for name in names)
+    early = result.timestamp.lt(result.timestamp.min() + pd.Timedelta(seconds=60))
+    assert result.loc[early, names[-1]].isna().all()
+    last = result.loc[result.timestamp.eq(result.timestamp.max()), names]
+    np.testing.assert_allclose(last.to_numpy(float), [[1, 1, 0.5], [1, 1, 0.5]])
+
+
 def test_trade_profile_uses_recorded_volume_and_never_reads_future_events():
     quotes = panel().iloc[:4]
     trades = pd.DataFrame(
