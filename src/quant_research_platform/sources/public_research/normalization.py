@@ -449,6 +449,7 @@ def normalize(data_id, path, record):
         result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
         _numbers(result, DATASETS[data_id])
         yield result
+        return
     elif source == "szse_option_contract_events_extracted":
         payload = json.loads(path.read_bytes())
         for table in payload["tables"]:
@@ -491,6 +492,7 @@ def normalize(data_id, path, record):
                 ),
             )
             yield result
+        return
     elif source in {"sse_option_risk_indicators", "sse_option_contract_updates"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["result"])
         if frame.empty:

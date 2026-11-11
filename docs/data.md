@@ -536,6 +536,8 @@ A 股持仓计算只要求境内股票消费域完整。全基金无条件声明
 完整域已确认时，资产合计差异不单独使整表不可用；缺页、前十大或范围未知仍不能按完整持仓计算。
 完整权益明细若包含股票的完整超集，且每行明确的证券市场均不属于沪深，可用
 `mainland_stock_holdings`域的`complete_all_equity_table_no_mainland_security_reported`表示境内零仓。
+同一完整权益超集含境内股票时，`complete_all_equity_table_mainland_stock_domain`明确境内域完整，
+`stock_rows`只计该域行；境外持仓及全球普通股/优先股分类仍可未知。
 这不是全球零股票，也不等同报告作出字面零仓声明；证券市场或超集完整性不明时不作该推断。
 
 `source=szse_option_contract_events_extracted`接收结构化的官方合约事件原件；当前消费挂牌表中的

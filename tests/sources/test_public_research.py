@@ -38,12 +38,10 @@ def test_szse_contract_listing_retains_identity_and_units_without_inventing_iv(
     )
     path = tmp_path / "contracts.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    result = next(
-        normalize(
-            "public_option_contracts",
-            path,
-            {"source": "szse_option_contract_events_extracted"},
-        )
+    (result,) = normalize(
+        "public_option_contracts",
+        path,
+        {"source": "szse_option_contract_events_extracted"},
     )
     assert result.security_id.tolist() == ["90000001"]
     assert result.contract_id.tolist() == ["159915C2406M02000"]

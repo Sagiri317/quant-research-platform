@@ -166,6 +166,13 @@ def complete_mainland_stock_reports(headers):
                 )
                 & headers.stock_rows.eq(0)
             )
+            | (
+                headers.disclosure_scope.eq("mainland_stock_holdings")
+                & headers.stock_disclosure_status.eq(
+                    "complete_all_equity_table_mainland_stock_domain"
+                )
+                & headers.stock_rows.gt(0)
+            )
         )
     ]
 

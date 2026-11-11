@@ -255,7 +255,11 @@ def test_share_history_keeps_missing_declared_sessions():
 )
 @pytest.mark.parametrize(
     "full_status",
-    ("full_stock_table_reconciled", "full_stock_table_as_reported_unreconciled"),
+    (
+        "full_stock_table_reconciled",
+        "full_stock_table_as_reported_unreconciled",
+        "complete_all_equity_table_mainland_stock_domain",
+    ),
 )
 def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_older(
     zero_scope,
@@ -312,6 +316,9 @@ def test_cn_complete_zero_report_clears_positions_and_older_amendment_stays_olde
         ],
         columns=["report_version_identity", "stock_market", "shares_held"],
     ).assign(stock_code="s", economic_portfolio_id="portfolio")
+    if full_status == "complete_all_equity_table_mainland_stock_domain":
+        headers["disclosure_scope"] = "mainland_stock_holdings"
+        headers.loc[headers.report_version_identity.eq("h0"), "stock_rows"] = 2
     if zero_scope != "global":
         zero = headers.report_version_identity.eq("h1")
         headers.loc[zero, "disclosure_scope"] = (
