@@ -1,6 +1,6 @@
 # 量价、持仓与跨市场因子扩展
 
-本文件说明研究定义和原生输入，计算完成情况以实际产物为准。因子标签、输入依赖和窗口由原生目录提供；去极值、标准化和中性化选择统一保存在 `configs/factor-analysis-policy.csv`。本文不把目录注册当作实证完成，也不把预测相关性当作可交易利润。
+本文件说明研究定义和原生输入，计算完成情况以实际产物为准。子区间复用检验见[研究选择](research.md#因子子区间检验)。因子标签、输入依赖和窗口由原生目录提供；去极值、标准化和中性化选择统一保存在 `configs/factor-analysis-policy.csv`。本文不把目录注册当作实证完成，也不把预测相关性当作可交易利润。
 
 ## 展示名称与计算标识
 
@@ -9,44 +9,6 @@
 `alpha101_054` 的中文主名称为“开收比五次方加权负收盘位置”，即 `-((C-L)/(H-L))*(O/C)^5`；`alpha191_046` 为“3／6／12／24日均线综合价格比”，即 `(MA3+MA6+MA12+MA24)/(4*C)`。编号仍作为原始出处和计算标识，不能从名称推断已证实反转或动量效应。纯展示名更新不改变公式、方向、窗口、可用时点或持久化字段，无需因改名重算数值。
 
 有效 IC／RankIC 次数要按评价轴解释：日频股票截面通常是有效交易日数，每日另有参与相关计算的股票数；多空分别在各自分位组内计算，信号恒定或配对不足的日期不计入。单资产全区间时序相关可能只有一次估计，其配对观测数另存于原生 `metrics.n_obs`，不能把一次估计误读成只有一个价格样本。多空组内相关不是多空组合收益相关或收益回测。
-
-## 子时间区间检验
-
-股票截面复用 `research.factors.statistics.factor_statistics` 的 `evaluation_inputs` 与 `window`，读取已发布EVAL的每日指标，发布新的STAT产物。它不重新读取因子面板、计算因子或重新划分每日多空组，也不能从全区间平均IC反推子区间。窗口必须在原评估范围内；原信号时点、筛选方式、标签及成熟截止不变。因子或检验口径已经修正时，先使用修正后的EVAL。
-
-[近期检验配置](../configs/factor-analysis/recent-statistics.json)选择2022年起至2026年10月最后一个交易日，复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方替换 `evaluation_inputs` 与新 `output` 路径即可；其他子区间直接修改 `window`，不新增统计器、配置继承或调度层。
-
-`analyses=["stratified_ic"]` 复用已有全体、long、short的IC和RankIC，输出均值、有效日数、配对观测数及可定义时的HAC推断与BY校正；原评估已有额外分层时同时保留。缺失导致推断未定义时，仍保留独立可用的均值和样本数。多重检验范围是本次明确输入的原生评估，不冒称覆盖其他研究。
-
-非零点时间戳（例如盘前09:00）的EVAL需要完整交易会话轴；调用方从原生交易日历生成 `sessions`，不从有指标的日期猜测交易日，也不填补缺失IC。日历属于本次显式输入，不另建日历解析器或统计入口。例如：
-
-```python
-import json
-from pathlib import Path
-
-from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.factors.statistics import factor_statistics
-from quant_research_platform.storage.datasets import read_dataset
-
-config = json.loads(Path("configs/factor-analysis/recent-statistics.json").read_text())
-calendar = read_dataset(
-    "data/interim/csmar/trading_calendar",
-    columns=["timestamp", "is_trading_day"],
-    time_window=TimeWindow(**config["window"]),
-)
-config["sessions"] = (
-    calendar.loc[calendar.is_trading_day.eq(True), "timestamp"]
-    .dt.strftime("%Y-%m-%d")
-    .drop_duplicates()
-    .sort_values()
-    .tolist()
-)
-factor_statistics(config)
-```
-
-示例中的评估、日历和输出路径由调用方替换。需要CLI时将同一份运行配置写入JSON，再调用 `qrp statistics-factors --config`；`sessions` 与 `window` 同属原生统计契约，交易日列表无需提交到研究配置模板。
-
-ETF日频的全区间时序相关不能由一个总相关系数切出子区间，应复用现有因子与标签，在 `research.evaluations.runner.evaluate` 中明确设置同一个子区间及原成熟截止，重新求相关；无需重新计算因子。比较全历史与近期结果时分别保留原生产物和真实可用样本，近期观察用于检查衰减，不将事后选择窗口当作独立样本外证明。
 
 ## 去重与处理
 

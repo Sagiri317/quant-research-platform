@@ -29,6 +29,41 @@
 
 组合比较保留明确基线与需要的风险约束组合。高低频默认维护单一目标组合，不按预测期限自动建立重叠子账户。调仓间隔、实际持有期、分位范围、风险限额、基准和预测路径分别配置；未设置的限额不视为已经控制，指数增强需要真实历史权重。研究说明不作为运行配置或测试夹具。
 
+## 因子子区间检验
+
+股票截面复用 `research.factors.statistics.factor_statistics` 的 `evaluation_inputs` 与 `window`，读取已发布EVAL的每日指标，发布新的STAT产物。它不重新读取因子面板、计算因子或重新划分每日多空组，也不能从全区间平均IC反推子区间。窗口必须在原评估范围内；原信号时点、筛选方式、标签及成熟截止不变。因子或检验口径已经修正时，先使用修正后的EVAL。
+
+[近期检验配置](../configs/factor-analysis/recent-statistics.json)选择2022年起至2026年10月最后一个交易日，复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方替换 `evaluation_inputs` 与新 `output` 路径即可；其他子区间直接修改 `window`，不新增统计器、配置继承或调度层。
+
+`analyses=["stratified_ic"]` 复用已有全体、long、short的IC和RankIC，输出均值、有效日数、配对观测数及可定义时的HAC推断与BY校正；原评估已有额外分层时同时保留。缺失导致推断未定义时，仍保留独立可用的均值和样本数。多重检验范围是本次明确输入的原生评估，不冒称覆盖其他研究。
+
+非零点时间戳（例如盘前09:00）的EVAL需要完整交易会话轴；调用方从原生交易日历生成 `sessions`，不从有指标的日期猜测交易日，也不填补缺失IC。日历属于本次显式输入，不另建日历解析器或统计入口。例如：
+
+```python
+import json
+from pathlib import Path
+
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    unified_trading_sessions,
+)
+from quant_research_platform.research.factors.statistics import factor_statistics
+from quant_research_platform.storage.datasets import read_dataset
+
+config = json.loads(Path("configs/factor-analysis/recent-statistics.json").read_text())
+calendar = read_dataset(
+    "data/interim/csmar/trading_calendar",
+    columns=["timestamp", "calendar_date", "source_market_type", "is_trading_day"],
+    time_window=TimeWindow(**config["window"]),
+)
+config["sessions"] = unified_trading_sessions(calendar).strftime("%Y-%m-%d").tolist()
+factor_statistics(config)
+```
+
+示例中的评估、日历和输出路径由调用方替换。需要CLI时将同一份运行配置写入JSON，再调用 `qrp statistics-factors --config runtime.json`；`sessions` 与 `window` 同属原生统计契约，交易日列表无需提交到研究配置模板。交易会话选择由市场适配层负责，统计层只消费日期，不依赖CSMAR。
+
+ETF日频的全区间时序相关不能由一个总相关系数切出子区间，应复用现有因子与标签，在 `research.evaluations.runner.evaluate` 中明确设置同一个子区间及原成熟截止，重新求相关；无需重新计算因子。比较全历史与近期结果时分别保留原生产物和真实可用样本，近期观察用于检查衰减，不将事后选择窗口当作独立样本外证明。
+
 ## 独立操作与证据
 
 研究过程使用独立 Python 操作，不使用 Notebook。数据准备、组装、训练、预测、评价、组合和统计分别指定输入、窗口和新输出。主线按时间滚动训练、验证选型和后续预测，不要求另设独立最终留出集；显式冻结的历史研究模板仍保留。季度窗口以前方已成熟数据训练；起点及窗口由调用者设定。因子预热历史不等于提前开始训练。
