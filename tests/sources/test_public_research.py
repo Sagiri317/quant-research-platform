@@ -57,7 +57,17 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
                         stock_rows=0,
                         stock_disclosure_status="explicit_no_stock_reported",
                         explicit_no_stock_statement_in_stock_section=True,
-                    )
+                    ),
+                    dict(
+                        shared,
+                        report_version_identity="unknown-report",
+                        source_sha256="c" * 64,
+                        publication_date=None,
+                        report_declared_send_date=None,
+                        stock_rows=None,
+                        stock_disclosure_status="unresolved",
+                        explicit_no_stock_statement_in_stock_section=None,
+                    ),
                 ]
             )
         )
@@ -92,10 +102,13 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(tmp
         f"report:{leaf}:stock-table:2:CN_MAINLAND:000002" for leaf in (0, 1)
     ]
     assert holding.economic_portfolio_id.tolist() == ["portfolio", "portfolio"]
-    assert report.explicit_no_stock.tolist() == ["true"]
-    assert report.stock_rows.tolist() == [0]
+    assert report.explicit_no_stock.iloc[0] == "true"
+    assert pd.isna(report.explicit_no_stock.iloc[1])
+    assert report.stock_rows.iloc[0] == 0
+    assert pd.isna(report.stock_rows.iloc[1])
     assert report.available_at.iloc[0] == pd.Timestamp("2024-08-20T16:00:00Z")
     assert report.published_at.isna().all()
+    assert pd.isna(report.available_at.iloc[1])
 
 
 def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
