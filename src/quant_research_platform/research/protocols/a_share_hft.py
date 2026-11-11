@@ -1,6 +1,7 @@
 """A-share snapshot research definitions; timestamps are vendor event times."""
 
 import json
+from dataclasses import replace
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -18,6 +19,7 @@ from quant_research_platform.research.factors.intraday_path import (
 from quant_research_platform.research.factors.intraday_path import (
     UNITS as PATH_UNITS,
 )
+from quant_research_platform.research.factors.names import factor_display_name
 
 KEY = ("market_id", "asset_id", "timestamp")
 DATA_IDS = (
@@ -301,7 +303,8 @@ def factor_catalog():
     from quant_research_platform.research.factors.intraday_context import definitions
 
     return FactorCatalog(
-        (
+        replace(item, display_name=factor_display_name(item.output_column))
+        for item in (
             *definitions(),
             *(
                 FactorDefinition(

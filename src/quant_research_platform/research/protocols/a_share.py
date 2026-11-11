@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -28,6 +30,7 @@ from quant_research_platform.research.factors.fundamental.definitions import (
     FUNDAMENTAL_FACTORS,
     fundamental_factor_definitions,
 )
+from quant_research_platform.research.factors.names import factor_display_name
 from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
     PRICE_VOLUME_PATH_FACTORS,
@@ -113,7 +116,8 @@ def factor_catalog() -> FactorCatalog:
     )
 
     return FactorCatalog(
-        (
+        replace(item, display_name=factor_display_name(item.output_column))
+        for item in (
             *financing_definitions(),
             *linked_definitions(),
             *fund_definitions(),
