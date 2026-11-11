@@ -102,6 +102,34 @@ def test_explicit_original_release_timestamp_and_timezone_requirement(tmp_path):
         read_release_csv(path)
 
 
+def test_explicit_snapshot_clock_does_not_claim_publication_or_vintage(tmp_path):
+    path = tmp_path / "snapshot.csv"
+    row = dict(
+        series_id="us_sofr",
+        observation_date="2024-01-02",
+        value=5.3,
+        unit="percent",
+        frequency="D",
+        source_id="nyfed",
+        source_series="SOFR",
+        source_timezone="America/New_York",
+        source_url="https://markets.newyorkfed.org/",
+        retrieved_at="2026-11-11T00:00:00Z",
+        estimated_available_at="2024-01-09T23:59:59-05:00",
+    )
+    pd.DataFrame([row]).to_csv(path, index=False)
+    data = read_release_csv(path)
+    assert data.timestamp.iloc[0] == pd.Timestamp("2024-01-10T04:59:59Z")
+    assert data.published_at.isna().all()
+    assert data.vintage_date.isna().all()
+    assert data.availability_basis.iloc[0] == "inferred_snapshot_release"
+    assert data.value.iloc[0] == 5.3
+    row["published_at"] = row["estimated_available_at"]
+    pd.DataFrame([row]).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="macro_release_columns_invalid"):
+        read_release_csv(path)
+
+
 def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
     raw, output = tmp_path / "raw", tmp_path / "interim"
     source = raw / "us_fed_assets"

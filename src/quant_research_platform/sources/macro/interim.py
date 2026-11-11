@@ -313,7 +313,7 @@ def validate_observations(frame):
 def read_release_csv(path):
     """Import timestamped original releases or revisions from an explicit local file.
 
-    Each row supplies a publication timestamp or a release date with its timezone.
+    Each file selects a publication timestamp, release date, or assumed clock.
     Source identity and units stay explicit, including for private vendor exports.
     """
     payload = Path(path).read_bytes()
@@ -330,20 +330,23 @@ def read_release_csv(path):
         "source_url",
         "retrieved_at",
     }
-    if not required <= set(data) or ("published_at" in data) == (
-        "release_date" in data
-    ):
+    clocks = set(data) & {"published_at", "release_date", "estimated_available_at"}
+    if not required <= set(data) or len(clocks) != 1:
         raise ValueError("macro_release_columns_invalid")
-    if "published_at" in data:
+    clock = next(iter(clocks))
+    if clock != "release_date":
         # Explicit offsets prevent machine-local time from becoming economic time.
-        if not data.published_at.str.contains(
-            r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True
-        ).all():
+        if not data[clock].str.contains(r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True).all():
             raise ValueError("macro_release_timezone_required")
-        data["published_at"] = pd.to_datetime(data.published_at, utc=True)
-        data["timestamp"] = data.published_at
-        data["availability_basis"] = "release_timestamp"
-        data["vintage_date"] = data.published_at.dt.tz_localize(None).dt.normalize()
+        data["timestamp"] = pd.to_datetime(data[clock], utc=True)
+        actual = clock == "published_at"
+        data["published_at"] = data.timestamp if actual else pd.NaT
+        data["availability_basis"] = (
+            "release_timestamp" if actual else "inferred_snapshot_release"
+        )
+        data["vintage_date"] = (
+            data.timestamp.dt.tz_localize(None).dt.normalize() if actual else pd.NaT
+        )
     else:
         data["timestamp"] = pd.Series(
             pd.NaT, index=data.index, dtype="datetime64[ns, UTC]"

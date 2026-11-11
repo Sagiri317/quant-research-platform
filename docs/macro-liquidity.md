@@ -30,7 +30,7 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 官方接口的覆盖并不统一。SOFR、IORB 有各自起始日；IOER 已终止。新旧美元指数保持独立；信用利差受发布方当前历史下载范围限制。Shibor 使用 CFETS 官方历史接口，国债与 AAA 中短期票据使用中债官方日终曲线，均按来源的一年查询上限分年请求；社融增量使用商务部转载的央行数据。公开市场操作、社融存量等仍可通过明确的发布文件接入，不能用其他利率代理或补零冒充缺失指标。下载及规范表元数据记录实际覆盖，独立年度请求的成功响应可保留为不完整来源。
 
-精确发布文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at` 或 `release_date` 其中一列。`published_at` 必须显式含 UTC 偏移；每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
+结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at`、`release_date`、`estimated_available_at` 其中一列。两个时刻列必须显式含 UTC 偏移。真实发布时间与日期沿用原规则；估计可用时刻记为 `inferred_snapshot_release`，`published_at` 和未知历史版本日期保持空，具体估计依据留在结构化 raw 来源证据。每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
 
 ## 日频决策时钟
 
