@@ -460,7 +460,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
     )
     result = work.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
     for name in columns:
-        result[name] = np.nan
+        result[name] = pd.Series(np.nan, index=result.index, dtype="Float64")
     missing = {
         name: [source for source in RECIPES[name] if source not in sources]
         for name in columns
@@ -717,11 +717,14 @@ def calculate(decisions, sources, *, columns, parameters=None):
                         )
                         - fractions
                     )
-                    exposure = (
-                        (fractions * others).groupby(known.stock_code).sum(min_count=1)
+                    grouped = (fractions * others).groupby(known.stock_code)
+                    exposure = grouped.sum(min_count=1).where(
+                        grouped.count().eq(grouped.size())
                     )
                     result.loc[at, name] = (
-                        block.asset_id.map(exposure).fillna(0).to_numpy()
+                        block.asset_id.map(exposure)
+                        .where(block.asset_id.isin(exposure.index), 0)
+                        .to_numpy()
                     )
                 elif name == FUNDS[3]:
                     earlier = headers.loc[headers.available_at.le(date)].merge(

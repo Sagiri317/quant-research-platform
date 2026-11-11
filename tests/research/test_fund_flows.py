@@ -382,6 +382,48 @@ def test_cn_redemption_uses_only_holdings_visible_before_flow_period(zero):
     )
 
 
+def test_nullable_common_ownership_keeps_unknown_denominators_local():
+    headers = pd.DataFrame(
+        dict(
+            economic_portfolio_id=["f1", "f2"],
+            report_version_identity=["r1", "r2"],
+            timestamp=pd.Timestamp("2024-06-30"),
+            available_at=pd.Timestamp("2024-08-20"),
+            disclosure_scope="full_stock_holdings",
+            stock_disclosure_status="full_stock_table_reconciled",
+            explicit_no_stock="false",
+            stock_rows=2,
+        )
+    )
+    h = pd.DataFrame(
+        dict(
+            economic_portfolio_id=["f1", "f1", "f2", "f2"],
+            report_version_identity=["r1", "r1", "r2", "r2"],
+            stock_market="CN_MAINLAND",
+            stock_code=["a", "b", "d", "e"],
+            shares_held=pd.Series([10.0, 20.0, 10.0, 20.0], dtype="Float64"),
+        )
+    )
+    d = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["a", "b", "c", "d", "e"],
+            timestamp=pd.Timestamp("2024-08-21"),
+            a_float_shares=pd.Series(
+                [100.0, pd.NA, 100.0, 100.0, 200.0], dtype="Float64"
+            ),
+        )
+    )
+    name = "cn_common_fund_ownership_exposure"
+    result = calculate(
+        d,
+        dict(public_fund_holdings=h, public_fund_holdings_reports=headers),
+        columns=[name],
+    )
+    assert result[name].iloc[:2].isna().all()
+    np.testing.assert_allclose(result[name].iloc[2:].to_numpy(float), [0.0, 0.01, 0.01])
+
+
 def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id():
     dates = pd.bdate_range("2024-01-02", periods=7)
     shares = pd.DataFrame(
