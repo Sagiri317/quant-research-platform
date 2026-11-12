@@ -1,55 +1,70 @@
 {
   "version": {
-    "number": 25,
-    "id": "appgprj_6af44317faf081919d5c8b0e58ee3a32~appgver_11f96a795fd08191b5b1172a89bef7e2",
-    "source_commit": "847ea3f6d692b8a74158cc7a9c5ea4d339abfccf"
+    "number": 26,
+    "id": "appgprj_6af44317faf081919d5c8b0e58ee3a32~appgver_043f0fc5739c81919d827f4df0a35278",
+    "source_commit": "049be14728064ca80211e970606bb7874cff36c2"
   },
   "deployment": {
-    "id": "appgdep_6af50217f4a48191b1e25742b73f5324",
+    "id": "appgdep_6af5123f56988191bf8dab14d3f5cc33",
     "status": "succeeded",
     "url": "https://qrp-factor-research-20261111.sagiri0317.chatgpt.site"
   },
-  "published_at_utc": "2026-11-12T00:02:45.376543+00:00",
-  "data_updated_at_utc": "2026-11-11T23:49:26.105655+00:00",
-  "source_stamp": {
-    "count": 16058,
-    "latest_mtime_ns": 1794438156719637665,
-    "code_commit": "01b06603a9ae7cdfbe4d2733588414ca4222560a"
+  "published_at_utc": "2026-11-12T01:11:42.049352+00:00",
+  "data_updated_at_utc": "2026-11-12T00:44:42.802682+00:00",
+  "input_probe": {
+    "initial_probe_persisted": false,
+    "retained_last_known_full_marker_release": 25,
+    "retained_last_known_full_source_stamp": {
+      "count": 16058,
+      "latest_mtime_ns": 1794438156719637665,
+      "code_commit": "01b06603a9ae7cdfbe4d2733588414ca4222560a"
+    },
+    "limitation": "本轮原始probe在准备检查失败前未落盘，保留v25最后已知full标记，不以后探值冒称原始读取。该运行标记限制不影响已导出及核验的科学结果。"
   },
-  "update_kind": "full",
   "counts": {
-    "sources": 171,
-    "selected_combinations": 15082,
-    "cross_sectional_sources": 46,
-    "cross_sectional_combinations_fixed5_both_windows": 6388,
-    "time_series_sources": 125,
-    "time_series_combinations": 8694,
-    "time_series_blocks_completed": 15452,
-    "time_series_blocks_planned": 15452,
-    "stock_hft_raw_factors": 6,
-    "stock_hft_raw_combinations": 18,
-    "stock_hft_processed_combinations_selected": 0,
-    "industry_time_series_sources_selected": 0,
-    "industry_broadcast_stock_reference_combinations": 21,
-    "stock_conditioning_reference_combinations": 7,
-    "etf_conditioning_independent_ranking_combinations": 0
+    "sources": 209,
+    "selected_combinations": 15895,
+    "cross_sectional_sources": 47,
+    "cross_sectional_combinations": 6424,
+    "time_series_sources": 162,
+    "time_series_combinations": 9471,
+    "time_series_blocks_completed": 21224,
+    "industry_sources": 37,
+    "industry_combinations": 777,
+    "industry_full_window_ready": 777,
+    "industry_recent_window_ready": 777,
+    "industry_blocks_completed": 5772,
+    "industry_empty_input_blocks": 3035,
+    "industry_no_finite_reference_signal_blocks": 8625,
+    "industry_finite_one_group_signal_blocks": 28,
+    "industry_response_daily_own_rows": 5111211,
+    "industry_evaluation_input_rows": 54187,
+    "industry_response_output_bytes": 336478164,
+    "stock_hft_pre_combinations": 18,
+    "stock_hft_risk_combinations_undefined": 18,
+    "industry_stock_broadcast_reference_combinations": 21
   },
-  "new_source": "results/factor-expansion-95ad4a83/stock_quote_hypotheses",
-  "excluded_from_selection": [
-    "results/factor-expansion-95ad4a83/stock_quote_hypotheses-mad-lagged_industry_five_style",
-    "results/factor-expansion-95ad4a83/industry_state_known_halts_corrected-*"
-  ],
   "checks": {
     "production_http_status": 200,
     "desktop_and_mobile_browser_passed": true,
-    "four_hft_metrics_three_labels_two_windows_passed": true,
-    "four_reference_roles_derived_from_policy_and_native_axis": true,
-    "high_frequency_default_30s_passed": true,
-    "filtered_empty_state_preserves_domain_scope": true,
-    "native_five_groups_and_percentage_units_passed": true,
-    "no_horizontal_overflow": true,
-    "previous_15064_correlation_means_and_counts_preserved": true,
+    "native_industry_namespace_identity_passed": true,
+    "four_metrics_both_windows_passed": true,
+    "reference_252_evaluation_20_sessions_passed": true,
+    "one_group_not_claimed_constant_reference": true,
+    "unknown_reference_and_empty_inputs_not_filled_with_zero": true,
+    "industry_same_day_spread_undefined": true,
+    "partly_missing_group_reasons_qualified": true,
+    "risk_zero_pairs_undefined_and_not_usable_neutralization": true,
+    "old_stock_broadcast_remains_reference": true,
+    "previous_15082_correlation_values_counts_preserved": true,
     "model_values_preserved": true,
-    "format_and_targeted_checks_passed": true
-  }
+    "format_and_targeted_checks_passed": true,
+    "export_error_count": 0
+  },
+  "logical_sources": {
+    "industry_evaluation": "results/factor-expansion-95ad4a83/industry_state_known_halts_corrected-*",
+    "industry_response": "results/factor-layer-validation-20261112/factor-expansion-95ad4a83/industry_state_known_halts_corrected-*/fold_*",
+    "hft_processed": "results/factor-expansion-95ad4a83/stock_quote_hypotheses-mad-lagged_industry_five_style"
+  },
+  "update_kind": "full"
 }
