@@ -169,6 +169,19 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     context = (
         *KEY,
         "signal_session",
+        *(
+            ("listing_date",)
+            if spec.data_id == "linked_market_factors"
+            and set(spec.column_roles)
+            & {
+                "basis_shock_x_hedging_exposure",
+                "oi_shock_x_hedging_exposure",
+                "us_sector_own_beta",
+                "us_sector_shock_x_own_beta",
+                "us_relative_sector_shock_x_own_beta",
+            }
+            else ()
+        ),
         "period_return",
         "market_return",
         "industry_level1_code",
@@ -218,6 +231,11 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     "asset_id",
                     "timestamp",
                     "adj_close",
+                    *(
+                        ("listing_date",)
+                        if "listing_date" in session.logical_columns
+                        else ()
+                    ),
                     *(
                         ("signal_session",)
                         if "signal_session" in session.logical_columns

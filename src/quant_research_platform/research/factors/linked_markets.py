@@ -144,6 +144,31 @@ def _canonical(frame, fields):
     return values.reset_index().sort_values(["asset_id", "timestamp"], kind="stable")
 
 
+def _history_ids(frame):
+    """Identify ordered asset histories, split by any supplied listing boundary."""
+    boundary = frame.asset_id.ne(frame.asset_id.shift())
+    if "listing_date" in frame:
+        boundary |= frame.listing_date.isna() | frame.listing_date.ne(
+            frame.listing_date.shift()
+        )
+    return boundary.fillna(True).astype("int64").cumsum()
+
+
+def _price_histories(panel):
+    """Keep native stock prices within each known contiguous listing lifecycle."""
+    fields = ("adj_close", *(("listing_date",) if "listing_date" in panel else ()))
+    facts = _canonical(panel, fields)
+    if "listing_date" in facts:
+        facts["adj_close"] = facts.adj_close.where(facts.listing_date.notna())
+    facts["_history"] = _history_ids(facts)
+    prices = facts.pivot(index="timestamp", columns="asset_id", values="adj_close")
+    prices = prices.sort_index()
+    histories = facts.pivot(
+        index="timestamp", columns="asset_id", values="_history"
+    ).reindex_like(prices)
+    return prices, histories
+
+
 def _align(states, decisions, fields, *, ids=None):
     left = decisions.loc[:, ["asset_id", "timestamp"]].copy()
     if ids is not None:
@@ -567,7 +592,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 - 1
             ).set_axis(benchmark.timestamp)
             exposure = pd.Series(np.nan, index=work.index)
-            for _, at in work.groupby("asset_id", sort=False).indices.items():
+            for at in work.groupby(_history_ids(work), sort=False).indices.values():
                 exposure.loc[at] = liquidity_beta(
                     work.iloc[at].period_return,
                     work.iloc[at].signal_session.map(returns),
@@ -587,18 +612,19 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     )
     if usable & set(PAIRS):
         panel = sources["market_panel_1d"]
-        prices = (
-            _canonical(panel, ("adj_close",))
-            .pivot(index="timestamp", columns="asset_id", values="adj_close")
-            .sort_index()
-        )
+        prices, histories = _price_histories(panel)
         pairs = parameters.get("pair_assets", {})
         for asset, positions in work.groupby("asset_id", sort=False).indices.items():
             peer = pairs.get(asset)
             if asset not in prices or peer not in prices:
                 continue
             x, y = np.log(prices[peer]), np.log(prices[asset])
-            xr, yr = x.diff(), y.diff()
+            same = (
+                histories[[asset, peer]]
+                .eq(histories[[asset, peer]].shift())
+                .all(axis=1)
+            )
+            xr, yr = x.diff().where(same), y.diff().where(same)
             states = pd.DataFrame(
                 {
                     "asset_id": asset,
@@ -612,10 +638,15 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 beta = yr.rolling(w, min_periods=w).cov(xr) / xr.rolling(
                     w, min_periods=w
                 ).var().where(lambda v: v > 0)
-                spread = y - beta.shift() * x
+                spread = (y - beta.shift() * x).where(same)
                 values = {
-                    f"linked_pair_relative_return_{w}d": np.expm1(y - y.shift(w))
-                    - np.expm1(x - x.shift(w)),
+                    f"linked_pair_relative_return_{w}d": (
+                        np.expm1(y - y.shift(w)) - np.expm1(x - x.shift(w))
+                    ).where(
+                        histories[[asset, peer]]
+                        .eq(histories[[asset, peer]].shift(w))
+                        .all(axis=1)
+                    ),
                     f"linked_pair_beta_adjusted_spread_{w}d": yr - beta.shift() * xr,
                     f"linked_pair_spread_zscore_{w}d": (
                         spread - spread.shift().rolling(w, min_periods=w).mean()
@@ -643,9 +674,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
             hours=16
         )
         panel = sources["market_panel_1d"]
-        prices = panel.pivot(
-            index="timestamp", columns="asset_id", values="adj_close"
-        ).sort_index()
+        prices, histories = _price_histories(panel)
         for signal, at in work.groupby("signal_session", sort=False).indices.items():
             decision = work.iloc[at].timestamp.min()
             raw = sources["index_weights"]
@@ -682,13 +711,18 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 continue
             position = prices.index.get_loc(signal)
             selected_prices = prices.reindex(columns=members)
+            selected_histories = histories.reindex(columns=members)
             for width in (5, 20):
                 name = f"index_positive_participation_{width}d"
                 if name not in usable or position < width:
                     continue
                 current_price = selected_prices.iloc[position]
                 old = selected_prices.iloc[position - width]
-                returns = current_price / old.where(old > 0) - 1
+                returns = (current_price / old.where(old > 0) - 1).where(
+                    selected_histories.iloc[position].eq(
+                        selected_histories.iloc[position - width]
+                    )
+                )
                 if returns.notna().all():
                     result.loc[at, name] = returns.gt(0).mean()
             name = "index_positive_return_concentration"
@@ -697,6 +731,10 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     selected_prices.iloc[position]
                     / selected_prices.iloc[position - 1].where(lambda x: x > 0)
                     - 1
+                ).where(
+                    selected_histories.iloc[position].eq(
+                        selected_histories.iloc[position - 1]
+                    )
                 )
                 lagged = weights.reindex(values.index)
                 if lagged.notna().all() and values.notna().all():
@@ -741,7 +779,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
             training = _align(
                 states, signal_open, (US[3], "us_relative_sector_shock"), ids=ids
             )
-            for _, positions in work.groupby("asset_id", sort=False).indices.items():
+            for positions in work.groupby(
+                _history_ids(work), sort=False
+            ).indices.values():
                 if not ids.iloc[positions].notna().any():
                     continue
                 block = work.iloc[positions]

@@ -1,5 +1,7 @@
 """Disclosure-only fund ownership, unit flows and ETF primary-market pressure."""
 
+from bisect import bisect_right
+
 import numpy as np
 import pandas as pd
 
@@ -729,12 +731,13 @@ def calculate(decisions, sources, *, columns, parameters=None):
         versions = _pcf_versions(
             parts, sources.get("public_etf_pcf_baskets"), basket_fields
         )
-        baskets = {
-            key: group.sort_values("available_at", kind="stable")
-            for key, group in versions.loc[versions.available_at.notna()].groupby(
-                ["fund_code", "timestamp"], sort=False
-            )
-        }
+        baskets = {}
+        for fund, day, released, payload, complete in (
+            versions.loc[versions.available_at.notna()]
+            .sort_values("available_at", kind="stable")
+            .itertuples(index=False, name=None)
+        ):
+            baskets.setdefault((fund, day), []).append((released, payload, complete))
         equity_known = versions._payload.map(
             lambda rows: (
                 isinstance(rows, tuple)
@@ -744,7 +747,17 @@ def calculate(decisions, sources, *, columns, parameters=None):
         first_equity_release = (
             versions.loc[equity_known].groupby("fund_code").available_at.min()
         )
-        share_positions = shares.groupby(["asset_id", "timestamp"], sort=False).indices
+        share_versions = {}
+        clock = "_share_delta_1d_available_at"
+        for fund, day, released, change in (
+            shares.loc[
+                shares[clock].notna(),
+                ["asset_id", "timestamp", clock, "_share_delta_1d"],
+            ]
+            .sort_values(clock, kind="stable")
+            .itertuples(index=False, name=None)
+        ):
+            share_versions.setdefault((fund, day), []).append((released, change))
         share_reports = iter_latest_report_keys(
             shares.assign(available_at=shares._share_delta_1d_available_at),
             work.timestamp.drop_duplicates().tolist(),
@@ -773,69 +786,41 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 for fund, cutoff in flow[["asset_id", "_date"]].itertuples(
                     index=False, name=None
                 ):
-                    needed = session_days[session_days <= cutoff][-width:]
-                    positions = [
-                        share_positions.get((fund, day), np.empty(0, dtype=int))
-                        for day in needed
-                    ]
-                    selected_shares = (
-                        shares.iloc[np.concatenate(positions)]
-                        if positions
-                        else shares.iloc[:0]
-                    )
-                    tail = (
-                        selected_shares.loc[
-                            selected_shares._share_delta_1d_available_at.le(date)
-                        ]
-                        .sort_values(
-                            ["timestamp", "_share_delta_1d_available_at"], kind="stable"
-                        )
-                        .drop_duplicates("timestamp", keep="last")
-                        .set_index("timestamp")
-                        .reindex(needed)
-                        .assign(asset_id=fund)
-                        .rename_axis("timestamp")
-                        .reset_index()
-                    )
-                    if (
-                        len(tail) == width
-                        and tail._share_delta_1d.notna().all()
-                        and tail._share_delta_1d_available_at.le(date).all()
-                    ):
-                        history.append(
-                            tail[["asset_id", "timestamp", "_share_delta_1d"]]
-                        )
+                    end = session_days.searchsorted(cutoff, side="right")
+                    needed = session_days[max(0, end - width) : end]
+                    tail = []
+                    for day in needed:
+                        reports = share_versions.get((fund, day), ())
+                        position = bisect_right(reports, date, key=lambda row: row[0])
+                        if not position or pd.isna(reports[position - 1][1]):
+                            break
+                        tail.append((fund, day, reports[position - 1][1]))
+                    if len(tail) == width:
+                        history.extend(tail)
                 if not history:
                     continue
-                delta = pd.concat(history, ignore_index=True)
                 selected_baskets, completion = [], []
-                for fund, day in delta[["asset_id", "timestamp"]].itertuples(
-                    index=False, name=None
-                ):
-                    reports = baskets.get((fund, day))
-                    position = (
-                        0
-                        if reports is None
-                        else reports.available_at.searchsorted(date, side="right")
-                    )
-                    record = None if not position else reports.iloc[position - 1]
-                    if record is None or not isinstance(record._payload, tuple):
+                for fund, day, change in history:
+                    reports = baskets.get((fund, day), ())
+                    position = bisect_right(reports, date, key=lambda row: row[0])
+                    record = None if not position else reports[position - 1]
+                    if record is None or not isinstance(record[1], tuple):
                         completion.append(pd.NaT)
                         continue
-                    completion.append(record._complete_at)
-                    selected_baskets.append(
-                        pd.DataFrame(record._payload, columns=basket_fields).assign(
-                            fund_code=fund, timestamp=day
-                        )
+                    completion.append(record[2])
+                    selected_baskets.extend(
+                        (fund, day, change, *row) for row in record[1]
                     )
                 if not selected_baskets:
                     continue
-                eligible = pd.concat(selected_baskets, ignore_index=True)
-                p = delta.merge(
-                    eligible,
-                    left_on=["asset_id", "timestamp"],
-                    right_on=["fund_code", "timestamp"],
-                    how="inner",
+                p = pd.DataFrame(
+                    selected_baskets,
+                    columns=[
+                        "asset_id",
+                        "timestamp",
+                        "_share_delta_1d",
+                        *basket_fields,
+                    ],
                 )
                 p = p.loc[p.component_kind.eq("equity_security")]
                 # Every constituent day must have its actual historical creation basket.

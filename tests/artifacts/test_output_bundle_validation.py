@@ -97,8 +97,26 @@ def test_unrelated_files_do_not_invalidate_declared_members(tmp_path):
     )
 
 
+@pytest.mark.parametrize(
+    "selection, physical_columns",
+    [
+        ({}, ("prediction_score",)),
+        (
+            {"time_window": TimeWindow("2014-01-03", "2014-01-03")},
+            ("prediction_score", "timestamp"),
+        ),
+        ({"asset_ids": ["asset-a"]}, ("prediction_score", "asset_id")),
+        (
+            {
+                "time_window": TimeWindow("2014-01-03", "2014-01-03"),
+                "asset_ids": ["asset-a"],
+            },
+            ("prediction_score", "timestamp", "asset_id"),
+        ),
+    ],
+)
 def test_read_parses_one_manifest_and_projects_only_consumed_scores(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, selection, physical_columns
 ):
     root, _, _ = native_bundle(tmp_path)
     import quant_research_platform.artifacts.outputs.manifest as manifests
@@ -120,10 +138,11 @@ def test_read_parses_one_manifest_and_projects_only_consumed_scores(
         return iterate(path, **kwargs)
 
     monkeypatch.setattr(parquet, "iter_dataset_part_batches", projected)
-    frame, _ = read_predictions(root, columns=("prediction_score",))
+    frame, _ = read_predictions(root, columns=("prediction_score",), **selection)
     assert list(frame) == ["prediction_score"]
+    assert frame.prediction_score.tolist() == [0.25]
     assert len(calls) == 1
-    assert physical == [("timestamp", "asset_id", "prediction_score")]
+    assert physical == [physical_columns]
 
 
 @pytest.mark.parametrize(

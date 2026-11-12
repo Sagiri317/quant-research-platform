@@ -209,7 +209,6 @@ def _iter_prediction_member(
         or set(requested) - set(prediction_columns(metadata))
     ):
         raise ValueError("prediction_projection_columns_invalid")
-    physical = tuple(dict.fromkeys(("timestamp", "asset_id", *requested)))
     filters = parquet_filters_for_time_window(
         timestamp_column="timestamp", time_window=time_window
     )
@@ -222,6 +221,9 @@ def _iter_prediction_member(
                 PreparedMembershipValues(pa.array(asset_ids, type=pa.string())),
             ),
         ]
+    physical = tuple(
+        dict.fromkeys((*requested, *(column for column, _, _ in filters or ())))
+    )
 
     with closing_iterator(
         iter_dataset_part_batches(

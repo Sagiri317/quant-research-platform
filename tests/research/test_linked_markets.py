@@ -54,7 +54,15 @@ def test_fixed_index_group_does_not_shrink_or_use_prepublication_backcasts(case)
 
 
 @pytest.mark.parametrize(
-    "case", ["known", "late_weights", "unknown_return", "member_change"]
+    "case",
+    [
+        "known",
+        "late_weights",
+        "unknown_return",
+        "member_change",
+        "relisted",
+        "unknown_lifecycle",
+    ],
 )
 def test_index_breadth_and_concentration_use_a_visible_full_member_baseline(case):
     dates = pd.bdate_range("2024-01-02", periods=7)
@@ -77,6 +85,11 @@ def test_index_breadth_and_concentration_use_a_visible_full_member_baseline(case
         ],
         ignore_index=True,
     )
+    prices["listing_date"] = pd.Timestamp("2000-01-01")
+    if case in {"relisted", "unknown_lifecycle"}:
+        prices.loc[
+            prices.asset_id.eq("b") & prices.timestamp.eq(dates[-1]), "listing_date"
+        ] = dates[-1] if case == "relisted" else pd.NaT
     if case == "unknown_return":
         prices.loc[
             prices.asset_id.eq("b") & prices.timestamp.eq(dates[-1]), "adj_close"
@@ -125,7 +138,7 @@ def test_index_breadth_and_concentration_use_a_visible_full_member_baseline(case
         dict(market_panel_1d=prices, index_membership=events, index_weights=weights),
         columns=columns,
     )
-    if case in {"late_weights", "unknown_return"}:
+    if case in {"late_weights", "unknown_return", "relisted", "unknown_lifecycle"}:
         assert result[columns].isna().all().all()
     else:
         # Unchanged member b stays in the denominator without a change event.
@@ -200,7 +213,8 @@ def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     assert partial.us_sector_etf_return_shock_1d.isna().all()
 
 
-def test_hedging_exposure_uses_the_actual_futures_benchmark():
+@pytest.mark.parametrize("lifecycle", ["known", "relisted", "unknown"])
+def test_hedging_exposure_uses_the_actual_futures_benchmark(lifecycle):
     dates = pd.bdate_range("2024-01-02", periods=132)
     changes = 0.01 * np.sin(np.arange(len(dates)) / 3)
     spot = 100 * np.cumprod(1 + changes)
@@ -234,8 +248,14 @@ def test_hedging_exposure_uses_the_actual_futures_benchmark():
             timestamp=dates + pd.Timedelta(days=1),
             signal_session=dates,
             period_return=2 * changes,
+            listing_date=pd.Timestamp("2000-01-01"),
         )
     )
+    if lifecycle != "known":
+        decision.loc[decision.index[-1], "listing_date"] = (
+            dates[-1] if lifecycle == "relisted" else pd.NaT
+        )
+    decision["asset_id"] = decision.asset_id.astype("string")
     result = calculate(
         decision,
         dict(
@@ -243,6 +263,276 @@ def test_hedging_exposure_uses_the_actual_futures_benchmark():
         ),
         columns=["basis_shock_x_hedging_exposure"],
     )
-    assert result.basis_shock_x_hedging_exposure.iloc[-1] == pytest.approx(
-        0.002, rel=1e-10
+    if lifecycle == "known":
+        assert result.basis_shock_x_hedging_exposure.iloc[-1] == pytest.approx(
+            0.002, rel=1e-10
+        )
+    else:
+        assert pd.isna(result.basis_shock_x_hedging_exposure.iloc[-1])
+
+
+@pytest.mark.parametrize("changed_asset", ["a", "b", None])
+def test_pair_history_restarts_when_either_listing_changes(changed_asset):
+    dates = pd.bdate_range("2024-01-02", periods=90)
+    boundary = 44 if changed_asset is not None else 0
+    n = np.arange(len(dates))
+    x = np.log(20.0) + np.cumsum(0.01 + 0.003 * np.sin(n))
+    y = np.log(30.0) + np.cumsum(0.006 + 0.002 * np.cos(n / 3))
+    series = {"a": y, "b": x}
+    if changed_asset is not None:
+        series[changed_asset][boundary:] += np.log(10)
+    panel = pd.concat(
+        [
+            pd.DataFrame(
+                dict(
+                    asset_id=asset,
+                    timestamp=dates,
+                    adj_close=np.exp(logged),
+                    listing_date=[
+                        dates[boundary]
+                        if asset == changed_asset and i >= boundary
+                        else pd.Timestamp("2000-01-01")
+                        for i in n
+                    ],
+                )
+            )
+            for asset, logged in series.items()
+        ],
+        ignore_index=True,
     )
+    if changed_asset is None:
+        # Generic/ETF histories without native stock lifecycle fields stay supported.
+        panel = panel.drop(columns="listing_date").astype({"asset_id": "string"})
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            signal_session=dates,
+            timestamp=dates + pd.Timedelta(days=1),
+        )
+    )
+    names = [
+        "linked_pair_relative_return_20d",
+        "linked_pair_beta_adjusted_spread_20d",
+        "linked_pair_spread_zscore_20d",
+    ]
+    values = calculate(
+        decisions,
+        {"market_panel_1d": panel},
+        columns=names,
+        parameters={"pair_assets": {"a": "b"}},
+    )
+    for name, warmup in zip(names, (20, 21, 41), strict=True):
+        assert values[name].iloc[boundary : boundary + warmup].isna().all()
+        assert np.isfinite(values[name].iloc[boundary + warmup])
+    end = boundary + 20
+    assert values[names[0]].iloc[end] == pytest.approx(
+        np.expm1(y[end] - y[boundary]) - np.expm1(x[end] - x[boundary])
+    )
+    end = boundary + 21
+    xr, yr = np.diff(x[boundary : end + 1]), np.diff(y[boundary : end + 1])
+    slope = np.dot(xr[:-1] - xr[:-1].mean(), yr[:-1] - yr[:-1].mean()) / np.sum(
+        (xr[:-1] - xr[:-1].mean()) ** 2
+    )
+    assert values[names[1]].iloc[end] == pytest.approx(yr[-1] - slope * xr[-1])
+
+
+def test_native_pair_publication_preserves_listing_history(tmp_path):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    days = pd.bdate_range("2024-01-02", periods=25)
+    inputs = {}
+    panel = pd.concat(
+        [
+            pd.DataFrame(
+                dict(
+                    market_id="a_share",
+                    asset_id=asset,
+                    timestamp=days,
+                    adj_close=[10.0] * 24 + [100.0 if asset == "a" else 10.0],
+                    listing_date=[pd.Timestamp("2000-01-01")] * 24
+                    + [days[-1] if asset == "a" else pd.Timestamp("2000-01-01")],
+                )
+            )
+            for asset in ("a", "b")
+        ],
+        ignore_index=True,
+    )
+    decision = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=days + pd.Timedelta(days=1),
+            signal_session=days,
+            execution_session=days + pd.Timedelta(days=1),
+            return_available_at=days + pd.Timedelta(hours=7),
+        )
+    )
+    for name, frame in (("market_panel_1d", panel), ("decision_panel", decision)):
+        path = tmp_path / name
+        key = ("market_id", "asset_id", "timestamp")
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                data_id=name,
+                frequency="1d",
+                grain="asset_timestamp",
+                primary_key=key,
+                partition_columns=(),
+                column_roles={
+                    column: "timestamp"
+                    if column == "timestamp"
+                    else "key"
+                    if column in key
+                    else "context"
+                    for column in frame
+                },
+            ),
+        )
+        inputs[name] = str(path)
+    name = "linked_pair_relative_return_20d"
+    result = read_dataset(
+        prepare(
+            dict(
+                market_id="a_share",
+                data_id="linked_market_factors",
+                inputs=inputs,
+                factor_columns=[name],
+                parameters={"pair_assets": {"a": "b"}},
+                time_window=dict(
+                    start=str(decision.timestamp.min().date()),
+                    end=str(decision.timestamp.max().date()),
+                ),
+                output_root=str(tmp_path / "factors"),
+            )
+        )
+    )
+    assert result[name].iloc[20:24].to_numpy(float) == pytest.approx([0.0] * 4)
+    assert pd.isna(result[name].iloc[-1])
+
+
+@pytest.mark.parametrize("gap", ["missing_quote", "unknown_lifecycle"])
+def test_pair_endpoint_return_only_requires_its_prices_and_known_lifecycle(gap):
+    dates = pd.bdate_range("2024-01-02", periods=21)
+    panel = pd.concat(
+        [
+            pd.DataFrame(
+                dict(
+                    asset_id=asset,
+                    timestamp=dates,
+                    adj_close=100.0 + change * np.arange(len(dates)),
+                    listing_date=pd.Timestamp("2000-01-01"),
+                )
+            )
+            for asset, change in (("a", 2), ("b", 1))
+        ],
+        ignore_index=True,
+    )
+    interior = panel.asset_id.eq("a") & panel.timestamp.eq(dates[10])
+    if gap == "missing_quote":
+        panel = panel.loc[~interior]
+    else:
+        panel.loc[interior, "listing_date"] = pd.NaT
+    name = "linked_pair_relative_return_20d"
+    result = calculate(
+        pd.DataFrame(
+            dict(
+                market_id="a_share",
+                asset_id=["a"],
+                signal_session=dates[-1],
+                timestamp=dates[-1] + pd.Timedelta(days=1),
+            )
+        ),
+        {"market_panel_1d": panel},
+        columns=[name],
+        parameters={"pair_assets": {"a": "b"}},
+    )
+    if gap == "missing_quote":
+        assert result[name].iloc[0] == pytest.approx(0.4 - 0.2)
+    else:
+        assert pd.isna(result[name].iloc[0])
+
+
+def test_native_foreign_beta_keeps_listing_boundaries_local_to_response(tmp_path):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2023-01-02", periods=145)
+    n = np.arange(len(days))
+    shocks = 0.01 * np.sin(n / 3) + 0.002 * np.cos(n / 7)
+    market = 0.01 * np.cos(n / 5)
+    # The stock's completed return responds to the shock known before its open.
+    response = 2 * np.r_[np.nan, shocks[:-1]] + 0.3 * market
+    response[130] = np.nan
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=days + pd.Timedelta(days=1),
+            signal_session=days,
+            execution_session=days + pd.Timedelta(days=1),
+            return_available_at=days + pd.Timedelta(hours=7),
+            period_return=response,
+            market_return=market,
+            listing_date=pd.Timestamp("2000-01-01"),
+        )
+    )
+    decisions.loc[130:, "listing_date"] = days[130]
+    prices = pd.DataFrame(
+        dict(
+            asset_id="SPY",
+            timestamp=days,
+            available_at=days + pd.Timedelta(hours=22),
+            adjusted_close=100 * np.cumprod(1 + shocks),
+        )
+    )
+    prices_path = tmp_path / "us_prices"
+    write_dataset(
+        prices_path,
+        prices,
+        spec=DataSpec(
+            data_id="public_etf_prices",
+            frequency="1d",
+            grain="asset_timestamp",
+            primary_key=("asset_id", "timestamp"),
+            partition_columns=(),
+            column_roles={
+                "asset_id": "key",
+                "timestamp": "timestamp",
+                "available_at": "context",
+                "adjusted_close": "context",
+            },
+        ),
+    )
+    result = read_dataset(
+        prepare(
+            dict(
+                market_id="a_share",
+                data_id="linked_market_factors",
+                inputs=dict(
+                    decision_panel=_input(
+                        tmp_path, "decision_panel", decisions, native=True
+                    ),
+                    public_etf_prices=str(prices_path),
+                ),
+                factor_columns=[
+                    "us_sector_own_beta",
+                    "us_sector_etf_return_shock_1d",
+                ],
+                parameters={"asset_us_tickers": {"a": "SPY"}},
+                time_window=dict(
+                    start=str(decisions.timestamp.min().date()),
+                    end=str(decisions.timestamp.max().date()),
+                ),
+                output_root=str(tmp_path / "foreign_beta"),
+            )
+        )
+    )
+    assert result.us_sector_own_beta.iloc[129] == pytest.approx(2, rel=1e-10)
+    assert result.us_sector_own_beta.iloc[130:].isna().all()
+    assert result.us_sector_etf_return_shock_1d.iloc[-1] == pytest.approx(shocks[-1])

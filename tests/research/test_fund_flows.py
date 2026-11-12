@@ -615,3 +615,58 @@ def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
         )
     else:
         assert result[columns[2:]].isna().all().all()
+
+
+def test_passive_pressure_aggregates_each_funds_visible_historical_window():
+    days = pd.bdate_range("2024-01-02", periods=7)
+    release = days[-1] + pd.Timedelta(days=1)
+    shares, parts = [], []
+    for fund, change, scale in (("f1", 10, 1), ("f2", 20, 2)):
+        units = pd.DataFrame(
+            dict(
+                asset_id=fund,
+                timestamp=days,
+                available_at=days + pd.Timedelta(hours=8),
+                shares_outstanding=100 + change * np.arange(len(days)),
+            )
+        )
+        if fund == "f2":
+            units.loc[units.index[-1], "available_at"] = release
+        shares.append(units)
+        parts.append(
+            pd.DataFrame(
+                dict(
+                    fund_code=fund,
+                    timestamp=days,
+                    available_at=days + pd.Timedelta(hours=8),
+                    component_code="s",
+                    component_kind="equity_security",
+                    component_quantity_unit="share",
+                    component_quantity=10.0 * scale * np.arange(1, len(days) + 1),
+                    creation_unit_fund_shares=100.0,
+                )
+            )
+        )
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="s",
+            timestamp=[release - pd.Timedelta(hours=1), release],
+            avg_volume_20d=100.0,
+        )
+    )
+    names = [f"stock_passive_flow_pressure_{width}d" for width in (1, 5)]
+    result = calculate(
+        decisions,
+        dict(
+            public_fund_shares=pd.concat(shares, ignore_index=True),
+            public_etf_pcf_components=pd.concat(parts, ignore_index=True),
+            trading_calendar=_calendar(days),
+        ),
+        columns=names,
+    )
+    # f1 uses days 3..7 throughout; f2 uses 2..6 until its seventh report is public.
+    np.testing.assert_allclose(
+        result[names].to_numpy(float),
+        [[0.07 + 0.24, 0.25 + 0.8], [0.07 + 0.28, 0.25 + 1.0]],
+    )
