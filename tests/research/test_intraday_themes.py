@@ -54,6 +54,30 @@ def test_intraday_reference_extrema_volume_and_sell_pressure_by_hand():
     )
 
 
+def test_theme_baselines_restart_at_segments_and_recover_from_local_missingness():
+    frame = theme_panel(np.exp(-np.arange(155) * 0.0001))
+    frame.loc[4:, "segment_id"] = "new_segment"
+    columns = (
+        "peak_drawdown_300s",
+        "signed_trend_efficiency_300s",
+        "trade_activity_ratio_30_300s",
+    )
+    actual = compute_factors(frame, columns=columns)
+    assert actual.loc[:103, list(columns)].isna().all(axis=None)
+    # At exactly 300 seconds, 100 log-price moves and 100 volume intervals exist.
+    np.testing.assert_allclose(
+        actual.loc[104, list(columns)].to_numpy(float),
+        [-np.expm1(-0.01), -1, 1],
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    frame.loc[54, "observed_trade_volume"] = np.nan
+    missing = compute_factors(frame, columns=columns)
+    assert pd.isna(missing.loc[104, columns[2]])
+    assert missing.loc[154, columns[2]] == pytest.approx(1)
+    pd.testing.assert_frame_equal(actual[list(columns[:2])], missing[list(columns[:2])])
+
+
 def test_failed_breach_uses_frozen_pre_event_level_and_no_future_confirmation():
     prices = np.r_[np.full(101, 10.0), 11.0, np.full(10, 9.5)]
     frame = theme_panel(prices)

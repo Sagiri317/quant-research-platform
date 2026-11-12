@@ -176,6 +176,9 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
 def _intraday_themes(work, base, columns):
     """Price-path and absorption hypotheses use only their declared inputs."""
     times = pd.DatetimeIndex(work.timestamp)
+    # Even the 30-second absorption factor uses a 300-second variance baseline.
+    if times[-1] - times[0] < pd.Timedelta(seconds=300):
+        return pd.DataFrame(np.nan, index=work.index, columns=list(columns))
     result = pd.DataFrame(index=times)
     price_columns = set(columns) - {"trade_activity_ratio_30_300s"}
     if price_columns:
