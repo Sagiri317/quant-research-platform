@@ -1193,7 +1193,33 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
             header + "old\t1\t012345678\t7\t30\tSH\t\tSOLE\n"
             "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n",
         )
-    frame = next(normalize("public_13f_holdings", path, {"source": "sec_13f"}))
+    payload = path.read_bytes()
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "records": [
+                    {
+                        "source": "sec_13f",
+                        "path": path.name,
+                        "status": "downloaded",
+                        "bytes": len(payload),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "retrieved_at": "2024-01-01T00:00:00Z",
+                    }
+                ],
+            }
+        )
+    )
+    output = tmp_path / "native"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(tmp_path),
+            "outputs": {"public_13f_holdings": str(output)},
+        }
+    )
+    frame = read_dataset(output)
     assert frame.value_usd.tolist() == [7000, 7000]
     assert frame.is_amendment.tolist() == ["N", "Y"]
     assert frame.report_date.nunique() == 1

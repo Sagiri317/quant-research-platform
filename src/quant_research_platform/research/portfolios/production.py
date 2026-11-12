@@ -16,7 +16,7 @@ from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
 )
-from quant_research_platform.contracts.risk import FactorRiskModel
+from quant_research_platform.contracts.risk import FactorRiskConfig, FactorRiskModel
 from quant_research_platform.contracts.time import (
     PredictionWindow,
     TimeWindow,
@@ -37,9 +37,6 @@ from quant_research_platform.research.portfolios.daily import (
 )
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
-)
-from quant_research_platform.research.risk import (
-    FactorRiskConfig,
 )
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,

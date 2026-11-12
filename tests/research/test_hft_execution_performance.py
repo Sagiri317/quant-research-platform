@@ -280,3 +280,50 @@ def test_public_prediction_asset_projection_keeps_empty_schema(tmp_path):
         pd.testing.assert_frame_equal(
             projected, all_rows.iloc[:0][["prediction_score"]]
         )
+
+
+def test_taker_pending_tracks_only_future_attempts_with_missing_forecasts():
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=tuple(f"01:30:{second:02d}" for second in range(0, 19, 3)),
+    ).assign(instrument_type="gold_etf")
+    start = pd.Timestamp("2024-01-02T01:30:00")
+    signals = pd.DataFrame(
+        {
+            "timestamp": start
+            + pd.to_timedelta([0.001, 3.001, 6.001, 9.001, 15.001], unit="s"),
+            "asset_id": "a",
+            "prediction_score": [300.0, 0.0, np.nan, 100.0, 100.0],
+        }
+    )
+    params = parameters(("a",))
+    params["latency_ms"] = 4000.0
+    decisions, batches = run_stream(
+        panel,
+        signals,
+        params,
+        policy=lambda event: event.features.prediction_score,
+    )
+    # The 6-second buy is actual inventory. The older 9-second sell remains
+    # pending through a missing forecast, then ceases to be pending after its fill.
+    assert [event.pending_quantities["a"] for event in decisions] == [
+        0,
+        200,
+        -300,
+        0,
+        0,
+    ]
+    assert [event.quantities["a"] for event in decisions] == [100, 100, 300, 0, 100]
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [
+        (pd.Timestamp(trade.timestamp_ns).second, trade.quantity) for trade in trades
+    ] == [
+        (6, 200),
+        (9, -300),
+        (15, 100),
+    ]
+    # Hand accounting: initial 5000, buy 200 at 10.01, sell 300 at 9.99,
+    # buy 100 at 10.01, terminal 100 shares marked at 10.00, no fees.
+    assert decisions[-1].cash == pytest.approx(3994)
+    assert decisions[-1].nav == pytest.approx(4994)

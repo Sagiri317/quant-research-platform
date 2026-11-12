@@ -96,6 +96,28 @@ def test_paths_are_local_and_secret_files_are_not_readable(tmp_path):
     assert ".env" not in listing["entries"]
 
 
+def test_native_dataset_directory_read_exposes_metadata_without_rows(tmp_path):
+    state, root = state_and_event(tmp_path)
+    result = read_local({"path": "input"}, state, root)
+    assert result["entries"] == ["_manifest/", "data/", "spec.json"]
+    assert result["dataset"] == {
+        "columns": {
+            "timestamp": "timestamp",
+            "asset_id": "key",
+            "x": "factor",
+            "eligible": "mask",
+            "label": "label",
+            "label_available_at": "context",
+        },
+        "units": {"label": "decimal_return"},
+        "frequency": "1d",
+        "rows": 36,
+        "date_min": "2020-01-01",
+        "date_max": "2020-01-12",
+        "label_availability_columns": {"label": "label_available_at"},
+    }
+
+
 def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
     state, root = state_and_event(tmp_path)
     (tmp_path / "factor.py").write_text("momentum = 5\n")

@@ -3,7 +3,12 @@
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_group_codes,
+    _mad_winsorize,
+    _stable_zscore,
+    _winsorize,
+)
 from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
@@ -11,10 +16,7 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.research.features.transforms import (
-    _industry_group_codes,
-    _mad_winsorize,
     _neutralize_cross_section,
-    _winsorize,
 )
 from quant_research_platform.research.risk import FactorRiskState
 

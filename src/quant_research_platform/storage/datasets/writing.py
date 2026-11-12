@@ -416,8 +416,6 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
     summary = accumulator._summary_observer
     if summary.duplicate_primary_key_count:
         raise ValueError("duplicate_dataset_primary_key")
-    if any(int(count) > 0 for count in summary.null_count_summary.values()):
-        raise ValueError("dataset_primary_key_null")
     if any(int(count) > 0 for count in summary.non_finite_count_summary.values()):
         raise ValueError("dataset_infinite_value")
 

@@ -1096,13 +1096,15 @@ def inventory_batches(
                 and at.value >= restore_at.value + latency_ns
             )
             for asset in current.index:
+                # Taker intents are single-quote attempts, not retained history.
+                decision = decisions.pop((int(at.value), asset), None)
                 if restoring:
                     targets[asset] = min(
                         opening_inventory[asset], params["maximum_inventory"][asset]
                     )
                     signal_times[asset] = int(restore_at.value)
-                elif (int(at.value), asset) in decisions:
-                    signal_at, score = decisions[int(at.value), asset]
+                elif decision is not None:
+                    signal_at, score = decision
                     if interactive:
                         targets[asset] = score
                         if execution_order is not None:

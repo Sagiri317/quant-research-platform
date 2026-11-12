@@ -15,6 +15,9 @@ from statistics import mean
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_group_codes,
+)
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.policies import PolicyDecision, policy_target
 from quant_research_platform.contracts.portfolios import (
@@ -38,6 +41,7 @@ from quant_research_platform.contracts.portfolios import (
     _portfolio_session_frame,
     portfolio_notional_tolerance,
 )
+from quant_research_platform.contracts.risk import FactorRiskConfig
 from quant_research_platform.contracts.time import (
     DECISION_CONTEXT_COLUMNS,
     TimeWindow,
@@ -55,9 +59,6 @@ from quant_research_platform.markets.implementations.a_share.stock_pool import (
     a_share_eligibility,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import (
-    _industry_group_codes,
-)
 from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,
     ExecutionAccounting,
@@ -91,7 +92,6 @@ from quant_research_platform.research.portfolios.schedules import (
 )
 from quant_research_platform.research.risk import (
     FactorExposureSession,
-    FactorRiskConfig,
     FactorRiskEstimate,
     FactorRiskState,
 )

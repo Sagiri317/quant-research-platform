@@ -57,8 +57,6 @@ class DatasetSummaryObserver:
     ) -> None:
         self.row_count += int(len(frame))
         self.duplicate_primary_key_count += int(duplicates)
-        for column in self.primary_key:
-            self.null_count_summary[column] += int(frame[column].isna().sum())
         self._observe_dates(frame)
         self._observe_numeric_profiles(frame, batch=batch)
 

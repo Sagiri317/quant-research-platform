@@ -703,13 +703,8 @@ def normalize(data_id, path, record):
             )
             result["timestamp"] = result.report_period_end
             result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
-            result["publication_date"] = pd.concat(
-                [
-                    pd.to_datetime(frame.publication_date),
-                    pd.to_datetime(frame.report_declared_send_date),
-                ],
-                axis=1,
-            ).max(axis=1)
+            result["publication_date"] = frame.publication_date
+            result["_report_declared_send_date"] = frame.report_declared_send_date
             result["asset_id"] = (
                 result.report_version_identity
                 + ":"
@@ -867,10 +862,7 @@ def normalize(data_id, path, record):
                 },
             },
         )
-        _numbers(result, ("weight",))
-        if not result.weight.between(0, 100).all():
-            raise ValueError("public_index_weight_percent_invalid")
-        result["weight"] /= 100
+        # Interpret percentages only after selecting observation dates.
         result["asset_id"] = result.source_asset_id + ":" + result.constituent_asset_id
         yield result
     elif source.startswith("etf_pcf_"):
@@ -987,19 +979,12 @@ def normalize(data_id, path, record):
                     }
                 )
             result = _rename(frame, mapping)
-            result["publication_date"] = pd.concat(
-                [
-                    pd.to_datetime(
-                        frame[
-                            "published_date"
-                            if data_id == "public_fund_holdings"
-                            else "publication_date"
-                        ]
-                    ),
-                    pd.to_datetime(frame.report_declared_send_date),
-                ],
-                axis=1,
-            ).max(axis=1)
+            result["publication_date"] = frame[
+                "published_date"
+                if data_id == "public_fund_holdings"
+                else "publication_date"
+            ]
+            result["_report_declared_send_date"] = frame.report_declared_send_date
             result["asset_id"] = result.report_version_identity
             result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
             if data_id == "public_fund_holdings":
@@ -1019,10 +1004,9 @@ def normalize(data_id, path, record):
                     + result.stock_code
                 )
             else:
-                flags = frame.explicit_no_stock_statement_in_official_report
-                if not flags.dropna().map(lambda value: type(value) is bool).all():
-                    raise ValueError("public_fund_no_stock_flag_invalid")
-                result["explicit_no_stock"] = flags.map({True: "true", False: "false"})
+                result["explicit_no_stock"] = (
+                    frame.explicit_no_stock_statement_in_official_report
+                )
             yield result
     elif source in {"chinaamc_extracted_holdings", "cn_fund_report_holdings_extracted"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"])
@@ -1230,8 +1214,7 @@ def normalize(data_id, path, record):
                 "close_split_adjusted;adjusted_close_splits_dividends_capital_gains;"
                 "current_vintage_not_historical_pit"
             )
-            if not frame.currency.eq("USD").all():
-                raise ValueError("yahoo_price_currency_not_usd")
+            result["_currency"] = frame.currency
         else:
             result["asset_id"] += ":" + result.event_type
         _numbers(
@@ -1260,6 +1243,45 @@ def normalize(data_id, path, record):
         result["asset_id"] = path.stem.split("-")[0]
         _numbers(result, DATASETS[data_id])
         yield result
+
+
+def normalize_selected_facts(frame, *, source):
+    """Interpret release-dependent facts only in the corrected observation domain."""
+    dates = ["publication_date"]
+    if "_report_declared_send_date" in frame:
+        dates.append("_report_declared_send_date")
+    parsed = []
+    for name in dates:
+        values = frame[name]
+        converted = pd.to_datetime(values, format="mixed").astype("datetime64[ns]")
+        if (
+            values.notna() & values.astype("str").str.strip().ne("") & converted.isna()
+        ).any():
+            raise ValueError("public_release_date_invalid")
+        parsed.append(converted)
+    frame["publication_date"] = (
+        parsed[0] if len(parsed) == 1 else pd.concat(parsed, axis=1).max(axis=1)
+    )
+    if source == "sec_13f":
+        _numbers(frame, ("value_usd",))
+        frame["value_usd"] *= frame.publication_date.lt("2023-01-03").map(
+            {True: 1000, False: 1}
+        )
+    elif source == "sec_nport":
+        if not frame.filing_type.isin(("NPORT-P", "NPORT-P/A")).all():
+            raise ValueError("nport_public_filing_type_required")
+    elif source == "cn_fund_report_descriptors_extracted":
+        flags = frame.explicit_no_stock
+        if not flags.dropna().map(lambda value: type(value) is bool).all():
+            raise ValueError("public_fund_no_stock_flag_invalid")
+        frame["explicit_no_stock"] = flags.map({True: "true", False: "false"})
+    elif source == "public_index_weight_history_extracted":
+        _numbers(frame, ("weight",))
+        if not frame.weight.between(0, 100).all():
+            raise ValueError("public_index_weight_percent_invalid")
+        frame["weight"] /= 100
+    elif source == "yahoo_chart_extracted" and not frame._currency.eq("USD").all():
+        raise ValueError("yahoo_price_currency_not_usd")
 
 
 def _cffex(payload, date):
@@ -1310,8 +1332,6 @@ def _sec(path, source, *, data_id):
             )
             member = "INFOTABLE.tsv"
         else:
-            if not submission.SUB_TYPE.isin(("NPORT-P", "NPORT-P/A")).all():
-                raise ValueError("nport_public_filing_type_required")
             fund_columns = ["ACCESSION_NUMBER", "SERIES_ID"]
             if data_id == "public_nport_funds":
                 fund_columns += [
@@ -1335,9 +1355,6 @@ def _sec(path, source, *, data_id):
                 funds, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
             )
             member = "FUND_REPORTED_HOLDING.tsv"
-        submission["FILING_DATE"] = pd.to_datetime(
-            submission.FILING_DATE, format="mixed"
-        )
         if data_id == "public_nport_funds":
             result = _rename(
                 submission,
@@ -1436,10 +1453,6 @@ def _sec(path, source, *, data_id):
                         "FILING_DATE": "publication_date",
                         "INFOTABLE_SK": "_holding_id",
                     },
-                )
-                _numbers(result, ("value_usd",))
-                result["value_usd"] *= result.publication_date.lt("2023-01-03").map(
-                    {True: 1000, False: 1}
                 )
             else:
                 result = _rename(

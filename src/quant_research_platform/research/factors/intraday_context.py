@@ -152,14 +152,19 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
             total = history.sum(axis=1)
             known = (day_positions >= width - 1) & (unknown == 0) & (total > 0)
             if width == 5:
-                trade_days = pd.DatetimeIndex(events[valid].normalize().unique())
+                first_trade = (
+                    pd.Series(events[valid], index=events[valid].normalize())
+                    .groupby(level=0)
+                    .min()
+                )
                 complete = (
-                    pd.Series(days.isin(trade_days), index=days)
+                    pd.Series(days.isin(first_trade.index), index=days)
                     .rolling(5, min_periods=5)
                     .sum()
                     .eq(5)
                 )
                 known &= complete.reindex(times.normalize()).to_numpy()
+                known &= first_trade.reindex(times.normalize()).to_numpy() <= times
             node = history.argmax(axis=1)
             center = np.exp((minimum + node + 0.5) * step)
             current = q.mid.to_numpy(float)
@@ -177,6 +182,11 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
                         total > 0, total, np.nan
                     )
                 else:
+                    # Only this window's occupied range can bound the value area.
+                    # Keep empty interior bins: they represent real price distance.
+                    occupied = history > 0
+                    lower = occupied.argmax(axis=1)
+                    upper = size - 1 - occupied[:, ::-1].argmax(axis=1)
                     left = node.copy()
                     right = node.copy()
                     mass = history[np.arange(len(q)), node].copy()
@@ -185,12 +195,12 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
                         if not active.any():
                             break
                         lv = np.where(
-                            left > 0,
+                            left > lower,
                             history[np.arange(len(q)), np.maximum(left - 1, 0)],
                             -1,
                         )
                         rv = np.where(
-                            right < size - 1,
+                            right < upper,
                             history[np.arange(len(q)), np.minimum(right + 1, size - 1)],
                             -1,
                         )

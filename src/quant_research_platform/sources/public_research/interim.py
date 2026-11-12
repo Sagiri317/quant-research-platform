@@ -12,7 +12,7 @@ from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets.writing import write_dataset
 
-from .normalization import DATASETS, _numbers, normalize
+from .normalization import DATASETS, _numbers, normalize, normalize_selected_facts
 
 PROVENANCE = (
     "source",
@@ -214,16 +214,7 @@ def materialize_interim_data(
                             ]
                         if frame.empty:
                             continue
-                        publication_dates = frame.publication_date
-                        frame["publication_date"] = pd.to_datetime(
-                            frame.publication_date
-                        ).astype("datetime64[ns]")
-                        if (
-                            publication_dates.notna()
-                            & publication_dates.astype("str").str.strip().ne("")
-                            & frame.publication_date.isna()
-                        ).any():
-                            raise ValueError("public_release_date_invalid")
+                        normalize_selected_facts(frame, source=record["source"])
                         if "published_at" not in frame:
                             frame["published_at"] = record.get(
                                 "historical_published_at"

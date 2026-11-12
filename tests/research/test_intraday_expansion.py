@@ -398,6 +398,118 @@ def test_trade_profiles_group_each_assets_own_recorded_trades():
     pd.testing.assert_frame_equal(result.drop(columns=name), quotes.drop(columns="mid"))
 
 
+@pytest.mark.parametrize("width", (1, 5))
+def test_trade_value_area_uses_only_current_window_occupied_bounds(width, tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.sources.venvoo import interim_spec
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.helpers.a_share_sources import _calendar_input
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2024-01-02", periods=6)
+    step = np.log(1.002)
+    opening = pd.Timedelta(hours=1, minutes=30)
+    times = [days[-1] + opening, days[-1] + opening + pd.Timedelta(seconds=3)]
+    quotes = pd.DataFrame(
+        dict(market_id="a_share", asset_id="a", timestamp=times, mid=10.0)
+    )
+    trades = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=[*(days[1:-1] + opening), *times],
+            source_row=np.arange(6),
+            event_kind="trade",
+            price=np.exp((np.array([1100] * 5 + [1105]) + 0.5) * step),
+            volume=[1.0] * 4 + [50.0, 50.0],
+        )
+    )
+    name = f"trade_profile_value_area_width_{width}d"
+    expected = trade_profiles(quotes, trades, columns=[name], session_days=days)
+    # The lower occupied node contains less than 70%; reaching the upper node
+    # spans all six fixed bins, including the four empty interior bins.
+    np.testing.assert_allclose(expected[name], [step, 6 * step])
+    outside = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=[
+                days[0] + opening,
+                times[-1] + pd.Timedelta(seconds=3),
+                times[0],
+            ],
+            source_row=[6, 7, 8],
+            event_kind="trade",
+            price=np.exp((np.array([1095, 1090, 1085]) + 0.5) * step),
+            volume=[1.0, 1.0, 0.0],
+        )
+    )
+    actual = trade_profiles(
+        quotes,
+        pd.concat([trades, outside], ignore_index=True),
+        columns=[name],
+        session_days=days,
+    )
+    pd.testing.assert_frame_equal(actual, expected)
+    combined = pd.concat([trades, outside], ignore_index=True)
+    spec = interim_spec("hft_trades")
+    source = tmp_path / "trades"
+    write_dataset(
+        source,
+        combined,
+        spec=replace(
+            spec, column_roles={name: spec.column_roles[name] for name in combined}
+        ),
+    )
+    day = days[-1].date().isoformat()
+    published = prepare(
+        dict(
+            market_id="a_share",
+            data_id="hft_research_factors",
+            inputs=dict(
+                hft_panel=_input(tmp_path, "hft_panel", quotes, native=True),
+                hft_trades=str(source),
+                trading_calendar=str(_calendar_input(tmp_path, {1: days})),
+            ),
+            factor_columns=[name],
+            time_window=dict(start=day, end=day),
+            output_root=str(tmp_path / "result"),
+        )
+    )
+    np.testing.assert_allclose(read_dataset(published)[name], expected[name])
+
+
+def test_five_day_profile_waits_for_todays_first_observed_trade():
+    days = pd.bdate_range("2024-01-02", periods=5)
+    opening = pd.Timedelta(hours=1, minutes=30)
+    trades = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=days + opening + pd.Timedelta(seconds=3),
+            source_row=np.arange(5),
+            event_kind="trade",
+            price=10.0,
+            volume=10.0,
+        )
+    )
+    quotes = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=[days[-1] + opening, trades.timestamp.iloc[-1]],
+            mid=10.0,
+        )
+    )
+    name = "trade_profile_concentration_5d"
+    result = trade_profiles(quotes, trades, columns=[name], session_days=days)
+    assert pd.isna(result[name].iloc[0])
+    assert result[name].iloc[1] == 1.0
+    prefix = trade_profiles(
+        quotes.iloc[:1], trades.iloc[:-1], columns=[name], session_days=days
+    )
+    pd.testing.assert_frame_equal(result.iloc[:1], prefix)
+
+
 def test_intraday_return_does_not_cross_overnight_when_segment_ids_repeat():
     one = (
         panel()

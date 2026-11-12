@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
+    _mad_winsorize,
     _select_quantile_boundary,
     _stable_zscore,
 )
@@ -20,7 +21,6 @@ from quant_research_platform.contracts.validation import (
     strict_finite_float,
     strict_real_numeric_series,
 )
-from quant_research_platform.research.features.transforms import _mad_winsorize
 from quant_research_platform.research.portfolios.optimizer import (
     _project_neutral_target,
 )

@@ -121,7 +121,9 @@ def read_local(arguments, state, root):
             entries=names[offset : offset + limit],
             next_offset=offset + limit if offset + limit < len(names) else None,
         )
-        if (path / "spec.json").is_file() and (path / "manifest.json").is_file():
+        if (path / "spec.json").is_file() and (
+            path / "_manifest" / "manifest.json"
+        ).is_file():
             from quant_research_platform.agents.protocol import sandbox_context
 
             result["dataset"] = sandbox_context({"data": path})["data"]

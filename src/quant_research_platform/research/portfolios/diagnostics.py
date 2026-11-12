@@ -14,7 +14,7 @@ from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMN
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
-from quant_research_platform.contracts.risk import FactorRiskModel
+from quant_research_platform.contracts.risk import FactorRiskConfig, FactorRiskModel
 from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import (
@@ -40,7 +40,6 @@ from quant_research_platform.research.portfolios.performance import performance_
 from quant_research_platform.research.portfolios.schedules import holding_intervals
 from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.risk import (
-    FactorRiskConfig,
     FactorRiskState,
 )
 from quant_research_platform.research.statistics import (

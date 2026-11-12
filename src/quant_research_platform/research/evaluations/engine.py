@@ -16,6 +16,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _compute_ic_and_grouped_label_values,
     _correlation_metrics_frame,
     _correlation_records,
+    _industry_group_codes,
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
 )
@@ -38,7 +39,6 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.features.transforms import _industry_group_codes
 from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
