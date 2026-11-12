@@ -243,6 +243,8 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             mask = result.timestamp.ge(
                 max(day, pd.Timestamp(lower))
             ) & result.timestamp.le(end)
-            yield result.loc[mask]
+            yield result.loc[mask].sort_values(
+                "timestamp", kind="stable", ignore_index=True
+            )
 
     yield frames(), metadata

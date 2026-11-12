@@ -506,6 +506,69 @@ def test_native_intraday_skips_unobserved_day_with_history_prefix(tmp_path):
     assert not result.timestamp.dt.day.eq(4).any()
 
 
+def test_native_intraday_keeps_complete_cross_sections_across_reader_batches(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.runtime.dataframes import iter_complete_time_frames
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.reading import (
+        iter_dataset_chunks,
+        open_dataset_session,
+    )
+    from tests.research.test_prepare_selection import _input
+
+    blocks = []
+    for asset, direction in (("a", 1), ("b", -1)):
+        for offset in (0, 1):
+            block = (
+                panel()
+                .iloc[:12]
+                .assign(
+                    asset_id=asset,
+                    bid_px1=0.99,
+                    ask_px1=1.01,
+                    bid_vol1=100.0,
+                    ask_vol1=100.0,
+                    exchange="SSE",
+                    instrument_type="stock",
+                )
+            )
+            block["mid"] = np.exp(direction * np.arange(len(block)) * 0.001)
+            block["timestamp"] = (block.timestamp + pd.Timedelta(days=offset)).astype(
+                "datetime64[ns]"
+            )
+            blocks.append(block)
+    frame = pd.concat(blocks, ignore_index=True)
+    name = "intraday_positive_return_fraction"
+    path = prepare(
+        dict(
+            market_id="a_share",
+            data_id="hft_research_factors",
+            inputs={"hft_panel": _input(tmp_path, "hft_panel", frame, native=True)},
+            factor_columns=[name],
+            time_window=dict(start="2024-01-02", end="2024-01-03"),
+            output_root=str(tmp_path / "result"),
+        )
+    )
+    result = read_dataset(path)
+    assert result.timestamp.is_monotonic_increasing
+    keys = ["market_id", "asset_id", "timestamp"]
+    pd.testing.assert_frame_equal(
+        result[keys].sort_values(keys).reset_index(drop=True),
+        frame[keys].sort_values(keys).reset_index(drop=True),
+    )
+    # One rising and one falling price path give breadth one half after 30s.
+    assert result[name].notna().sum() == 8
+    np.testing.assert_allclose(result[name].dropna(), 0.5)
+    session = open_dataset_session(path)
+    recovered = pd.concat(
+        iter_complete_time_frames(
+            iter_dataset_chunks(session, batch_rows=7), timestamp_column="timestamp"
+        ),
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(recovered, result)
+
+
 @pytest.mark.parametrize(
     ("name", "inputs", "expected"),
     (
