@@ -26,6 +26,26 @@ def panel():
     )
 
 
+def test_flow_warmup_uses_each_segments_elapsed_time_and_recovers_after_missing():
+    frame = panel().iloc[:44].copy()
+    frame["segment_id"] = np.repeat([0, 1, 2], [4, 11, 29])
+    names = ("observed_trade_volume_30s", "realized_volatility_60s")
+    result = compute_factors(frame, columns=names)
+    assert result.loc[:3, list(names)].isna().all(axis=None)
+    assert result.loc[4:13, names[0]].isna().all()
+    assert result.loc[:34, names[1]].isna().all()
+    # At 30 seconds, (t-30s, t] contains ten observed 10-share intervals.
+    assert result.loc[14, names[0]] == 100.0
+    assert result.loc[25, names[0]] == 100.0
+    # Twenty 3-second log-price increments of 0.0001 enter the 60-second sum.
+    assert result.loc[35, names[1]] == pytest.approx(np.sqrt(20) * 0.0001)
+    frame.loc[20, "observed_trade_volume"] = np.nan
+    missing = compute_factors(frame, columns=names)
+    assert pd.isna(missing.loc[25, names[0]])
+    assert missing.loc[30, names[0]] == 100.0
+    pd.testing.assert_series_equal(missing[names[1]], result[names[1]])
+
+
 @pytest.mark.parametrize("direction", (1, -1))
 def test_intraday_acceleration_has_quadratic_reference_and_no_future_prices(direction):
     frame = panel().iloc[:112].copy()

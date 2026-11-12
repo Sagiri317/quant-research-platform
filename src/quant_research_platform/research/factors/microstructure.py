@@ -7,6 +7,9 @@ from quant_research_platform.research.protocols import a_share_hft as protocol
 
 
 def _trailing_sum(values, timestamps, seconds):
+    window = pd.Timedelta(seconds=seconds)
+    if timestamps.iloc[-1] - timestamps.iloc[0] < window:
+        return np.full(len(values), np.nan)
     series = pd.Series(values.to_numpy(), index=pd.DatetimeIndex(timestamps))
     rolling = series.rolling(f"{seconds}s", closed="right")
     elapsed = timestamps - timestamps.iloc[0]
@@ -14,7 +17,7 @@ def _trailing_sum(values, timestamps, seconds):
         series.isna().astype(int).rolling(f"{seconds}s", closed="right").sum().eq(0)
     )
     result = rolling.sum().where(complete).to_numpy(copy=True)
-    result[elapsed.lt(pd.Timedelta(seconds=seconds))] = np.nan
+    result[elapsed.lt(window)] = np.nan
     return result
 
 
