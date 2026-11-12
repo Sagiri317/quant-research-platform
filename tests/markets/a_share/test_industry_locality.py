@@ -57,11 +57,23 @@ def _snapshot(
     }
 
 
-def _panel(snapshots, *, dictionary=None, history=None, changes=None, versions=None):
+def _panel(
+    snapshots,
+    *,
+    dictionary=None,
+    history=None,
+    changes=None,
+    versions=None,
+    stock_status_date=None,
+):
     dates = pd.bdate_range("2020-01-02", periods=6).as_unit("ns")
     inputs = _synthetic_interim_frames(dates)
     stocks = inputs["stock_master"].copy()
-    stocks["timestamp"] = stocks["listing_date"]
+    stocks["timestamp"] = (
+        stocks["listing_date"]
+        if stock_status_date is None
+        else pd.Timestamp(stock_status_date)
+    )
     if versions is None:
         versions = pd.DataFrame(
             {
@@ -95,6 +107,82 @@ def _assert_prices_unchanged(actual):
     )
     assert len(actual) == 18
     assert actual.close.notna().all()
+
+
+def test_official_snapshot_uses_observed_life_with_late_company_status():
+    snapshots = pd.DataFrame(
+        [
+            _snapshot(asset, "2020-01-03", observed="2020-01-02")
+            for asset in ("000001", "000002", "000003", "000004", "000005", "000006")
+        ]
+    )
+    stocks = panels._canonical_stock_master(
+        pd.DataFrame(
+            {
+                "source_asset_id": ["000001", "000002", "000003", "000005", "000006"],
+                "timestamp": pd.to_datetime(
+                    [
+                        "2020-01-07",
+                        "2010-01-01",
+                        "2020-01-03",
+                        "2010-01-01",
+                        "2010-01-01",
+                    ]
+                ),
+                "listing_date": pd.to_datetime(
+                    ["2010-01-01", "2010-01-01", "2020-01-03", "2010-01-01", None]
+                ),
+                "delisting_date": pd.to_datetime(
+                    [None, "2020-01-01", None, "2020-01-02", None]
+                ),
+            }
+        )
+    )
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012"],
+            "implement_date": pd.to_datetime(["2012-10-26"]),
+            "abandon_date": pd.Series(pd.NaT, index=[0], dtype="datetime64[ns]"),
+        }
+    )
+    before = snapshots.copy(deep=True)
+    actual = panels._snapshot_industry_history(
+        snapshots,
+        industry_sets=_dictionary(),
+        industry_versions=versions,
+        stock_master=stocks,
+    )
+    assert actual.set_index("asset_id")._industry_known.to_dict() == {
+        "000001": True,
+        "000002": False,
+        "000003": False,
+        "000004": False,
+        "000005": True,
+        "000006": False,
+    }
+    assert actual.timestamp.eq(pd.Timestamp("2020-01-03")).all()
+    pd.testing.assert_frame_equal(snapshots, before)
+
+
+def test_public_industry_survives_unknown_early_company_status():
+    snapshots = [_snapshot("000001", "2020-01-03", observed="2020-01-02")]
+    actual = _panel(snapshots, stock_status_date="2020-01-07")
+    baseline = _panel(None, stock_status_date="2020-01-07")
+    affected = actual.query("asset_id == '000001'").reset_index(drop=True)
+    assert affected.industry_level1_code.fillna("unknown").tolist() == [
+        "unknown",
+        "A",
+        "A",
+        "A",
+        "A",
+        "A",
+    ]
+    assert affected.iloc[:3].company_status.isna().all()
+    assert affected.iloc[:3].delisting_date_unresolved.all()
+    pd.testing.assert_frame_equal(
+        actual.drop(columns=INDUSTRY_COLUMNS),
+        baseline.drop(columns=INDUSTRY_COLUMNS),
+    )
 
 
 @pytest.mark.parametrize("conflict", ["value", "standard"])

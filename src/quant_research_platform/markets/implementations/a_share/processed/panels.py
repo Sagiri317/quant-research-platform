@@ -816,7 +816,7 @@ def _asof_industry(
 def _snapshot_industry_history(
     snapshots, *, industry_sets, industry_versions, stock_master
 ):
-    """Qualify public observations without inventing publication or issuer history."""
+    """Resolve public industry observations for the observed listing life."""
     if industry_sets is None or stock_master is None:
         raise ValueError("industry_snapshot_context_missing")
     result = snapshots.rename(columns={"source_asset_id": "asset_id"}).copy()
@@ -839,7 +839,7 @@ def _snapshot_industry_history(
     observed = result["_industry_event_timestamp"]
     result["_industry_known"] = (
         observed.ge(result["listing_date"])
-        & observed.le(result["delisting_date"])
+        & (result["delisting_date"].isna() | observed.le(result["delisting_date"]))
         & _industry_version_active_mask(
             result["industry_standard_id"], observed, industry_versions
         )
