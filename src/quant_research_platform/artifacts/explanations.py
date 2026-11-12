@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from math import fsum
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.compute.attribution import attribution_relative_tolerance
 from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
@@ -143,47 +143,6 @@ def validate_attribution_method(method, algorithm):
         raise ValueError("explanation_tree_model_required")
 
 
-def attribution_relative_tolerance(method, feature_count):
-    """Tree backends accumulate float32 paths; affine paths use float64."""
-    return float(
-        5e-5
-        if method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}
-        else 64 * np.finfo(float).eps * max(1, feature_count)
-    )
-
-
-def attribution_additivity(base, contributions, output, relative):
-    """Require both backward stability and useful precision at the output scale."""
-    terms = [float(base), *map(float, contributions)]
-    if not all(np.isfinite(terms)):
-        return np.nan, np.nan, "nonrepresentable_contribution_or_baseline"
-    magnitude = max(abs(output), *map(abs, terms))
-    floor = np.nextafter(0.0, 1.0) * max(1, len(contributions))
-    backward = (
-        (relative * magnitude) * max(1.0, fsum(abs(term) / magnitude for term in terms))
-        if magnitude
-        else 0.0
-    )
-    backward += floor
-    tolerance = min(
-        backward, max(relative, np.sqrt(np.finfo(float).eps)) * abs(output) + floor
-    )
-    try:
-        residual = fsum([*terms, -float(output)])
-    except OverflowError:
-        return np.nan, np.nan, "nonrepresentable_additivity"
-    if not np.isfinite(residual) or not np.isfinite(tolerance):
-        return np.nan, np.nan, "nonrepresentable_additivity"
-    if abs(residual) > tolerance:
-        reason = (
-            "cancellation_precision_loss"
-            if abs(residual) <= backward
-            else "additivity_mismatch"
-        )
-        return np.nan, np.nan, reason
-    return residual, tolerance, ""
-
-
 def _validate(metadata, tables):
     if not isinstance(metadata, dict) or metadata.get("kind") != "MODEL_EXPLANATION":
         raise ValueError("explanation_metadata_invalid")
@@ -284,39 +243,40 @@ def _validate(metadata, tables):
         except (pa.ArrowException, ValueError, TypeError):
             raise ValueError("explanation_table_schema_invalid") from None
         arrow_tables[name] = table
-        converted = table.to_pandas()
         if (
-            converted[_KEYS[name]].isna().any(axis=None)
-            or converted.duplicated(_KEYS[name]).any()
+            frame[_KEYS[name]].isna().any(axis=None)
+            or frame.duplicated(_KEYS[name]).any()
         ):
             raise ValueError("explanation_table_keys_invalid")
         for field in schema:
             if name == "contributions" and field.name == "input_value":
-                values = pd.to_numeric(converted.input_value.dropna(), errors="coerce")
+                values = pd.to_numeric(frame.input_value.dropna(), errors="coerce")
                 if not np.isfinite(values).all():
                     raise ValueError("explanation_input_value_invalid")
                 continue
             if pa.types.is_string(field.type) and (
-                converted[field.name].isna().any()
+                frame[field.name].isna().any()
                 or field.name != "reason"
-                and converted[field.name].str.strip().eq("").any()
+                and frame[field.name].str.strip().eq("").any()
             ):
                 raise ValueError("explanation_table_string_invalid")
             if pa.types.is_floating(field.type):
-                if not np.isfinite(converted[field.name].dropna()).all():
+                if not np.isfinite(
+                    frame[field.name].dropna().to_numpy(dtype=float)
+                ).all():
                     raise ValueError("explanation_table_nonfinite")
             if pa.types.is_integer(field.type) and (
-                (field.name != "rank" and converted[field.name].isna().any())
-                or converted[field.name].lt(0).any()
+                (field.name != "rank" and frame[field.name].isna().any())
+                or frame[field.name].lt(0).any()
             ):
                 raise ValueError("explanation_table_count_invalid")
         if (
-            "feature" in converted
-            and not converted.feature.isin(metadata["input_columns"]).all()
+            "feature" in frame
+            and not frame.feature.isin(metadata["input_columns"]).all()
         ):
             raise ValueError("explanation_feature_binding_invalid")
-        if "status" in converted:
-            defined = converted.status.eq("DEFINED")
+        if "status" in frame:
+            defined = frame.status.eq("DEFINED")
             measurements = {
                 "native_importance": ["value"],
                 "predictions": [
@@ -333,15 +293,15 @@ def _validate(metadata, tables):
                 "permutation_summary": ["baseline", "delta_mean", "delta_std"],
             }[name]
             if (
-                not converted.status.isin(
+                not frame.status.isin(
                     ("DEFINED", "NOT_APPLICABLE")
                     if name == "native_importance"
                     else ("DEFINED", "UNDEFINED")
                 ).all()
-                or converted.loc[defined, measurements].isna().any(axis=None)
-                or converted.loc[~defined, measurements].notna().any(axis=None)
-                or converted.loc[defined, "reason"].ne("").any()
-                or converted.loc[~defined, "reason"].str.strip().eq("").any()
+                or frame.loc[defined, measurements].isna().any(axis=None)
+                or frame.loc[~defined, measurements].notna().any(axis=None)
+                or frame.loc[defined, "reason"].ne("").any()
+                or frame.loc[~defined, "reason"].str.strip().eq("").any()
             ):
                 raise ValueError("explanation_table_status_invalid")
         if name in {"predictions", "contributions", "summary"}:
@@ -359,9 +319,9 @@ def _validate(metadata, tables):
                     "rank",
                 },
             }.get(name, set())
-            if converted.drop(columns=list(nullable)).isna().any(axis=None):
+            if frame.drop(columns=list(nullable)).isna().any(axis=None):
                 raise ValueError("explanation_table_null_invalid")
-        result[name] = converted
+        result[name] = frame
     if "predictions" in result:
         predictions = result["predictions"].set_index(["timestamp", "asset_id"])
         if (

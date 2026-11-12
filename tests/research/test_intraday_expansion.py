@@ -504,3 +504,45 @@ def test_native_intraday_skips_unobserved_day_with_history_prefix(tmp_path):
     assert result.loc[result.timestamp.dt.day.eq(2), name].isna().all()
     assert result[name].iloc[-1] == 1
     assert not result.timestamp.dt.day.eq(4).any()
+
+
+@pytest.mark.parametrize(
+    ("name", "inputs", "expected"),
+    (
+        ("intraday_positive_return_fraction", ("mid",), 1.0),
+        (
+            "intraday_positive_flow_fraction",
+            ("observed_trade_volume", "observed_signed_trade_volume"),
+            1.0,
+        ),
+        (
+            "intraday_liquidity_stress_fraction",
+            ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1"),
+            0.0,
+        ),
+        ("opening_gap_repair_fraction_5m", ("mid",), -np.expm1(0.01)),
+    ),
+)
+def test_selected_intraday_context_uses_only_its_observation_inputs(
+    name, inputs, expected
+):
+    frame = (
+        panel()
+        .iloc[:111]
+        .assign(bid_px1=0.99, ask_px1=1.01, bid_vol1=100.0, ask_vol1=100.0)
+    )
+    frame = frame.loc[:, ["market_id", "asset_id", "timestamp", "segment_id", *inputs]]
+    daily = pd.DataFrame(
+        dict(
+            asset_id=["a"],
+            timestamp=pd.Timestamp("2024-01-02 01:00"),
+            signal_session=pd.Timestamp("2023-12-29"),
+            close=0.5,
+        )
+    )
+    result = calculate(frame, columns=[name], daily_context=daily)
+    # Positive price/flow histories give breadth one; a constant book has no
+    # shock. Opening price is 1 against prior close .5, so repair is -return.
+    assert result[name].iloc[-1] == pytest.approx(expected)
+    assert pd.isna(result[name].iloc[0])
+    assert list(result) == ["market_id", "asset_id", "timestamp", name]

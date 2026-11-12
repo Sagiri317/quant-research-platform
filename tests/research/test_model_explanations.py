@@ -248,7 +248,7 @@ def test_small_affine_output_keeps_real_contributions_and_residual(tmp_path, tar
 
 
 def test_additivity_preserves_tiny_signal_but_rejects_severe_relative_loss():
-    from quant_research_platform.artifacts.explanations import (
+    from quant_research_platform.compute.attribution import (
         attribution_additivity,
         attribution_relative_tolerance,
     )

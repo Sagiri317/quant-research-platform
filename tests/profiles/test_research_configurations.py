@@ -96,7 +96,7 @@ def test_selected_financial_recipe_requires_only_consumed_statements(factor, sou
     }
 
 
-def test_required_risk_factor_is_explicit_and_order_is_preserved():
+def test_selected_financial_factors_preserve_requested_order():
     spec = _configured_spec(
         processed_catalog().get("fundamental_factors"),
         {"factor_columns": ["roe", "earnings_yield"]},

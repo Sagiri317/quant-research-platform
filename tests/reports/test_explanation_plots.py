@@ -14,10 +14,12 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.explanations import (
-    attribution_additivity,
-    attribution_relative_tolerance,
     read_explanation,
     write_explanation,
+)
+from quant_research_platform.compute.attribution import (
+    attribution_additivity,
+    attribution_relative_tolerance,
 )
 from quant_research_platform.reports import plots
 

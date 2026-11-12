@@ -32,6 +32,8 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at`、`release_date`、`estimated_available_at` 其中一列。两个时刻列必须显式含 UTC 偏移。真实发布时间与日期沿用原规则；估计可用时刻记为 `inferred_snapshot_release`，`published_at` 和未知历史版本日期保持空，具体估计依据留在结构化 raw 来源证据。每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
 
+`release_csv` 按观察日选择记录，再验证所选数值、单位与发布时钟。下载数据先解析原格式中的观察日、下载时刻和历史版本日期，再按观察日选域并验证所选数值、单位和业务时序。同一已选观察日的修订全部保留，发布时间推定口径沿用原规则。
+
 ## 日频决策时钟
 
 `decision_panel` 接收既有日频 `daily_dataset` 和完整 `trading_calendar`，明确设置 `mode`、`local_time` 和 `latency_seconds`。输入原始日频数据不被改写。

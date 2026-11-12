@@ -339,3 +339,106 @@ def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls():
     names = ["cn_treasury_1y", "cn_treasury_3y", "cn_treasury_10y", "cn_credit_aaa_3y"]
     actual = _normalize_response(payload, names, record)
     assert [float(f.value.iloc[0]) for f in actual] == [2.1, 2.3, 2.7, 3.4]
+
+
+@pytest.mark.parametrize(
+    "bad_field,bad_value",
+    [
+        ("value", "invalid"),
+        ("unit", "wrong_unit"),
+        ("published_at", "2024-02-04T18:00:00"),
+    ],
+)
+def test_macro_release_checks_only_selected_observation_window(
+    tmp_path, bad_field, bad_value
+):
+    path = tmp_path / "release.csv"
+    row = {
+        "series_id": "cn_dr007",
+        "observation_date": "2024-01-04",
+        "value": 1.8,
+        "unit": "percent",
+        "frequency": "D",
+        "source_id": "cfets",
+        "source_series": "DR007",
+        "source_timezone": "Asia/Shanghai",
+        "source_url": "https://www.chinamoney.com.cn/",
+        "retrieved_at": "2026-11-05T00:00Z",
+        "published_at": "2024-01-04T18:00:00+08:00",
+    }
+    later = row | {
+        "observation_date": "2024-02-04",
+        "published_at": "2024-02-04T18:00:00+08:00",
+        bad_field: bad_value,
+    }
+    pd.DataFrame([row, later]).to_csv(path, index=False)
+    output = tmp_path / "selected"
+    materialize_interim_data(
+        raw_root=tmp_path,
+        output_roots={"macro_observations": output},
+        release_csv=path,
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+    )
+    result = read_dataset(output)
+    assert result.observation_date.tolist() == [pd.Timestamp("2024-01-04")]
+    assert result.timestamp.tolist() == [pd.Timestamp("2024-01-04T10:00:00")]
+    assert result.value.tolist() == [1.8]
+    invalid = tmp_path / "invalid"
+    with pytest.raises(ValueError):
+        materialize_interim_data(
+            raw_root=tmp_path,
+            output_roots={"macro_observations": invalid},
+            release_csv=path,
+            start_date="2024-02-01",
+            end_date="2024-02-29",
+        )
+    assert not invalid.exists()
+
+
+def test_downloaded_macro_window_ignores_other_observations_invalid_values(tmp_path):
+    raw = tmp_path / "raw"
+    source = raw / "vvix"
+    source.mkdir(parents=True)
+    payload = b"DATE,VVIX\n01/02/2024,20.0\n02/02/2024,invalid\n"
+    (source / "daily.csv").write_bytes(payload)
+    (raw / "download.json").write_text(
+        json.dumps(
+            {
+                "sources": {
+                    "vvix": {
+                        "status": "downloaded",
+                        "source": "cboe",
+                        "series_ids": ["us_vvix"],
+                        "responses": [
+                            {
+                                "file": "daily.csv",
+                                "retrieved_at": "2026-11-05T00:00:00Z",
+                                "url": "https://example.org/vix",
+                                "bytes": len(payload),
+                                "sha256": hashlib.sha256(payload).hexdigest(),
+                            }
+                        ],
+                    }
+                }
+            }
+        )
+    )
+    output = tmp_path / "selected"
+    materialize_interim_data(
+        raw_root=raw,
+        output_roots={"macro_observations": output},
+        start_date="2024-01-01",
+        end_date="2024-01-31",
+    )
+    result = read_dataset(output)
+    assert result.observation_date.tolist() == [pd.Timestamp("2024-01-02")]
+    assert result.value.tolist() == [20.0]
+    with pytest.raises(ValueError):
+        materialize_interim_data(
+            raw_root=raw,
+            output_roots={"macro_observations": tmp_path / "invalid"},
+            start_date="2024-02-01",
+            end_date="2024-02-29",
+        )
+    assert not (tmp_path / "invalid").exists()

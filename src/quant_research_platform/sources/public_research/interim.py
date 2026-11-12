@@ -178,27 +178,9 @@ def materialize_interim_data(
                     if "source_sha256" not in frame:
                         frame["source_sha256"] = digest
                     if "retrieved_at" not in frame:
-                        frame["retrieved_at"] = (
-                            pd.Timestamp(record["retrieved_at"])
-                            if "retrieved_at" in record
-                            else pd.NaT
-                        )
+                        frame["retrieved_at"] = record.get("retrieved_at")
                     if "publication_date" not in frame:
                         frame["publication_date"] = pd.NaT
-                    publication_dates = frame.publication_date
-                    frame["publication_date"] = pd.to_datetime(
-                        frame.publication_date
-                    ).astype("datetime64[ns]")
-                    if (
-                        publication_dates.notna()
-                        & publication_dates.astype("str").str.strip().ne("")
-                        & frame.publication_date.isna()
-                    ).any():
-                        raise ValueError("public_release_date_invalid")
-                    if "published_at" not in frame:
-                        frame["published_at"] = record.get("historical_published_at")
-                    frame["published_at"] = _utc_times(frame.published_at)
-                    frame["retrieved_at"] = _utc_times(frame.retrieved_at)
                     frame["timestamp"] = pd.to_datetime(frame.timestamp).astype(
                         "datetime64[ns]"
                     )
@@ -228,6 +210,20 @@ def materialize_interim_data(
                         ]
                     if frame.empty:
                         continue
+                    publication_dates = frame.publication_date
+                    frame["publication_date"] = pd.to_datetime(
+                        frame.publication_date
+                    ).astype("datetime64[ns]")
+                    if (
+                        publication_dates.notna()
+                        & publication_dates.astype("str").str.strip().ne("")
+                        & frame.publication_date.isna()
+                    ).any():
+                        raise ValueError("public_release_date_invalid")
+                    if "published_at" not in frame:
+                        frame["published_at"] = record.get("historical_published_at")
+                    frame["published_at"] = _utc_times(frame.published_at)
+                    frame["retrieved_at"] = _utc_times(frame.retrieved_at)
                     from quant_research_platform.sources.macro.interim import (
                         date_end_available,
                     )
@@ -270,7 +266,9 @@ def materialize_interim_data(
                                 frame.timestamp.dt.normalize(),
                             ]
                         )
-                        clock = clocks.reindex(keys).set_axis(frame.index)
+                        clock = _select_release_clocks(clocks, keys).set_axis(
+                            frame.index
+                        )
                         actual = frame.published_at.isna() & clock.published_at.notna()
                         frame.loc[actual, "published_at"] = clock.loc[
                             actual, "published_at"
@@ -508,12 +506,10 @@ def _release_clocks(path):
     clocks = pd.read_csv(
         io.BytesIO(payload), dtype="str", usecols=lambda column: column in selected
     )
-    if clocks[list(required)].isna().any(axis=None):
+    if clocks[["source", "observation_date"]].isna().any(axis=None):
         raise ValueError("public_release_clock_required_value_missing")
     if "published_at" not in clocks:
         clocks["published_at"] = pd.NA
-    for name in ("estimated_available_at", "published_at"):
-        clocks[name] = _utc_times(clocks[name])
     clocks["observation_date"] = pd.to_datetime(clocks.observation_date)
     if clocks.observation_date.isna().any():
         raise ValueError("public_observation_date_invalid")
@@ -522,3 +518,20 @@ def _release_clocks(path):
     return clocks.set_index(["source", "observation_date"]), hashlib.sha256(
         payload
     ).hexdigest()
+
+
+def _select_release_clocks(clocks, keys):
+    """Validate only the release facts used by the selected source observations."""
+    selected = clocks.reindex(keys)
+    matched = keys.isin(clocks.index)
+    if (
+        selected.loc[
+            matched, ["estimated_available_at", "availability_basis", "evidence_url"]
+        ]
+        .isna()
+        .any(axis=None)
+    ):
+        raise ValueError("public_release_clock_required_value_missing")
+    for name in ("estimated_available_at", "published_at"):
+        selected[name] = _utc_times(selected[name])
+    return selected

@@ -14,9 +14,11 @@ import pandas as pd
 from quant_research_platform.artifacts.explanations import (
     ATTRIBUTION_METHODS,
     LINEAR_EXPLANATION_ALGORITHMS,
+    validate_attribution_method,
+)
+from quant_research_platform.compute.attribution import (
     attribution_additivity,
     attribution_relative_tolerance,
-    validate_attribution_method,
 )
 from quant_research_platform.compute.dataframe.cross_section import (
     _average_ranks,

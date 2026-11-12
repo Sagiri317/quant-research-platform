@@ -192,7 +192,7 @@ def equal_timestamp_sample_weights(
         or not periods.is_monotonic_increasing
     ):
         raise ValueError("training_decay_calendar_invalid")
-    indices = periods.get_indexer(values)
+    indices = periods.get_indexer(values.dt.normalize())
     if (indices < 0).any():
         raise ValueError("training_decay_calendar_coverage_missing")
     with np.errstate(over="ignore", under="ignore"):

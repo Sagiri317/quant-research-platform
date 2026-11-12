@@ -260,3 +260,56 @@ def test_enabled_decay_requires_matching_complete_own_calendar():
         _collect_training_frame(
             [mixed], model, fitting_cutoff="2024-01-03", trading_calendar=shared
         )
+
+
+def test_decay_uses_session_age_without_collapsing_intraday_timestamps(tmp_path):
+    dates = pd.to_datetime(
+        ["2024-01-01 01:00"] * 2 + ["2024-01-01 02:00"] + ["2024-01-03 01:00"] * 2
+    )
+    data = pd.DataFrame(
+        dict(
+            timestamp=dates,
+            asset_id=["a", "b", "a", "a", "b"],
+            market_type=1,
+            x=[1.0, 2.0, 3.0, 4.0, 5.0],
+            label=[1.0, 2.0, 3.0, 4.0, 5.0],
+            eligible=True,
+            label_available_at=dates,
+        )
+    )
+    model = ModelSpec(
+        model_id="decayed_intraday",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        target_column="label",
+        training_weighting=TrainingWeighting(half_life_periods=1),
+    )
+    calendar = pd.DataFrame(
+        dict(
+            calendar_date=pd.date_range("2024-01-01", "2024-01-03"),
+            source_market_type=1,
+            is_trading_day=True,
+        )
+    )
+    prepared = _collect_training_frame(
+        [data], model, fitting_cutoff="2024-01-04", trading_calendar=calendar
+    )
+    # Timestamp masses are 1, 1 and 4, including the unobserved middle session.
+    expected = np.array([5 / 12, 5 / 12, 5 / 6, 5 / 3, 5 / 3])
+    weights, scaler = prepared.preprocessing
+    np.testing.assert_allclose(weights, expected)
+    assert sum(weights) == pytest.approx(len(data))
+    assert scaler.mean_[0] == pytest.approx(np.average(data.x, weights=expected))
+    case = fit_frame(tmp_path / "fit", data, model, trading_calendar=calendar)
+    assert case.result.metadata["training_target_mean"] == pytest.approx(
+        np.average(data.label, weights=expected)
+    )
+    assert case.result.prediction_model.scaler.mean_ == pytest.approx(scaler.mean_)
+    future = data.iloc[:2].assign(timestamp=pd.Timestamp("2024-01-04 01:00"), x=[6, 7])
+    predictions, _, _ = predict_frame(
+        tmp_path / "predict",
+        future,
+        case,
+        window={"start": "2024-01-04", "end": "2024-01-04"},
+    )
+    np.testing.assert_allclose(predictions.prediction_score, [6.0, 7.0])

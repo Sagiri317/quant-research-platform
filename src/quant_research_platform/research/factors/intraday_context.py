@@ -224,6 +224,50 @@ def calculate(
         return result
     if all(name.startswith("trade_profile_") for name in columns):
         return trade_profiles(work, trades, columns=columns, session_days=session_days)
+    requested = set(columns)
+    opening_windows = [
+        w
+        for w in (5, 15, 30)
+        if requested
+        & {f"opening_gap_repair_fraction_{w}m", f"opening_relative_activity_{w}m"}
+    ]
+    activity_windows = [
+        w for w in opening_windows if f"opening_relative_activity_{w}m" in requested
+    ]
+    peer_windows = [
+        w
+        for w in (30, 60, 300)
+        if requested
+        & {
+            f"industry_return_relative_{w}s",
+            f"industry_catchup_{w}s",
+            f"industry_catchdown_{w}s",
+            f"lagged_industry_return_{w}s",
+        }
+    ]
+    pressure = bool(
+        requested
+        & {"intraday_short_squeeze_pressure", "intraday_long_deleveraging_pressure"}
+    )
+    return_windows = sorted(
+        set(peer_windows)
+        | ({30} if "intraday_positive_return_fraction" in requested else set())
+        | ({60} if pressure else set())
+    )
+    flow_windows = [
+        w
+        for w in (30, 60)
+        if f"industry_synchronous_sell_pressure_{w}s" in requested
+        or (w == 30 and "intraday_positive_flow_fraction" in requested)
+        or (w == 60 and pressure)
+    ]
+    stress_widths = [
+        w
+        for w in (30, 60)
+        if f"industry_synchronous_liquidity_stress_{w}s" in requested
+    ]
+    stress_needed = any("liquidity_stress" in name for name in requested)
+    relative_needed = any("_activity_x_depth_recovery" in name for name in requested)
     day = work.timestamp.dt.normalize()
     daily = pd.DataFrame(np.nan, index=work.index, columns=DAILY_FIELDS)
     if daily_context is not None:
@@ -242,32 +286,40 @@ def calculate(
     activities = {}
     relative_activity = pd.Series(np.nan, index=work.index)
     late_samples = []
-    for (asset, date), at in work.groupby(
-        [work.asset_id, day], sort=False
-    ).indices.items():
+    opening_groups = (
+        work.groupby([work.asset_id, day], sort=False).indices.items()
+        if opening_windows or "late_session_relative_activity" in requested
+        else ()
+    )
+    for (asset, date), at in opening_groups:
         at = np.asarray(at)
         block = work.iloc[at]
         times = pd.DatetimeIndex(block.timestamp)
         opening = date + pd.Timedelta(hours=1, minutes=30)
         complete = 0 <= (times[0] - opening).total_seconds() <= 6
-        volume = block.observed_trade_volume
-        for minutes in (5, 15, 30):
+        if activity_windows or "late_session_relative_activity" in requested:
+            volume = block.observed_trade_volume
+        for minutes in opening_windows:
             ends = np.flatnonzero(times >= opening + pd.Timedelta(minutes=minutes))
             if not len(ends):
                 continue
             end = ends[0]
             visible = np.arange(len(block)) >= end
-            gap = block.mid.iloc[0] / pd.to_numeric(daily.loc[at, "close"]).iloc[0] - 1
             name = f"opening_gap_repair_fraction_{minutes}m"
             if name in columns and complete:
+                gap = (
+                    block.mid.iloc[0] / pd.to_numeric(daily.loc[at, "close"]).iloc[0]
+                    - 1
+                )
                 observed = block.mid.iloc[end] / block.mid.iloc[0] - 1
                 result.loc[at, name] = np.where(
                     visible, -observed / gap if gap != 0 else np.nan, np.nan
                 )
-            window = volume.iloc[1 : end + 1]
-            activities[(asset, date, minutes)] = (
-                window.sum(min_count=len(window)) if complete else np.nan
-            )
+            if minutes in activity_windows:
+                window = volume.iloc[1 : end + 1]
+                activities[(asset, date, minutes)] = (
+                    window.sum(min_count=len(window)) if complete else np.nan
+                )
         if "late_session_relative_activity" in columns:
             close = calendar.continuous_session_end(
                 block.timestamp, block.exchange, block.instrument_type
@@ -296,24 +348,23 @@ def calculate(
                         }
                     ).loc[selected]
                 )
-    for asset, at in work.groupby("asset_id", sort=False).indices.items():
+    activity_groups = (
+        work.groupby("asset_id", sort=False).indices.items()
+        if activity_windows and session_days is not None
+        else ()
+    )
+    for asset, at in activity_groups:
         observed = pd.DatetimeIndex(day.iloc[at].unique())
-        dates = (
-            observed
-            if session_days is None
-            else session_days[
-                (session_days >= observed.min()) & (session_days <= observed.max())
-            ]
-        )
-        for window in (5, 15, 30):
+        dates = session_days[
+            (session_days >= observed.min()) & (session_days <= observed.max())
+        ]
+        for window in activity_windows:
             amounts = pd.Series(
                 [activities.get((asset, date, window), np.nan) for date in dates],
                 index=dates,
             )
             baseline = amounts.shift().rolling(20, min_periods=20).mean()
             name = f"opening_relative_activity_{window}m"
-            if name not in columns or session_days is None:
-                continue
             for date in dates:
                 positions = np.asarray(at)[day.iloc[at].eq(date)]
                 start = date + pd.Timedelta(hours=1, minutes=30 + window)
@@ -348,25 +399,35 @@ def calculate(
         ratio = reference.volume / reference.baseline.where(reference.baseline > 0)
         result.loc[reference.row, "late_session_relative_activity"] = ratio.to_numpy()
     if all(
-        name.startswith("opening_relative_activity_")
-        or name == "late_session_relative_activity"
+        name.startswith("opening_") or name == "late_session_relative_activity"
         for name in columns
     ):
         return result
     stress_windows = {w: pd.Series(np.nan, index=work.index) for w in (30, 60)}
-    for _, at in work.groupby(
-        [work.asset_id, day, work.segment_id], sort=False
-    ).indices.items():
+    segments = (
+        tuple(
+            work.groupby(
+                [work.asset_id, day, work.segment_id], sort=False
+            ).indices.values()
+        )
+        if return_windows or flow_windows or stress_needed or relative_needed
+        else ()
+    )
+    for at in segments:
         at = np.asarray(at)
         block = work.iloc[at]
         times = pd.DatetimeIndex(block.timestamp)
-        for width in (30, 60, 300):
+        for width in return_windows:
             returns[width].loc[at] = (
                 block.mid.to_numpy() / _lag(block.mid, times, width) - 1
             )
-        volume = pd.Series(block.observed_trade_volume.to_numpy(), index=times)
-        signed = pd.Series(block.observed_signed_trade_volume.to_numpy(), index=times)
-        if any("_activity_x_depth_recovery" in name for name in columns):
+        if flow_windows or relative_needed:
+            volume = pd.Series(block.observed_trade_volume.to_numpy(), index=times)
+        if flow_windows:
+            signed = pd.Series(
+                block.observed_signed_trade_volume.to_numpy(), index=times
+            )
+        if relative_needed:
             baseline = (
                 volume.rolling("300s")
                 .sum()
@@ -384,7 +445,7 @@ def calculate(
                 10 * gross / np.where(baseline > 0, baseline, np.nan),
                 np.nan,
             )
-        for width in (30, 60):
+        for width in flow_windows:
             gross = volume.rolling(f"{width}s").sum()
             net = signed.rolling(f"{width}s").sum()
             complete = (
@@ -395,6 +456,8 @@ def calculate(
             flows[width].loc[at] = (
                 (net / gross.where(gross > 0)).where(complete).to_numpy()
             )
+        if not stress_needed:
+            continue
         spread = pd.Series((block.ask_px1 - block.bid_px1).to_numpy(), index=times)
         depth = pd.Series((block.bid_vol1 + block.ask_vol1).to_numpy(), index=times)
         normal_spread = spread.rolling("60s", closed="left").mean()
@@ -422,7 +485,7 @@ def calculate(
             .where(known)
             .to_numpy()
         )
-        for width in (30, 60):
+        for width in stress_widths:
             history = pd.Series(stress.loc[at].to_numpy(), index=times)
             complete = history.isna().astype(int).rolling(f"{width}s").sum().eq(0) & (
                 (times - times[0]).total_seconds() >= 60 + width
@@ -431,14 +494,15 @@ def calculate(
                 history.rolling(f"{width}s").mean().where(complete).to_numpy()
             )
     cohort = work.timestamp
-    peer_keys = pd.MultiIndex.from_arrays(
-        [cohort, daily.industry_standard_id, daily.industry_level1_code]
-    )
-    peer_ids = pd.Series(pd.factorize(peer_keys)[0], index=work.index)
-    valid_industry = (
-        daily.industry_standard_id.notna() & daily.industry_level1_code.notna()
-    )
-    for width in (30, 60, 300):
+    if any("industry_" in name for name in requested):
+        peer_keys = pd.MultiIndex.from_arrays(
+            [cohort, daily.industry_standard_id, daily.industry_level1_code]
+        )
+        peer_ids = pd.Series(pd.factorize(peer_keys)[0], index=work.index)
+        valid_industry = (
+            daily.industry_standard_id.notna() & daily.industry_level1_code.notna()
+        )
+    for width in peer_windows:
         own = returns[width]
         peers = leave_one_out_mean(own.where(valid_industry), peer_ids)
         for kind, value in (
@@ -449,28 +513,25 @@ def calculate(
             name = f"industry_{kind}_{width}s"
             if name in columns:
                 result[name] = value.where(own.notna() & peers.notna() & valid_industry)
-        if width in (30, 60):
-            for kind, values in (
-                ("sell_pressure", (-flows[width]).clip(lower=0)),
-                ("liquidity_stress", stress_windows[width]),
-            ):
-                name = f"industry_synchronous_{kind}_{width}s"
-                if name in columns:
-                    result[name] = pd.Series(
-                        leave_one_out_mean(values.where(valid_industry), peer_ids),
-                        index=work.index,
-                    ).where(valid_industry)
-            name = f"lagged_industry_return_{width}s"
+        name = f"lagged_industry_return_{width}s"
+        if name in columns:
+            for at in segments:
+                result.loc[at, name] = _lag(
+                    peers.iloc[at],
+                    pd.DatetimeIndex(work.timestamp.iloc[at]),
+                    width,
+                )
+    for width in (30, 60):
+        for kind, values in (
+            ("sell_pressure", (-flows[width]).clip(lower=0)),
+            ("liquidity_stress", stress_windows[width]),
+        ):
+            name = f"industry_synchronous_{kind}_{width}s"
             if name in columns:
-                series = pd.Series(peers, index=work.index)
-                for _, at in work.groupby(
-                    [work.asset_id, day, work.segment_id], sort=False
-                ).indices.items():
-                    result.loc[at, name] = _lag(
-                        series.iloc[at],
-                        pd.DatetimeIndex(work.timestamp.iloc[at]),
-                        width,
-                    )
+                result[name] = pd.Series(
+                    leave_one_out_mean(values.where(valid_industry), peer_ids),
+                    index=work.index,
+                ).where(valid_industry)
     for name, values in (
         ("intraday_positive_return_fraction", returns[30]),
         ("intraday_positive_flow_fraction", flows[30]),

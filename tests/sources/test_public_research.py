@@ -1075,14 +1075,18 @@ def test_manifest_publication_clock_cannot_invent_an_earlier_release(
 
 
 def test_local_china_release_date_is_not_compared_to_utc_midnight(tmp_path):
-    from quant_research_platform.sources.public_research.interim import _release_clocks
+    from quant_research_platform.sources.public_research.interim import (
+        _release_clocks,
+        _select_release_clocks,
+    )
 
     clocks = tmp_path / "clock.csv"
     clocks.write_text(
         "source,observation_date,estimated_available_at,availability_basis,evidence_url\n"
         "sse_etf_shares,2024-01-02,2024-01-01T18:00:00Z,assumption,https://example.org/rule\n"
     )
-    frame, _ = _release_clocks(clocks)
+    clocks, _ = _release_clocks(clocks)
+    frame = _select_release_clocks(clocks, clocks.index)
     assert frame.estimated_available_at.iloc[0] == pd.Timestamp(
         "2024-01-02T02:00:00+08:00"
     )
@@ -1238,7 +1242,10 @@ def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
     ],
 )
 def test_release_clock_requires_explicit_timezone(tmp_path, clock, error):
-    from quant_research_platform.sources.public_research.interim import _release_clocks
+    from quant_research_platform.sources.public_research.interim import (
+        _release_clocks,
+        _select_release_clocks,
+    )
 
     path = tmp_path / "clocks.csv"
     pd.DataFrame(
@@ -1250,13 +1257,24 @@ def test_release_clock_requires_explicit_timezone(tmp_path, clock, error):
             "evidence_url": ["https://example.org/rule"],
         }
     ).to_csv(path, index=False)
+    clocks, _ = _release_clocks(path)
     with pytest.raises(ValueError, match=error):
-        _release_clocks(path)
+        _select_release_clocks(clocks, clocks.index)
 
 
 @pytest.mark.parametrize(
     "clock_column",
-    ["publication_date", "published_at", "calendar_date", "calendar_order"],
+    [
+        "publication_date",
+        "published_at",
+        "calendar_date",
+        "calendar_order",
+        "invalid_publication_date",
+        "published_timezone",
+        "calendar_timezone",
+        "calendar_missing",
+        "calendar_unrelated_source",
+    ],
 )
 def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_column):
     from quant_research_platform.sources.public_research.interim import (
@@ -1281,13 +1299,27 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
         clocks = raw / "clocks.csv"
         pd.DataFrame(
             {
-                "source": ["cboe_put_call_extracted"] * 2,
-                "observation_date": rows.observation_date,
+                "source": [
+                    "cboe_put_call_extracted",
+                    "sse_margin"
+                    if clock_column == "calendar_unrelated_source"
+                    else "cboe_put_call_extracted",
+                ],
+                "observation_date": [
+                    "2024-01-02",
+                    "2024-01-02"
+                    if clock_column == "calendar_unrelated_source"
+                    else "2024-02-02",
+                ],
                 "published_at": ["2024-01-03T12:00:00Z", "2024-02-03T13:00:00Z"],
                 "estimated_available_at": [
                     "2024-01-03T12:00:00Z",
                     "2024-01-01T12:00:00Z"
                     if clock_column == "calendar_date"
+                    else "2024-02-03T12:00:00"
+                    if clock_column == "calendar_timezone"
+                    else None
+                    if clock_column in {"calendar_missing", "calendar_unrelated_source"}
                     else "2024-02-03T12:00:00Z",
                 ],
                 "availability_basis": ["source_release"] * 2,
@@ -1295,8 +1327,17 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
             }
         ).to_csv(clocks, index=False)
     else:
-        rows[clock_column] = (
-            ["2024-01-03", "2024-01-01"]
+        field = (
+            "publication_date"
+            if clock_column in {"publication_date", "invalid_publication_date"}
+            else "published_at"
+        )
+        rows[field] = (
+            ["2024-01-03", "not a date"]
+            if clock_column == "invalid_publication_date"
+            else ["2024-01-03T12:00:00Z", "2024-02-03T12:00:00"]
+            if clock_column == "published_timezone"
+            else ["2024-01-03", "2024-01-01"]
             if clock_column == "publication_date"
             else ["2024-01-03T12:00:00Z", "2024-01-01T12:00:00Z"]
         )
@@ -1327,7 +1368,18 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
     result = read_dataset(output)
     assert result.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
     assert result.put_call_ratio.tolist() == [0.5]
-    with pytest.raises(ValueError, match="public_release_clock_precedes_dependency"):
+    if clock_column == "calendar_unrelated_source":
+        return
+    error = (
+        "timezone_required"
+        if clock_column in {"published_timezone", "calendar_timezone"}
+        else "required_value_missing"
+        if clock_column == "calendar_missing"
+        else "Unknown datetime string"
+        if clock_column == "invalid_publication_date"
+        else "public_release_clock_precedes_dependency"
+    )
+    with pytest.raises(ValueError, match=error):
         materialize_interim_data(
             raw_root=raw,
             release_csv=clocks,

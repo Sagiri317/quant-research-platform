@@ -314,7 +314,21 @@ def validate_observations(frame):
     )
 
 
-def read_release_csv(path):
+def _select_observation_window(frame, *, start_date, end_date):
+    """Select observation dependencies before validating their values and clocks."""
+    frame = frame.assign(observation_date=pd.to_datetime(frame.observation_date))
+    if frame.observation_date.isna().any():
+        raise ValueError("macro_observation_key_missing")
+    if start_date is not None:
+        frame = frame.loc[frame.observation_date.ge(pd.Timestamp(start_date))]
+    if end_date is not None:
+        frame = frame.loc[
+            frame.observation_date.lt(pd.Timestamp(end_date) + pd.Timedelta(days=1))
+        ]
+    return frame
+
+
+def read_release_csv(path, *, start_date=None, end_date=None):
     """Import timestamped original releases or revisions from an explicit local file.
 
     Each file selects a publication timestamp, release date, or assumed clock.
@@ -337,6 +351,7 @@ def read_release_csv(path):
     clocks = set(data) & {"published_at", "release_date", "estimated_available_at"}
     if not required <= set(data) or len(clocks) != 1:
         raise ValueError("macro_release_columns_invalid")
+    data = _select_observation_window(data, start_date=start_date, end_date=end_date)
     clock = next(iter(clocks))
     if clock != "release_date":
         # Explicit offsets prevent machine-local time from becoming economic time.
@@ -419,9 +434,8 @@ def materialize_interim_data(
     raw_root = Path(raw_root)
     frames, skipped, sources, incomplete = [], [], {}, []
     if release_csv is not None:
-        release = read_release_csv(release_csv)
-        sources["release_csv"] = release.attrs.pop("source_evidence")
-        frames.append(release)
+        frame = read_release_csv(release_csv, start_date=start_date, end_date=end_date)
+        sources["release_csv"] = frame.attrs.pop("source_evidence")
     else:
         manifest = read_qrp_json_file(raw_root / "download.json")[1]
         for key, metadata in manifest["sources"].items():
@@ -461,16 +475,16 @@ def materialize_interim_data(
                 data = pd.concat(chunks, ignore_index=True)
                 frames.append(data)
             sources[key] = metadata
-    if not frames:
-        raise ValueError("macro_no_observations")
-    frame = validate_observations(pd.concat(frames, ignore_index=True))
+        if not frames:
+            raise ValueError("macro_no_observations")
+        frame = validate_observations(
+            _select_observation_window(
+                pd.concat(frames, ignore_index=True),
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
     frame = estimate_initial_archive_times(resolve_source_conflicts(frame))
-    if start_date is not None:
-        frame = frame.loc[frame.observation_date.ge(pd.Timestamp(start_date))]
-    if end_date is not None:
-        frame = frame.loc[
-            frame.observation_date.lt(pd.Timestamp(end_date) + pd.Timedelta(days=1))
-        ]
     coverage = []
     for name, group in frame.groupby("series_id", sort=True):
         observed = group.loc[group.value.notna()]

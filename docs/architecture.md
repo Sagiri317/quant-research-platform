@@ -129,6 +129,7 @@ score/select 各写自己的 JSON；selection 读取恢复已保存的选择，�
 schema 和行数直接来自实际写入的 Arrow 表，关闭后只记录文件大小；不为证明自身写入再打开文件。
 空批次仍贡献逻辑类型和类别域；仅整个数据集零行时写入带类型的空分片。
 统计计算负责科学结果及未定义原因；统计发布只检查表结构、键、状态表示和元数据绑定，不回算科学结果。
+解释的可加性残差与容差由 `compute.attribution` 计算；解释发布直接检查生产者的表并转换为 Arrow 保存，不将刚生成的 Arrow 表转回 pandas 复验。
 输入校验由写入入口负责，
 外部文件的结构与类型校验由读取入口负责。原生产物的信任与检查边界见[data.md](data.md)。
 显式检查和比较按请求运行。
@@ -211,9 +212,12 @@ Matplotlib与中文字体只在绘图时加载，缺字体明确报错。
 ## 数据准备的显式选择
 
 `prepare` 必填 `market_id, data_id, inputs, time_window, output_root`。
-`inputs` 将本次使用的数据标识映射到路径。
-仅支持对应计算确实使用的 `parameters`、`factor_columns`、`base_panel`。
-财报 PIT 的因子选择缩小必需源集合，未使用的参数直接拒绝。
+`inputs` 将本次使用的数据标识映射到路径；`factor_columns`、`label_columns` 分别选择因子和标签值列，
+省略时沿用该表的默认集合。标签前瞻与可用时间列由已有定义推导，不为未选标签读满最长前瞻。
+`parameters` 只填写所选计算使用的设置。
+依赖表、列和回看由所选计算决定，财报 PIT 按因子裁剪必需源，不为现金比率强求市值表。
+输入的 `years`、`time_window`、`files` 与数学窗口取交集；显式裁掉必要历史时按真实缺失处理，
+不绕过调用者的选择。年分区读取在发现文件前裁剪年份，仍验证实际选择路径。
 
 `assemble` 必填 `market_id, dataset_id, inputs, time_window, output_root`；
 可明确选择 `factor_columns, label_columns, feature_recipe, base_input_data_id`。
@@ -306,12 +310,6 @@ PPO 和成本感知模型同样复用训练中位数；PPO 从有界训练 episo
 
 
 ## 选择计算与数值产物
-
-`prepare.factor_columns` 选择实际计算的因子，`prepare.label_columns` 选择标签值列；
-标签的前瞻期限由已有定义推导，对应可用时间列自动输出。省略选择沿用该表的默认集合。
-依赖表、列、回看及前瞻由所选计算决定，不为未选标签读满最长前瞻，不为现金比率强求市值表。
-输入的 `years`、`time_window`、`files` 与数学窗口取交集；显式裁掉必要历史时结果按真实缺失处理，
-不绕过调用者的选择。年分区读取在发现文件前裁剪年份，仍验证实际选择路径。
 
 EVAL 按实际预测键与标签键配对；预测声明窗可以只覆盖评估窗的一部分，无预测日期只影响对应信号的观察数。
 因子统计的 RankIC-only 读取 metrics；分层和覆盖成员仅在所选分析实际依赖时读取。
