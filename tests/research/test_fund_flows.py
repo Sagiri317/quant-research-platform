@@ -534,7 +534,7 @@ def test_passive_pressure_uses_each_historical_basket_and_ignores_unused_row_id(
 
 
 @pytest.mark.parametrize(
-    "case", ["complete", "partial", "unpublished", "unknown_quantity"]
+    "case", ["complete", "partial", "unpublished", "unknown_quantity", "different_file"]
 )
 def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
     dates = pd.bdate_range("2024-01-02", periods=7)
@@ -556,6 +556,8 @@ def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
             component_quantity_unit="share",
             component_quantity=np.nan if case == "unknown_quantity" else 10.0,
             creation_unit_fund_shares=100.0,
+            source="etf_pcf_components_extracted",
+            source_sha256="raw-pcf",
         )
     )
     headers = pd.DataFrame(
@@ -565,6 +567,8 @@ def test_passive_pressure_distinguishes_absent_from_unknown_component(case):
             available_at=dates
             + pd.Timedelta(days=20 if case == "unpublished" else 0, hours=16),
             declared_component_count=2 if case == "partial" else 1,
+            source="etf_pcf_baskets_extracted",
+            source_sha256="another-pcf" if case == "different_file" else "raw-pcf",
         )
     )
     decision = pd.DataFrame(

@@ -217,9 +217,9 @@ def _pcf_versions(parts, headers, fields):
         complete = pd.NaT
         if headers is not None:
             proof = headers.iloc[header_groups.get((fund, day), [])]
-            for field in ("source", "source_sha256"):
-                if field in proof and field in block:
-                    proof = proof.loc[proof[field].eq(block[field].iloc[0])]
+            # Table-specific source labels differ; the raw-file hash links the tables.
+            if "source_sha256" in proof and "source_sha256" in block:
+                proof = proof.loc[proof.source_sha256.eq(block.source_sha256.iloc[0])]
             if block.component_code.nunique() == len(block):
                 proof = proof.loc[proof.declared_component_count.eq(len(block))]
                 if (
