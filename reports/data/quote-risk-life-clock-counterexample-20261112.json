@@ -1,0 +1,18 @@
+{
+  "status": "completed_read_only_counterexample",
+  "sample_rows": 17945,
+  "sample_assets": 4990,
+  "query_rows_with_listing_life": 17945,
+  "paired_rows_with_changed_risk_styles": 16535,
+  "current_decision_rows": 5021,
+  "decision_clock_min": "2023-07-03T01:00:00",
+  "original_observation_min": "2023-06-30T00:00:00",
+  "original_observation_max": "2023-06-30T00:00:00",
+  "explicit_available_at_min": "2023-07-03T01:00:01",
+  "source_query_listing_life_missing": true,
+  "correction": "Quote life must be supplied from actual contemporaneous lifecycle facts; risk facts use their original signal_session as observation and preserve order_submit_at availability.",
+  "limits": "One actual nine-second quote domain. Counts measure five finite styles and positive weight, not complete industry/model identification. No dataset, risk rule, source clock or ETF model was changed.",
+  "original_query_finite_style_weight_rows": 0,
+  "listing_context_only_finite_style_weight_rows": 16535,
+  "original_observation_clock_and_listing_context_finite_style_weight_rows": 16542
+}

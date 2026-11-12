@@ -1,0 +1,150 @@
+{
+  "status": "completed_native_projection_and_whole_window_evaluation",
+  "core_code_commit": "99bbd2b414ee519f6ac85b33f7dfa6f5181f4801",
+  "window": {
+    "start": "2014-01-01",
+    "end": "2026-10-30"
+  },
+  "cutoff": "2026-10-31T00:00:00",
+  "native_output": "data/research/factor-expansion-95ad4a83/industry_state_known_halts_corrected",
+  "native_rows": 54187,
+  "native_compressed_bytes": 4383902,
+  "industries": 37,
+  "factors": [
+    "industry_amount_hhi",
+    "industry_activity_pressure",
+    "industry_isolation_20d"
+  ],
+  "labels": [
+    "forward_return_10d",
+    "forward_return_120d",
+    "forward_return_1d",
+    "forward_return_20d",
+    "forward_return_5d",
+    "forward_return_60d",
+    "next_session_intraday_return"
+  ],
+  "published_evaluations": 37,
+  "actual_summary_pairs": 777,
+  "pairs_with_finite_ic": 764,
+  "pairs_with_finite_rankic": 764,
+  "seconds": 35.13,
+  "yearly_projection": [
+    {
+      "year": 2014,
+      "stock_rows": 620068,
+      "eligible_stock_rows": 592015,
+      "eligible_unknown_industry_rows": 541463,
+      "industry_rows": 3185
+    },
+    {
+      "year": 2015,
+      "stock_rows": 665185,
+      "eligible_stock_rows": 603177,
+      "eligible_unknown_industry_rows": 519649,
+      "industry_rows": 3672
+    },
+    {
+      "year": 2016,
+      "stock_rows": 704146,
+      "eligible_stock_rows": 646864,
+      "eligible_unknown_industry_rows": 452109,
+      "industry_rows": 4222
+    },
+    {
+      "year": 2017,
+      "stock_rows": 799069,
+      "eligible_stock_rows": 684517,
+      "eligible_unknown_industry_rows": 396578,
+      "industry_rows": 4364
+    },
+    {
+      "year": 2018,
+      "stock_rows": 856806,
+      "eligible_stock_rows": 771461,
+      "eligible_unknown_industry_rows": 316413,
+      "industry_rows": 4374
+    },
+    {
+      "year": 2019,
+      "stock_rows": 890262,
+      "eligible_stock_rows": 827626,
+      "eligible_unknown_industry_rows": 249126,
+      "industry_rows": 4392
+    },
+    {
+      "year": 2020,
+      "stock_rows": 951998,
+      "eligible_stock_rows": 835756,
+      "eligible_unknown_industry_rows": 207960,
+      "industry_rows": 4374
+    },
+    {
+      "year": 2021,
+      "stock_rows": 1062390,
+      "eligible_stock_rows": 896430,
+      "eligible_unknown_industry_rows": 178265,
+      "industry_rows": 4374
+    },
+    {
+      "year": 2022,
+      "stock_rows": 1149244,
+      "eligible_stock_rows": 1007811,
+      "eligible_unknown_industry_rows": 181365,
+      "industry_rows": 4356
+    },
+    {
+      "year": 2023,
+      "stock_rows": 1211954,
+      "eligible_stock_rows": 1104229,
+      "eligible_unknown_industry_rows": 243253,
+      "industry_rows": 4356
+    },
+    {
+      "year": 2024,
+      "stock_rows": 1236332,
+      "eligible_stock_rows": 1166641,
+      "eligible_unknown_industry_rows": 141181,
+      "industry_rows": 4493
+    },
+    {
+      "year": 2025,
+      "stock_rows": 1251463,
+      "eligible_stock_rows": 1190495,
+      "eligible_unknown_industry_rows": 91648,
+      "industry_rows": 4444
+    },
+    {
+      "year": 2026,
+      "stock_rows": 1029911,
+      "eligible_stock_rows": 973191,
+      "eligible_unknown_industry_rows": 32551,
+      "industry_rows": 3581
+    }
+  ],
+  "rule": {
+    "membership": "original eligible stocks with known contemporaneous industry",
+    "state": "one unchanged broadcast state per industry/date",
+    "labels": "equal mean of finite original member labels, with member and pair counts",
+    "label_maturity": "latest original maturity of every actually paired member",
+    "unknown_industry": "excluded only from this industry relation, no historical backfill",
+    "return_interpretation": "identifiable member subset, not a complete industry index"
+  },
+  "frozen_rolling_layers_completed": false,
+  "limits": "Whole-window TS evaluation is complete; frozen 252-session/20-session layer validation is a separate in-progress step. No claim that every industry state/label statistic is finite.",
+  "independent_fixture_check": {
+    "equal_member_label_values": [
+      0.1,
+      0.3
+    ],
+    "expected_mean": 0.2,
+    "paired_member_maturity_dates": [
+      "2024-01-03",
+      "2024-01-05"
+    ],
+    "expected_mean_maturity": "2024-01-05",
+    "missing_label_group_retains_nan_and_zero_pair_count": true,
+    "unknown_industry_and_ineligible_members_excluded_only_from_this_relation": true,
+    "checked_before_native_operation": true
+  }
+}

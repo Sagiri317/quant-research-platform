@@ -1,50 +1,55 @@
 {
+  "version": {
+    "number": 25,
+    "id": "appgprj_6af44317faf081919d5c8b0e58ee3a32~appgver_11f96a795fd08191b5b1172a89bef7e2",
+    "source_commit": "847ea3f6d692b8a74158cc7a9c5ea4d339abfccf"
+  },
   "deployment": {
-    "id": "appgdep_6af4f5c29b0481918acfa8c419353232",
+    "id": "appgdep_6af50217f4a48191b1e25742b73f5324",
     "status": "succeeded",
     "url": "https://qrp-factor-research-20261111.sagiri0317.chatgpt.site"
   },
-  "published_at_utc": "2026-11-11T23:10:12.203619+00:00",
-  "data_updated_at_utc": "2026-11-11T23:03:18.282458+00:00",
+  "published_at_utc": "2026-11-12T00:02:45.376543+00:00",
+  "data_updated_at_utc": "2026-11-11T23:49:26.105655+00:00",
+  "source_stamp": {
+    "count": 16058,
+    "latest_mtime_ns": 1794438156719637665,
+    "code_commit": "01b06603a9ae7cdfbe4d2733588414ca4222560a"
+  },
+  "update_kind": "full",
   "counts": {
-    "sources": 170,
-    "selected_combinations": 15064,
-    "cross_sectional_sources": 45,
-    "cross_sectional_combinations_fixed5_both_windows": 6370,
-    "cross_sectional_historical_combinations": 0,
+    "sources": 171,
+    "selected_combinations": 15082,
+    "cross_sectional_sources": 46,
+    "cross_sectional_combinations_fixed5_both_windows": 6388,
     "time_series_sources": 125,
     "time_series_combinations": 8694,
     "time_series_blocks_completed": 15452,
     "time_series_blocks_planned": 15452,
-    "cross_sectional_combinations_with_undefined_group_mean_full": 308,
-    "cross_sectional_combinations_with_undefined_highest_group_mean_full": 21
+    "stock_hft_raw_factors": 6,
+    "stock_hft_raw_combinations": 18,
+    "stock_hft_processed_combinations_selected": 0,
+    "industry_time_series_sources_selected": 0,
+    "industry_broadcast_stock_reference_combinations": 21,
+    "stock_conditioning_reference_combinations": 7,
+    "etf_conditioning_independent_ranking_combinations": 0
   },
+  "new_source": "results/factor-expansion-95ad4a83/stock_quote_hypotheses",
+  "excluded_from_selection": [
+    "results/factor-expansion-95ad4a83/stock_quote_hypotheses-mad-lagged_industry_five_style",
+    "results/factor-expansion-95ad4a83/industry_state_known_halts_corrected-*"
+  ],
   "checks": {
     "production_http_status": 200,
     "desktop_and_mobile_browser_passed": true,
-    "four_metric_values_both_windows_passed": true,
-    "percentage_units_passed": true,
-    "undefined_event_tail_ic_retained": true,
-    "side_selection_keeps_return_columns": true,
+    "four_hft_metrics_three_labels_two_windows_passed": true,
+    "four_reference_roles_derived_from_policy_and_native_axis": true,
+    "high_frequency_default_30s_passed": true,
+    "filtered_empty_state_preserves_domain_scope": true,
+    "native_five_groups_and_percentage_units_passed": true,
     "no_horizontal_overflow": true,
-    "ic_ts_and_model_values_preserved": true,
-    "full_export_source_stamp_preserved": true,
+    "previous_15064_correlation_means_and_counts_preserved": true,
+    "model_values_preserved": true,
     "format_and_targeted_checks_passed": true
-  },
-  "data_publication_version": {
-    "number": 22,
-    "source_commit": "52cc9deb4078a4a28363d253ad6aacbc044b6376",
-    "id": "appgprj_6af44317faf081919d5c8b0e58ee3a32~appgver_2d6452863b3c819195f7dfc1ba93c49b"
-  },
-  "current_text_publication": {
-    "version": 23,
-    "source_commit": "278fb3c778d5071074cf96f9db1216129437c3bf",
-    "deployment_id": "appgdep_6af4f8d50a68819184095686a215bdb9",
-    "published_at_utc": "2026-11-11T23:23:14.061233+00:00",
-    "status": "succeeded",
-    "changes": "Clarify historical frozen thresholds for time-series returns versus original evaluation-sample tail IC; cross-sectional common-boundary wording retained.",
-    "data_export_or_recalculation": false,
-    "data_file_unchanged": true,
-    "production_desktop_mobile_checks_passed": true
   }
 }

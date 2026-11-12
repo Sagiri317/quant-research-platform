@@ -1,0 +1,118 @@
+{
+  "checked_at": "2026-11-12T00:01:35.008010+00:00",
+  "status": "passed",
+  "checks": [
+    {
+      "case": "finite",
+      "original_source": "results/factor-expansion-95ad4a83/industry_state_known_halts_corrected-capco-c",
+      "output": "results/factor-layer-validation-20261112/factor-expansion-95ad4a83/industry_state_known_halts_corrected-capco-c/fold_20260512_20260608",
+      "held_window": {
+        "end": "2026-06-08",
+        "start": "2026-05-12"
+      },
+      "reference_window": {
+        "end": "2026-05-11",
+        "start": "2025-04-23"
+      },
+      "single_asset_filter": [
+        [
+          "asset_id",
+          "in",
+          [
+            "CAPCO:C"
+          ]
+        ]
+      ],
+      "effective_group_counts": {
+        "industry_activity_pressure": 5,
+        "industry_amount_hhi": 5,
+        "industry_isolation_20d": 4
+      },
+      "response_rows": 1960,
+      "group_mean_reasons": {
+        "no_valid_observations": 1600,
+        "finite_or_not_applicable": 360
+      },
+      "input_rows": 20,
+      "period": "daily",
+      "scope": "own",
+      "unrequested_median_all_null": true,
+      "old_full_window_IC_untouched": true,
+      "independent_reference_checks": [
+        {
+          "signal": "industry_activity_pressure",
+          "finite_reference_rows": 252,
+          "effective_groups": 5,
+          "matched": true
+        },
+        {
+          "signal": "industry_amount_hhi",
+          "finite_reference_rows": 252,
+          "effective_groups": 5,
+          "matched": true
+        },
+        {
+          "signal": "industry_isolation_20d",
+          "finite_reference_rows": 252,
+          "effective_groups": 4,
+          "matched": true
+        }
+      ]
+    },
+    {
+      "case": "empty",
+      "original_source": "results/factor-expansion-95ad4a83/industry_state_known_halts_corrected-capco-c",
+      "output": "results/factor-layer-validation-20261112/factor-expansion-95ad4a83/industry_state_known_halts_corrected-capco-c/fold_20140102_20140129",
+      "held_window": {
+        "end": "2014-01-29",
+        "start": "2014-01-02"
+      },
+      "reference_window": {
+        "end": "2013-12-31",
+        "start": "2012-12-12"
+      },
+      "single_asset_filter": [
+        [
+          "asset_id",
+          "in",
+          [
+            "CAPCO:C"
+          ]
+        ]
+      ],
+      "effective_group_counts": {
+        "industry_activity_pressure": null,
+        "industry_amount_hhi": null,
+        "industry_isolation_20d": null
+      },
+      "response_rows": 0,
+      "group_mean_reasons": {},
+      "input_rows": 0,
+      "period": "daily",
+      "scope": "own",
+      "unrequested_median_all_null": true,
+      "old_full_window_IC_untouched": true,
+      "independent_reference_checks": [
+        {
+          "signal": "industry_activity_pressure",
+          "finite_reference_rows": 0,
+          "effective_groups": null,
+          "matched": true
+        },
+        {
+          "signal": "industry_amount_hhi",
+          "finite_reference_rows": 0,
+          "effective_groups": null,
+          "matched": true
+        },
+        {
+          "signal": "industry_isolation_20d",
+          "finite_reference_rows": 0,
+          "effective_groups": null,
+          "matched": true
+        }
+      ]
+    }
+  ],
+  "independent_reference_method": "Sort finite direction-adjusted historical factor values; empirical quantile numerator/g uses rank ceil(n*numerator/g), exact integer arithmetic; deduplicate and exclude maximum; no NumPy quantile and no labels read"
+}
