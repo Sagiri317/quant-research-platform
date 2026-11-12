@@ -216,7 +216,9 @@ class FactorRiskState:
         frame = prepared.frame
         if not project_ineligible and "eligible" in frame:
             frame = frame.loc[frame.eligible]
-        observations = cross.loc[cross.asset_id.astype("string").isin(frame.asset_id)]
+        observations = cross.loc[
+            pd.Index(frame.asset_id).get_indexer(cross.asset_id.astype("string")) >= 0
+        ]
         if observations.empty:
             return None, ()
         if (
@@ -228,7 +230,7 @@ class FactorRiskState:
             observations.asset_return, error="factor_risk_numeric_invalid"
         )
         returns.index = observations.asset_id.astype("string")
-        frame = frame.loc[frame.asset_id.isin(returns.index)].copy()
+        frame = frame.loc[returns.index.get_indexer(frame.asset_id) >= 0].copy()
         frame["asset_return"] = frame.asset_id.map(returns)
         frame = frame.dropna(subset=list(self.style_columns))
         if require_complete and (
