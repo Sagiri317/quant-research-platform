@@ -869,8 +869,10 @@ def test_full_risk_standardization_preserves_weighted_industry_and_style_neutral
     assert missing.feature_other.iloc[:10].isna().all()
 
 
+@pytest.mark.parametrize("versioned_risk_keys", [False, True])
 def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw(
     tmp_path,
+    versioned_risk_keys,
 ):
     from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.storage.datasets import (
@@ -935,7 +937,27 @@ def test_intraday_full_risk_uses_published_prior_life_facts_without_changing_raw
     write_dataset(
         sampled, base, spec=replace(source_spec, data_id="sampled", frequency="tick")
     )
-    risk_root, _ = assembly_source(tmp_path, risk_frame, data_id="daily_risk")
+    risk_root, risk_spec = assembly_source(tmp_path, risk_frame, data_id="daily_risk")
+    if versioned_risk_keys:
+        risk_root = tmp_path / "versioned_daily_risk"
+        write_dataset(
+            risk_root,
+            risk_frame.dropna(subset=["listing_date", "risk_available_at"]),
+            spec=replace(
+                risk_spec,
+                data_id="versioned_daily_risk",
+                primary_key=(
+                    *risk_spec.primary_key,
+                    "listing_date",
+                    "risk_available_at",
+                ),
+                column_roles={
+                    **risk_spec.column_roles,
+                    "listing_date": "key",
+                    "risk_available_at": "key",
+                },
+            ),
+        )
     config = assembly_config(
         tmp_path,
         sampled,

@@ -366,6 +366,7 @@ def _validate_research_input_specs(
     processed_specs: Mapping[str, ProcessedDataSpec],
     *,
     provided_columns: tuple[str, ...] = (),
+    risk_input_data_id: str | None = None,
 ) -> None:
     for data_id, processed_spec in processed_specs.items():
         missing_key_columns = [
@@ -378,7 +379,10 @@ def _validate_research_input_specs(
                 f"missing_research_join_key: {data_id}: "
                 + ", ".join(missing_key_columns)
             )
-        if set(processed_spec.primary_key) != set(dataset_spec.primary_key):
+        # As-of risk facts can also key publication versions and listing lives.
+        if data_id != risk_input_data_id and set(processed_spec.primary_key) != set(
+            dataset_spec.primary_key
+        ):
             raise ValueError(f"incompatible_research_input_keys: {data_id}")
         _validate_asset_time_key(
             processed_spec.primary_key, processed_spec.column_roles
@@ -1170,7 +1174,12 @@ def assemble(config: Mapping) -> Path:
                 if label in consumed and maturity in consumed
             },
         )
-    _validate_research_input_specs(spec, consumed_specs, provided_columns=risk_columns)
+    _validate_research_input_specs(
+        spec,
+        consumed_specs,
+        provided_columns=risk_columns,
+        risk_input_data_id=risk_input_id,
+    )
     units = {
         column: unit
         for item in consumed_specs.values()
