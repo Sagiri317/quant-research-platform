@@ -417,6 +417,82 @@ def test_risk_fact_window_keeps_life_baselines_late_updates_and_latest_nulls(
             assert pd.isna(styles.loc["C"])
 
 
+def test_risk_frames_keep_original_observation_clock_and_listing_life():
+    from quant_research_platform.contracts.risk import FactorRiskModel
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.datasets.risk import (
+        asof_risk_frame,
+        compact_asof_risk_facts,
+    )
+
+    # Preopen publication describes the prior session, not its decision date.
+    source = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "listing_date": pd.Timestamp("2020-01-01"),
+            "timestamp": pd.to_datetime(
+                ["2024-01-08 01:00", "2024-01-09 01:00", "2024-01-09 03:00"]
+            ),
+            "signal_session": pd.to_datetime(
+                ["2024-01-05", "2024-01-08", "2024-01-04"]
+            ),
+            "published": pd.to_datetime(
+                ["2024-01-08 01:00:01", "2024-01-09 01:00:01", "2024-01-09 03:00:01"]
+            ),
+            "industry_standard_id": "test",
+            "industry_level1_code": "A",
+            "total_market_cap": 100.0,
+            "a": [10.0, 20.0, 99.0],
+        }
+    )
+    model = FactorRiskModel(("a",))
+    frames = (
+        chunk.assign(timestamp=chunk.signal_session).drop(columns="signal_session")
+        for chunk in (source.iloc[:1], source.iloc[1:])
+    )
+    facts = compact_asof_risk_facts(
+        frames,
+        model=model,
+        available_at_column="published",
+        time_window=TimeWindow("2024-01-08", "2024-01-09"),
+    )
+    decisions = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "A",
+            "listing_date": pd.Timestamp("2020-01-01"),
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-08 01:00",
+                    "2024-01-08 01:00:01",
+                    "2024-01-08 01:35",
+                    "2024-01-09 01:35",
+                    "2024-01-09 04:00",
+                ],
+                format="mixed",
+            ),
+            "eligible": True,
+        }
+    )
+    aligned = asof_risk_frame(
+        decisions, facts, model=model, available_at_column="published"
+    )
+    assert pd.isna(aligned.a.iloc[0])
+    assert aligned.a.iloc[1:].tolist() == [10.0, 10.0, 20.0, 20.0]
+    changed_life = decisions.iloc[[-1]].assign(listing_date=pd.Timestamp("2024-01-09"))
+    assert (
+        asof_risk_frame(
+            changed_life, facts, model=model, available_at_column="published"
+        )
+        .a.isna()
+        .all()
+    )
+    assert facts.timestamp.tolist() == list(
+        pd.to_datetime(["2024-01-05", "2024-01-08"])
+    )
+
+
 def test_unknown_eligibility_only_excludes_dependent_risk_and_target_values():
     from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.research.features.transforms import (

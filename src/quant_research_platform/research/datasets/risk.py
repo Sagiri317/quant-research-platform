@@ -82,8 +82,8 @@ def read_asof_risk_facts(
     session, *, model, available_at_column, time_window, additional_columns=()
 ):
     """Keep each life's initial state and published updates in the decision window."""
-    start, stop, closed = time_window_timestamp_interval(time_window)
-    start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    _, stop, closed = time_window_timestamp_interval(time_window)
+    stop = pd.Timestamp(stop)
     if not closed:
         stop -= pd.Timedelta(1, "ns")
     # Native date bounds prune future observation rows without imposing a lookback.
@@ -95,9 +95,26 @@ def read_asof_risk_facts(
                 min(pd.Timestamp(first_date), last_observation), last_observation
             )
         )
+    return compact_asof_risk_facts(
+        iter_dataset_chunks(session),
+        model=model,
+        available_at_column=available_at_column,
+        time_window=time_window,
+        additional_columns=additional_columns,
+    )
+
+
+def compact_asof_risk_facts(
+    frames, *, model, available_at_column, time_window, additional_columns=()
+):
+    """Compact explicit observation/publication frames to a decision window."""
+    start, stop, closed = time_window_timestamp_interval(time_window)
+    start, stop = pd.Timestamp(start), pd.Timestamp(stop)
+    if not closed:
+        stop -= pd.Timedelta(1, "ns")
     baseline = None
     updates = []
-    with closing_iterator(iter_dataset_chunks(session)) as chunks:
+    with closing_iterator(frames) as chunks:
         for frame in chunks:
             source = _risk_source(
                 frame,
