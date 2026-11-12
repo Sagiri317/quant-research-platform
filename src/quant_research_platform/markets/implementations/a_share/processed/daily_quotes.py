@@ -241,6 +241,8 @@ def daily_decisions(prices, calendar, *, actions=None):
         ]
         data = group.reindex(axis)
         following = next_trading_sessions(calendar, axis)
+        # Unknown calendar intervals cannot become adjacent return observations.
+        segments = pd.Series(following, index=axis).shift().ne(axis).cumsum()
         current = data[["open", "close"]]
         next_prices = current.reindex(following).set_axis(axis)
         valid = next_prices.open.gt(0) & next_prices.close.gt(0)
@@ -254,9 +256,8 @@ def daily_decisions(prices, calendar, *, actions=None):
         out["return_available_at"] = axis + pd.Timedelta(hours=7, seconds=1)
         out[LABEL + "_available_at"] = following + pd.Timedelta(hours=7, seconds=1)
         out[LABEL] = (next_prices.close / next_prices.open - 1).where(valid)
-        out["period_return"] = (
-            data.close / data.close.shift().where(data.close.shift() > 0) - 1
-        )
+        previous = data.close.groupby(segments).shift()
+        out["period_return"] = data.close / previous.where(previous > 0) - 1
         out["adj_close"] = np.nan
         out["secondary_flow_imbalance"] = np.nan
         out["market_return"] = np.nan
@@ -286,20 +287,29 @@ def daily_decisions(prices, calendar, *, actions=None):
                 multiplier.loc[date] = (
                     q + cash / data.close.loc[date] if visible.all() else np.nan
                 )
-            out["adj_close"] = data.close * multiplier.cumprod(skipna=False)
-            out["period_return"] = (
-                out.adj_close / out.adj_close.shift().where(out.adj_close.shift() > 0)
-                - 1
+            out["adj_close"] = data.close * multiplier.groupby(segments).cumprod(
+                skipna=False
             )
+            previous = out.adj_close.groupby(segments).shift()
+            out["period_return"] = out.adj_close / previous.where(previous > 0) - 1
         out["eligible"] = data.close.gt(0)
         for width in (20, 60):
-            out[f"volatility_{width}d"] = out.period_return.rolling(
-                width, min_periods=width
-            ).std()
+            out[f"volatility_{width}d"] = (
+                out.period_return.groupby(segments)
+                .rolling(width, min_periods=width)
+                .std()
+                .droplevel(0)
+            )
             out[f"implied_variance_{width}d"] = np.nan
         for field in ("volume", "amount"):
             if field in data:
-                out[f"avg_{field}_20d"] = data[field].rolling(20, min_periods=20).mean()
+                out[f"avg_{field}_20d"] = (
+                    data[field]
+                    .groupby(segments)
+                    .rolling(20, min_periods=20)
+                    .mean()
+                    .droplevel(0)
+                )
         blocks.append(out.loc[out.timestamp.notna()].reset_index(drop=True))
     return (
         pd.concat(blocks, ignore_index=True)
@@ -350,9 +360,14 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             .sort_values(["asset_id", "timestamp"], kind="stable")
             .reset_index(drop=True)
         )
+        # A native row's decision date proves its signal's next session. Missing
+        # links delimit history without inventing a calendar or persisted state.
+        previous_decisions = frame.groupby("asset_id", sort=False).timestamp.shift()
+        segments = frame.signal_session.ne(previous_decisions.dt.normalize()).cumsum()
         result = calculate_price_volume_factors(
-            frame.assign(timestamp=frame.signal_session),
+            frame.assign(timestamp=frame.signal_session, _calendar_segment=segments),
             factor_columns=selected,
+            history_keys=("asset_id", "_calendar_segment"),
             **json.loads(spec.parameters_json),
         )
         result["timestamp"] = frame.timestamp

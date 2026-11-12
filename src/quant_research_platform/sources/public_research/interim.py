@@ -488,9 +488,9 @@ def _release_clocks(path):
     if path is None:
         return None, None
     payload = Path(path).read_bytes()
+    import csv
     import io
 
-    clocks = pd.read_csv(io.BytesIO(payload), dtype="str")
     required = {
         "source",
         "observation_date",
@@ -498,8 +498,16 @@ def _release_clocks(path):
         "availability_basis",
         "evidence_url",
     }
-    if not required <= set(clocks) or set(clocks) - required - {"published_at"}:
+    selected = required | {"published_at"}
+    header = next(csv.reader(io.StringIO(payload.decode("utf-8-sig"))), ())
+    if (
+        any(header.count(column) != 1 for column in required)
+        or header.count("published_at") > 1
+    ):
         raise ValueError("public_release_clock_columns_invalid")
+    clocks = pd.read_csv(
+        io.BytesIO(payload), dtype="str", usecols=lambda column: column in selected
+    )
     if clocks[list(required)].isna().any(axis=None):
         raise ValueError("public_release_clock_required_value_missing")
     if "published_at" not in clocks:

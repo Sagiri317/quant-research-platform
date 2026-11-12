@@ -96,8 +96,8 @@ def load_a_share_fee_source(
         root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
     )
     metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
-    rows, data_row_count, csv_sha256, csv_bytes = _read_rows(csv_path)
-    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes)
+    rows, data_row_count, csv_sha256, csv_bytes, columns = _read_rows(csv_path)
+    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes, columns=columns)
     if metadata.get("row_count") != data_row_count:
         raise ValueError("a_share_fee_source_row_count_mismatch")
     digest = hashlib.sha256()
@@ -139,6 +139,7 @@ def _validate_sidecar(
     csv_sha256: str,
     *,
     csv_bytes: int,
+    columns: tuple[str, ...],
 ) -> None:
     if (
         metadata.get("file_sha256") != csv_sha256
@@ -146,12 +147,14 @@ def _validate_sidecar(
         or metadata.get("file_bytes") != csv_bytes
         or type(metadata.get("row_count")) is not int
         or metadata.get("row_count") < 0
-        or metadata.get("fields_raw") != list(FEE_CSV_COLUMNS)
+        or metadata.get("fields_raw") != list(columns)
     ):
         raise ValueError("a_share_fee_source_metadata_invalid")
 
 
-def _read_rows(path: Path) -> tuple[tuple[FeeSourceRow, ...], int, str, int]:
+def _read_rows(
+    path: Path,
+) -> tuple[tuple[FeeSourceRow, ...], int, str, int, tuple[str, ...]]:
     rows: list[FeeSourceRow] = []
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
@@ -163,11 +166,12 @@ def _read_rows(path: Path) -> tuple[tuple[FeeSourceRow, ...], int, str, int]:
             ) as text:
                 csv.field_size_limit(sys.maxsize)
                 reader = csv.DictReader(text, strict=True)
-                if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
+                columns = tuple(reader.fieldnames or ())
+                if any(columns.count(column) != 1 for column in FEE_CSV_COLUMNS):
                     raise ValueError("a_share_fee_source_schema_invalid")
                 for row in reader:
                     data_row_count += 1
-                    if set(row) != set(FEE_CSV_COLUMNS) or None in row:
+                    if None in row:
                         raise ValueError("a_share_fee_source_schema_invalid")
                     values = {}
                     for key in FEE_CSV_COLUMNS:
@@ -231,7 +235,7 @@ def _read_rows(path: Path) -> tuple[tuple[FeeSourceRow, ...], int, str, int]:
         raise ValueError("a_share_fee_source_unavailable") from exc
     if not rows:
         raise ValueError("a_share_fee_source_empty")
-    return tuple(rows), data_row_count, hashed.hexdigest(), hashed.bytes_read
+    return tuple(rows), data_row_count, hashed.hexdigest(), hashed.bytes_read, columns
 
 
 def _parse_date(value: str) -> date:

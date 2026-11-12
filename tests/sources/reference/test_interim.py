@@ -48,7 +48,9 @@ def _file_bytes(root: Path) -> dict[Path, bytes]:
     }
 
 
-def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
+def _write_reference_root(
+    root: Path, *, commission: float = 0.0003, columns=FEE_CSV_COLUMNS
+) -> Path:
     schedule_root = root / "reference" / "a_share_fee_schedule"
     filesystem_mkdir(schedule_root, parents=True, exist_ok=True)
     csv_path = schedule_root / A_SHARE_FEE_CSV_NAME
@@ -67,7 +69,7 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
     with open_filesystem_file(
         csv_path, "w", encoding="utf-8-sig", newline=""
     ) as handle:
-        writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
+        writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
     sidecar = {
@@ -76,7 +78,7 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
         ).hexdigest(),
         "file_bytes": filesystem_stat(csv_path).st_size,
         "row_count": len(rows),
-        "fields_raw": list(FEE_CSV_COLUMNS),
+        "fields_raw": list(columns),
     }
     filesystem_write_text(
         schedule_root / A_SHARE_FEE_SIDECAR_NAME,
@@ -107,8 +109,18 @@ def _row(
     return row
 
 
-def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path):
-    raw = _write_reference_root(tmp_path / "raw") / "reference"
+@pytest.mark.parametrize(
+    "columns",
+    (
+        FEE_CSV_COLUMNS,
+        (*reversed(FEE_CSV_COLUMNS), "extra_note"),
+        (*FEE_CSV_COLUMNS, "extra_note", "extra_note"),
+    ),
+)
+def test_fee_source_publishes_explicit_path_and_records_source_evidence(
+    tmp_path, columns
+):
+    raw = _write_reference_root(tmp_path / "raw", columns=columns) / "reference"
     output = tmp_path / "fees"
     result = interim.materialize_interim_data(
         raw_root=raw, output_roots={A_SHARE_FEE_SCHEDULE_DATA_ID: output}
@@ -116,6 +128,7 @@ def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path
     assert result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID] == output
     frame = read_dataset(output)
     assert tuple(frame.columns) == interim.FEE_SCHEDULE_COLUMNS
+    assert frame.rate.tolist() == [0.0003, 0.0003, 1e-5, 1e-5, 0.001]
     manifest = open_dataset_session(output).manifest
     assert (
         manifest["source_evidence"]["content_hash"]
@@ -127,6 +140,45 @@ def test_fee_source_publishes_explicit_path_and_records_source_evidence(tmp_path
             raw_root=raw, output_roots={A_SHARE_FEE_SCHEDULE_DATA_ID: output}
         )
     assert _file_bytes(output) == before
+
+
+@pytest.mark.parametrize("missing_required", [False, True])
+def test_fee_reader_checks_only_required_cells(tmp_path, missing_required):
+    raw = (
+        _write_reference_root(
+            tmp_path / "raw", columns=(*FEE_CSV_COLUMNS, "extra_note")
+        )
+        / "reference"
+    )
+    source = raw / "a_share_fee_schedule"
+    path = source / A_SHARE_FEE_CSV_NAME
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.reader(handle))
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(rows[0])
+        writer.writerows(row[: -(1 + missing_required)] for row in rows[1:])
+    payload = path.read_bytes()
+    sidecar = source / A_SHARE_FEE_SIDECAR_NAME
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    metadata.update(
+        file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()
+    )
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+    if missing_required:
+        with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
+            load_a_share_fee_source(reference_root=raw)
+    else:
+        assert len(load_a_share_fee_source(reference_root=raw).rows) == 5
+
+
+def test_fee_reader_rejects_duplicate_required_header(tmp_path):
+    raw = (
+        _write_reference_root(tmp_path / "raw", columns=(*FEE_CSV_COLUMNS, "费用代码"))
+        / "reference"
+    )
+    with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
+        load_a_share_fee_source(reference_root=raw)
 
 
 def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
@@ -188,7 +240,26 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     from tests.helpers.a_share_sources import _synthetic_interim_frames
 
     raw_root = tmp_path / "raw"
-    write_industry_reference_fixture(raw_root, observations=_industry_observations())
+    source = write_industry_reference_fixture(
+        raw_root, observations=_industry_observations()
+    )
+    candidate_path = source / "snapshot.json"
+    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    candidate["extraction_note"] = "Unconsumed extraction metadata"
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    metadata_path = source / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    extra_path = source / "unconsumed.json"
+    extra_path.write_text('{"unconsumed": true}', encoding="utf-8")
+    metadata["files"][extra_path.name] = hashlib.sha256(
+        extra_path.read_bytes()
+    ).hexdigest()
+    metadata["review_note"] = "Unconsumed review metadata"
+    metadata["snapshots"][0]["document_title"] = "Unconsumed document metadata"
+    metadata["files"]["snapshot.json"] = hashlib.sha256(
+        candidate_path.read_bytes()
+    ).hexdigest()
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     root = tmp_path / "industry"
     interim.materialize_interim_data(
@@ -323,6 +394,7 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
         metadata["snapshots"][0]["document_sha256"] = "invalid"
     elif failure == "unstructured_member":
         metadata["files"]["snapshot.pdf"] = "0" * 64
+        metadata["snapshots"][0]["candidate_file"] = "snapshot.pdf"
     elif failure == "candidate_provenance_mismatch":
         metadata["snapshots"][0]["document_sha256"] = "0" * 64
     elif failure == "non_mapping_record":

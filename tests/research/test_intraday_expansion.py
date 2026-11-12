@@ -186,6 +186,48 @@ def test_semivariance_and_bipower_use_observed_log_returns():
     assert pd.isna(first.daily_jump_variation_fraction)
 
 
+def test_batched_path_factors_keep_asset_and_segment_coordinates():
+    x = np.arange(111, dtype=float)
+    blocks = []
+    for asset, direction in (("a", 1), ("b", -1)):
+        for segment, hour in enumerate((1, 5)):
+            blocks.append(
+                pd.DataFrame(
+                    dict(
+                        market_id="a_share",
+                        asset_id=asset,
+                        timestamp=pd.date_range(
+                            f"2024-01-02 {hour:02d}:30", periods=len(x), freq="3s"
+                        ),
+                        segment_id=segment,
+                        mid=(10 + 10 * segment)
+                        * np.exp(direction * (0.0001 * x + 0.000001 * x**2)),
+                    )
+                )
+            )
+    frame = pd.concat(blocks, ignore_index=True).iloc[::-1]
+    names = (
+        "opening_observed_return_5m",
+        "price_up_acceleration_30s",
+        "hf_upside_realized_variance_1d",
+    )
+    result = compute_factors(frame, columns=names)
+    assert list(result) == ["market_id", "asset_id", "timestamp", *names]
+    increments = 0.0001 + 0.000001 * (2 * np.arange(1, len(x)) - 1)
+    curvature = 2e-6 / np.sqrt(np.mean(increments[:10] ** 2))
+    for asset, direction in (("a", 1), ("b", -1)):
+        own = result.loc[result.asset_id.eq(asset)].reset_index(drop=True)
+        assert own[names[0]].iloc[-1] == pytest.approx(np.expm1(direction * 0.02))
+        assert own[names[1]].iloc[111:121].isna().all()
+        assert own[names[1]].iloc[121] == pytest.approx(
+            curvature if direction > 0 else 0, abs=1e-10
+        )
+        # The afternoon repricing is not a within-segment observed return.
+        assert own[names[2]].iloc[-1] == pytest.approx(
+            2 * np.sum(increments**2) if direction > 0 else 0
+        )
+
+
 def test_liquidity_recovery_needs_its_own_complete_baseline():
     frame = (
         panel()

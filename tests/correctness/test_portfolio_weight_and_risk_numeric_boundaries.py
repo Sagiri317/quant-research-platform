@@ -510,7 +510,9 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
 
 
 def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path):
-    from quant_research_platform.research.factors.engine import _market_model_frames
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer as market_producer,
+    )
 
     dates = pd.bdate_range("2020-01-02", periods=592)
     assets = [f"a{i:02d}" for i in range(12)]
@@ -539,13 +541,15 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
     )
     write_dataset(
         factor_root,
-        _market_model_frames([saved], trading_calendar=None, market_history=None),
+        market_producer._market_model_frames(
+            [saved], trading_calendar=None, market_history=None
+        ),
         spec=factor_spec,
     )
     actual = read_dataset(factor_root)
     # Native session boundaries must not change rolling lifecycle history.
     split = pd.concat(
-        _market_model_frames(
+        market_producer._market_model_frames(
             [
                 saved.iloc[: 296 * len(assets)],
                 saved.iloc[296 * len(assets) : 547 * len(assets)],
@@ -576,7 +580,9 @@ def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path)
     new = control.asset_id.eq(assets[0]) & control.timestamp.ge(dates[296])
     control.loc[new, "asset_id"] = "new_life"
     expected = pd.concat(
-        _market_model_frames([control], trading_calendar=None, market_history=None)
+        market_producer._market_model_frames(
+            [control], trading_calendar=None, market_history=None
+        )
     )
     actual = actual.loc[actual.asset_id.eq(assets[0]) & actual.timestamp.ge(dates[296])]
     expected = expected.loc[expected.asset_id.eq("new_life")]

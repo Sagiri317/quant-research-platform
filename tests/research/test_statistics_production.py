@@ -22,7 +22,6 @@ from quant_research_platform.research.factors.statistics import (
 from quant_research_platform.research.models.statistics import (
     build_a_share_statistics_tables,
 )
-from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
@@ -31,6 +30,7 @@ from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     CORE6_FACTORS,
+    PRIMARY_LABEL_COLUMN,
     PV25_FACTORS,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -82,7 +82,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             "market_id": "a_share",
             "eligible": True,
             "x": rng.normal(size=len(dates) * len(assets)),
-            a_share.PRIMARY_LABEL_COLUMN: np.tile(
+            PRIMARY_LABEL_COLUMN: np.tile(
                 np.arange(len(assets), dtype=float), len(dates)
             ),
             "forward_return_20d_available_at": label_calendar[21:].repeat(len(assets)),
@@ -123,7 +123,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
     spec = make_demo_research_dataset_spec(
         data_id="pv_all",
         factor_columns=("x",),
-        label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
+        label_columns=(PRIMARY_LABEL_COLUMN,),
         filter_columns=("eligible",),
         context_columns=(
             "total_market_cap",
@@ -541,7 +541,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                         **{factor: np.nan for factor in PV25_FACTORS},
                         CORE6_FACTORS[0]: x,
                         CORE6_FACTORS[1]: x * x,
-                        a_share.PRIMARY_LABEL_COLUMN: label,
+                        PRIMARY_LABEL_COLUMN: label,
                         "forward_return_20d_available_at": label_calendar[
                             date_index + 21
                         ],
@@ -551,7 +551,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         spec = make_demo_research_dataset_spec(
             data_id="stats_demo",
             factor_columns=PV25_FACTORS,
-            label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
+            label_columns=(PRIMARY_LABEL_COLUMN,),
             filter_columns=("eligible",),
             context_columns=(
                 "total_market_cap",
@@ -587,9 +587,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                             "source_column": CORE6_FACTORS[0],
                         }
                     ],
-                    "label_columns": [a_share.PRIMARY_LABEL_COLUMN],
+                    "label_columns": [PRIMARY_LABEL_COLUMN],
                     "label_availability_columns": {
-                        a_share.PRIMARY_LABEL_COLUMN: "forward_return_20d_available_at"
+                        PRIMARY_LABEL_COLUMN: "forward_return_20d_available_at"
                     },
                 },
             }
@@ -1020,7 +1020,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             "market_id": "a_share",
             "eligible": True,
             factor: factor_values,
-            a_share.PRIMARY_LABEL_COLUMN: 2.0 + 3.0 * factor_values,
+            PRIMARY_LABEL_COLUMN: 2.0 + 3.0 * factor_values,
             "forward_return_20d_available_at": calendar[21:].repeat(len(assets)),
         }
     )
@@ -1028,7 +1028,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
     spec = make_demo_research_dataset_spec(
         data_id="family_names",
         factor_columns=(factor,),
-        label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
+        label_columns=(PRIMARY_LABEL_COLUMN,),
         filter_columns=("eligible",),
         context_columns=(
             "total_market_cap",

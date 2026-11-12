@@ -110,6 +110,87 @@ def test_missing_quote_or_unknown_calendar_day_does_not_compress_successor_axis(
     assert not result.signal_session.eq(pd.Timestamp("2024-01-05")).any()
 
 
+@pytest.mark.parametrize("etf", [False, True])
+def test_unknown_calendar_day_breaks_return_and_rolling_history(etf):
+    import numpy as np
+
+    days = pd.bdate_range("2024-01-02", periods=48)
+    calendar = pd.DataFrame(
+        dict(
+            calendar_date=pd.date_range(days.min(), days.max()),
+            source_market_type=1,
+        )
+    )
+    calendar["is_trading_day"] = calendar.calendar_date.isin(days)
+    calendar = calendar.loc[calendar.calendar_date.ne(days[24])]
+    prices = pd.DataFrame(
+        dict(
+            asset_id="510300" if etf else "000300",
+            timestamp=days,
+            open=100.0 * 1.01 ** np.arange(len(days)),
+            close=100.0 * 1.01 ** np.arange(len(days)),
+            volume=100.0,
+            amount=1000.0,
+        )
+    )
+    if not etf:
+        prices = prices.drop(columns=["volume", "amount"])
+    actions = pd.DataFrame(columns=["asset_id", "timestamp"]) if etf else None
+    result = daily_quotes.daily_decisions(prices, calendar, actions=actions).set_index(
+        "signal_session"
+    )
+    assert pd.isna(result.loc[days[25], "period_return"])
+    assert result.loc[days[26], "period_return"] == pytest.approx(0.01)
+    assert pd.isna(result.loc[days[44], "volatility_20d"])
+    assert result.loc[days[45], "volatility_20d"] == pytest.approx(0, abs=1e-14)
+    # The independent next-session label remains valid across this history break.
+    assert result.loc[days[25], "next_session_intraday_return"] == 0.0
+    if etf:
+        assert pd.isna(result.loc[days[43], "avg_volume_20d"])
+        assert result.loc[days[44], "avg_volume_20d"] == 100.0
+
+
+def test_native_etf_price_history_does_not_join_across_omitted_decisions(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2024-01-02", periods=7)
+    # A missing calendar fact prevents publishing the decisions around the gap.
+    # Each surviving timestamp still proves its own signal's exact successor.
+    frame = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="510300",
+            signal_session=days[[0, 1, 4, 5]],
+            timestamp=days[[1, 2, 5, 6]] + pd.Timedelta(hours=1),
+            adj_close=[100.0, 110.0, 146.41, 161.051],
+            next_session_intraday_return=0.0,
+            next_session_intraday_return_available_at=days[[1, 2, 5, 6]]
+            + pd.Timedelta(hours=7),
+        )
+    )
+    result = read_dataset(
+        prepare(
+            dict(
+                market_id="a_share",
+                data_id="etf_price_volume_factors",
+                inputs={
+                    "etf_daily_panel": _input(
+                        tmp_path, "etf_daily_panel", frame, native=True
+                    )
+                },
+                factor_columns=["reversal_1d"],
+                time_window=dict(start="2024-01-02", end="2024-01-10"),
+                output_root=str(tmp_path / "factors"),
+            )
+        )
+    )
+    assert result.timestamp.tolist() == frame.timestamp.tolist()
+    assert pd.isna(result.reversal_1d.iloc[2])
+    assert result.reversal_1d.iloc[[1, 3]].tolist() == pytest.approx([-0.1, -0.1])
+
+
 def test_quote_successor_does_not_require_unrelated_board_closed_history():
     prices, calendar = inputs()
     # Before another board existed, its absent weekend rows are irrelevant.

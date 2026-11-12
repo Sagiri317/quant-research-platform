@@ -53,6 +53,10 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
     dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
     build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
     conda_specs = _environment_dependency_specs(environment)
+    explain = _dependency_specs(
+        pyproject["project"]["optional-dependencies"]["explain"]
+    )
+    assert explain.items() <= dev.items()
     expected = {
         name: (CONDA_NAMES.get(name, name), spec)
         for name, spec in (runtime | dev | build_system_requires).items()

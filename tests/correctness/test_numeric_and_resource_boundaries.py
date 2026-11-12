@@ -235,8 +235,10 @@ def test_grouped_label_mean_preserves_finite_results(labels, expected):
         ),
         n_groups=2,
     )
-    assert len(grouped) == 1
-    assert grouped.mean_label_value.iloc[0] == pytest.approx(expected)
+    # A constant signal puts every observation on both tied extreme boundaries.
+    assert grouped.group.tolist() == [1, 2]
+    assert grouped.n_obs.tolist() == [len(labels), len(labels)]
+    assert grouped.mean_label_value.tolist() == pytest.approx([expected, expected])
 
 
 @pytest.mark.parametrize(

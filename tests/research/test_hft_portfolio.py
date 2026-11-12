@@ -627,6 +627,36 @@ def test_markout_uses_only_observed_future_quotes_in_same_segment(tmp_path, term
         ]
 
 
+@pytest.mark.parametrize("horizon_ms", [1000.0, 4000.0])
+def test_markout_waits_past_unknown_mid_inside_the_same_segment(tmp_path, horizon_ms):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:06", "01:30:09"),
+    )
+    panel.loc[2, ["mid", "bid_px1", "ask_px1"]] = np.nan
+    panel.loc[2, "eligible"] = False
+    panel.loc[3, ["mid", "bid_px1", "ask_px1"]] = [11.0, 10.99, 11.01]
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    params = parameters(("a",))
+    params["markout_ms"] = horizon_ms
+    batches, _ = native_account(
+        tmp_path,
+        [(daily_view(panel), panel, signals)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    facts = {
+        row.name: row
+        for batch in batches
+        for row in batch.diagnostics
+        if row.name.startswith("markout_")
+    }
+    assert "markout_reason" not in facts
+    assert facts["markout_bps"].number == pytest.approx((11.0 / 10.01 - 1) * 10000)
+    assert facts["markout_observed_at_ns"].text == str(panel.timestamp.iloc[3].value)
+
+
 @pytest.mark.parametrize(
     "setting,value,error",
     [

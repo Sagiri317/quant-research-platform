@@ -85,3 +85,11 @@ def test_financial_pit_owner_converts_quarterly_flows_to_ttm():
     # Current half-year + prior annual - prior half-year = 6 + 4 - 2.
     assert quarter.value.tolist() == [8.0]
     assert quarter.available_at.tolist() == [pd.Timestamp("2020-07-21")]
+
+
+def test_factor_dispatcher_does_not_own_market_eligibility(import_edges):
+    factor_path = SOURCE_ROOT / "research" / "factors" / "engine.py"
+    assert all(
+        not edge.module.startswith("quant_research_platform.markets")
+        for edge in import_edges_under(import_edges, factor_path)
+    )

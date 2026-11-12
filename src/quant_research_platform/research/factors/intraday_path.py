@@ -69,19 +69,23 @@ DESCRIPTION = (
 
 def calculate(panel, *, columns):
     output = []
+    requested = set(columns)
+    variance_needed = any(name.startswith(("hf_", "daily_")) for name in columns)
+    segment_needed = any(
+        name.startswith(("price_", "observed_", "event_")) for name in columns
+    )
     for _, group in panel.groupby(
         [panel.asset_id, panel.timestamp.dt.normalize()], sort=False
     ):
         work = group.sort_values("timestamp", kind="stable").reset_index(drop=True)
         times = pd.DatetimeIndex(work.timestamp)
-        result = work.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+        result = {name: np.full(len(work), np.nan) for name in columns}
         date = (times[0] + pd.Timedelta(hours=8)).normalize()
         seconds = (times + pd.Timedelta(hours=8) - date).total_seconds().to_numpy()
-        requested = set(columns)
         price_needed = any("mid" in INPUTS[name] for name in columns)
         price = work.mid.to_numpy(dtype=float) if price_needed else None
         returns = None
-        if price_needed:
+        if variance_needed:
             returns = pd.Series(np.log(price)).diff()
             returns.loc[work.segment_id.ne(work.segment_id.shift())] = np.nan
         flow_needed = any("observed_trade_volume" in INPUTS[name] for name in columns)
@@ -152,7 +156,12 @@ def calculate(panel, *, columns):
                 result["early_late_pressure_shift"] = (
                     late.to_numpy() - opening_flow.get(15, np.nan)
                 )
-        for _, positions in work.groupby("segment_id", sort=False).indices.items():
+        segments = (
+            work.groupby("segment_id", sort=False).indices.values()
+            if segment_needed
+            else ()
+        )
+        for positions in segments:
             at = np.asarray(positions)
             segment = work.iloc[at]
             t = pd.DatetimeIndex(segment.timestamp)
@@ -190,7 +199,7 @@ def calculate(panel, *, columns):
                                 ),
                                 np.nan,
                             )
-                            result.loc[at, name] = values
+                            result[name][at] = values
                 name = f"price_flow_divergence_{width}s"
                 if name in requested:
                     index = (
@@ -221,7 +230,7 @@ def calculate(panel, *, columns):
                     )
                     change = np.log(price[at] / price[at][lag])
                     imbalance = (net / gross.where(gross > 0)).to_numpy()
-                    result.loc[at, name] = np.where(
+                    result[name][at] = np.where(
                         known,
                         change * np.maximum(-np.sign(change) * imbalance, 0),
                         np.nan,
@@ -342,7 +351,7 @@ def calculate(panel, *, columns):
                         & np.isfinite(normal)
                         & np.isfinite(now)
                     )
-                    result.loc[at, name] = np.where(
+                    result[name][at] = np.where(
                         known, np.where(shock, score, 0), np.nan
                     )
         if returns is not None:
@@ -394,7 +403,15 @@ def calculate(panel, *, columns):
                         .where(known)
                         .to_numpy()
                     )
-        output.append(result.loc[:, ["market_id", "asset_id", "timestamp", *columns]])
+        output.append(
+            pd.concat(
+                [
+                    work.loc[:, ["market_id", "asset_id", "timestamp"]],
+                    pd.DataFrame(result, index=work.index),
+                ],
+                axis=1,
+            )
+        )
     return (
         pd.concat(output, ignore_index=True)
         if output

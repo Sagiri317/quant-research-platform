@@ -1056,9 +1056,9 @@ def inventory_batches(
                     queue = pending_markouts.get(asset, ())
                     while queue:
                         fill_id, price, side, due, segment = queue[0]
-                        same_segment = valid[asset] and row.segment_id == segment
+                        same_segment = row.segment_id == segment
                         observed = same_segment and np.isfinite(row.mid) and row.mid > 0
-                        if observed and at.value < due:
+                        if same_segment and (not observed or at.value < due):
                             break
                         queue.popleft()
                         if observed:

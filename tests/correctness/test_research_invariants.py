@@ -41,13 +41,16 @@ from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
 )
-from quant_research_platform.research.protocols.a_share import EXECUTION_ASSUMPTIONS
 from quant_research_platform.research.risk import (
     FactorRiskConfig,
     FactorRiskState,
 )
 from tests.helpers.optimizer import with_cash_asset
-from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
+from tests.helpers.research_configuration import (
+    CORE6_FACTORS,
+    EXECUTION_ASSUMPTIONS,
+    PV25_FACTORS,
+)
 
 
 def test_research_factor_rosters_are_explicit():

@@ -35,7 +35,10 @@ from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
 from tests.helpers.paths import StorageLayout
-from tests.helpers.research_configuration import research_configuration
+from tests.helpers.research_configuration import (
+    EXECUTION_ASSUMPTIONS,
+    research_configuration,
+)
 
 
 def prepare_a_share_acceptance(root: Path):
@@ -299,7 +302,7 @@ def run_a_share_acceptance(project_root: Path):
             "prediction_window": test,
             "sample_role": "test",
             "assumptions": {
-                **asdict(a_share.EXECUTION_ASSUMPTIONS),
+                **asdict(EXECUTION_ASSUMPTIONS),
                 "initial_nav": 2e9,
             },
         }

@@ -1,5 +1,17 @@
 """Small explicit research inputs, independent of documentation and experiments."""
 
+from quant_research_platform.contracts.portfolios import ExecutionAssumptions
+
+PRIMARY_LABEL_COLUMN = "forward_return_20d"
+EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
+    initial_nav=1_000_000_000.0,
+    slippage_bps=5.0,
+    impact_bps=25.0,
+    adv_participation=0.05,
+    adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
+)
+
+
 CORE6_FACTORS = (
     "momentum_252_20",
     "reversal_5d",

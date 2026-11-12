@@ -279,7 +279,7 @@ def _industry_source(reference_root):
     path = root / _INDUSTRY_MANIFEST_NAME
     raw, metadata = read_qrp_json_file(path)
     if (
-        set(metadata) != {"schema_id", "files", "snapshots"}
+        not {"schema_id", "files", "snapshots"} <= set(metadata)
         or metadata["schema_id"] != "a_share_industry_snapshots/1"
         or type(metadata["files"]) is not dict
         or not metadata["files"]
@@ -292,10 +292,11 @@ def _industry_source(reference_root):
         for snapshot in metadata["snapshots"]
         if type(snapshot) is dict and type(snapshot.get("candidate_file")) is str
     }
-    if set(metadata["files"]) != candidates:
+    if not candidates <= set(metadata["files"]):
         raise ValueError("industry_snapshot_member_invalid")
     members = {}
-    for name, expected_hash in metadata["files"].items():
+    for name in sorted(candidates):
+        expected_hash = metadata["files"][name]
         if (
             type(name) is not str
             or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json", name) is None
@@ -312,7 +313,7 @@ def _industry_source(reference_root):
             raise ValueError("industry_snapshot_member_hash_mismatch")
     seen = set()
     for snapshot in metadata["snapshots"]:
-        if type(snapshot) is not dict or set(snapshot) != {
+        if type(snapshot) is not dict or not {
             "snapshot_id",
             "industry_standard_id",
             "observation_date",
@@ -322,7 +323,7 @@ def _industry_source(reference_root):
             "document_sha256",
             "publication_evidence_url",
             "publication_evidence_sha256",
-        }:
+        } <= set(snapshot):
             raise ValueError("industry_snapshot_metadata_invalid")
         standard = snapshot["industry_standard_id"]
         if type(standard) is not str or standard not in {"CSRC2012", "CAPCO"}:
@@ -381,7 +382,7 @@ def _industry_frame(metadata, members, *, end_date=None):
             continue
         candidate = members[snapshot["candidate_file"]]
         if (
-            set(candidate) != {"source", "source_sha256", "records"}
+            not {"source", "source_sha256", "records"} <= set(candidate)
             or candidate["source"] != snapshot["source_url"]
             or candidate["source_sha256"] != snapshot["document_sha256"]
             or type(candidate["records"]) is not list

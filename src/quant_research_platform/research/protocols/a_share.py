@@ -15,9 +15,6 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.portfolios import (
-    ExecutionAssumptions,
-)
 from quant_research_platform.contracts.risk import (
     RISK_STYLE_COLUMNS as RISK_STYLE_COLUMNS,
 )
@@ -45,7 +42,6 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-PROTOCOL_ID = "a_share_low_frequency"
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
 SCENARIO_IDS = (
     "pv_all",
@@ -54,17 +50,7 @@ SCENARIO_IDS = (
     "fusion_nf_expectations",
 )
 LABEL_HORIZONS = (1, 5, 10, 20, 60, 120)
-PRIMARY_LABEL_COLUMN = forward_return_label_column(20)
 MODEL_TARGET_COLUMN = "model_target"
-
-
-EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
-    initial_nav=1_000_000_000.0,
-    slippage_bps=5.0,
-    impact_bps=25.0,
-    adv_participation=0.05,
-    adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
-)
 
 
 def _inference_blocker(manifest):

@@ -322,12 +322,14 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
         volume=1000.0,
         turnover=0.01,
     )
-    from quant_research_platform.research.factors.engine import (
-        _market_model_frames,
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer as market_producer,
     )
 
     market_factors = pd.concat(
-        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        market_producer._market_model_frames(
+            (panel,), trading_calendar=None, market_history=None
+        ),
         ignore_index=True,
     ).loc[:, list(_processed_specs().get("market_model_factors").required_columns)]
     calendar = pd.DataFrame(

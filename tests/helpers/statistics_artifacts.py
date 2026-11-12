@@ -7,6 +7,7 @@ from quant_research_platform.research.models.statistics import _selection_trial_
 from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
+    EXECUTION_ASSUMPTIONS,
     PV25_FACTORS,
     research_configuration,
 )
@@ -171,7 +172,6 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
 
     from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
     from quant_research_platform.research.protocols.a_share import (
-        EXECUTION_ASSUMPTIONS,
         RISK_STYLE_COLUMNS,
     )
     from quant_research_platform.research.risk import (

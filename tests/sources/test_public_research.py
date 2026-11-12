@@ -69,6 +69,7 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
                 "availability_basis": "estimated_same_day_end_snapshot_assumption",
                 "evidence_url": "https://example.org/source",
                 "published_at": None,
+                "source_note": "Unconsumed upstream evidence metadata",
             }
             for day in ("2026-04-23", "2026-04-24")
         ]
@@ -1336,3 +1337,18 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
             end_date="2024-02-29",
         )
     assert not (tmp_path / "invalid").exists()
+
+
+@pytest.mark.parametrize("column", ("source", "published_at"))
+def test_release_clock_rejects_ambiguous_consumed_column(tmp_path, column):
+    from quant_research_platform.sources.public_research.interim import _release_clocks
+
+    path = tmp_path / "clocks.csv"
+    path.write_text(
+        "source,observation_date,estimated_available_at,availability_basis,evidence_url,"
+        f"published_at,{column}\n"
+        "sse_margin,2024-01-02,2024-01-03T00:00:00Z,assumption,https://example.org/rule,,\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="public_release_clock_columns_invalid"):
+        _release_clocks(path)

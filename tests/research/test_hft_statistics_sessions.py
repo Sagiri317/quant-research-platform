@@ -181,6 +181,15 @@ def test_saved_common_correlation_uses_identical_timestamp_blocks(tmp_path, scop
     # The constant-x first block remains visible as a defined z diagnostic.
     z_blocks = raw["metrics"].loc[raw["metrics"].signal.eq("z")]
     assert z_blocks.rankic.tolist() == pytest.approx([1, -1, -1, 1])
+    # Two groups select half of four assets per side. Each two-point side has
+    # the same slope sign: (+1, -1, -1, +1). Own daily means are (-1/3, 1);
+    # common excludes the constant-x first block, leaving daily means (-1, 1).
+    for side in ("long", "short"):
+        assert z_blocks[f"{side}_n_obs"].tolist() == [2] * 4
+        for metric in ("ic", "rankic"):
+            assert z_blocks[f"{side}_{metric}"].tolist() == pytest.approx(
+                [1, -1, -1, 1]
+            )
     expected = 0.0 if scope == "common" else 1 / 3
     summary = raw["ic_summary"].set_index("signal")
     assert summary.loc["z", "mean_rankic"] == pytest.approx(expected)
@@ -202,7 +211,10 @@ def test_saved_common_correlation_uses_identical_timestamp_blocks(tmp_path, scop
         selected = table.loc[table.signal.eq("z")]
         assert set(selected.stratification) == {"all", "industry", "side"}
         sides = selected.loc[selected.stratification.eq("side")]
-        assert sides["mean"].isna().all() and sides.observation_count.eq(0).all()
+        assert len(sides) == 4
+        assert sides["mean"].tolist() == pytest.approx([expected] * 4)
+        assert sides.observation_count.eq(2).all()
+        assert sides.observation_pairs.eq(8).all()
         selected = selected.loc[~selected.stratification.eq("side")]
         assert set(selected.stratification) == {"all", "industry"}
         assert selected["mean"].to_numpy() == pytest.approx([expected] * len(selected))
@@ -251,20 +263,23 @@ def test_saved_intraday_evaluation_uses_the_same_daily_ic_rankic_axis(
     with artifact.table("factor_stratified_diagnostics.parquet") as table:
         assert set(table.statistic) == {"ic", "rankic"}
         sides = table.loc[table.stratification.eq("side")]
-        assert len(sides) == 4 and sides["mean"].isna().all()
-        assert sides.observation_count.eq(0).all()
-        assert sides.observation_pairs.eq(4).all()
-        table = table.loc[table.stratification.eq("all")]
-        assert table["mean"].to_numpy() == pytest.approx([-1 / 3] * 2)
+        # With n_groups=2, each side pairs two assets per timestamp. The side
+        # correlations are (+1, +1, -1, -1), just like the full cross sections:
+        # daily means (1/3, -1) give mean -1/3 and lag-one HAC SE 1/3.
+        assert len(sides) == 4 and len(table) == 6
+        assert sides.observation_pairs.eq(8).all()
+        assert table["mean"].to_numpy() == pytest.approx([-1 / 3] * 6)
         assert table.observation_count.eq(2).all()
         assert table.observed_date_count.eq(2).all()
-        assert table.observation_pairs.eq(16).all()
+        assert (
+            table.loc[table.stratification.eq("all"), "observation_pairs"].eq(16).all()
+        )
         assert table.input_date_count.eq(len(config["sessions"])).all()
         if missing_session:
             assert table.reason.eq("incomplete_session_clock").all()
             assert table.fdr_adjusted_p_value.isna().all()
         else:
-            assert table.standard_error.to_numpy() == pytest.approx([1 / 3] * 2)
+            assert table.standard_error.to_numpy() == pytest.approx([1 / 3] * 6)
     with artifact.table("factor_diagnostics.parquet") as table:
         assert table["mean"].to_numpy() == pytest.approx([-1 / 3] * 2)
         assert table.input_date_count.eq(len(config["sessions"])).all()

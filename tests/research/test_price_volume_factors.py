@@ -757,10 +757,14 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         for asset, multiplier in (("a", 1), ("b", 3))
     ]
     panel = pd.DataFrame(rows)
-    from quant_research_platform.research.factors.engine import _market_model_frames
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer as market_producer,
+    )
 
     result = pd.concat(
-        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        market_producer._market_model_frames(
+            (panel,), trading_calendar=None, market_history=None
+        ),
         ignore_index=True,
     )
     assert result.loc[result.timestamp < dates[251], "beta_252d"].isna().all()
@@ -785,7 +789,7 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         np.testing.assert_array_equal(actual.isna(), reference.isna())
         np.testing.assert_allclose(actual, reference, rtol=1e-12, atol=1e-16)
     bounded = pd.concat(
-        _market_model_frames(
+        market_producer._market_model_frames(
             (panel.loc[panel.timestamp >= dates[350 - 312]],),
             trading_calendar=None,
             market_history=None,
@@ -1228,10 +1232,14 @@ def test_market_model_positive_prices_persist_usable_risk_styles(tmp_path):
             for asset in ("a", "b")
         ]
     )
-    from quant_research_platform.research.factors.engine import _market_model_frames
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer as market_producer,
+    )
 
     output = pd.concat(
-        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        market_producer._market_model_frames(
+            (panel,), trading_calendar=None, market_history=None
+        ),
         ignore_index=True,
     )
     spec = scientific_catalogs().processed.get("market_model_factors")

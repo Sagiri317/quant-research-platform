@@ -755,7 +755,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
     spec = processed_catalog().get(target)
     expected = (
         pd.concat(
-            producer.factor_engine._market_model_frames(
+            producer._market_model_frames(
                 (panel,),
                 trading_calendar=source["trading_calendar"],
                 market_history=None,
@@ -800,7 +800,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
         return compute(spec, **kwargs)
 
     if target == "market_model_factors":
-        market_model_frames = producer.factor_engine._market_model_frames
+        market_model_frames = producer._market_model_frames
 
         def observed_market_models(panels, **kwargs):
             def observed_panels():
@@ -810,9 +810,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
 
             yield from market_model_frames(observed_panels(), **kwargs)
 
-        monkeypatch.setattr(
-            producer.factor_engine, "_market_model_frames", observed_market_models
-        )
+        monkeypatch.setattr(producer, "_market_model_frames", observed_market_models)
         monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 300)
     else:
         monkeypatch.setattr(producer, "_compute_processed_frame", observed)

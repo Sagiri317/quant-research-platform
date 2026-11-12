@@ -130,6 +130,7 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 - [研究 agent 的交互与权限](docs/agent.md)
 
 环境配置见 [environment.yml](environment.yml) 和 [pyproject.toml](pyproject.toml)，项目运行使用独立 Conda 环境。
+开发环境包含真实解释测试所需的 SHAP；普通运行时仍可按需选择 `explain` 可选依赖。
 
 ```text
 python -m ruff format --check .
