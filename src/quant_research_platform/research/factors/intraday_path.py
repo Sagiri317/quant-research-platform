@@ -70,9 +70,43 @@ DESCRIPTION = (
 def calculate(panel, *, columns):
     output = []
     requested = set(columns)
-    variance_needed = any(name.startswith(("hf_", "daily_")) for name in columns)
+    variance_windows = tuple(
+        width
+        for width in ("30m", "1d")
+        if any(
+            name.startswith("hf_") and name.endswith(f"_{width}") for name in columns
+        )
+    )
+    daily_variation = bool(
+        requested & {"daily_continuous_variation", "daily_jump_variation_fraction"}
+    )
     segment_needed = any(
         name.startswith(("price_", "observed_", "event_")) for name in columns
+    )
+    spread_needed = any(
+        name.startswith("observed_spread_recovery_") for name in columns
+    )
+    depth_recovery = any(
+        name.startswith("observed_depth_recovery_") for name in columns
+    )
+    impact_needed = any(
+        name.startswith("event_price_impact_efficiency_") for name in columns
+    )
+    sell_needed = any(
+        name.startswith("observed_sell_pressure_decay_") for name in columns
+    )
+    recovery_windows = tuple(
+        width
+        for width in (30, 60, 300)
+        if any(
+            name in requested
+            for name in (
+                f"observed_spread_recovery_{width}s",
+                f"observed_depth_recovery_{width}s",
+                f"observed_sell_pressure_decay_{width}s",
+                f"event_price_impact_efficiency_{width}s",
+            )
+        )
     )
     for _, group in panel.groupby(
         [panel.asset_id, panel.timestamp.dt.normalize()], sort=False
@@ -85,7 +119,7 @@ def calculate(panel, *, columns):
         price_needed = any("mid" in INPUTS[name] for name in columns)
         price = work.mid.to_numpy(dtype=float) if price_needed else None
         returns = None
-        if variance_needed:
+        if variance_windows or daily_variation:
             returns = pd.Series(np.log(price)).diff()
             returns.loc[work.segment_id.ne(work.segment_id.shift())] = np.nan
         flow_needed = any("observed_trade_volume" in INPUTS[name] for name in columns)
@@ -166,6 +200,26 @@ def calculate(panel, *, columns):
             segment = work.iloc[at]
             t = pd.DatetimeIndex(segment.timestamp)
             elapsed = (t - t[0]).total_seconds().to_numpy()
+            gross, net = {}, {}
+            if flow_needed:
+                v, s = volume.iloc[at], signed.iloc[at]
+                for width in (30, 60, 300):
+                    divergence = f"price_flow_divergence_{width}s" in requested
+                    impact = f"event_price_impact_efficiency_{width}s" in requested
+                    sell_window = width == 30 and sell_needed
+                    if divergence or impact or sell_window:
+                        window = f"{width}s"
+                        gross[width] = (
+                            v.rolling(window)
+                            .sum()
+                            .where(v.isna().rolling(window).sum().eq(0))
+                        )
+                        if divergence or sell_window:
+                            net[width] = (
+                                s.rolling(window)
+                                .sum()
+                                .where(s.isna().rolling(window).sum().eq(0))
+                            )
             for width in (30, 300):
                 names = {
                     side: f"price_{side}_acceleration_{width}s"
@@ -207,41 +261,27 @@ def calculate(panel, *, columns):
                         - 1
                     )
                     lag = np.maximum(index, 0)
-                    gross = volume.iloc[at].rolling(f"{width}s").sum()
-                    net = signed.iloc[at].rolling(f"{width}s").sum()
                     known = (
                         (index >= 0)
                         & (
                             (t - pd.Timedelta(seconds=width) - t[lag]).total_seconds()
                             <= 6
                         )
-                        & volume.iloc[at]
-                        .isna()
-                        .rolling(f"{width}s")
-                        .sum()
-                        .eq(0)
-                        .to_numpy()
-                        & signed.iloc[at]
-                        .isna()
-                        .rolling(f"{width}s")
-                        .sum()
-                        .eq(0)
-                        .to_numpy()
+                        & gross[width].notna().to_numpy()
+                        & net[width].notna().to_numpy()
                     )
                     change = np.log(price[at] / price[at][lag])
-                    imbalance = (net / gross.where(gross > 0)).to_numpy()
+                    imbalance = (
+                        net[width] / gross[width].where(gross[width] > 0)
+                    ).to_numpy()
                     result[name][at] = np.where(
                         known,
                         change * np.maximum(-np.sign(change) * imbalance, 0),
                         np.nan,
                     )
-            book_needed = any(set(INPUTS[name]) & set(BOOK) for name in columns)
-            if book_needed:
+            if spread_needed:
                 spread = pd.Series(
                     (segment.ask_px1 - segment.bid_px1).to_numpy(float), index=t
-                )
-                depth = pd.Series(
-                    (segment.bid_vol1 + segment.ask_vol1).to_numpy(float), index=t
                 )
                 baseline_spread = (
                     spread.rolling("60s", closed="left")
@@ -251,6 +291,11 @@ def calculate(panel, *, columns):
                         & spread.isna().rolling("60s", closed="left").sum().eq(0)
                     )
                 )
+            if depth_recovery or impact_needed:
+                depth = pd.Series(
+                    (segment.bid_vol1 + segment.ask_vol1).to_numpy(float), index=t
+                )
+            if depth_recovery:
                 baseline_depth = (
                     depth.rolling("60s", closed="left")
                     .mean()
@@ -259,19 +304,13 @@ def calculate(panel, *, columns):
                         & depth.isna().rolling("60s", closed="left").sum().eq(0)
                     )
                 )
-            if flow_needed:
-                v, s = volume.iloc[at], signed.iloc[at]
-                v30 = v.rolling("30s").sum()
+            if sell_needed:
                 sell = (
-                    (-s.rolling("30s").sum() / v30.where(v30 > 0))
+                    (-net[30] / gross[30].where(gross[30] > 0))
                     .clip(lower=0)
-                    .where(
-                        (elapsed >= 30)
-                        & v.isna().rolling("30s").sum().eq(0)
-                        & s.isna().rolling("30s").sum().eq(0)
-                    )
+                    .where(elapsed >= 30)
                 )
-            for width in (30, 60, 300):
+            for width in recovery_windows:
                 index = (
                     t.searchsorted(t - pd.Timedelta(seconds=width), side="right") - 1
                 )
@@ -326,14 +365,8 @@ def calculate(panel, *, columns):
                         old = price[at][lag]
                         normal = depth.to_numpy()[lag]
                         now = price[at]
-                        gross = (
-                            v.rolling(f"{width}s")
-                            .sum()
-                            .where(v.isna().rolling(f"{width}s").sum().eq(0))
-                            .to_numpy()
-                        )
                         scale = np.divide(
-                            gross,
+                            gross[width].to_numpy(),
                             normal,
                             out=np.full(len(at), np.nan),
                             where=normal > 0,
@@ -359,8 +392,15 @@ def calculate(panel, *, columns):
             same = work.segment_id.eq(work.segment_id.shift()).to_numpy()
             unexpected = r.isna().to_numpy() & same
             r = r.where(same, 0)
-            up, down = r.clip(lower=0) ** 2, r.clip(upper=0) ** 2
-            for width in ("30m", "1d"):
+            if daily_variation or "1d" in variance_windows:
+                day_known = (
+                    complete_open
+                    & ((times - times[0]).total_seconds() > 0)
+                    & ~np.maximum.accumulate(unexpected)
+                )
+            if variance_windows:
+                up, down = r.clip(lower=0) ** 2, r.clip(upper=0) ** 2
+            for width in variance_windows:
                 if width == "30m":
                     u, d = up.rolling("30min").sum(), down.rolling("30min").sum()
                     known = ((times - times[0]).total_seconds() >= 1800) & pd.Series(
@@ -368,11 +408,7 @@ def calculate(panel, *, columns):
                     ).rolling("30min").sum().eq(0).to_numpy()
                 else:
                     u, d = up.cumsum(), down.cumsum()
-                    known = (
-                        complete_open
-                        & ((times - times[0]).total_seconds() > 0)
-                        & ~np.maximum.accumulate(unexpected)
-                    )
+                    known = day_known
                 for side, values in (
                     ("upside_realized_variance", u),
                     ("downside_realized_variance", d),
@@ -381,15 +417,12 @@ def calculate(panel, *, columns):
                     name = f"hf_{side}_{width}"
                     if name in requested:
                         result[name] = values.where(known).to_numpy()
-            if requested & {
-                "daily_continuous_variation",
-                "daily_jump_variation_fraction",
-            }:
+            if daily_variation:
                 products = (r.abs() * r.abs().shift()).where(same, 0)
                 bipower = (np.pi / 2) * products.cumsum()
                 variance = (r * r).cumsum()
                 paired = same & np.r_[False, same[:-1]]
-                known = known & np.maximum.accumulate(paired)
+                known = day_known & np.maximum.accumulate(paired)
                 if "daily_continuous_variation" in requested:
                     result["daily_continuous_variation"] = bipower.where(
                         known

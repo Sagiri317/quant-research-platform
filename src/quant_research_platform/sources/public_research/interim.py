@@ -9,6 +9,7 @@ import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 from .normalization import DATASETS, _numbers, normalize
@@ -167,220 +168,236 @@ def materialize_interim_data(
                     if digest in complete_archives:
                         continue
                     complete_archives.add(digest)
-                for frame in normalize(data_id, path, record):
-                    if frame.empty:
-                        continue
-                    frame["source"] = record["source"]
-                    if "source_url" not in frame:
-                        frame["source_url"] = pd.Series(
-                            record.get("url"), index=frame.index, dtype="str"
+                with closing_iterator(normalize(data_id, path, record)) as normalized:
+                    for frame in normalized:
+                        if frame.empty:
+                            continue
+                        frame["source"] = record["source"]
+                        if "source_url" not in frame:
+                            frame["source_url"] = pd.Series(
+                                record.get("url"), index=frame.index, dtype="str"
+                            )
+                        if "source_sha256" not in frame:
+                            frame["source_sha256"] = digest
+                        if "retrieved_at" not in frame:
+                            frame["retrieved_at"] = record.get("retrieved_at")
+                        if "publication_date" not in frame:
+                            frame["publication_date"] = pd.NaT
+                        frame["timestamp"] = pd.to_datetime(frame.timestamp).astype(
+                            "datetime64[ns]"
                         )
-                    if "source_sha256" not in frame:
-                        frame["source_sha256"] = digest
-                    if "retrieved_at" not in frame:
-                        frame["retrieved_at"] = record.get("retrieved_at")
-                    if "publication_date" not in frame:
-                        frame["publication_date"] = pd.NaT
-                    frame["timestamp"] = pd.to_datetime(frame.timestamp).astype(
-                        "datetime64[ns]"
-                    )
-                    if frame.timestamp.isna().any():
-                        raise ValueError("public_observation_date_invalid")
-                    if data_id in correction_evidence:
-                        corrected = pd.to_datetime(
-                            frame.source_sha256.map(report_dates)
-                        )
-                        frame["timestamp"] = corrected.fillna(frame.timestamp)
-                        if data_id == "public_fund_financial_cells":
-                            frame["report_period_end"] = frame.timestamp
-                            keys = pd.MultiIndex.from_arrays(
-                                [frame.source_sha256, frame.asset_id]
+                        if frame.timestamp.isna().any():
+                            raise ValueError("public_observation_date_invalid")
+                        if data_id in correction_evidence:
+                            corrected = pd.to_datetime(
+                                frame.source_sha256.map(report_dates)
                             )
-                            revised = cell_dates.reindex(keys).set_axis(frame.index)
-                            frame["value_observation_date"] = revised.fillna(
-                                pd.to_datetime(frame.value_observation_date)
-                            )
-                    if start_date is not None:
-                        frame = frame.loc[frame.timestamp.ge(pd.Timestamp(start_date))]
-                    if end_date is not None:
-                        frame = frame.loc[
-                            frame.timestamp.lt(
-                                pd.Timestamp(end_date) + pd.Timedelta(days=1)
-                            )
-                        ]
-                    if frame.empty:
-                        continue
-                    publication_dates = frame.publication_date
-                    frame["publication_date"] = pd.to_datetime(
-                        frame.publication_date
-                    ).astype("datetime64[ns]")
-                    if (
-                        publication_dates.notna()
-                        & publication_dates.astype("str").str.strip().ne("")
-                        & frame.publication_date.isna()
-                    ).any():
-                        raise ValueError("public_release_date_invalid")
-                    if "published_at" not in frame:
-                        frame["published_at"] = record.get("historical_published_at")
-                    frame["published_at"] = _utc_times(frame.published_at)
-                    frame["retrieved_at"] = _utc_times(frame.retrieved_at)
-                    from quant_research_platform.sources.macro.interim import (
-                        date_end_available,
-                    )
-
-                    zone = _source_timezone(record["source"])
-                    dated_release = date_end_available(frame.publication_date, zone)
-                    frame["available_at"] = frame.published_at.fillna(dated_release)
-                    frame["availability_basis"] = "unknown_historical_release"
-                    frame.loc[frame.publication_date.notna(), "availability_basis"] = (
-                        "public_nport_filing_date_rule_upper_bound"
-                        if data_id
-                        in {
-                            "public_nport_holdings",
-                            "public_nport_funds",
-                            "public_security_identifiers",
-                        }
-                        else "publication_date_upper_bound"
-                    )
-                    frame.loc[frame.published_at.notna(), "availability_basis"] = (
-                        "publication_timestamp"
-                    )
-                    frame["availability_evidence_url"] = pd.Series(
-                        pd.NA, index=frame.index, dtype="str"
-                    )
-                    if clocks is not None:
-                        if data_id == "public_fund_nav" and fund_identities is not None:
-                            identity = fund_identities.reindex(
-                                frame.fund_code
-                            ).set_axis(frame.index)
-                            visible = (
-                                identity.clock_source_key.notna()
-                                & frame.timestamp.ge(identity.clock_valid_from)
-                            )
-                            frame["_clock_source"] = frame.source.where(
-                                ~visible, identity.clock_source_key
-                            )
-                        keys = pd.MultiIndex.from_arrays(
-                            [
-                                frame.get("_clock_source", frame.source),
-                                frame.timestamp.dt.normalize(),
+                            frame["timestamp"] = corrected.fillna(frame.timestamp)
+                            if data_id == "public_fund_financial_cells":
+                                frame["report_period_end"] = frame.timestamp
+                                keys = pd.MultiIndex.from_arrays(
+                                    [frame.source_sha256, frame.asset_id]
+                                )
+                                revised = cell_dates.reindex(keys).set_axis(frame.index)
+                                frame["value_observation_date"] = revised.fillna(
+                                    pd.to_datetime(frame.value_observation_date)
+                                )
+                        if start_date is not None:
+                            frame = frame.loc[
+                                frame.timestamp.ge(pd.Timestamp(start_date))
                             ]
-                        )
-                        clock = _select_release_clocks(clocks, keys).set_axis(
-                            frame.index
-                        )
-                        actual = frame.published_at.isna() & clock.published_at.notna()
-                        frame.loc[actual, "published_at"] = clock.loc[
-                            actual, "published_at"
-                        ]
-                        frame.loc[actual, "available_at"] = clock.loc[
-                            actual, "estimated_available_at"
-                        ]
-                        estimated = clock.estimated_available_at.notna() & (
-                            frame.available_at.isna()
-                            | clock.estimated_available_at.ge(frame.available_at)
-                        )
-                        applied = actual | estimated
-                        frame.loc[estimated, "available_at"] = clock.loc[
-                            estimated, "estimated_available_at"
-                        ]
-                        frame.loc[applied, "availability_basis"] = clock.loc[
-                            applied, "availability_basis"
-                        ]
-                        frame.loc[applied, "availability_evidence_url"] = clock.loc[
-                            applied, "evidence_url"
-                        ]
-                    if frame.available_at.lt(frame.published_at).any():
-                        raise ValueError("public_release_clock_precedes_dependency")
-                    observed = frame.timestamp.dt.normalize()
-                    if data_id == "public_finra_margin":
-                        observed += pd.offsets.MonthEnd(0)
-                    for name in (
-                        ()
-                        if data_id
-                        in {"public_etf_actions", "public_domestic_etf_actions"}
-                        else ("published_at", "available_at")
-                    ):
-                        local_date = (
-                            frame[name]
-                            .dt.tz_convert(zone)
-                            .dt.tz_localize(None)
-                            .dt.normalize()
-                        )
-                        if local_date.lt(observed).any():
-                            raise ValueError("public_release_clock_precedes_dependency")
-                    if (
-                        data_id
-                        not in {"public_etf_actions", "public_domestic_etf_actions"}
-                        and frame.publication_date.lt(observed).any()
-                    ):
-                        raise ValueError("public_release_clock_precedes_dependency")
-                    numeric_fields = [
-                        field
-                        for field, unit in DATASETS[data_id].items()
-                        if unit not in {"identifier", "text", "date"}
-                    ]
-                    _numbers(frame, numeric_fields)
-                    for field, count in frame.attrs.get(
-                        "invalid_numeric_cells", {}
-                    ).items():
-                        numeric_counts[field] = numeric_counts.get(field, 0) + count
-                    for field, unit in DATASETS[data_id].items():
-                        if unit in {"identifier", "text"}:
-                            frame[field] = frame[field].astype("str")
-                        elif unit == "date":
-                            frame[field] = pd.to_datetime(frame[field]).astype(
-                                "datetime64[ns]"
+                        if end_date is not None:
+                            frame = frame.loc[
+                                frame.timestamp.lt(
+                                    pd.Timestamp(end_date) + pd.Timedelta(days=1)
+                                )
+                            ]
+                        if frame.empty:
+                            continue
+                        publication_dates = frame.publication_date
+                        frame["publication_date"] = pd.to_datetime(
+                            frame.publication_date
+                        ).astype("datetime64[ns]")
+                        if (
+                            publication_dates.notna()
+                            & publication_dates.astype("str").str.strip().ne("")
+                            & frame.publication_date.isna()
+                        ).any():
+                            raise ValueError("public_release_date_invalid")
+                        if "published_at" not in frame:
+                            frame["published_at"] = record.get(
+                                "historical_published_at"
                             )
-                        else:
-                            frame[field] = frame[field].astype("Float64")
-                    if not frame.empty:
-                        yield frame.loc[:, list(catalog.get(data_id).required_columns)]
+                        frame["published_at"] = _utc_times(frame.published_at)
+                        frame["retrieved_at"] = _utc_times(frame.retrieved_at)
+                        from quant_research_platform.sources.macro.interim import (
+                            date_end_available,
+                        )
 
-        iterator = frames()
-        first = next(iterator, None)
-        if first is None:
-            skipped.append(data_id)
-            continue
-        from itertools import chain
+                        zone = _source_timezone(record["source"])
+                        dated_release = date_end_available(frame.publication_date, zone)
+                        frame["available_at"] = frame.published_at.fillna(dated_release)
+                        frame["availability_basis"] = "unknown_historical_release"
+                        frame.loc[
+                            frame.publication_date.notna(), "availability_basis"
+                        ] = (
+                            "public_nport_filing_date_rule_upper_bound"
+                            if data_id
+                            in {
+                                "public_nport_holdings",
+                                "public_nport_funds",
+                                "public_security_identifiers",
+                            }
+                            else "publication_date_upper_bound"
+                        )
+                        frame.loc[frame.published_at.notna(), "availability_basis"] = (
+                            "publication_timestamp"
+                        )
+                        frame["availability_evidence_url"] = pd.Series(
+                            pd.NA, index=frame.index, dtype="str"
+                        )
+                        if clocks is not None:
+                            if (
+                                data_id == "public_fund_nav"
+                                and fund_identities is not None
+                            ):
+                                identity = fund_identities.reindex(
+                                    frame.fund_code
+                                ).set_axis(frame.index)
+                                visible = (
+                                    identity.clock_source_key.notna()
+                                    & frame.timestamp.ge(identity.clock_valid_from)
+                                )
+                                frame["_clock_source"] = frame.source.where(
+                                    ~visible, identity.clock_source_key
+                                )
+                            keys = pd.MultiIndex.from_arrays(
+                                [
+                                    frame.get("_clock_source", frame.source),
+                                    frame.timestamp.dt.normalize(),
+                                ]
+                            )
+                            clock = _select_release_clocks(clocks, keys).set_axis(
+                                frame.index
+                            )
+                            actual = (
+                                frame.published_at.isna() & clock.published_at.notna()
+                            )
+                            frame.loc[actual, "published_at"] = clock.loc[
+                                actual, "published_at"
+                            ]
+                            frame.loc[actual, "available_at"] = clock.loc[
+                                actual, "estimated_available_at"
+                            ]
+                            estimated = clock.estimated_available_at.notna() & (
+                                frame.available_at.isna()
+                                | clock.estimated_available_at.ge(frame.available_at)
+                            )
+                            applied = actual | estimated
+                            frame.loc[estimated, "available_at"] = clock.loc[
+                                estimated, "estimated_available_at"
+                            ]
+                            frame.loc[applied, "availability_basis"] = clock.loc[
+                                applied, "availability_basis"
+                            ]
+                            frame.loc[applied, "availability_evidence_url"] = clock.loc[
+                                applied, "evidence_url"
+                            ]
+                        if frame.available_at.lt(frame.published_at).any():
+                            raise ValueError("public_release_clock_precedes_dependency")
+                        observed = frame.timestamp.dt.normalize()
+                        if data_id == "public_finra_margin":
+                            observed += pd.offsets.MonthEnd(0)
+                        for name in (
+                            ()
+                            if data_id
+                            in {"public_etf_actions", "public_domestic_etf_actions"}
+                            else ("published_at", "available_at")
+                        ):
+                            local_date = (
+                                frame[name]
+                                .dt.tz_convert(zone)
+                                .dt.tz_localize(None)
+                                .dt.normalize()
+                            )
+                            if local_date.lt(observed).any():
+                                raise ValueError(
+                                    "public_release_clock_precedes_dependency"
+                                )
+                        if (
+                            data_id
+                            not in {"public_etf_actions", "public_domestic_etf_actions"}
+                            and frame.publication_date.lt(observed).any()
+                        ):
+                            raise ValueError("public_release_clock_precedes_dependency")
+                        numeric_fields = [
+                            field
+                            for field, unit in DATASETS[data_id].items()
+                            if unit not in {"identifier", "text", "date"}
+                        ]
+                        _numbers(frame, numeric_fields)
+                        for field, count in frame.attrs.get(
+                            "invalid_numeric_cells", {}
+                        ).items():
+                            numeric_counts[field] = numeric_counts.get(field, 0) + count
+                        for field, unit in DATASETS[data_id].items():
+                            if unit in {"identifier", "text"}:
+                                frame[field] = frame[field].astype("str")
+                            elif unit == "date":
+                                frame[field] = pd.to_datetime(frame[field]).astype(
+                                    "datetime64[ns]"
+                                )
+                            else:
+                                frame[field] = frame[field].astype("Float64")
+                        if not frame.empty:
+                            yield frame.loc[
+                                :, list(catalog.get(data_id).required_columns)
+                            ]
 
-        target = Path(output_roots[data_id])
-        write_dataset(
-            target,
-            chain((first,), iterator),
-            spec=catalog.get(data_id),
-            metadata={
-                "producer_diagnostics": {
-                    "source_invalid_numeric_cells": numeric_counts
+        with closing_iterator(frames()) as iterator:
+            first = next(iterator, None)
+            if first is None:
+                skipped.append(data_id)
+                continue
+            from itertools import chain
+
+            target = Path(output_roots[data_id])
+            write_dataset(
+                target,
+                chain((first,), iterator),
+                spec=catalog.get(data_id),
+                metadata={
+                    "producer_diagnostics": {
+                        "source_invalid_numeric_cells": numeric_counts
+                    },
+                    "source_evidence": {
+                        "manifests": manifest_evidence,
+                        "records": evidence,
+                        **(
+                            {"release_clock_sha256": clock_hash}
+                            if clock_hash is not None
+                            else {}
+                        ),
+                        **(
+                            {
+                                "fund_identity_sha256": hashlib.sha256(
+                                    Path(fund_identity_csv).read_bytes()
+                                ).hexdigest()
+                            }
+                            if fund_identity_csv is not None
+                            and "public_fund_nav" in data_ids
+                            else {}
+                        ),
+                    },
+                    "parameters": {
+                        "timestamp_semantics": "observation_not_availability",
+                        "publication_imputation": "explicit_release_csv"
+                        if clocks is not None
+                        else "none",
+                    },
                 },
-                "source_evidence": {
-                    "manifests": manifest_evidence,
-                    "records": evidence,
-                    **(
-                        {"release_clock_sha256": clock_hash}
-                        if clock_hash is not None
-                        else {}
-                    ),
-                    **(
-                        {
-                            "fund_identity_sha256": hashlib.sha256(
-                                Path(fund_identity_csv).read_bytes()
-                            ).hexdigest()
-                        }
-                        if fund_identity_csv is not None
-                        and "public_fund_nav" in data_ids
-                        else {}
-                    ),
-                },
-                "parameters": {
-                    "timestamp_semantics": "observation_not_availability",
-                    "publication_imputation": "explicit_release_csv"
-                    if clocks is not None
-                    else "none",
-                },
-            },
-        )
-        roots[data_id] = target
+            )
+            roots[data_id] = target
     return PublicImportResult(roots, tuple(skipped))
 
 

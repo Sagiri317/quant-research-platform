@@ -16,7 +16,6 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
-from quant_research_platform.interfaces.queries import list_factors, list_labels
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
@@ -120,9 +119,16 @@ def lookup(arguments, state):
                 documents[name] = sanitize_shared_text(text)
     elif scope == "catalog":
         profile = research_profile(A_SHARE_PROFILE_ID)
+        catalogs = {"factors": profile.factors, "labels": profile.labels}
+        if "key" in arguments:
+            catalogs = {arguments["key"]: catalogs[arguments["key"]]}
         documents = {
-            "factors": list_factors(profile).model_dump_json(indent=2),
-            "labels": list_labels(profile).model_dump_json(indent=2),
+            name: json.dumps(
+                {"items": [item.to_manifest() for item in catalog.list()]},
+                ensure_ascii=False,
+                indent=2,
+            )
+            for name, catalog in catalogs.items()
         }
     elif scope == "evidence":
         documents = {

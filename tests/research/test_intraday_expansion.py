@@ -609,3 +609,44 @@ def test_selected_intraday_context_uses_only_its_observation_inputs(
     assert result[name].iloc[-1] == pytest.approx(expected)
     assert pd.isna(result[name].iloc[0])
     assert list(result) == ["market_id", "asset_id", "timestamp", name]
+
+
+def test_shared_intraday_flow_windows_keep_dependency_local_missingness():
+    frame = (
+        panel()
+        .iloc[:81]
+        .assign(bid_px1=1.0, ask_px1=1.01, bid_vol1=100.0, ask_vol1=100.0)
+    )
+    frame["mid"] = np.exp(np.arange(len(frame)) * 0.001)
+    frame["observed_signed_trade_volume"] = -2.0
+    names = (
+        "price_flow_divergence_30s",
+        "observed_sell_pressure_decay_30s",
+        "event_price_impact_efficiency_30s",
+    )
+    complete = compute_factors(frame, columns=names)
+    # Ten observations in (t-30s, t] contain 100 gross and -20 signed shares.
+    np.testing.assert_allclose(
+        complete.loc[20, list(names)].to_numpy(float),
+        [0.01 * 0.2, 0, 2 * np.expm1(0.01)],
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    frame.loc[25, "observed_signed_trade_volume"] = np.nan
+    missing = compute_factors(frame, columns=names)
+    assert missing.loc[30, list(names[:2])].isna().all()
+    pd.testing.assert_series_equal(missing[names[2]], complete[names[2]])
+    for name in names:
+        pd.testing.assert_series_equal(
+            compute_factors(frame, columns=(name,))[name], missing[name]
+        )
+    frame.loc[40:, "segment_id"] = 1
+    reset = compute_factors(frame, columns=names)
+    assert reset.loc[40:49, list(names)].isna().all(axis=None)
+    assert reset.loc[50:59, names[1]].isna().all()
+    np.testing.assert_allclose(
+        reset.loc[60, list(names)].to_numpy(float),
+        [0.01 * 0.2, 0, 2 * np.expm1(0.01)],
+        rtol=1e-12,
+        atol=1e-14,
+    )

@@ -102,6 +102,35 @@ def test_equity_event_raw_to_persisted_normalization_preserves_units_and_dates(
     assert prepared_source_evidence(interim, raw, "a_share_equity_events") == identity
 
 
+@pytest.mark.parametrize("scope", ["metadata", "event"])
+def test_equity_source_ignores_unconsumed_descriptive_attributes(tmp_path, scope):
+    raw = tmp_path / "raw"
+    root = write_equity_source(raw)
+    source_identity = prepared_source_evidence(interim, raw, "a_share_equity_events")
+    config = {
+        "source_id": "reference",
+        "raw_root": str(raw),
+        "outputs": {"a_share_equity_events": str(tmp_path / "baseline")},
+    }
+    baseline = read_dataset(
+        prepare_source(config).artifact_roots["a_share_equity_events"]
+    )
+    path = root / "metadata.json"
+    metadata = json.loads(path.read_text())
+    target = metadata if scope == "metadata" else metadata["events"][0]
+    target["extraction_note"] = {"method": "manual transcription"}
+    path.write_text(json.dumps(metadata))
+    config["outputs"] = {"a_share_equity_events": str(tmp_path / "extended")}
+    extended = read_dataset(
+        prepare_source(config).artifact_roots["a_share_equity_events"]
+    )
+    pd.testing.assert_frame_equal(baseline, extended)
+    assert (
+        prepared_source_evidence(interim, raw, "a_share_equity_events")
+        != source_identity
+    )
+
+
 @pytest.mark.parametrize(
     "damage",
     [

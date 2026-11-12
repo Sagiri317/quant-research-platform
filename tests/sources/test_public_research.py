@@ -13,6 +13,52 @@ from quant_research_platform.sources.public_research.normalization import normal
 from quant_research_platform.storage.datasets.reading import read_dataset
 
 
+def test_public_import_closes_archive_when_output_already_exists(tmp_path, monkeypatch):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    path = raw / "futures.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(
+            "20240102_1.csv",
+            (
+                "合约代码,今开盘,最高价,最低价,今收盘,今结算,前结算,成交量,持仓量,持仓变化\n"
+                "IF2401,3500,3600,3400,3550,3540,3500,100,200,10\n"
+            ).encode("gb18030"),
+        )
+    record = {
+        "path": path.name,
+        "source": "cffex_daily",
+        "status": "downloaded",
+        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "bytes": path.stat().st_size,
+        "retrieved_at": "2024-02-01T00:00:00Z",
+    }
+    (raw / "manifest.json").write_text(
+        json.dumps({"schema_version": 1, "records": [record]})
+    )
+    output = tmp_path / "interim"
+    config = {
+        "source_id": "public_research",
+        "raw_root": str(raw),
+        "outputs": {"public_futures_daily": str(output)},
+    }
+    prepare_source(config)
+    baseline = read_dataset(output)
+    opened = []
+
+    class ObservedZipFile(zipfile.ZipFile):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            opened.append(self)
+
+    monkeypatch.setattr(zipfile, "ZipFile", ObservedZipFile)
+    with pytest.raises(ValueError, match="dataset_exists") as caught:
+        prepare_source(config)
+    assert caught.value is not None
+    assert opened and all(archive.fp is None for archive in opened)
+    pd.testing.assert_frame_equal(baseline, read_dataset(output))
+
+
 def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
     tmp_path,
 ):

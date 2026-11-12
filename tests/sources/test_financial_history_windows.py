@@ -1,10 +1,12 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
+from quant_research_platform.sources.choice.interim import interim_catalog
 from quant_research_platform.sources.prepare import prepare_source
-from quant_research_platform.storage.datasets import read_dataset
+from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.a_share_sources import (
     _prepare,
     _synthetic_interim_frames,
@@ -126,3 +128,25 @@ def test_explicit_financial_windows_keep_choice_history_and_point_in_time_revisi
     expected = saved.loc[saved.timestamp.eq(f"{year}-05-04")].reset_index(drop=True)
     pd.testing.assert_frame_equal(early, expected, check_exact=True)
     assert early.loc[early.asset_id.eq("000001"), "operating_revenue_ttm"].eq(8.0).all()
+
+    income["first_disclosure_date"] = pd.Timestamp("2000-01-01")
+    spec = interim_catalog().get("financial_income")
+    extended_input = tmp_path / "extended-income"
+    write_dataset(
+        extended_input,
+        income,
+        spec=replace(
+            spec,
+            column_roles={**spec.column_roles, "first_disclosure_date": "context"},
+        ),
+    )
+    extended = read_dataset(
+        _prepare(
+            tmp_path / "extended-pit",
+            "fundamental_pit",
+            {**prepared, "financial_income": extended_input},
+            pd.Timestamp(f"{year}-01-01"),
+            sessions[-1],
+        )
+    )
+    pd.testing.assert_frame_equal(saved, extended, check_exact=True)

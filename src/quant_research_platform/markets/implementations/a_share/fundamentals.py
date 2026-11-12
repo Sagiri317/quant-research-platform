@@ -90,7 +90,6 @@ def financial_events_from_interim(
     records: list[pd.DataFrame] = []
     for data_id, original in interim_by_data_id.items():
         value_columns = FINANCIAL_VALUE_COLUMNS[data_id]
-        frame = original.copy()
         required = {
             "source_asset_id",
             "report_period",
@@ -100,10 +99,10 @@ def financial_events_from_interim(
             "version_identity",
             *value_columns,
         }
-        if not required.issubset(frame.columns):
+        if not required.issubset(original.columns):
             raise ValueError("financial_interim_schema_invalid")
         # Only consolidated reports are consumed by these metrics.
-        frame = frame.loc[frame["report_type"].eq("A")].copy()
+        frame = original.loc[original["report_type"].eq("A"), sorted(required)].copy()
         frame["asset_id"] = (
             frame["source_asset_id"].astype("string").str.strip().replace("", pd.NA)
         )

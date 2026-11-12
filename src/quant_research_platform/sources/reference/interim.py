@@ -480,7 +480,7 @@ def _equity_source(reference_root, *, end_date=None):
     path = root / "metadata.json"
     raw, metadata = read_qrp_json_file(path)
     if (
-        set(metadata) != {"schema_id", "events"}
+        not {"schema_id", "events"} <= set(metadata)
         or metadata["schema_id"] != "a_share_equity_events/1"
         or type(metadata["events"]) is not list
         or not metadata["events"]
@@ -517,8 +517,9 @@ def _equity_source(reference_root, *, end_date=None):
         return float(value)
 
     for event in metadata["events"]:
-        if type(event) is not dict or set(event) != keys:
+        if type(event) is not dict or not keys <= set(event):
             raise ValueError("equity_event_row_invalid")
+        event = {key: event[key] for key in keys}
         if (
             type(event["document_sha256"]) is not str
             or re.fullmatch(r"[0-9a-f]{64}", event["document_sha256"]) is None

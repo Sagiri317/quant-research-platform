@@ -8,7 +8,25 @@ from quant_research_platform.agents.execution import error_feedback
 from quant_research_platform.agents.knowledge import lookup
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import read_session
+from quant_research_platform.profiles.research import research_profile
 from tests.agents.support import ScriptedClient, agent_config
+
+
+@pytest.mark.parametrize("name", ["factors", "labels"])
+def test_catalog_lookup_preserves_native_facts_across_pages(name):
+    profile = research_profile()
+    expected = [item.to_manifest() for item in getattr(profile, name).list()]
+    pieces, offset = [], 0
+    while True:
+        result = lookup(
+            {"scope": "catalog", "query": "", "key": name, "offset": offset}, {}
+        )
+        pieces.append(result["text"])
+        if result["next_offset"] is None:
+            break
+        assert result["next_offset"] == offset + len(result["text"])
+        offset = result["next_offset"]
+    assert json.loads("".join(pieces)) == {"items": expected}
 
 
 def test_report_csv_lookup_preserves_values_and_pagination(tmp_path):
