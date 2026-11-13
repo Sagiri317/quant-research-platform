@@ -400,10 +400,33 @@ def _futures_states(futures, contracts, index_prices, *, product):
 def foreign_price_states(prices):
     """Derive visible foreign returns before any historical beta alignment."""
     versions = []
-    for released, snapshots, _updated in revision_snapshots(
+    sessions = pd.DatetimeIndex(prices.timestamp.unique()).sort_values()
+    for released, snapshots, updated in revision_snapshots(
         {"prices": (prices, ("asset_id", "timestamp"), ("adjusted_close",))}
     ):
-        versions.append((released, _foreign_price_states(snapshots["prices"])))
+        current = snapshots["prices"]
+        if released is None:
+            states = _foreign_price_states(current, sessions=sessions)
+        else:
+            changed = updated["prices"]
+            assets = (
+                current.asset_id.unique()
+                if changed.asset_id.eq("SPY").any()
+                else changed.asset_id.unique()
+            )
+            first = sessions.searchsorted(changed.timestamp.min())
+            last = sessions.searchsorted(changed.timestamp.max())
+            axis = sessions[max(0, first - 5) : last + 6]
+            selected = current.loc[
+                current.asset_id.isin((*assets, "SPY"))
+                & current.timestamp.between(axis[0], axis[-1])
+            ]
+            states = _foreign_price_states(selected, sessions=axis)
+            states = states.loc[
+                states.asset_id.isin(assets)
+                & states.timestamp.ge(changed.timestamp.min())
+            ]
+        versions.append((released, states))
     if len(versions) == 1:
         return versions[0][1]
     return combine_derived_versions(
@@ -411,10 +434,8 @@ def foreign_price_states(prices):
     )
 
 
-def _foreign_price_states(raw):
-    states = _quote_session_rows(
-        raw, pd.DatetimeIndex(raw.timestamp.unique()).sort_values()
-    )
+def _foreign_price_states(raw, *, sessions):
+    states = _quote_session_rows(raw, sessions)
     prices = states.groupby("asset_id", sort=False).adjusted_close
     states[US[3]] = states.adjusted_close / prices.shift() - 1
     states[US[4]] = states.adjusted_close / prices.shift(5) - 1

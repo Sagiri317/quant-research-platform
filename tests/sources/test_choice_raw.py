@@ -13,12 +13,14 @@ from quant_research_platform.sources.choice.raw_exports import (
     read_choice_response,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_write_text,
     native_filesystem_path,
 )
 from tests.helpers.choice_raw import SDK, choice_session
 from tests.helpers.choice_raw import response as _response
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import (
+    StorageLayout,
+    filesystem_write_text,
+)
 
 
 def _request(endpoint: str = "ctr") -> ChoiceRequest:

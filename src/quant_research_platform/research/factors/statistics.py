@@ -12,6 +12,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.streaming import (
+    iter_complete_session_frames,
+)
 from quant_research_platform.contracts.evaluations import CORRELATION_METRICS
 from quant_research_platform.contracts.experiments import (
     legal_training_rows,
@@ -40,13 +43,9 @@ from quant_research_platform.research.statistics import (
     hac_mean,
     time_series_inference_summary,
 )
-from quant_research_platform.runtime.dataframes import (
-    iter_complete_session_frames,
-    iter_complete_time_frames,
-)
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
-    iter_dataset_chunks,
+    iter_dataset_time_chunks,
 )
 
 _FAMA_MACBETH_PERIOD_COLUMNS = (
@@ -151,10 +150,7 @@ def build_a_share_factor_statistics_tables(
         for method in ("pearson", "spearman")
         if "factor_correlation" in analyses
     }
-    chunks = iter_complete_time_frames(
-        iter_dataset_chunks(dataset_session.projected_view(columns)),
-        timestamp_column="timestamp",
-    )
+    chunks = iter_dataset_time_chunks(dataset_session.projected_view(columns))
     with closing_iterator(chunks):
         for batch in chunks:
             input_dates.extend(map(pd.Timestamp, batch["timestamp"].drop_duplicates()))
@@ -627,7 +623,6 @@ def factor_statistics(config):
     optional = {
         "sample_role",
         "sessions",
-        "input_spec",
         "analyses",
         "label_cutoff",
         "selection_is_exploratory",

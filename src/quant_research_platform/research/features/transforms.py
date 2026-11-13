@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from math import fsum
-
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
+    _center_scale,
     _industry_group_codes,
     _mad_winsorize,
-    _stable_zscore,
+    _neutralize_cross_section,
     _winsorize,
 )
 from quant_research_platform.contracts.features import (
@@ -24,206 +23,21 @@ def apply_feature_transforms(
     frame: pd.DataFrame,
     transforms: tuple[FeatureTransformSpec, ...],
     *,
+    industry_column: str = "industry_level1_code",
     diagnostics: dict | None = None,
     risk_sessions: dict | None = None,
 ) -> pd.DataFrame:
+    """Apply the already validated recipe to each eligible cross section."""
     if len(transforms) != 1:
         raise ValueError("feature_recipe_must_be_exclusive")
     recipe = transforms[0]
-    return a_share_feature_pipeline(
-        frame,
-        factor_columns=recipe.source_columns,
-        recipe_id=recipe.recipe_id,
-        clip=recipe.clip,
-        industry_neutralize=recipe.industry_neutralize,
-        size_neutralize=recipe.size_neutralize,
-        size_column=recipe.size_column,
-        center=recipe.center,
-        scale=recipe.scale,
-        diagnostics=diagnostics,
-        output_groups=recipe.output_groups,
-        risk_model=recipe.risk_model,
-        risk_sessions=risk_sessions,
-    )
-
-
-def _neutralization_design(industries, sizes):
-    """Cache grouped centered size coordinates for a shared valid domain."""
-    codes, _ = pd.factorize(industries, sort=False)
-    first = np.unique(codes, return_index=True)[1]
-    centered = None
-    xx = None
-    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
-        if sizes is not None:
-            sizes = np.asarray(sizes, dtype="float64")
-            centered = sizes - sizes[first[codes]]
-            centered -= (
-                pd.Series(centered)
-                .groupby(codes, sort=False)
-                .transform("mean")
-                .to_numpy()
-            )
-            xx = fsum(pd.Series(centered * centered).groupby(codes, sort=False).sum())
-    return codes, first, centered, xx
-
-
-def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
-    """Project onto industry intercepts and one within-industry size slope."""
-    target = np.asarray(target, dtype="float64")
-    codes, first, x, xx = (
-        _neutralization_design(industries, sizes) if design is None else design
-    )
-    y = target - target[first[codes]]
-    y -= pd.Series(y).groupby(codes, sort=False).transform("mean").to_numpy()
-    residual = y
-    if x is not None:
-        if xx == 0:
-            return np.full(len(target), np.nan)
-        xy = fsum(pd.Series(x * y).groupby(codes, sort=False).sum())
-        residual = y - x * (xy / xx)
-    magnitude = np.max(np.abs(residual))
-    # Compensated group sums keep roundoff independent of group replication.
-    # Judge an exact fit at each industry's own scale, not the largest industry.
-    scale = pd.Series(np.abs(y)).groupby(codes, sort=False).transform("max").to_numpy()
-    if np.all(np.abs(residual) <= 8 * np.finfo(float).eps * scale):
-        return np.zeros(len(target))
-    return residual / magnitude if rescale else residual
-
-
-def _neutralize_cross_section(
-    frame,
-    *,
-    factor_columns,
-    industry_column,
-    size_column,
-    minimum_observations=100,
-    rescale,
-    industry_neutralize=True,
-    size_neutralize=True,
-    time_groups=None,
-):
-    required = {"timestamp", *factor_columns}
-    if industry_neutralize:
-        required.add(industry_column)
-    if not required.issubset(frame.columns):
-        raise ValueError("neutralization_columns_invalid")
-    if type(minimum_observations) is not int or minimum_observations < 1:
-        raise ValueError("neutralization_minimum_observations_invalid")
-    if not industry_neutralize and not size_neutralize:
-        return frame
-    result = frame.copy()
-    for column in factor_columns:
-        result[column] = np.nan
-    if time_groups is None:
-        time_groups = frame.groupby("timestamp", sort=False).indices
-    for positions in time_groups.values():
-        cross = frame.iloc[positions]
-        industry = (
-            cross[industry_column]
-            if industry_neutralize
-            else pd.Series(0, index=cross.index)
-        )
-        valid_industry = industry.notna()
-        if not valid_industry.any():
-            continue
-        size = None
-        if size_neutralize and any(factor != size_column for factor in factor_columns):
-            if size_column not in cross:
-                raise ValueError("neutralization_size_column_required")
-            size = strict_finite_numeric_series(
-                cross.loc[valid_industry, size_column],
-                error="invalid_neutralization_size",
-                allow_null=True,
-            )
-        designs = {}
-        for factor in factor_columns:
-            # A size source is never regressed on itself. With no industry step,
-            # its value passes through to the separately selected centering step.
-            use_size = size_neutralize and factor != size_column
-            if not industry_neutralize and not use_size:
-                result.loc[cross.index, factor] = cross[factor].to_numpy(
-                    dtype="float64", na_value=np.nan
-                )
-                continue
-            values = strict_finite_numeric_series(
-                cross.loc[valid_industry, factor],
-                error=f"invalid_neutralization_factor: {factor}",
-                allow_null=True,
-            )
-            valid = values.notna()
-            if use_size:
-                valid &= size.notna()
-            indices = values.index[valid]
-            groups = industry.loc[indices]
-            parameters = groups.nunique() + use_size
-            if len(indices) < max(minimum_observations, 5 * parameters):
-                continue
-            target = values.loc[indices].to_numpy(dtype="float64", copy=False)
-            sizes = size.loc[indices].to_numpy() if use_size else None
-            key = (use_size, valid.to_numpy(dtype=bool).tobytes())
-            if key not in designs:
-                designs[key] = _neutralization_design(groups, sizes)
-            result.loc[indices, factor] = _industry_size_residuals(
-                target, groups, sizes, rescale=rescale, design=designs[key]
-            )
-    return result
-
-
-def _center_scale(values, *, center, scale, weights=None):
-    if center and scale and weights is None:
-        return _stable_zscore(values)
-    if not center and not scale:
-        return values.astype("float64")
-    observed = values.dropna()
-    output = pd.Series(np.nan, index=values.index, dtype="float64")
-    if not len(observed) or (scale and len(observed) < 2):
-        return output
-    shifted = observed - observed.iloc[0]
-    centered = shifted - shifted.mean()
-    targets = centered if center else observed
-    if center and weights is not None:
-        targets = shifted - np.average(shifted, weights=weights.loc[observed.index])
-    if scale:
-        std = centered.std(ddof=0)
-        if std == 0:
-            return output
-        targets = targets / std
-    output.loc[observed.index] = targets
-    return output
-
-
-def a_share_feature_pipeline(
-    frame: pd.DataFrame,
-    *,
-    factor_columns: tuple[str, ...],
-    recipe_id: str = "a_share_canonical",
-    size_column: str = "log_total_market_cap",
-    industry_column: str = "industry_level1_code",
-    diagnostics: dict | None = None,
-    clip: str | None = None,
-    industry_neutralize: bool = True,
-    size_neutralize: bool = True,
-    center: bool = True,
-    scale: bool = True,
-    output_groups: tuple[str, ...] = ("processed",),
-    risk_model: FactorRiskModel | None = None,
-    risk_sessions: dict | None = None,
-) -> pd.DataFrame:
-    """Clip, neutralize, center and scale in that fixed order on eligible rows."""
-    recipe = FeatureTransformSpec(
-        recipe_id,
-        factor_columns,
-        clip,
-        industry_neutralize,
-        size_neutralize,
-        center,
-        scale,
-        size_column=size_column,
-        output_groups=output_groups,
-        risk_model=risk_model,
-    )
-    industry_neutralize = industry_neutralize and "processed" in output_groups
-    size_neutralize = size_neutralize and "processed" in output_groups
+    factor_columns = recipe.source_columns
+    size_column = recipe.size_column
+    output_groups = recipe.output_groups
+    risk_model = recipe.risk_model
+    center, scale = recipe.center, recipe.scale
+    industry_neutralize = recipe.industry_neutralize and "processed" in output_groups
+    size_neutralize = recipe.size_neutralize and "processed" in output_groups
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")
     universe = frame["eligible"]
@@ -338,3 +152,42 @@ def a_share_feature_pipeline(
                 scoped_feature.iloc[positions] = transformed
             feature_values["feature_" + suffix] = scoped_feature.reindex(result.index)
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
+
+
+def a_share_feature_pipeline(
+    frame: pd.DataFrame,
+    *,
+    factor_columns: tuple[str, ...],
+    recipe_id: str = "a_share_canonical",
+    size_column: str = "log_total_market_cap",
+    industry_column: str = "industry_level1_code",
+    diagnostics: dict | None = None,
+    clip: str | None = None,
+    industry_neutralize: bool = True,
+    size_neutralize: bool = True,
+    center: bool = True,
+    scale: bool = True,
+    output_groups: tuple[str, ...] = ("processed",),
+    risk_model: FactorRiskModel | None = None,
+    risk_sessions: dict | None = None,
+) -> pd.DataFrame:
+    """Clip, neutralize, center and scale in that fixed order on eligible rows."""
+    recipe = FeatureTransformSpec(
+        recipe_id,
+        factor_columns,
+        clip,
+        industry_neutralize,
+        size_neutralize,
+        center,
+        scale,
+        size_column=size_column,
+        output_groups=output_groups,
+        risk_model=risk_model,
+    )
+    return apply_feature_transforms(
+        frame,
+        (recipe,),
+        industry_column=industry_column,
+        diagnostics=diagnostics,
+        risk_sessions=risk_sessions,
+    )

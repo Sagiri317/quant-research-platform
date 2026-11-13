@@ -41,7 +41,6 @@ from quant_research_platform.research.models.scaler import (
     ScaledPredictor,
     equal_timestamp_sample_weights,
 )
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
 
 @dataclass
@@ -308,6 +307,11 @@ def _collect_training_frame(
         if availability_column is not None
         else training_availability_columns(spec.target_column)
     )
+    context_columns = sequence_context_columns(
+        spec.model_algorithm, spec.hyperparameters
+    )
+    if set(context_columns).intersection(availability_columns):
+        raise ValueError("sequence_context_uses_future_outcome")
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -319,7 +323,7 @@ def _collect_training_frame(
                     else ()
                 ),
                 *spec.input_columns,
-                *sequence_context_columns(spec.model_algorithm, spec.hyperparameters),
+                *context_columns,
                 spec.target_column,
                 "eligible",
                 *availability_columns,
@@ -342,7 +346,7 @@ def _collect_training_frame(
             chunk = chunk.reset_index(drop=True)
             if spec.model_algorithm in SEQUENCE_ALGORITHMS:
                 observed = chunk.loc[:, spec.input_columns].notna().any(axis=1)
-                if sequence_context_columns(spec.model_algorithm, spec.hyperparameters):
+                if context_columns:
                     observed = pd.Series(True, index=chunk.index)
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
@@ -350,14 +354,16 @@ def _collect_training_frame(
                 sequence_context.append(
                     chunk.loc[
                         observed,
-                        [
-                            "asset_id",
-                            "timestamp",
-                            *spec.input_columns,
-                            *sequence_context_columns(
-                                spec.model_algorithm, spec.hyperparameters
-                            ),
-                        ],
+                        list(
+                            dict.fromkeys(
+                                (
+                                    "asset_id",
+                                    "timestamp",
+                                    *spec.input_columns,
+                                    *context_columns,
+                                )
+                            )
+                        ),
                     ]
                 )
             if sample_windows is not None:
@@ -411,6 +417,11 @@ def _collect_training_frame(
             training["timestamp"], error="invalid_model_training_timestamp"
         )
         training["timestamp"] = timestamps
+        training = training.sort_values(
+            ["timestamp", *(("asset_id",) if "asset_id" in training else ())],
+            kind="stable",
+            ignore_index=True,
+        )
         train_start = time_value_isoformat(pd.Timestamp(timestamps.min()))
         train_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
     row_counts = {
@@ -535,10 +546,7 @@ def _fit_predictor(
 def iter_model_work_frames(
     frames: Iterable[pd.DataFrame], *, required: set[str], work_columns: tuple[str, ...]
 ) -> Iterable[pd.DataFrame]:
-    complete_frames = iter_complete_time_frames(
-        iter(frames), timestamp_column="timestamp"
-    )
-    with closing_iterator(complete_frames) as active_frames:
+    with closing_iterator(iter(frames)) as active_frames:
         for frame in active_frames:
             missing = sorted(required.difference(frame.columns))
             if missing:

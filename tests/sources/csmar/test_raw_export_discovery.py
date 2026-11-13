@@ -239,7 +239,7 @@ def test_csv_closes_once_and_preserves_parse_or_header_failure(
 
 
 @pytest.mark.parametrize(
-    "data_id,columns,error",
+    "data_id,columns",
     (
         (
             "listing_status_changes",
@@ -251,7 +251,6 @@ def test_csv_closes_once_and_preserves_parse_or_header_failure(
                 "ValueBefore",
                 "ValueAfter",
             ),
-            "invalid_listing_status_date",
         ),
         (
             "stock_info_changes",
@@ -263,11 +262,10 @@ def test_csv_closes_once_and_preserves_parse_or_header_failure(
                 "Value_Before",
                 "Value_After",
             ),
-            "invalid_stock_info_change_date",
         ),
     ),
 )
-def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns, error):
+def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns):
     import pandas as pd
 
     from quant_research_platform.sources.csmar import interim
@@ -276,7 +274,14 @@ def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns, e
     source = pd.DataFrame(
         [
             ("000001", "", "2020-01-03", "上市状态", "正常", "变更"),
-            ("000001", "2020-01-01", "2020-01-02", "上市状态", "变更", "正常"),
+            (
+                "000001",
+                "2020-01-01T08:15:00+08:00",
+                "2020-01-03T07:30:00+08:00",
+                "上市状态",
+                "变更",
+                "正常",
+            ),
         ],
         columns=columns,
     )
@@ -297,13 +302,13 @@ def test_state_change_dates_survive_csv_to_interim(tmp_path, data_id, columns, e
         pd.to_datetime(["2020-01-02", "2020-01-03"])
     )
     assert actual.effective_date.equals(actual.timestamp)
-    assert actual.announcement_date.iloc[0] == pd.Timestamp("2020-01-01")
+    assert actual.announcement_date.iloc[0] == pd.Timestamp("2020-01-01T00:15:00")
     assert pd.isna(actual.announcement_date.iloc[1])
     assert actual.value_after.tolist() == ["正常", "变更"]
-    mapped = source.rename(columns=field_mappings.COLUMN_MAPPINGS[data_id])
-    mapped.loc[0, "effective_date"] = "bad-date"
-    with pytest.raises(ValueError, match=error):
-        interim._normalize_state_change_frame(mapped, data_id)
+    source.loc[0, columns[2]] = "bad-date"
+    selected = interim.normalize_raw_frame(source, data_id)
+    assert selected.timestamp.tolist() == [pd.Timestamp("2020-01-02")]
+    assert selected.attrs["source_row_counts"]["excluded_missing_required_rows"] == 1
 
 
 @pytest.mark.parametrize(

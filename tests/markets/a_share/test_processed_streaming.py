@@ -8,6 +8,9 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.portfolios.daily as daily
+from quant_research_platform.compute.dataframe.streaming import (
+    iter_complete_session_frames,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.execution import (
     market_name_for_type,
@@ -21,7 +24,6 @@ from quant_research_platform.markets.implementations.a_share.stock_pool import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.protocols.a_share import factor_catalog
-from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     open_dataset_session,
@@ -35,7 +37,7 @@ from tests.helpers.a_share_sources import (
     _synthetic_financial_frames,
     _synthetic_interim_frames,
 )
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import StorageLayout, filesystem_write_text
 
 
 def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tmp_path):
@@ -862,7 +864,6 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
     from quant_research_platform.storage.identity import (
         filesystem_mkdir,
         filesystem_walk,
-        filesystem_write_text,
     )
     from tests.helpers.choice_raw import SDK, choice_session, response, write_css
 
@@ -1859,7 +1860,7 @@ def test_processed_axis_preserves_each_assets_observed_sessions(
     root = StorageLayout(tmp_path).interim_data_root(spec.source_id, spec.data_id)
     write_dataset(root, rows, spec=spec)
     session = open_dataset_session(root, columns=None, time_window=None)
-    monkeypatch.setattr(producer.resources, "DEFAULT_BATCH_ROWS", batch_rows)
+    monkeypatch.setattr(producer.parquet, "DEFAULT_BATCH_ROWS", batch_rows)
     sessions, assets, membership, observed, market_sessions = producer._processed_axis(
         session,
         panel_source=False,

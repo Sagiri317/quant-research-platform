@@ -571,11 +571,7 @@ def _normalize_mapped_frame(
             ].itertuples(index=False, name=None)
         ]
         for column in ("effective_date", "announcement_date"):
-            result[column] = strict_timestamp_series(
-                result[column],
-                error=f"invalid_index_membership_{column}",
-                allow_null=column == "announcement_date",
-            ).dt.normalize()
+            result[column] = result[column].dt.normalize()
         result["timestamp"] = result["effective_date"]
         result["source_asset_id"] = result["index_code"]
         result.sort_values(
@@ -587,9 +583,7 @@ def _normalize_mapped_frame(
         result["constituent_asset_id"] = normalize_provider_stock_code_series(
             result["constituent_stock_code"]
         )
-        result["effective_date"] = strict_timestamp_series(
-            result["effective_date"], error="invalid_index_weight_date"
-        ).dt.normalize()
+        result["effective_date"] = result["effective_date"].dt.normalize()
         result["weight"] = result["weight_pct"].astype("float64") / 100.0
         negative = result["weight"].lt(0.0)
         result.attrs["source_row_counts"] = {"invalid_weight_rows": int(negative.sum())}
@@ -602,9 +596,7 @@ def _normalize_mapped_frame(
         return result.reset_index(drop=True)
     if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
         result = mapped
-        result["report_period"] = strict_timestamp_series(
-            result["report_period"], error="invalid_financial_report_period"
-        ).dt.normalize()
+        result["report_period"] = result["report_period"].dt.normalize()
         result["correction_disclosure_date"] = _parse_financial_correction_date(
             result["correction_disclosure_date"]
         )
@@ -638,10 +630,6 @@ def _normalize_mapped_frame(
         return result.reset_index(drop=True)
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
-        result["trade_date"] = strict_timestamp_series(
-            result["trade_date"],
-            error="invalid_csmar_trade_date",
-        )
         result["timestamp"] = result["trade_date"]
         # Retain the identity type when the requested date window selects no rows.
         result["source_asset_id"] = result["stock_code"].astype(
@@ -696,10 +684,6 @@ def _normalize_mapped_frame(
         return result
     if data_id == "adjustment":
         result = mapped
-        result["trade_date"] = strict_timestamp_series(
-            result["trade_date"],
-            error="invalid_csmar_adjustment_date",
-        )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -707,10 +691,6 @@ def _normalize_mapped_frame(
         return result
     if data_id == "market_cap":
         result = mapped
-        result["share_change_date"] = strict_timestamp_series(
-            result["share_change_date"],
-            error="invalid_csmar_market_cap_date",
-        )
         result["timestamp"] = result["share_change_date"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -718,9 +698,6 @@ def _normalize_mapped_frame(
         return result
     if data_id == "stock_master":
         result = mapped
-        for column in ("listing_date", "delisting_date", "status_change_date"):
-            if column in result.columns:
-                result[column] = _parse_optional_csmar_date(result[column])
         result["timestamp"] = result["status_change_date"].fillna(
             result["listing_date"].where(~result.pop("_invalid_status_change_date"))
         )
@@ -795,9 +772,7 @@ def _normalize_mapped_frame(
         return result
     if data_id == "index_market":
         result = mapped
-        result["trade_date"] = strict_timestamp_series(
-            result["trade_date"], error="invalid_index_return_date"
-        ).dt.normalize()
+        result["trade_date"] = result["trade_date"].dt.normalize()
         result["period_return"] = result["return_1d_pct"].astype("float64") / 100.0
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["index_code"]
@@ -805,9 +780,7 @@ def _normalize_mapped_frame(
         return result.reset_index(drop=True)
     if data_id == "industry_classification":
         result = mapped
-        result["implement_date"] = strict_timestamp_series(
-            result["implement_date"], error="invalid_industry_implement_date"
-        ).dt.normalize()
+        result["implement_date"] = result["implement_date"].dt.normalize()
         result["timestamp"] = result["implement_date"]
         result["source_asset_id"] = result["stock_code"]
         return (
@@ -817,9 +790,7 @@ def _normalize_mapped_frame(
         )
     if data_id == "industry_classification_annual":
         result = mapped
-        result["effective_date"] = strict_timestamp_series(
-            result["effective_date"], error="invalid_industry_annual_date"
-        ).dt.normalize()
+        result["effective_date"] = result["effective_date"].dt.normalize()
         result["timestamp"] = result["effective_date"]
         result["source_asset_id"] = result["stock_code"]
         return (
@@ -840,12 +811,7 @@ def _normalize_mapped_frame(
         return result.reset_index(drop=True)
     if data_id == "industry_classification_versions":
         result = mapped
-        result["implement_date"] = strict_timestamp_series(
-            result["implement_date"],
-            error="invalid_industry_version_date",
-            allow_null=True,
-        ).dt.normalize()
-        result["abandon_date"] = _parse_optional_csmar_date(result["abandon_date"])
+        result["implement_date"] = result["implement_date"].dt.normalize()
         result["timestamp"] = result["implement_date"]
         result = result.loc[result["timestamp"].notna()].copy()
         return (
@@ -867,12 +833,8 @@ def _normalize_mapped_frame(
         result["source_asset_id"] = normalize_provider_stock_code_series(
             result["stock_code"]
         ).astype("string")
-        result["declare_date"] = _parse_optional_csmar_date(
-            result["declare_date"]
-        ).dt.normalize()
-        result["forecast_end_date"] = strict_timestamp_series(
-            result["forecast_end_date"], error="invalid_analyst_forecast_end_date"
-        ).dt.normalize()
+        result["declare_date"] = result["declare_date"].dt.normalize()
+        result["forecast_end_date"] = result["forecast_end_date"].dt.normalize()
         result["report_id"] = strict_string_series(
             result["report_id"], error="invalid_analyst_report_id"
         ).astype("string")
@@ -915,9 +877,7 @@ def _normalize_corporate_actions(mapped: pd.DataFrame) -> pd.DataFrame:
     """Preserve distribution facts without inferring holder entitlements."""
     result = mapped.copy()
     result["source_asset_id"] = result["stock_code"].astype("string")
-    result["timestamp"] = strict_timestamp_series(
-        result["timestamp"], error="invalid_corporate_action_ex_date"
-    ).dt.normalize()
+    result["timestamp"] = result["timestamp"].dt.normalize()
     result["kind"] = strict_string_series(
         result["kind"], error="invalid_corporate_action_kind"
     ).astype("string")
@@ -968,17 +928,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
     result = frame
     result["source_asset_id"] = result["stock_code"]
     if data_id in {"listing_status_changes", "stock_info_changes"}:
-        result["announcement_date"] = _parse_optional_csmar_date(
-            result["announcement_date"]
-        )
-        result["effective_date"] = strict_timestamp_series(
-            result["effective_date"],
-            error=(
-                "invalid_listing_status_date"
-                if data_id == "listing_status_changes"
-                else "invalid_stock_info_change_date"
-            ),
-        ).dt.normalize()
+        result["effective_date"] = result["effective_date"].dt.normalize()
         result["timestamp"] = result["effective_date"]
         return (
             result.loc[:, STATE_CHANGE_COLUMNS]
@@ -987,9 +937,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         )
     if data_id == "stock_info_annual":
         for column in ("effective_date", "listing_date"):
-            result[column] = strict_timestamp_series(
-                result[column], error="invalid_stock_info_annual_date", allow_null=True
-            ).dt.normalize()
+            result[column] = result[column].dt.normalize()
         result["timestamp"] = result["effective_date"]
         return (
             result.loc[:, STOCK_INFO_ANNUAL_COLUMNS]
@@ -997,9 +945,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
             .reset_index(drop=True)
         )
     if data_id == "trading_no_limit":
-        result["trade_date"] = strict_timestamp_series(
-            result["trade_date"], error="invalid_trading_no_limit_date"
-        ).dt.normalize()
+        result["trade_date"] = result["trade_date"].dt.normalize()
         result["timestamp"] = result["trade_date"]
         result["reason"] = (
             result["reason"].astype("string").str.strip().replace("", pd.NA)
@@ -1010,14 +956,8 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
             .reset_index(drop=True)
         )
     if data_id == "special_treatment_changes":
-        result["announcement_date"] = strict_timestamp_series(
-            result["announcement_date"],
-            error="invalid_special_treatment_date",
-            allow_null=True,
-        ).dt.normalize()
-        result["effective_date"] = strict_timestamp_series(
-            result["effective_date"], error="invalid_special_treatment_date"
-        ).dt.normalize()
+        result["announcement_date"] = result["announcement_date"].dt.normalize()
+        result["effective_date"] = result["effective_date"].dt.normalize()
         result["timestamp"] = result["effective_date"]
         result["change_type"] = strict_string_series(
             result["change_type"], error="invalid_special_treatment_change_type"
@@ -1036,9 +976,7 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
             .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
             .reset_index(drop=True)
         )
-    result["report_period"] = strict_timestamp_series(
-        result["report_period"], error="invalid_equity_change_period"
-    ).dt.normalize()
+    result["report_period"] = result["report_period"].dt.normalize()
     result["timestamp"] = result["report_period"]
     result["report_type"] = strict_string_series(
         result["report_type"], error="invalid_equity_change_report_type"
@@ -1128,21 +1066,15 @@ def materialize_interim_data(
                 source_evidence=source_evidence,
             )
             with closing_iterator(frames):
-                try:
-                    write_dataset(
-                        artifact_root,
-                        frames,
-                        spec=spec,
-                        metadata={
-                            **target_metadata,
-                            "source_evidence": source_evidence,
-                        },
-                    )
-                except ValueError as exc:
-                    if str(exc) != "empty_dataset_schema_missing":
-                        raise
-                    skipped.add(data_id)
-                    continue
+                write_dataset(
+                    artifact_root,
+                    frames,
+                    spec=spec,
+                    metadata={
+                        **target_metadata,
+                        "source_evidence": source_evidence,
+                    },
+                )
             written[data_id] = artifact_root
     skipped.update(pending)
 
@@ -1435,10 +1367,6 @@ def _column_roles(
 
 def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame
-    result["calendar_date"] = strict_timestamp_series(
-        result["calendar_date"],
-        error="invalid_trading_calendar_date",
-    )
     result["source_market_type"] = strict_integer_series(
         result["source_market_type"],
         error="invalid_trading_calendar_market_type",

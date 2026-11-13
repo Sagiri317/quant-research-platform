@@ -143,7 +143,7 @@ def before_holdout(value, holdout_start):
             before_holdout(item, holdout_start)
 
 
-def sandbox_context(inputs):
+def dataset_context(inputs):
     """Expose native metadata without treating the whole table as a sample window."""
     result = {}
     for alias, root in inputs.items():
@@ -251,7 +251,7 @@ def validate_config(config):
         "protocol": protocol,
         "tools": public_tools,
         "budget": config["budget"],
-        "sandbox_inputs": sandbox_context(config.get("sandbox", {}).get("inputs", {})),
+        "sandbox_inputs": dataset_context(config.get("sandbox", {}).get("inputs", {})),
         "documents": list(config.get("documents", {})),
         "final_evaluation": [
             {
@@ -263,7 +263,7 @@ def validate_config(config):
         ],
     }
     if "inputs" in config:
-        public["inputs"] = sandbox_context(config["inputs"])
+        public["inputs"] = dataset_context(config["inputs"])
         if "workspace" not in config:
             public["operations"] = sorted(OPERATIONS)
     if "workspace" in config:

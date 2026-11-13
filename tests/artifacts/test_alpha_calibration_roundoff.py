@@ -74,8 +74,10 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
     published = predict(
         {
             "model": str(fitted_model.root),
-            "inputs": str(prediction_path),
-            "input_spec": fitted_model.config["input_spec"],
+            "inputs": {
+                "path": str(prediction_path),
+                "spec": fitted_model.config["inputs"]["spec"],
+            },
             "output": str(tmp_path / "prediction"),
             "prediction_window": {
                 "start": dates[0].isoformat(),

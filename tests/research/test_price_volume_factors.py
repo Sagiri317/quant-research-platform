@@ -730,7 +730,9 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
 
 
 def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
-    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
+    )
 
     dates = pd.bdate_range("2020-01-01", periods=400)
     rows = [
@@ -1026,7 +1028,9 @@ def test_return_amount_products_preserve_opposing_economic_units():
 def test_market_model_residual_volatility_matches_decimal_oracle(scale):
     from decimal import Decimal, localcontext
 
-    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
+    )
 
     left = np.resize(np.array([0.01, 0.02, -0.01, 0.03, 0.0]), 420) * scale
     right = np.resize(np.array([-0.01, 0.01, 0.02, -0.01, 0.04]), 420) * scale
@@ -1120,7 +1124,9 @@ def test_trend_efficiency_normal_price_path_persists_finite_ratio(tmp_path):
     ),
 )
 def test_market_model_equal_assets_keep_unit_beta(values):
-    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
+    )
 
     state = MarketModelRiskState()
     for value in values:
@@ -1263,7 +1269,9 @@ def test_market_model_positive_prices_persist_usable_risk_styles(tmp_path):
 def test_market_model_preserves_residual_beside_historical_outlier():
     from fractions import Fraction
 
-    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
+    )
 
     state = MarketModelRiskState()
     for index in range(253):
@@ -1296,7 +1304,9 @@ def test_market_model_preserves_residual_beside_historical_outlier():
 
 
 def test_all_a_weighted_mean_keeps_small_member_contribution():
-    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
+    )
 
     state = MarketModelRiskState(window=2)
     panel = pd.DataFrame(

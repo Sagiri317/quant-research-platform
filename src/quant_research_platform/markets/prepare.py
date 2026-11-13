@@ -49,6 +49,7 @@ def prepare(config: Mapping) -> Path:
     inputs, window = _request(config)
     market = config["market_id"]
     source = config.get("source")
+    configure_spec = _configured_spec
     if market == "a_share":
         if source is not None:
             raise ValueError("a_share_prepare_source_not_consumed")
@@ -83,23 +84,33 @@ def prepare(config: Mapping) -> Path:
         from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
         if spec.data_id == "market_state_factors":
-            from .implementations.a_share.processed.market_states import produce
+            from .implementations.a_share.processed import market_states as recipe
 
-            producer, kwargs = produce, {}
+            producer, configure_spec, kwargs = (
+                recipe.produce,
+                recipe.configured_spec,
+                {},
+            )
         elif spec.data_id in {
             "etf_daily_panel",
             "benchmark_daily_panel",
             "etf_price_volume_factors",
         }:
-            from .implementations.a_share.processed.daily_quotes import produce
+            from .implementations.a_share.processed import daily_quotes as recipe
 
-            producer, kwargs = produce, {}
-        elif spec.data_id == "hft_research_factors":
-            from .implementations.a_share.processed.intraday import (
-                produce,
+            producer, configure_spec, kwargs = (
+                recipe.produce,
+                recipe.configured_spec,
+                {},
             )
+        elif spec.data_id == "hft_research_factors":
+            from .implementations.a_share.processed import intraday as recipe
 
-            producer, kwargs = produce, {}
+            producer, configure_spec, kwargs = (
+                recipe.produce,
+                recipe.configured_spec,
+                {},
+            )
         elif spec.data_id in DATA_IDS:
             from quant_research_platform.sources.venvoo import interim_spec
 
@@ -117,11 +128,13 @@ def prepare(config: Mapping) -> Path:
                 },
             )
         elif spec.data_id in {"linked_market_factors", "fund_flow_factors"}:
-            from .implementations.a_share.processed.public_factors import (
-                produce,
-            )
+            from .implementations.a_share.processed import public_factors as recipe
 
-            producer, kwargs = produce, {}
+            producer, configure_spec, kwargs = (
+                recipe.produce,
+                recipe.configured_spec,
+                {},
+            )
         elif spec.data_id == "financing_factors":
             from .implementations.a_share.processed.financing import (  # noqa: E501
                 produce,
@@ -129,14 +142,16 @@ def prepare(config: Mapping) -> Path:
 
             producer, kwargs = produce, {}
         elif spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
-            from .implementations.a_share.processed.macro import (  # noqa: E501
-                produce,
-            )
+            from .implementations.a_share.processed import macro as recipe
 
-            producer, kwargs = produce, {}
+            producer, configure_spec, kwargs = (
+                recipe.produce,
+                recipe.configured_spec,
+                {},
+            )
     else:
         raise ValueError("data_operation_market_invalid")
-    spec = _configured_spec(spec, config)
+    spec = configure_spec(spec, config)
     required = set(spec.processed_input_data_ids) | (
         set(spec.source_input_data_ids) - set(spec.optional_source_input_data_ids)
     )
@@ -166,41 +181,6 @@ def prepare(config: Mapping) -> Path:
 def _configured_spec(spec, config):
     """Apply only options consumed by this explicitly requested mathematical recipe."""
     from quant_research_platform.contracts.columns import ColumnRole
-
-    if spec.data_id == "market_state_factors":
-        from .implementations.a_share.processed.market_states import configured_spec
-
-        return configured_spec(spec, config)
-
-    if spec.data_id in {
-        "etf_daily_panel",
-        "benchmark_daily_panel",
-        "etf_price_volume_factors",
-    }:
-        from .implementations.a_share.processed.daily_quotes import configured_spec
-
-        return configured_spec(spec, config)
-
-    if spec.data_id == "hft_research_factors":
-        from .implementations.a_share.processed.intraday import (
-            configured_spec,
-        )
-
-        return configured_spec(spec, config)
-
-    if spec.data_id in {"linked_market_factors", "fund_flow_factors"}:
-        from .implementations.a_share.processed.public_factors import (
-            configured_spec,
-        )
-
-        return configured_spec(spec, config)
-
-    if spec.data_id in {"decision_panel", "macro_liquidity_factors"}:
-        from .implementations.a_share.processed.macro import (  # noqa: E501
-            configured_spec,
-        )
-
-        return configured_spec(spec, config)
 
     parameters = config.get("parameters", {})
     if type(parameters) is not dict:

@@ -22,10 +22,12 @@ from quant_research_platform.storage import schema_inventory
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
-    filesystem_write_text,
     native_filesystem_path,
 )
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import (
+    StorageLayout,
+    filesystem_write_text,
+)
 
 
 def _collect_inventory(
@@ -352,18 +354,8 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
             },
             "manifest_partition_date_mismatch",
         ),
-        (
-            {
-                "null_count_summary": {
-                    "market_id": 1,
-                    "asset_id": 0,
-                    "timestamp": 0,
-                }
-            },
-            "dataset_manifest_summary_mismatch",
-        ),
     ),
-    ids=("row-count", "partition-summary", "observer-summary"),
+    ids=("row-count", "partition-summary"),
 )
 def test_schema_inventory_rejects_forged_storage_summary(
     tmp_path: Path,
@@ -505,14 +497,10 @@ def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path, forged):
         manifest = json.loads(
             Path(native_filesystem_path(path)).read_text(encoding="utf-8")
         )
-        manifest["null_count_summary"]["asset_id"] = 1
+        manifest["null_count_summary"] = {"asset_id": 1}
         filesystem_write_text(path, json.dumps(manifest) + "\n", encoding="utf-8")
-    if forged:
-        with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
-            _collect_inventory(tmp_path)
-    else:
-        (item,) = _collect_inventory(
-            tmp_path, important_null_count_columns=("timestamp",)
-        )["datasets"]
-        assert item["row_count_by_year"] == {}
-        assert item["selected_important_column_null_counts"] == {"timestamp": 1}
+    (item,) = _collect_inventory(tmp_path, important_null_count_columns=("timestamp",))[
+        "datasets"
+    ]
+    assert item["row_count_by_year"] == {}
+    assert item["selected_important_column_null_counts"] == {"timestamp": 1}

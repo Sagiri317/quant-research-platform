@@ -9,15 +9,17 @@ import pytest
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_mkdir,
     filesystem_rename,
     filesystem_unlink,
     filesystem_walk,
-    filesystem_write_bytes,
-    filesystem_write_text,
     native_filesystem_path,
     open_filesystem_file,
+)
+from tests.helpers.paths import (
+    filesystem_glob,
+    filesystem_write_bytes,
+    filesystem_write_text,
 )
 from tests.helpers.source_preparation import prepared_source_evidence
 

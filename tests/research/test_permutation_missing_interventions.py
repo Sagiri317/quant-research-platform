@@ -97,7 +97,7 @@ def test_bundled_affine_and_importance_survive_missing_interventions(tmp_path):
     alternating = np.arange(len(frame)) % 2 == 0
     frame.loc[future & alternating, "x"] = np.nan
     frame.loc[future & ~alternating, "y"] = np.nan
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     config["methods"].append("permutation")
     config["permutation"] = {
         "metrics": ["mse"],

@@ -26,9 +26,9 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.time import (
     TimeWindow,
     _window_payload,
-    is_datetime_window,
     prediction_window_mask,
     time_value_isoformat,
+    time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -43,6 +43,20 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
+
+
+def _fit_read_windows(windows, *, sequence, context_start=None):
+    """Keep loss windows separate from feature-only sequence gaps."""
+    previous = None if context_start is None else pd.Timestamp(context_start)
+    for window in windows:
+        lower, upper, closed = time_window_timestamp_interval(window)
+        if sequence and previous is not None and previous < pd.Timestamp(lower):
+            yield (
+                TimeWindow(previous, pd.Timestamp(lower) - pd.Timedelta(1, "ns")),
+                True,
+            )
+        yield window, False
+        previous = pd.Timestamp(upper) + pd.Timedelta(1 if closed else 0, "ns")
 
 
 def fit_model(
@@ -73,6 +87,11 @@ def fit_model(
     if validation_windows is not None and validation_frames is None:
         raise ValueError("sequence_validation_configuration_invalid")
 
+    sequence = spec.model_algorithm in SEQUENCE_ALGORITHMS
+    read_windows = tuple(
+        window for window, _ in _fit_read_windows(windows, sequence=sequence)
+    )
+
     def scoped():
         with closing_iterator(iter(frames)) as source:
             for frame in source:
@@ -80,7 +99,7 @@ def fit_model(
                     frame["timestamp"], error="invalid_training_timestamp"
                 )
                 mask = pd.Series(False, index=frame.index)
-                for window in windows:
+                for window in read_windows:
                     mask |= prediction_window_mask(timestamps, window)
                 yield frame.loc[mask]
 
@@ -90,6 +109,7 @@ def fit_model(
         fitting_cutoff=cutoff,
         availability_column=label_availability_column,
         trading_calendar=trading_calendar,
+        sample_windows=windows if sequence else None,
     )
     if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
@@ -165,7 +185,6 @@ def fit(config: Mapping) -> Path:
             "candidate_parameters",
             "selection",
             "asset_ids",
-            "input_spec",
             "family_id",
             "trading_calendar",
             "validation",
@@ -174,11 +193,8 @@ def fit(config: Mapping) -> Path:
     output = Path(config["output"])
     reject_if_exists(output)
     spec = _model_spec(config["model"])
+    recipe = model_spec_payload(spec)
     source = config["inputs"]
-    if config.get("input_spec") is not None:
-        if isinstance(source, Mapping):
-            raise ValueError("duplicate_input_spec")
-        source = {"path": source, "spec": config["input_spec"]}
     cutoff = strict_timestamp_series(
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
     ).iloc[0]
@@ -195,18 +211,15 @@ def fit(config: Mapping) -> Path:
             or pd.Timestamp(validation_windows[0].start) <= cutoff
         ):
             raise ValueError("model_validation_training_overlap")
-    validation_read_windows = validation_windows
-    if validation_windows and spec.model_algorithm in SEQUENCE_ALGORITHMS:
-        # Histories include real observations between loss windows. Labels and
-        # maturity are evaluated only inside the declared validation windows.
-        validation_read_windows = (
-            TimeWindow(
-                pd.Timestamp(windows[-1].end).to_pydatetime()
-                if is_datetime_window(validation_windows[-1])
-                else pd.Timestamp(windows[-1].end).date(),
-                validation_windows[-1].end,
-            ),
+    sequence = spec.model_algorithm in SEQUENCE_ALGORITHMS
+    read_windows = tuple(_fit_read_windows(windows, sequence=sequence))
+    validation_read_windows = tuple(
+        _fit_read_windows(
+            validation_windows,
+            sequence=sequence,
+            context_start=windows[-1].end if sequence else None,
         )
+    )
     assets = config.get("asset_ids")
     if assets is not None and (
         type(assets) is not list
@@ -217,7 +230,9 @@ def fit(config: Mapping) -> Path:
         raise ValueError("training_asset_ids_invalid")
     options = _dataset_input_options(
         source,
-        discovery_windows=(*windows, *validation_read_windows),
+        discovery_windows=tuple(
+            window for window, _ in (*read_windows, *validation_read_windows)
+        ),
         row_filters=(("asset_id", "in", tuple(assets)),) if assets is not None else (),
     )
     selected_columns = options.get("columns")
@@ -226,10 +241,11 @@ def fit(config: Mapping) -> Path:
     declared = session.spec
     validate_model_input_roles(
         declared,
-        spec,
+        recipe,
         market_id=config["market_id"],
         include_target=True,
         selected_columns=selected_columns,
+        hyperparameters=config.get("candidate_parameters", spec.hyperparameters),
     )
     availability = declared.get("label_availability_columns", {}).get(
         spec.target_column
@@ -288,7 +304,7 @@ def fit(config: Mapping) -> Path:
         "family_id": family_id,
         "asset_ids": config.get("asset_ids"),
         "market_id": str(market),
-        "model": model_spec_payload(spec),
+        "model": recipe,
         "inputs": config["inputs"],
         "fit_windows": [_window_payload(w) for w in windows],
         "fit_cutoff": time_value_isoformat(cutoff, preserve_datetime=True),
@@ -306,7 +322,6 @@ def fit(config: Mapping) -> Path:
         },
         "selection": config.get("selection"),
         "selection_cutoff": None if selection is None else selection["cutoff"],
-        "input_spec": config.get("input_spec"),
     }
     if validation is not None:
         facts["validation"] = validation
@@ -335,6 +350,20 @@ def fit(config: Mapping) -> Path:
         if spec.training_weighting.half_life_periods is not None:
             columns = (*columns, "market_type")
 
+        context_columns = tuple(
+            dict.fromkeys(
+                (
+                    "timestamp",
+                    "asset_id",
+                    *spec.input_columns,
+                    *sequence_context_columns(
+                        spec.model_algorithm,
+                        config.get("candidate_parameters", spec.hyperparameters),
+                    ),
+                )
+            )
+        )
+
         def checked_frames(read_windows):
             import pyarrow as pa
 
@@ -347,9 +376,11 @@ def fit(config: Mapping) -> Path:
                 if set(declared["primary_key"]) == {"timestamp", "asset_id"}
                 else ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
             )
-            for window in read_windows:
+            for window, context_only in read_windows:
                 frames = iter_dataset_chunks(
-                    session.filtered_view(window).projected_view(columns)
+                    session.filtered_view(window).projected_view(
+                        context_columns if context_only else columns
+                    )
                 )
                 with closing_iterator(iter(frames)) as source:
                     for frame in source:
@@ -365,7 +396,7 @@ def fit(config: Mapping) -> Path:
                             )
                         ):
                             raise ValueError("model_training_keys_invalid")
-                        yield frame
+                        yield frame.reindex(columns=columns) if context_only else frame
 
         calendar = None
         if spec.training_weighting.half_life_periods is not None:
@@ -389,7 +420,7 @@ def fit(config: Mapping) -> Path:
                 )
             )
         result = fit_model(
-            checked_frames(windows),
+            checked_frames(read_windows),
             spec,
             fit_windows=windows,
             fit_cutoff=cutoff,
@@ -406,7 +437,10 @@ def fit(config: Mapping) -> Path:
 
         terminal = recorder.finish(result={"model_metadata": result.metadata})
         save_model(
-            output, result, facts={**facts, "trial": str(recorder.root)}, trial=terminal
+            output,
+            result,
+            facts={**facts, "trial": str(recorder.root)},
+            trial_id=terminal["trial_id"],
         )
     except BaseException as exc:
         if not (recorder.root / "terminal.json").exists():

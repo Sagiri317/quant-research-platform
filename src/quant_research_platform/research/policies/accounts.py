@@ -128,7 +128,7 @@ def _stream(episode):
         account = _strict_config(
             account,
             {"panel", "fee_schedule", "daily_inputs", "parameters"},
-            {"trades", "stock_status"},
+            {"trades", "stock_status", "candidate_id"},
         )
         prediction = episode.get("prediction")
         params = _parameters(account["parameters"], policy=True)

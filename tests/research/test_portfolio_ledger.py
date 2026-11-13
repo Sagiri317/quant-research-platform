@@ -32,10 +32,12 @@ from quant_research_platform.sources.reference.a_share_fees import (
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     filesystem_stat,
-    filesystem_write_bytes,
-    filesystem_write_text,
     native_filesystem_path,
     open_filesystem_file,
+)
+from tests.helpers.paths import (
+    filesystem_write_bytes,
+    filesystem_write_text,
 )
 
 

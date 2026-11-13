@@ -19,10 +19,12 @@ from quant_research_platform.storage.datasets import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_is_file,
-    filesystem_write_text,
     native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_glob,
+    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -86,7 +88,7 @@ def test_write_dataset_rejects_parallel_input_fingerprint_lineage(
         )
 
 
-def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
+def test_inspect_dataset_ignores_unconsumed_metadata(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "parallel_fingerprint_lineage")
@@ -101,8 +103,7 @@ def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
     )
     manifest["input_fingerprints"] = {}
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_manifest_fields_invalid"):
-        inspect_dataset(root)
+    assert inspect_dataset(root).row_count == len(make_default_dataset_frame())
 
 
 def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata(
@@ -471,20 +472,8 @@ def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
 
 @pytest.mark.parametrize(
     ("initial", "changed"),
-    (
-        (1, 2.0),
-        ({"initial": 1}, {"initial": 2, "added": 3}),
-        ({"initial": 1, "removed": 2}, {"initial": 3}),
-        ({"initial": [1]}, {"initial": [2.0]}),
-        ({"initial": None}, {"initial": 2, "added": 3}),
-    ),
-    ids=(
-        "numeric-type",
-        "added-field",
-        "removed-field",
-        "nested-type",
-        "pending-field",
-    ),
+    [(1, 2.0)],
+    ids=["numeric-type"],
 )
 def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, initial, changed):
     from quant_research_platform.contracts.columns import ColumnRole
@@ -569,38 +558,15 @@ def test_public_writer_preserves_nullable_object_strings_independent_of_row_orde
 
 @pytest.mark.parametrize("cross_year", (False, True))
 @pytest.mark.parametrize(
-    "values",
-    (
-        [[], [1], []],
-        [[None], [1], [None]],
-        [{"leaf": None}, {"leaf": 1}, {"leaf": None}],
-        [None, [1], None],
-        [None, {"leaf": 1}, None],
-        [
-            [{"branch": {"left": None, "right": None}}],
-            [{"branch": {"left": 1, "right": None}}],
-            [{"branch": {"left": None, "right": 2}}],
-        ],
-        [[None], [{"branch": [None]}], [{"branch": [1]}]],
-    ),
-    ids=(
-        "empty-list",
-        "null-list",
-        "null-struct",
-        "null-to-list",
-        "null-to-struct",
-        "partial-deep-resolution",
-        "null-to-deep-container",
-    ),
+    "values", ([None, 1, None], [None, "known", None]), ids=("integer", "string")
 )
-def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
+def test_writer_resolves_scalar_nulls_independently_of_parts_and_chunks(
     tmp_path, monkeypatch, values, cross_year
 ):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
     from quant_research_platform.contracts.columns import ColumnRole
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.storage.datasets.schema import (
         physical_schema_from_schema,
     )
@@ -613,7 +579,7 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
     ).astype("datetime64[ns]")
     frame["value"] = pd.Series(values, dtype=object)
     before = frame.copy(deep=True)
-    spec = make_processed_dataset_spec("nested_null", value_role=ColumnRole.CONTEXT)
+    spec = make_processed_dataset_spec("scalar_null", value_role=ColumnRole.CONTEXT)
     key = list(spec.primary_key)
     expected = frame.sort_values(key).reset_index(drop=True)
     expected_values = pa.Table.from_pandas(expected, preserve_index=False)[
@@ -631,7 +597,13 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
         )
         write_dataset(root, data, spec=spec)
         actual = read_dataset(root).sort_values(key).reset_index(drop=True)
-        pd.testing.assert_frame_equal(actual, expected)
+        pd.testing.assert_frame_equal(
+            actual.drop(columns="value"), expected.drop(columns="value")
+        )
+        pd.testing.assert_series_equal(actual["value"].isna(), expected["value"].isna())
+        pd.testing.assert_series_equal(
+            actual["value"].dropna(), expected["value"].dropna()
+        )
         assert actual["value"].dtype == object
         assert (
             actual[key].to_records(index=False).tolist()
@@ -651,9 +623,7 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
         saved_spec = json.loads((root / "spec.json").read_text())
         assert saved_spec["primary_key"] == key
         assert not (set(saved_spec) - {"schema_id"}) & set(manifest)
-        assert manifest["schema_hash"] == canonical_json_hash(
-            manifest["physical_schema"]
-        )
+        assert "schema_hash" not in manifest
         assert (
             not {"spec_identity", "logical_dtype_hash", "validation_status"}
             & manifest.keys()
@@ -683,34 +653,15 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
     pd.testing.assert_frame_equal(frame, before)
 
 
-@pytest.mark.parametrize("values", ([[None], [None]], [{"leaf": None}, {"leaf": None}]))
-def test_writer_rejects_unresolved_nested_nulls_without_publishing(tmp_path, values):
-    from quant_research_platform.contracts.columns import ColumnRole
-
-    frame = make_default_dataset_frame().iloc[:2].copy()
-    frame["value"] = pd.Series(values, index=frame.index, dtype=object)
-    root = make_dataset_artifact_root(tmp_path, "unresolved_nested")
-    with pytest.raises(ValueError, match="unsupported_dataset_arrow_type"):
-        write_dataset(
-            root,
-            tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame))),
-            spec=make_processed_dataset_spec(
-                "unresolved_nested", value_role=ColumnRole.CONTEXT
-            ),
-        )
-    assert not root.exists()
-    assert list(root.parent.iterdir()) == []
-
-
 @pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 @pytest.mark.parametrize("close_failure", (False, True))
-def test_pending_nested_parquet_failure_closes_resources_and_preserves_primary(
+def test_pending_null_parquet_failure_closes_resources_and_preserves_primary(
     tmp_path, monkeypatch, primary_type, close_failure
 ):
     from quant_research_platform.contracts.columns import ColumnRole
 
     frame = make_default_dataset_frame().iloc[:2].copy()
-    frame["value"] = pd.Series([[None], [1]], index=frame.index, dtype=object)
+    frame["value"] = pd.Series([None, 1], index=frame.index, dtype=object)
     root = make_dataset_artifact_root(tmp_path, "pending_close")
     events = []
     primary = primary_type("pending_read_primary")
@@ -755,13 +706,13 @@ def test_pending_nested_parquet_failure_closes_resources_and_preserves_primary(
 
 
 @pytest.mark.parametrize("failure_stage", ("close", "rewrite"))
-def test_pending_nested_parquet_rewrite_failure_occurs_after_close(
+def test_pending_null_parquet_rewrite_failure_occurs_after_close(
     tmp_path, monkeypatch, failure_stage
 ):
     from quant_research_platform.contracts.columns import ColumnRole
 
     frame = make_default_dataset_frame().iloc[:2].copy()
-    frame["value"] = pd.Series([[None], [1]], index=frame.index, dtype=object)
+    frame["value"] = pd.Series([None, 1], index=frame.index, dtype=object)
     root = make_dataset_artifact_root(tmp_path, "pending_rewrite")
     events = []
     write_calls = 0

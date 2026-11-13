@@ -35,7 +35,7 @@ def evaluation_config(
     inputs, output, spec, *, start, end, cutoff=None, role="validation"
 ):
     return {
-        "inputs": str(inputs),
+        "inputs": inputs if isinstance(inputs, dict) else str(inputs),
         "output": str(output),
         "evaluation": {
             "evaluation_id": spec.evaluation_id,

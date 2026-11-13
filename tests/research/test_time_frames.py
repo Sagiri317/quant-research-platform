@@ -7,11 +7,11 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.models.fitting import _collect_training_frame
-from quant_research_platform.runtime.dataframes import (
+from quant_research_platform.compute.dataframe.streaming import (
     iter_complete_session_frames,
     iter_complete_time_frames,
 )
+from quant_research_platform.research.models.fitting import _collect_training_frame
 
 
 def test_complete_session_frames_merge_boundary_and_emit_one_session() -> None:
@@ -37,6 +37,35 @@ def test_complete_session_frames_merge_boundary_and_emit_one_session() -> None:
     assert [len(chunk) for chunk in chunks] == [2, 2, 1]
     assert pd.concat(chunks).value.tolist() == [1, 2, 3, 4, 5]
     assert [chunk["timestamp"].nunique() for chunk in chunks] == [1, 1, 1]
+
+
+def test_session_frames_group_equivalent_clocks_without_rewriting_values():
+    frames = [
+        pd.DataFrame(
+            {
+                "timestamp": ["2024-01-01T09:00:00+08:00"],
+                "value": [1],
+            }
+        ),
+        pd.DataFrame(
+            {
+                "timestamp": [
+                    "2024-01-01T01:01:00Z",
+                    "2024-01-01T01:00:00Z",
+                ],
+                "value": [3, 2],
+            }
+        ),
+    ]
+    chunks = list(
+        iter_complete_session_frames(iter(frames), timestamp_column="timestamp")
+    )
+    assert [chunk.value.tolist() for chunk in chunks] == [[1, 2], [3]]
+    assert chunks[0].timestamp.tolist() == [
+        "2024-01-01T09:00:00+08:00",
+        "2024-01-01T01:00:00Z",
+    ]
+    assert chunks[0].timestamp.dtype == frames[0].timestamp.dtype
 
 
 def test_complete_time_sized_frames_preserves_all_empty_chunk_schema() -> None:

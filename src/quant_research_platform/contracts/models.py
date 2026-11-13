@@ -14,17 +14,18 @@ from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
 )
-from quant_research_platform.contracts.experiments import DEFAULT_ROOT_SEED
+from quant_research_platform.contracts.experiments import (
+    DEFAULT_ROOT_SEED,
+    training_availability_columns,
+)
 from quant_research_platform.contracts.filtering import (
+    FILTER_COLUMNS,
     SampleFilterMode,
-    filter_definition,
     reject_filter_input_columns,
-    required_filter_columns,
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
-    _json_native_object,
     canonical_identity_bytes,
 )
 from quant_research_platform.contracts.risk import FactorRiskModel
@@ -161,7 +162,7 @@ def sequence_parameters(algorithm, parameters):
         or any(
             type(column) is not str
             or not column
-            or column in {"asset_id", "timestamp", "eligible"}
+            or column in {"asset_id", "timestamp", *FILTER_COLUMNS}
             for column in groups
         )
         or len(set(groups)) != len(groups)
@@ -268,29 +269,6 @@ def _thaw_model_hyperparameters(
     if type(thawed) is not dict:
         raise TypeError("model hyperparameters must be a mapping")
     return thawed
-
-
-def _resolved_model_hyperparameters_match(
-    algorithm: str,
-    hyperparameters: dict[str, object],
-    resolved_hyperparameters: dict[str, object],
-) -> bool:
-    """Check scientific parameters; execution parallelism is descriptive metadata."""
-
-    try:
-        expected = dict(hyperparameters)
-        actual = dict(resolved_hyperparameters)
-        if algorithm in _PARALLEL_MODEL_ALGORITHMS:
-            expected.pop("n_jobs", None)
-            actual.pop("n_jobs", None)
-        if algorithm == "xgboost_regressor":
-            expected.setdefault("device", "cuda")
-            expected.setdefault("tree_method", "hist")
-        if algorithm in SEQUENCE_ALGORITHMS:
-            expected = sequence_parameters(algorithm, expected)
-        return canonical_identity_bytes(actual) == canonical_identity_bytes(expected)
-    except (TypeError, ValueError):
-        return False
 
 
 @dataclass(frozen=True)
@@ -414,6 +392,10 @@ class ModelSpec:
             sequence_parameters(
                 self.model_algorithm, _thaw_model_hyperparameters(hyperparameters)
             )
+            if self.target_column in sequence_context_columns(
+                self.model_algorithm, hyperparameters
+            ):
+                raise ValueError("sequence_context_uses_future_outcome")
         if (
             self.model_algorithm in DEEPLOB_ALGORITHMS
             and self.input_columns != DEEPLOB_INPUT_COLUMNS
@@ -423,353 +405,6 @@ class ModelSpec:
     @property
     def input_columns(self) -> tuple[str, ...]:
         return (*self.input_factor_columns, *self.input_feature_columns)
-
-
-def _validate_early_stopping(value):
-    fields = {
-        "best_iteration",
-        "iterations",
-        "validation_rows",
-        "validation_start",
-        "validation_end",
-        "label_available_max",
-        "validation_cutoff",
-    }
-    if type(value) is not dict or set(value) != fields:
-        raise ValueError("invalid_model_early_stopping")
-    if any(
-        type(value[key]) is not int
-        for key in ("best_iteration", "iterations", "validation_rows")
-    ) or not (
-        0 <= value["best_iteration"] < value["iterations"]
-        and value["validation_rows"] > 0
-    ):
-        raise ValueError("invalid_model_early_stopping")
-    clocks = strict_timestamp_series(
-        pd.Series(
-            [
-                value[key]
-                for key in (
-                    "validation_start",
-                    "validation_end",
-                    "label_available_max",
-                    "validation_cutoff",
-                )
-            ]
-        ),
-        error="invalid_model_validation_maturity",
-    )
-    if not (
-        clocks.iloc[0] <= clocks.iloc[1] <= clocks.iloc[3]
-        and clocks.iloc[1] <= clocks.iloc[2] <= clocks.iloc[3]
-    ):
-        raise ValueError("invalid_model_validation_maturity")
-    return clocks
-
-
-def validate_model_metadata_core(value: object) -> dict[str, object]:
-    """Validate the shared persisted model metadata contract."""
-
-    if type(value) is not dict:
-        raise ValueError("invalid_model_metadata")
-    try:
-        metadata = _json_native_object(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    required = {
-        "model_algorithm",
-        "input_factor_columns",
-        "input_feature_columns",
-        "input_columns",
-        "input_count",
-        "target_column",
-        "sample_filter_mode",
-        "hyperparameters",
-        "resolved_hyperparameters",
-        "random_seed",
-        "dependency_status",
-        "rows_input",
-        "rows_after_filter_mode",
-        "rows_after_input_label_dropna",
-        "train_start",
-        "training_asset_ids",
-        "train_end",
-        "label_availability_column",
-        "label_available_max",
-        "filter_columns_used",
-        "filter_definition",
-        "training_weighting",
-        "training_scaling",
-        "scaler",
-    }
-    _validate_non_empty_string(
-        metadata.get("label_availability_column"),
-        "model_label_availability_column_required",
-    )
-    strict_timestamp_series(
-        pd.Series([metadata.get("label_available_max")]),
-        error="invalid_model_label_maturity",
-    )
-    assets = metadata.get("training_asset_ids")
-    if (
-        type(assets) is not list
-        or any(type(asset) is not str or not asset for asset in assets)
-        or len(assets) != len(set(assets))
-    ):
-        raise ValueError("invalid_model_training_asset_ids")
-    if not required.issubset(metadata):
-        raise ValueError("invalid_model_metadata")
-    allowed = required | {
-        "feature_importance",
-        "feature_importance_status",
-        "training_target_mean",
-        "learning_curve",
-        "early_stopping",
-    }
-    if set(metadata).difference(allowed):
-        raise ValueError("invalid_model_metadata")
-    stopping = metadata.get("early_stopping")
-    if stopping is not None:
-        _validate_early_stopping(stopping)
-    if "learning_curve" in metadata:
-        curve = metadata["learning_curve"]
-        if (
-            type(curve) is not dict
-            or set(curve)
-            != {
-                "metric",
-                "training_loss_scope",
-                "validation_loss_scope",
-                "epochs",
-                "sequence_lengths",
-            }
-            or metadata["model_algorithm"] not in SEQUENCE_ALGORITHMS
-        ):
-            raise ValueError("invalid_learning_curve")
-        points = curve["epochs"]
-        parameters = sequence_parameters(
-            metadata["model_algorithm"], metadata["hyperparameters"]
-        )
-        if type(points) is not list or not (
-            len(points) == parameters["epochs"]
-            if parameters.get("early_stopping_rounds") is None
-            else stopping is not None
-            and 1 <= len(points) <= parameters["epochs"]
-            and stopping["iterations"] == len(points)
-        ):
-            raise ValueError("invalid_learning_curve")
-        for epoch, point in enumerate(points, 1):
-            if (
-                type(point) is not dict
-                or set(point) != {"epoch", "training_loss", "validation_loss"}
-                or point["epoch"] != epoch
-            ):
-                raise ValueError("invalid_learning_curve")
-            for name in ("training_loss", "validation_loss"):
-                loss = point[name]
-                if loss is None and name == "validation_loss" and stopping is None:
-                    continue
-                if type(loss) not in (int, float) or not np.isfinite(loss) or loss < 0:
-                    raise ValueError("invalid_learning_curve")
-        if stopping is not None and stopping["best_iteration"] != min(
-            range(len(points)), key=lambda i: points[i]["validation_loss"]
-        ):
-            raise ValueError("invalid_learning_curve")
-    if "training_target_mean" in metadata and (
-        type(metadata["training_target_mean"]) not in {int, float}
-        or not np.isfinite(metadata["training_target_mean"])
-    ):
-        raise ValueError("invalid_model_training_target_mean")
-    for key in (
-        "rows_input",
-        "rows_after_filter_mode",
-        "rows_after_input_label_dropna",
-        "input_count",
-    ):
-        value_for_key = metadata[key]
-        if type(value_for_key) is not int or value_for_key < 0:
-            raise ValueError("invalid_model_metadata")
-    if not (
-        0
-        < metadata["rows_after_input_label_dropna"]
-        <= metadata["rows_after_filter_mode"]
-        <= metadata["rows_input"]
-    ):
-        raise ValueError("invalid_model_metadata")
-    if (
-        type(metadata["hyperparameters"]) is not dict
-        or type(metadata["resolved_hyperparameters"]) is not dict
-        or not _resolved_model_hyperparameters_match(
-            metadata["model_algorithm"],
-            metadata["hyperparameters"],
-            metadata["resolved_hyperparameters"],
-        )
-    ):
-        raise ValueError("invalid_model_metadata")
-    if (stopping is not None) != (
-        metadata["hyperparameters"].get("early_stopping_rounds") is not None
-    ):
-        raise ValueError("invalid_model_early_stopping")
-    for key in (
-        "input_factor_columns",
-        "input_feature_columns",
-        "input_columns",
-        "filter_columns_used",
-    ):
-        columns = metadata[key]
-        if type(columns) is not list or any(
-            type(column) is not str or not column for column in columns
-        ):
-            raise ValueError("invalid_model_metadata")
-    if metadata["input_count"] != len(metadata["input_columns"]):
-        raise ValueError("invalid_model_metadata")
-    if metadata["input_columns"] != [
-        *metadata["input_factor_columns"],
-        *metadata["input_feature_columns"],
-    ]:
-        raise ValueError("invalid_model_metadata")
-    dependency_status = metadata["dependency_status"]
-    try:
-        facts = _model_algorithm_facts(metadata["model_algorithm"])
-    except ValueError as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    expected_package = facts.dependency_package or "internal"
-    expected_keys = {"status", "package"}
-    if facts.dependency_package is not None:
-        expected_keys.add("version")
-    if (
-        type(dependency_status) is not dict
-        or set(dependency_status) != expected_keys
-        or dependency_status["status"] != "available"
-        or type(dependency_status["package"]) is not str
-        or dependency_status["package"] != expected_package
-        or (
-            facts.dependency_package is not None
-            and (
-                type(dependency_status["version"]) is not str
-                or not dependency_status["version"]
-            )
-        )
-    ):
-        raise ValueError("invalid_model_metadata")
-    try:
-        if metadata["filter_columns_used"] != list(
-            required_filter_columns(metadata["sample_filter_mode"])
-        ) or metadata["filter_definition"] != filter_definition(
-            metadata["sample_filter_mode"]
-        ):
-            raise ValueError("invalid_model_metadata")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    try:
-        ModelSpec(
-            model_id="persisted_model",
-            model_algorithm=metadata["model_algorithm"],
-            input_factor_columns=tuple(metadata["input_factor_columns"]),
-            input_feature_columns=tuple(metadata["input_feature_columns"]),
-            target_column=metadata["target_column"],
-            sample_filter_mode=metadata["sample_filter_mode"],
-            hyperparameters=metadata["hyperparameters"],
-            random_seed=metadata["random_seed"],
-            training_weighting=metadata["training_weighting"],
-            training_scaling=metadata["training_scaling"],
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    for key in ("train_start", "train_end"):
-        if type(metadata[key]) is not str:
-            raise ValueError("invalid_model_metadata")
-        try:
-            timestamp = pd.Timestamp(metadata[key])
-        except (TypeError, ValueError) as exc:
-            raise ValueError("invalid_model_metadata") from exc
-        if pd.isna(timestamp):
-            raise ValueError("invalid_model_metadata")
-    train_start = pd.Timestamp(metadata["train_start"])
-    train_end = pd.Timestamp(metadata["train_end"])
-    if train_start > train_end:
-        raise ValueError("invalid_model_metadata")
-    if type(metadata["training_scaling"]) is not bool:
-        raise ValueError("invalid_model_metadata")
-    scaler = metadata["scaler"]
-    if scaler is not None:
-        if (
-            type(scaler) is not dict
-            or set(scaler) - {"medians", "native_missing"}
-            != {
-                "columns",
-                "scaling",
-                "weighted_mean",
-                "weighted_population_scale",
-            }
-            or type(scaler.get("scaling")) is not bool
-            or scaler["scaling"] != metadata["training_scaling"]
-            or (
-                "native_missing" in scaler
-                and (scaler["native_missing"] is not True or "medians" in scaler)
-            )
-            or ("medians" in scaler and type(scaler["medians"]) is not list)
-            or scaler["columns"] != metadata["input_columns"]
-            or (
-                "medians" in scaler
-                and (
-                    len(scaler["medians"]) != len(metadata["input_columns"])
-                    or not all(
-                        type(value) in {int, float} and np.isfinite(value)
-                        for value in scaler["medians"]
-                    )
-                )
-            )
-            or type(scaler["weighted_mean"]) is not list
-            or type(scaler["weighted_population_scale"]) is not list
-            or len(scaler["columns"]) != len(scaler["weighted_mean"])
-            or len(scaler["columns"]) != len(scaler["weighted_population_scale"])
-            or any(
-                type(number) not in {int, float} or not np.isfinite(float(number))
-                for number in (
-                    *scaler["weighted_mean"],
-                    *scaler["weighted_population_scale"],
-                )
-            )
-            or any(
-                type(number) not in {int, float}
-                or not np.isfinite(float(number))
-                or float(number) <= 0.0
-                for number in scaler["weighted_population_scale"]
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-        if not scaler["scaling"] and (
-            any(value != 0 for value in scaler["weighted_mean"])
-            or any(value != 1 for value in scaler["weighted_population_scale"])
-        ):
-            raise ValueError("invalid_model_metadata")
-    feature_keys = {
-        key
-        for key in ("feature_importance", "feature_importance_status")
-        if key in metadata
-    }
-    if len(feature_keys) != 1:
-        raise ValueError("invalid_model_metadata")
-    if "feature_importance" in metadata:
-        importance = metadata["feature_importance"]
-        if (
-            type(importance) is not dict
-            or not importance
-            or set(importance) != set(metadata["input_columns"])
-            or any(
-                type(value) not in {int, float} or not np.isfinite(float(value))
-                for value in importance.values()
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-    else:
-        if (
-            type(metadata["feature_importance_status"]) is not str
-            or not metadata["feature_importance_status"]
-        ):
-            raise ValueError("invalid_model_metadata")
-    return metadata
 
 
 _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
@@ -1015,8 +650,8 @@ def compare_model_facts(facts, expected):
         raise ValueError("model_scientific_facts_mismatch: model")
 
 
-def validate_model_facts(facts, metadata=None, *, expected=None):
-    """Validate and compare scientific model recipes independently of storage paths."""
+def validate_model_facts(facts, *, expected=None):
+    """Check new fitting facts against the already-parsed model recipe."""
     required = {
         "model",
         "market_id",
@@ -1031,70 +666,32 @@ def validate_model_facts(facts, metadata=None, *, expected=None):
 
     validate_market_id(facts["market_id"])
     _validate_non_empty_string(facts["family_id"], "model_family_id_invalid")
-    spec = _model_spec(facts["model"])
+    recipe = facts["model"]
+    hyperparameters = recipe.get("hyperparameters", {})
     parameters = facts["candidate_parameters"]
     if not isinstance(parameters, Mapping):
         raise ValueError("model_candidate_parameters_invalid")
     _freeze_model_hyperparameters(parameters)
-    _resolve_candidate_parameters(spec.model_algorithm, parameters, 1)
-    if spec.hyperparameters and canonical_identity_bytes(
+    _resolve_candidate_parameters(recipe["model_algorithm"], parameters, 1)
+    if hyperparameters and canonical_identity_bytes(
         parameters
-    ) != canonical_identity_bytes(_thaw_model_hyperparameters(spec.hyperparameters)):
+    ) != canonical_identity_bytes(hyperparameters):
         raise ValueError("model_candidate_parameters_mismatch")
     if type(facts["label_unit"]) is not str or not facts["label_unit"].strip():
         raise ValueError("model_label_unit_required")
     units = facts["input_units"]
-    if not isinstance(units, Mapping) or set(units) - set(spec.input_columns):
+    columns = {
+        *recipe.get("input_factor_columns", ()),
+        *recipe.get("input_feature_columns", ()),
+    }
+    if not isinstance(units, Mapping) or set(units) - columns:
         raise ValueError("model_input_units_invalid")
     for unit in units.values():
         if type(unit) is not str or not unit.strip():
             raise ValueError("model_input_units_invalid")
-    _validate_target_definition(facts.get("target_definition"), spec.target_column)
-    assets = facts.get("asset_ids")
-    if assets is not None and (
-        type(assets) is not list
-        or not assets
-        or any(type(asset) is not str or not asset for asset in assets)
-        or len(assets) != len(set(assets))
-    ):
-        raise ValueError("model_training_asset_scope_invalid")
+    _validate_target_definition(facts.get("target_definition"), recipe["target_column"])
     if expected is not None:
         compare_model_facts(facts, expected)
-    if metadata is None:
-        return
-    if "rows_after_input_label_dropna" in metadata:
-        expected_parameters = _resolve_candidate_parameters(
-            spec.model_algorithm, parameters, metadata["rows_after_input_label_dropna"]
-        )
-        if canonical_identity_bytes(expected_parameters) != canonical_identity_bytes(
-            metadata["hyperparameters"]
-        ):
-            raise ValueError("model_sample_scaled_parameters_mismatch")
-        for key in (
-            "model_algorithm",
-            "target_column",
-            "sample_filter_mode",
-            "random_seed",
-            "training_scaling",
-        ):
-            if getattr(spec, key) != metadata[key]:
-                raise ValueError("model_facts_metadata_mismatch")
-        if (
-            spec.training_weighting.payload() != metadata["training_weighting"]
-            or list(spec.input_columns) != metadata["input_columns"]
-        ):
-            raise ValueError("model_facts_metadata_mismatch")
-    training_assets = metadata["training_asset_ids"]
-    if (
-        type(training_assets) is not list
-        or not training_assets
-        or any(type(asset) is not str or not asset for asset in training_assets)
-        or len(training_assets) != len(set(training_assets))
-    ):
-        raise ValueError("native_model_training_asset_ids_required")
-    if assets is not None and not set(training_assets) <= set(assets):
-        raise ValueError("model_training_asset_scope_mismatch")
-    validate_model_fit_facts(facts, metadata)
 
 
 _PREDICTION_LOSS_REASONS = (
@@ -1245,68 +842,6 @@ def _validate_target_definition(definition, target):
     canonical_identity_bytes(definition)
 
 
-def validate_model_fit_facts(facts, metadata):
-    """Validate chronology using only realized training and decision facts."""
-    cutoff = strict_timestamp_series(
-        pd.Series([facts["fit_cutoff"]]), error="invalid_fit_cutoff"
-    ).iloc[0]
-    maturity = strict_timestamp_series(
-        pd.Series([metadata["label_available_max"]]),
-        error="invalid_model_label_maturity",
-    ).iloc[0]
-    if maturity > cutoff:
-        raise ValueError("model_training_label_after_fit_cutoff")
-    windows = _fit_windows(facts["fit_windows"], cutoff)
-    bounds = strict_timestamp_series(
-        pd.Series([metadata["train_start"], metadata["train_end"]]),
-        error="invalid_model_training_window",
-    )
-    if bounds.iloc[0] > bounds.iloc[1] or bounds.iloc[1] > cutoff:
-        raise ValueError("model_training_window_invalid")
-    from quant_research_platform.contracts.time import time_window_timestamp_interval
-
-    def contains(window, timestamp):
-        start, end, closed = time_window_timestamp_interval(window)
-        return pd.Timestamp(start) <= timestamp and (
-            timestamp <= pd.Timestamp(end) if closed else timestamp < pd.Timestamp(end)
-        )
-
-    if not all(any(contains(window, bound) for window in windows) for bound in bounds):
-        raise ValueError("model_training_window_outside_declared_fit")
-    enabled = facts["candidate_parameters"].get("early_stopping_rounds") is not None
-    stopping = metadata.get("early_stopping")
-    if enabled != (stopping is not None):
-        raise ValueError("invalid_model_early_stopping")
-    if stopping is not None:
-        clocks = _validate_early_stopping(stopping)
-        validation = facts.get("validation")
-        if type(validation) is not dict or set(validation) != {"windows", "cutoff"}:
-            raise ValueError("model_validation_facts_required")
-        validation_cutoff = strict_timestamp_series(
-            pd.Series([validation["cutoff"]]), error="invalid_validation_cutoff"
-        ).iloc[0]
-        validation_windows = _fit_windows(validation["windows"], validation_cutoff)
-        if (
-            clocks.iloc[3] != validation_cutoff
-            or cutoff >= pd.Timestamp(validation_windows[0].start)
-            or cutoff >= clocks.iloc[0]
-            or not all(
-                any(contains(window, bound) for window in validation_windows)
-                for bound in clocks.iloc[:2]
-            )
-        ):
-            raise ValueError("model_validation_training_overlap")
-    decision = facts.get("selection_cutoff")
-    if (
-        decision is not None
-        and strict_timestamp_series(
-            pd.Series([decision]), error="invalid_selection_cutoff"
-        ).iloc[0]
-        > cutoff
-    ):
-        raise ValueError("model_selection_after_fit_cutoff")
-
-
 def _validate_model_prediction_window(facts, window):
     """Require predictions to follow the actual fitting decision."""
     if pd.Timestamp(window.start) <= pd.Timestamp(facts["fit_cutoff"]):
@@ -1324,27 +859,56 @@ def _validate_model_prediction_window(facts, window):
 
 def validate_model_input_roles(
     declared,
-    spec,
+    recipe,
     *,
     market_id,
     include_target=False,
     selected_columns=None,
     input_units=None,
+    hyperparameters=None,
 ):
     """Check consumed roles and explicit market/unit conflicts in the opened input."""
     validate_input_market(declared, market_id)
-    consumed = {*spec.input_columns, *((spec.target_column,) if include_target else ())}
+    factors = recipe.get("input_factor_columns", ())
+    features = recipe.get("input_feature_columns", ())
+    groups = sequence_context_columns(
+        recipe["model_algorithm"],
+        recipe.get("hyperparameters", {})
+        if hyperparameters is None
+        else hyperparameters,
+    )
+    consumed = {
+        *factors,
+        *features,
+        *groups,
+        *((recipe["target_column"],) if include_target else ()),
+    }
     if selected_columns is not None and consumed - set(selected_columns):
         raise ValueError("model_input_projection_missing")
     roles = declared["column_roles"]
     _validate_asset_time_key(declared["primary_key"], roles)
-    for column in spec.input_factor_columns:
+    labels = {recipe["target_column"]} | {
+        column for column, role in roles.items() if role == "label"
+    }
+    availability = declared.get("label_availability_columns", {})
+    maturity = {
+        availability.get(label, training_availability_columns(label)[0])
+        for label in labels
+    }
+    if set(groups) & (labels | maturity | set(FILTER_COLUMNS)):
+        raise ValueError("sequence_context_uses_future_outcome")
+    if any(
+        roles.get(column) not in {"context", "key", "factor", "feature"}
+        for column in groups
+    ):
+        raise ValueError("sequence_context_role_invalid")
+    for column in factors:
         if roles.get(column) != "factor":
             raise ValueError("model_factor_role_mismatch")
-    for column in spec.input_feature_columns:
+    for column in features:
         if roles.get(column) != "feature":
             raise ValueError("model_feature_role_mismatch")
-    if include_target and roles.get(spec.target_column) != "label":
+    if include_target and roles.get(recipe["target_column"]) != "label":
         raise ValueError("model_target_role_mismatch")
     actual_units = declared.get("column_units", {})
     for column, unit in (input_units or {}).items():

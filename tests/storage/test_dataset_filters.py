@@ -282,12 +282,6 @@ def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> N
     assert len(calls) == 1
 
 
-def test_membership_internal_grammar_rejects_raw_arrow_values() -> None:
-    raw = pa.array([1, 2], type=pa.int64())
-    with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading._freeze_filter_value(raw)
-
-
 def test_dataset_prepared_in_filter_compacts_sorted_duplicates() -> None:
     prepared = _prepare_in_filter(pa.field("value", pa.int64()), (2, 1, 1))
     assert prepared.values.to_pylist() == [1, 2]

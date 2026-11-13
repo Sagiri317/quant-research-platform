@@ -8,10 +8,12 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
+from quant_research_platform.compute.dataframe.streaming import (
+    iter_complete_session_frames,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,

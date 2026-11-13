@@ -28,7 +28,6 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
@@ -39,6 +38,7 @@ from quant_research_platform.storage.manifests import (
     write_manifest,
 )
 from quant_research_platform.storage.parquet import (
+    DEFAULT_BATCH_ROWS,
     iter_dataset_part_batches,
     parquet_table_writer,
 )

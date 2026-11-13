@@ -16,7 +16,7 @@ from rich.text import Text
 from quant_research_platform.agents.execution import error_feedback
 from quant_research_platform.agents.protocol import (
     OPERATIONS,
-    sandbox_context,
+    dataset_context,
     validate_budget,
 )
 from quant_research_platform.agents.runner import resume_agent, run_agent
@@ -217,7 +217,7 @@ class _Terminal:
                 raise ValueError("agent_data_usage")
             _, alias, source = parts
             path = str(Path(source.strip("\"'")).resolve())
-            metadata = sandbox_context({alias: path})[alias]
+            metadata = dataset_context({alias: path})[alias]
             self.config["inputs"][alias] = path
             self.save_workspace()
             self.emit(

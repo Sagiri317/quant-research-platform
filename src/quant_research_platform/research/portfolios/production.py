@@ -327,14 +327,13 @@ def backtest(config: Mapping) -> Path:
                 emit(batch)
 
     metadata = {
-        **dict(config),
+        **{key: value for key, value in config.items() if key != "risk_config"},
         "selection_mode": selection_mode,
         "prediction_facts": prediction_facts,
         **({"selection_cutoff": selection["cutoff"]} if selection is not None else {}),
         "candidate": asdict(candidate),
         **(
             {
-                "risk_config": asdict(risk_config),
                 "risk_model": risk_model.to_dict(),
                 "optimizer_config": asdict(optimizer_config),
             }

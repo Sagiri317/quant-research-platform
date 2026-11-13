@@ -63,6 +63,51 @@ def test_custom_scope_only_requires_its_selected_facts():
     ).all()
 
 
+@pytest.mark.parametrize(
+    "recipe,extra,expected",
+    [
+        ("a_share_nonfinancial", (), [True, False, True, False, False]),
+        (
+            "a_share_fundamental",
+            ("has_legal_fundamental_pit",),
+            [True, False, False, False, False],
+        ),
+    ],
+)
+def test_recipe_columns_cover_only_actual_membership_facts(recipe, extra, expected):
+    frame = pd.DataFrame(
+        {
+            "is_a_share_scope": pd.array([True] * 4 + [None], dtype="boolean"),
+            "is_nonfinancial_industry": [True, False, True, True, True],
+            "has_legal_fundamental_pit": [True, True, False, True, True],
+            "industry_standard_id": "S",
+            "industry_level1_code": "I",
+            "industry_level1_name": [
+                "Industry",
+                "Industry",
+                "Industry",
+                "",
+                "Industry",
+            ],
+        }
+    )
+    options = dict(exclude_st=False, exclude_pt=False, minimum_listing_sessions=0)
+    columns = a_share_eligibility_columns(recipe=recipe, **options)
+    assert columns == (
+        "is_a_share_scope",
+        "is_nonfinancial_industry",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        *extra,
+    )
+    selected = frame.loc[:, columns]
+    assert a_share_eligibility(selected, recipe, **options).tolist() == expected
+    unknown = a_share_eligibility(selected, recipe, preserve_unknown=True, **options)
+    assert pd.isna(unknown.iloc[-1])
+    assert unknown.iloc[:-1].tolist() == expected[:-1]
+
+
 def _cross(day, *, paused=(), missing=()):
     assets = [f"a{i}" for i in range(8)]
     returns = np.arange(8, dtype=float) / 100

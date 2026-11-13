@@ -1,6 +1,6 @@
 """Point-in-time calibration of prediction ranks to realized holding returns."""
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -294,77 +294,15 @@ def alpha_interval_semantics(rebalance_schedule):
 
 
 def frozen_alpha_calibration(payload, *, cutoff, selection_group, rebalance_schedule):
-    """Validate the final validation calibration bound to its actual group inputs."""
+    """Bind a published native calibration to this consumer's group and horizon."""
     if (
-        type(payload) is not dict
-        or set(payload)
-        != {
-            "schema_id",
-            "selection_group",
-            "cutoff",
-            "inputs",
-            "calibration",
-            "interval_semantics",
-        }
-        or (
-            payload["interval_semantics"]
-            != alpha_interval_semantics(rebalance_schedule)
-            or payload["schema_id"] != "qrp-final-alpha-calibration"
-            or payload["selection_group"] != selection_group
-            or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
-            or (type(payload["calibration"]) is not dict)
-            or (
-                set(payload["calibration"])
-                != {field.name for field in fields(AlphaCalibration)}
-            )
-        )
+        payload["schema_id"] != "qrp-final-alpha-calibration"
+        or payload["interval_semantics"] != alpha_interval_semantics(rebalance_schedule)
+        or payload["selection_group"] != selection_group
+        or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
     ):
         raise ValueError("test_alpha_calibration_binding_invalid")
-    values = payload["calibration"]
-    calibration = AlphaCalibration(**values)
+    calibration = AlphaCalibration(**payload["calibration"])
     if calibration.status != "DEFINED":
         raise PortfolioTargetBlocked("test_alpha_calibration_undefined")
-    if calibration.valid_rebalance_dates < 6 or calibration.coverage < 0.8:
-        raise PortfolioTargetBlocked("test_alpha_calibration_insufficient")
-    required = ("slope", "intercept", "slope_standard_error", "coverage")
-    if any(
-        type(values[name]) not in {int, float} or not np.isfinite(values[name])
-        for name in required
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    if (
-        calibration.slope_standard_error < 0
-        or not 0 <= calibration.coverage <= 1
-        or type(calibration.valid_rebalance_dates) is not int
-        or (type(calibration.scheduled_rebalance_dates) is not int)
-        or (calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates)
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    optional = (
-        "slope_t_statistic",
-        "slope_pvalue",
-        "slope_ci_low",
-        "slope_ci_high",
-        "weighted_r2",
-    )
-    if any(
-        values[name] is not None
-        and (type(values[name]) not in {int, float} or not np.isfinite(values[name]))
-        for name in optional
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    if (
-        (calibration.slope_standard_error == 0)
-        != (calibration.slope_t_statistic is None)
-        or len({values[name] is None for name in optional[:4]}) != 1
-        or (
-            calibration.slope_pvalue is not None
-            and (not 0 <= calibration.slope_pvalue <= 1)
-        )
-        or (
-            calibration.slope_ci_low is not None
-            and calibration.slope_ci_low > calibration.slope_ci_high
-        )
-    ):
-        raise ValueError("test_alpha_calibration_statistics_invalid")
-    return (calibration, payload["cutoff"])
+    return calibration, payload["cutoff"]

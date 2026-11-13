@@ -22,6 +22,7 @@ from quant_research_platform.compute.attribution import (
 )
 from quant_research_platform.compute.dataframe.cross_section import (
     _average_ranks,
+    _mean_squared_error,
     _pearson_correlation_result,
 )
 from quant_research_platform.contracts.experiments import (
@@ -33,7 +34,6 @@ from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     DEEPLOB_ALGORITHMS,
     SEQUENCE_ALGORITHMS,
-    _model_spec,
     _prediction_loss_reason,
     _validate_model_prediction_window,
     model_context_window,
@@ -50,19 +50,15 @@ from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
-from quant_research_platform.research.models.trial_selection import (
-    _mean_squared_error,
-)
 from quant_research_platform.research.predictions.outputs import (
     prediction_input_mask,
     prediction_rows,
 )
 from quant_research_platform.research.randomness import derive_seed
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
-    iter_dataset_chunks,
+    iter_dataset_time_chunks,
     open_dataset_session,
 )
 
@@ -111,22 +107,19 @@ def _selection(value):
     return selected
 
 
-def _session(source, input_spec, result, facts, *, window, labels=False):
-    if input_spec is not None:
-        if isinstance(source, Mapping):
-            raise ValueError("duplicate_input_spec")
-        source = {"path": source, "spec": input_spec}
+def _session(source, result, facts, *, window, labels=False):
     options = _dataset_input_options(source, time_window=window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
     validate_model_input_roles(
         session.spec,
-        _model_spec(facts["model"]),
+        facts["model"],
         market_id=facts["market_id"],
         include_target=labels,
         selected_columns=selected_columns,
         input_units=facts["input_units"],
+        hyperparameters=result.metadata["hyperparameters"],
     )
     return session
 
@@ -147,10 +140,8 @@ def _prediction_frames(session, result, window, *, extra=()):
             )
         )
     )
-    frames = iter_dataset_chunks(session.projected_view(columns))
-    with closing_iterator(
-        iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
-    ) as source:
+    frames = iter_dataset_time_chunks(session.projected_view(columns))
+    with closing_iterator(frames) as source:
         for frame in source:
             usable = prediction_rows(
                 frame,
@@ -215,9 +206,7 @@ def _selected_indices(context, selection, *, window=None):
 
 
 def _background(config, result, facts):
-    config = _strict_config(
-        config, {"inputs", "window", "max_rows"}, {"input_spec", "root_seed"}
-    )
+    config = _strict_config(config, {"inputs", "window", "max_rows"}, {"root_seed"})
     _positive(config["max_rows"], "background_rows")
     _seed(config.setdefault("root_seed", DEFAULT_ROOT_SEED))
     window = PredictionWindow(**config["window"])
@@ -225,9 +214,7 @@ def _background(config, result, facts):
         facts["fit_cutoff"]
     ):
         raise ValueError("explanation_background_after_fit_cutoff")
-    session = _session(
-        config["inputs"], config.get("input_spec"), result, facts, window=window
-    )
+    session = _session(config["inputs"], result, facts, window=window)
     if not hasattr(result.prediction_model, "scaler"):
         raise ValueError("explanation_background_method_not_supported")
     rng = np.random.default_rng(
@@ -847,7 +834,6 @@ def explain(config: Mapping) -> Path:
         {"model", "output", "methods"},
         {
             "inputs",
-            "input_spec",
             "window",
             "sample_role",
             "selection",
@@ -874,7 +860,6 @@ def explain(config: Mapping) -> Path:
     needs_data = bool(attribution or "permutation" in methods)
     data_fields = {
         "inputs",
-        "input_spec",
         "window",
         "sample_role",
         "selection",
@@ -934,7 +919,6 @@ def explain(config: Mapping) -> Path:
         context_window = model_context_window(facts, window)
         session = _session(
             config["inputs"],
-            config.get("input_spec"),
             result,
             facts,
             window=context_window,

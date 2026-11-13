@@ -14,7 +14,6 @@ import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.storage.datasets.comparison as dataset_comparison
-import quant_research_platform.storage.exact_keys as key_tracking
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -233,7 +232,7 @@ def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_er
 
 @pytest.mark.parametrize(
     "type_payload",
-    (
+    [
         {"kind": "decimal", "bit_width": 128, "precision": 39, "scale": 0},
         {"kind": "decimal", "bit_width": 256, "precision": 77, "scale": 0},
         {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": -1},
@@ -241,15 +240,6 @@ def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_er
         {"kind": "decimal", "bit_width": 256, "precision": 40, "scale": -1},
         {"kind": "decimal", "bit_width": 256, "precision": 40, "scale": 41},
         {"kind": "fixed_size_binary", "byte_width": 0},
-        {"kind": "struct", "fields": []},
-        {
-            "kind": "list",
-            "value_field": {
-                "name": "item",
-                "nullable": True,
-                "type": {"kind": "struct", "fields": []},
-            },
-        },
         {"kind": "date", "unit": "millisecond"},
         {"kind": "time", "unit": "s"},
         {"kind": "timestamp", "unit": "s", "timezone": None},
@@ -259,18 +249,8 @@ def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_er
             "value_type": {"kind": "string"},
             "ordered": False,
         },
-        {
-            "kind": "map",
-            "keys_sorted": False,
-            "key_field": {"name": "key", "nullable": True, "type": {"kind": "string"}},
-            "item_field": {
-                "name": "value",
-                "nullable": True,
-                "type": {"kind": "integer", "signed": True, "bit_width": 64},
-            },
-        },
-    ),
-    ids=(
+    ],
+    ids=[
         "decimal128-precision",
         "decimal256-precision",
         "decimal128-negative-scale",
@@ -278,14 +258,11 @@ def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_er
         "decimal256-negative-scale",
         "decimal256-scale-over-precision",
         "fixed-size-binary-zero",
-        "empty-struct",
-        "nested-empty-struct",
         "date-millisecond",
         "time-second",
         "timestamp-second",
         "dictionary-unsigned-index",
-        "map-key-nullable",
-    ),
+    ],
 )
 def test_physical_schema_rejects_unpersistable_descriptors(
     type_payload: dict[str, object],
@@ -298,7 +275,7 @@ def test_physical_schema_rejects_unpersistable_descriptors(
 
 @pytest.mark.parametrize(
     "data_type",
-    (
+    [
         pa.decimal128(18, 0),
         pa.decimal128(38, 38),
         pa.decimal256(40, 0),
@@ -315,15 +292,9 @@ def test_physical_schema_rejects_unpersistable_descriptors(
         pa.large_string(),
         pa.large_binary(),
         pa.binary(16),
-        pa.list_(pa.field("element", pa.int32(), nullable=False), 0),
-        pa.struct([pa.field("child", pa.int64(), nullable=False)]),
-        pa.map_(pa.string(), pa.int64()),
         pa.dictionary(pa.int8(), pa.string()),
-        pa.list_(
-            pa.field("element", pa.dictionary(pa.int16(), pa.string()), nullable=True)
-        ),
-    ),
-    ids=(
+    ],
+    ids=[
         "decimal128-scale-zero",
         "decimal128-scale-precision",
         "decimal256-scale-zero",
@@ -340,12 +311,8 @@ def test_physical_schema_rejects_unpersistable_descriptors(
         "large-string",
         "large-binary",
         "fixed-size-binary-positive",
-        "fixed-size-list-zero",
-        "nonempty-struct",
-        "map",
         "signed-dictionary",
-        "nested-dictionary",
-    ),
+    ],
 )
 def test_physical_schema_accepts_persisted_parquet_identity_round_trip(
     tmp_path: Path, data_type: pa.DataType
@@ -410,20 +377,20 @@ def test_exact_key_index_compares_persisted_row_values() -> None:
         {
             "asset_id": ["a", "b", "d"],
             "value": [1.0, None, None],
-            "nested": [[1, 2], [3], [4]],
+            "label": ["a", "b", "c"],
         }
     )
     right = pa.table(
         {
             "asset_id": ["b", "c", "d"],
             "value": [2.0, float("inf"), None],
-            "nested": [[3], [4], [4]],
+            "label": ["b", "c", "c"],
         }
     )
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     assert (
         index.add_comparison_table(
-            left, namespace="left", value_columns=("value", "nested")
+            left, namespace="left", value_columns=("value", "label")
         )
         == 0
     )
@@ -431,120 +398,18 @@ def test_exact_key_index_compares_persisted_row_values() -> None:
         right,
         expected_namespace="left",
         actual_namespace="right",
-        value_columns=("value", "nested"),
+        value_columns=("value", "label"),
     ) == (0, 1)
     assert index.difference_counts(
         expected_namespace="left", actual_namespace="right"
     ) == (1, 1)
-    map_type = pa.map_(pa.string(), pa.int64())
-    index.add_comparison_table(
-        pa.table(
-            {
-                "asset_id": ["map"],
-                "value": pa.array([[("b", 2), ("a", 1)]], type=map_type),
-            }
-        ),
-        namespace="map-left",
-        value_columns=("value",),
-    )
-    assert index._compare_table(
-        pa.table(
-            {
-                "asset_id": ["map"],
-                "value": pa.array([[("a", 1), ("b", 2)]], type=map_type),
-            }
-        ),
-        expected_namespace="map-left",
-        actual_namespace="map-right",
-        value_columns=("value",),
-    ) == (0, 0)
-    assert index.difference_counts(
-        expected_namespace="map-left", actual_namespace="map-right"
-    ) == (0, 0)
-
-
-def _nested_float_zero_array(case: str) -> pa.Array:
-    if case == "list":
-        return pa.array([[-0.0], [0.0]], type=pa.list_(pa.float32()))
-    if case == "large-list":
-        return pa.array([[-0.0], [0.0]], type=pa.large_list(pa.float64()))
-    if case == "fixed-list":
-        return pa.array([[-0.0], [0.0]], type=pa.list_(pa.float32(), 1))
-    if case == "struct":
-        return pa.array(
-            [{"zero": -0.0}, {"zero": 0.0}],
-            type=pa.struct([pa.field("zero", pa.float64())]),
-        )
-    if case == "map-key":
-        return pa.array(
-            [[(-0.0, 1)], [(0.0, 1)]], type=pa.map_(pa.float32(), pa.int64())
-        )
-    if case == "map-item":
-        return pa.array(
-            [[("zero", -0.0)], [("zero", 0.0)]], type=pa.map_(pa.string(), pa.float64())
-        )
-    if case == "dictionary":
-        return pa.DictionaryArray.from_arrays(
-            pa.array([0, 1], type=pa.int8()), pa.array([-0.0, 0.0], type=pa.float32())
-        )
-    return pa.array(
-        [[{"zero": [-0.0]}], [{"zero": [0.0]}]],
-        type=pa.list_(pa.struct([pa.field("zero", pa.list_(pa.float64()))])),
-    )
-
-
-@pytest.mark.parametrize(
-    "case",
-    (
-        "list",
-        "large-list",
-        "fixed-list",
-        "struct",
-        "map-key",
-        "map-item",
-        "dictionary",
-        "recursive",
-    ),
-)
-def test_nested_float_zero_unifies_key_identity_but_preserves_payload(
-    case: str,
-) -> None:
-    zeros = _nested_float_zero_array(case)
-    table = pa.Table.from_arrays([zeros], names=("key",))
-    index = ExactPrimaryKeyIndex(primary_key=("key",))
-    assert index.add_table(table, namespace="writer") == 1
-    index.add_comparison_table(table.slice(0, 1), namespace="left", value_columns=())
-    assert index._compare_table(
-        table.slice(1, 1),
-        expected_namespace="left",
-        actual_namespace="right",
-        value_columns=(),
-    ) == (0, 0)
-    assert index.difference_counts(
-        expected_namespace="left", actual_namespace="right"
-    ) == (0, 0)
-
-    # The same nested values retain exact signed-zero bits outside the key.
-    payloads = table.append_column("value", zeros)
-    index.add_comparison_table(
-        payloads.slice(0, 1), namespace="payload-left", value_columns=("value",)
-    )
-    assert index._compare_table(
-        payloads.slice(1, 1),
-        expected_namespace="payload-left",
-        actual_namespace="payload-right",
-        value_columns=("value",),
-    ) == (0, 1)
-    assert index.difference_counts(
-        expected_namespace="payload-left", actual_namespace="payload-right"
-    ) == (0, 0)
 
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))
-def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
+def test_scalar_primary_key_nonfinite_rejects_but_scalar_value_allows(
     nonfinite: float,
 ) -> None:
-    nested = pa.array([[nonfinite]], type=pa.list_(pa.float64()))
+    nested = pa.array([nonfinite], type=pa.float64())
     index = ExactPrimaryKeyIndex(primary_key=("key",))
     with pytest.raises(ValueError, match="dataset_primary_key|null|invalid"):
         index.add_table(pa.Table.from_arrays([nested], names=("key",)))
@@ -570,24 +435,6 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
         == 0
     )
     assert tuple(index.identity_payload_values(namespace="primary-key-only")) == (b"",)
-
-
-def test_exact_map_order_and_multiplicity_are_independent() -> None:
-    map_type = pa.map_(pa.string(), pa.int64())
-    entries = [("first", 0), ("second", 1)]
-    entries.extend((("duplicate", 2), ("duplicate", 1), ("duplicate", 1)))
-    forward = pa.array([entries], type=map_type)[0]
-    reverse = pa.array([list(reversed(entries))], type=map_type)[0]
-    forward_payload = bytearray()
-    reverse_payload = bytearray()
-    key_tracking._append_arrow_scalar_payload(forward_payload, forward, map_type)
-    key_tracking._append_arrow_scalar_payload(reverse_payload, reverse, map_type)
-    assert forward_payload == reverse_payload
-    reduced_payload = bytearray()
-    key_tracking._append_arrow_scalar_payload(
-        reduced_payload, pa.array([entries[:-1]], type=map_type)[0], map_type
-    )
-    assert reduced_payload != forward_payload
 
 
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(
@@ -693,84 +540,6 @@ def test_dataset_spec_payload_accepts_exact_base_variant_and_rejects_extras() ->
         )
 
 
-def test_physical_schema_identity_is_recursive_and_parameter_complete() -> None:
-    nested_field = pa.field(
-        "items", pa.list_(pa.field("item", pa.int64(), nullable=False)), nullable=True
-    )
-    schema = pa.schema(
-        [
-            pa.field("payload", pa.struct([nested_field]), nullable=False),
-            pa.field(
-                "category",
-                pa.dictionary(pa.int8(), pa.string(), ordered=True),
-                nullable=True,
-            ),
-        ]
-    )
-    identity = physical_schema_from_schema(schema)
-    validate_physical_schema_payload(identity)
-    payload_type = identity[0]["type"]
-    assert payload_type["kind"] == "struct"
-    list_field = payload_type["fields"][0]
-    assert list_field["nullable"] is True
-    assert list_field["type"]["value_field"]["nullable"] is False
-    dictionary_type = identity[1]["type"]
-    assert dictionary_type == {
-        "kind": "dictionary",
-        "index_type": {"kind": "integer", "signed": True, "bit_width": 8},
-        "value_type": {"kind": "string"},
-        "ordered": True,
-    }
-    top_nullable = physical_schema_from_schema(
-        pa.schema(
-            [schema.field("payload").with_nullable(True), schema.field("category")]
-        )
-    )
-    child_nullable = physical_schema_from_schema(
-        pa.schema(
-            [
-                pa.field(
-                    "payload",
-                    pa.struct(
-                        [
-                            pa.field(
-                                "items",
-                                pa.list_(pa.field("item", pa.int64(), nullable=True)),
-                                nullable=True,
-                            )
-                        ]
-                    ),
-                    nullable=False,
-                ),
-                schema.field("category"),
-            ]
-        )
-    )
-    dictionary_changed = physical_schema_from_schema(
-        pa.schema(
-            [
-                schema.field("payload"),
-                pa.field(
-                    "category",
-                    pa.dictionary(pa.int16(), pa.string(), ordered=False),
-                    nullable=True,
-                ),
-            ]
-        )
-    )
-    assert (
-        len(
-            {
-                canonical_json_hash(identity),
-                canonical_json_hash(top_nullable),
-                canonical_json_hash(child_nullable),
-                canonical_json_hash(dictionary_changed),
-            }
-        )
-        == 4
-    )
-
-
 def test_physical_schema_identity_rejects_unsupported_or_mutated_grammar() -> None:
     with pytest.raises(ValueError, match="unsupported_dataset_arrow_type"):
         physical_schema_from_schema(pa.schema([pa.field("unsupported", pa.null())]))
@@ -795,29 +564,16 @@ def test_physical_schema_encoder_rejects_unsupported_date64(
 
 
 @pytest.mark.parametrize(
-    ("type_payload", "nested"),
-    (
-        ({"kind": "time", "unit": "ms"}, False),
-        ({"kind": "duration", "unit": "ms"}, False),
-        ({"kind": "timestamp", "unit": "ms", "timezone": None}, False),
-        (
-            {
-                "kind": "struct",
-                "fields": [
-                    {
-                        "name": "child",
-                        "nullable": True,
-                        "type": {"kind": "timestamp", "unit": "ms", "timezone": None},
-                    }
-                ],
-            },
-            True,
-        ),
-    ),
-    ids=("time", "duration", "timestamp", "nested-timestamp"),
+    "type_payload",
+    [
+        {"kind": "time", "unit": "ms"},
+        {"kind": "duration", "unit": "ms"},
+        {"kind": "timestamp", "unit": "ms", "timezone": None},
+    ],
+    ids=["time", "duration", "timestamp"],
 )
-def test_physical_schema_units_reject_unhashable_values_at_any_depth(
-    type_payload: dict[str, object], nested: bool
+def test_physical_schema_units_reject_unhashable_values(
+    type_payload: dict[str, object],
 ) -> None:
     wrong_kind = []
     schema_payload = [
@@ -825,8 +581,6 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
     ]
     validate_physical_schema_payload(schema_payload)
     target = schema_payload[0]["type"]
-    if nested:
-        target = target["fields"][0]["type"]
     target["unit"] = wrong_kind
     with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
         validate_physical_schema_payload(schema_payload)
@@ -853,19 +607,6 @@ def test_physical_schema_units_reject_unhashable_values_at_any_depth(
             "float",
         ),
         ({"kind": "fixed_size_binary", "byte_width": 16}, ("byte_width",), "float"),
-        (
-            {
-                "kind": "fixed_size_list",
-                "list_size": 3,
-                "value_field": {
-                    "name": "item",
-                    "nullable": False,
-                    "type": {"kind": "integer", "signed": True, "bit_width": 32},
-                },
-            },
-            ("list_size",),
-            "float",
-        ),
         (
             {
                 "kind": "dictionary",
@@ -941,22 +682,6 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
         _discovered_paths(data_root, spec={**spec, "partition_columns": ["month"]})
 
 
-def test_inventory_discovery_orders_numeric_part_indices(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    for index in (1001, 999, 1000, 998):
-        pq.write_table(
-            pa.table({"value": [index]}), data_root / f"part-{index}.parquet"
-        )
-    paths = _discovered_paths(data_root, spec={"partition_columns": []})
-    assert [path.name for path in paths] == [
-        "part-998.parquet",
-        "part-999.parquet",
-        "part-1000.parquet",
-        "part-1001.parquet",
-    ]
-
-
 @pytest.mark.parametrize(
     "names",
     [
@@ -1004,19 +729,6 @@ def test_inventory_discovery_classifies_scan_error(
     assert not getattr(caught.value, "__notes__", ())
 
 
-def test_inventory_discovery_accepts_single_external_hardlink(tmp_path: Path) -> None:
-    data_root = tmp_path / "data"
-    data_root.mkdir()
-    external = tmp_path / "external.parquet"
-    part = data_root / "part-000.parquet"
-    pq.write_table(pa.table({"value": [1]}), external)
-    try:
-        os.link(external, part)
-    except OSError:
-        pytest.skip("hardlink_not_available")
-    assert _discovered_paths(data_root, spec={"partition_columns": []}) == [part]
-
-
 def test_inventory_discovery_rejects_case_variant_parquet_suffix(
     tmp_path: Path,
 ) -> None:
@@ -1041,11 +753,11 @@ def test_top_level_float_zero_key_encodings_agree(data_type):
 def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
     index = ExactPrimaryKeyIndex(primary_key=("key",))
     index.add_comparison_table(
-        pa.table({"key": [[0.0]], "value": [1.0]}),
+        pa.table({"key": [0.0], "value": [1.0]}),
         namespace="left",
         value_columns=("value",),
     )
-    right = pa.table({"key": [[1.0], [float("inf")]], "value": [2.0, 3.0]})
+    right = pa.table({"key": [1.0, float("inf")], "value": [2.0, 3.0]})
     with pytest.raises(ValueError, match="^invalid_dataset_primary_key_value$"):
         index._compare_table(
             right,

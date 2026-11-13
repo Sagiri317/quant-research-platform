@@ -23,14 +23,10 @@ class DatasetSummaryObserver:
     row_count: int = 0
     date_min: pd.Timestamp | None = None
     date_max: pd.Timestamp | None = None
-    null_count_summary: dict[str, int] = field(default_factory=dict)
     non_finite_count_summary: dict[str, int] = field(default_factory=dict)
     factor_nan_profile: dict[str, int] = field(default_factory=dict)
     label_nan_profile: dict[str, int] = field(default_factory=dict)
     duplicate_primary_key_count: int = 0
-
-    def __post_init__(self) -> None:
-        self.null_count_summary = {column: 0 for column in self.primary_key}
 
     def observe_batch(
         self, batch: pa.RecordBatch | pa.Table, *, frame: pd.DataFrame
@@ -43,11 +39,6 @@ class DatasetSummaryObserver:
         return {
             "date_min": date_string(self.date_min),
             "date_max": date_string(self.date_max),
-            "null_count_summary": dict(sorted(self.null_count_summary.items())),
-            "non_finite_count_summary": dict(
-                sorted(self.non_finite_count_summary.items())
-            ),
-            "duplicate_primary_key_count": int(self.duplicate_primary_key_count),
             "factor_nan_profile": dict(sorted(self.factor_nan_profile.items())),
             "label_nan_profile": dict(sorted(self.label_nan_profile.items())),
         }

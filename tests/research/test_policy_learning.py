@@ -1,6 +1,7 @@
 """Learned decisions share real account, causality and persistence rules."""
 
 import pickle
+from copy import deepcopy
 from dataclasses import asdict
 
 import numpy as np
@@ -180,6 +181,52 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
         assert values["terminal_nav"] == pytest.approx(4999)
 
 
+def test_execution_strategies_keep_distinct_native_candidates(tmp_path):
+    episode = hft_episode(tmp_path / "inputs")
+    ledgers = []
+    for strategy in ("immediate", "twap"):
+        branch = deepcopy(episode)
+        branch["account"]["candidate_id"] = strategy
+        output = backtest_policy(
+            {
+                "episode": branch,
+                "strategy": strategy,
+                "output": str(tmp_path / strategy),
+            }
+        )
+        ledgers.append(str(output / "ledger"))
+        assert (
+            read_portfolio_ledger_artifact(output / "ledger").capital.candidate_id
+            == strategy
+        )
+    config = {
+        "ledgers": ledgers,
+        "window": episode["window"],
+        "output": str(tmp_path / "comparison"),
+        "analyses": ["performance"],
+    }
+    artifact = read_statistics_artifact(portfolio_statistics(config))
+    assert artifact.metadata["candidate_ids"] == ["immediate", "twap"]
+    with artifact.table("portfolio_performance.parquet") as performance:
+        values = (
+            performance.loc[performance.metric_id.eq("net_pnl")]
+            .set_index("candidate_id")
+            .value
+        )
+        # Immediate sells 100 shares at the 0.01 CNY half-spread. TWAP has no
+        # executable whole-lot order before this six-second window ends.
+        assert values.to_dict() == pytest.approx({"immediate": -1.0, "twap": 0.0})
+    with pytest.raises(ValueError, match="portfolio_statistics_candidate_set_invalid"):
+        portfolio_statistics(
+            {
+                **config,
+                "ledgers": [ledgers[0], ledgers[0]],
+                "output": str(tmp_path / "duplicate"),
+            }
+        )
+    assert not (tmp_path / "duplicate").exists()
+
+
 def test_policy_statistics_reject_mixed_account_clocks(tmp_path):
     episode = hft_episode(tmp_path / "hft-inputs")
     daily = tmp_path / "daily"
@@ -320,7 +367,13 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     inputs.pop("risk_context")
     assets = [f"a{i}" for i in range(6)]
     candidate = PortfolioCandidateSpec(
-        "learned", "global", "quantile_equal_weight", "champion", "daily", 0.5, None
+        "equal_weight",
+        "global",
+        "quantile_equal_weight",
+        "champion",
+        "daily",
+        0.5,
+        None,
     )
     assumptions = ExecutionAssumptions(100_000.0, 0.0, 0.0, 1.0, (1.0,), 0.0)
     episode = {
@@ -348,6 +401,7 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     )
     ledger = read_portfolio_ledger_artifact(output / "ledger")
     assert any(batch.trades for batch in ledger.iter_chunks())
+    assert ledger.capital.candidate_id == candidate.candidate_id
     policy_ledger = output / "ledger"
     daily_model = train_policy(
         {
@@ -420,10 +474,12 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     assert parse_qrp_json_object((model / "model.json").read_bytes())["device"] == "cpu"
     frozen = (model / "feature_scaler.pkl").read_bytes()
     assert pickle.loads(frozen).medians == (4.0,)
+    cost_episode = deepcopy(episode)
+    cost_episode["account"]["candidate"]["candidate_id"] = "cost_allocator"
     output = backtest_cost_model(
         {
             "model": str(model),
-            "episode": episode,
+            "episode": cost_episode,
             "output": str(tmp_path / "cost-ledger"),
             "device": "cuda",
         }
@@ -508,7 +564,7 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         "regime_comparison": {"threshold": 0.0},
     }
     artifact = read_statistics_artifact(portfolio_statistics(config))
-    ids = {"learned_policy", "cost_aware_allocator"}
+    ids = {"equal_weight", "cost_allocator"}
     assert set(artifact.metadata["candidate_ids"]) == ids
     with artifact.table("portfolio_performance.parquet") as performance:
         assert set(performance.candidate_id) == ids

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from decimal import Decimal, localcontext
 
 import numpy as np
@@ -14,7 +13,6 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_result,
     _stable_zscore,
 )
-from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
@@ -25,6 +23,9 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
+from quant_research_platform.markets.implementations.a_share.market_model import (
+    MarketModelRiskState,
+)
 from quant_research_platform.research.evaluations.engine import (
     _add_group_spread_observation,
     _EvaluationStreamingState,
@@ -34,10 +35,6 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
-from quant_research_platform.storage.datasets.schema import (
-    _typed_category_value_payload,
-    parse_logical_dtype_metadata,
-)
 from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
@@ -170,31 +167,6 @@ def test_real_number_nullable_values_are_preserved():
     pd.testing.assert_series_equal(
         result, pd.Series([2.5, pd.NA, pd.NA], dtype="Float64")
     )
-
-
-def test_decimal_metadata_rejects_exponents_without_expansion():
-    payload = {
-        "schema_id": "qrp-dataset-part-logical-dtypes",
-        "columns": [
-            {
-                "name": "category",
-                "kind": "categorical",
-                "ordered": False,
-                "categories": [{"type": "decimal", "value": "1e20"}],
-            }
-        ],
-    }
-    raw = json.dumps(payload).encode()
-    with pytest.raises(ValueError):
-        parse_logical_dtype_metadata(raw)
-    encoded = _typed_category_value_payload(Decimal("1e20"))
-    assert encoded == {"type": "decimal", "value": "1" + "0" * 20}
-    payload["columns"][0]["categories"] = [encoded]
-    assert parse_logical_dtype_metadata(json.dumps(payload).encode()) == payload
-    assert _typed_category_value_payload(Decimal("1.2300")) == {
-        "type": "decimal",
-        "value": "1.2300",
-    }
 
 
 def test_real_observations_preserve_nonfinite_domain_handling():

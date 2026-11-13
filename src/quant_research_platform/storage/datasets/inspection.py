@@ -7,7 +7,6 @@ from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.observation import DatasetSummaryObserver
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.reading import (
@@ -23,6 +22,7 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 def inspect_dataset(
@@ -40,7 +40,6 @@ def inspect_dataset_session(context: DatasetSession) -> DatasetInspection:
         data_root=context.data_root,
         spec=context.spec,
         columns=physical_schema_columns(context.schema),
-        schema_hash=context.schema_hash,
         file_count=int(runtime["file_count"]),
         row_count=int(runtime["row_count"]),
         partitions=runtime["partitions"],
@@ -114,6 +113,10 @@ def _inspection_runtime_metadata(
         file_count = len(context.all_paths)
     else:
         file_count = selected_file_count
+    if observer.duplicate_primary_key_count:
+        raise ValueError("dataset_primary_key_duplicate")
+    if any(observer.non_finite_count_summary.values()):
+        raise ValueError("dataset_infinite_value")
     partitions = tuple(sorted(partition_row_counts))
     runtime_summary = {
         "file_count": file_count,
@@ -133,4 +136,8 @@ def _inspection_runtime_metadata(
         for key, value in persisted_summary.items():
             if manifest.get(key) != value:
                 raise ValueError("dataset_manifest_summary_mismatch")
-    return runtime_summary
+    return {
+        **runtime_summary,
+        "duplicate_primary_key_count": observer.duplicate_primary_key_count,
+        "null_key_counts": {column: 0 for column in primary_key},
+    }

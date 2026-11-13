@@ -10,7 +10,6 @@ import pyarrow as pa
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.fingerprinting import (
     comparison_schema,
 )
@@ -28,6 +27,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_exists,
 )
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 def compare_datasets(

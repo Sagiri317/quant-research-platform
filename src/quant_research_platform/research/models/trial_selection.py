@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable
 
 import numpy as np
 import pandas as pd
@@ -10,8 +10,12 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
     _average_ranks,
+    _mean_squared_error,
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
+)
+from quant_research_platform.compute.dataframe.streaming import (
+    iter_complete_time_frames,
 )
 from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.evaluations import (
@@ -40,7 +44,6 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_chunks,
@@ -371,22 +374,6 @@ def _daily_trial_summary(metrics, *, model_id, row_count):
     return _trial_metric_summary(model_id, row_count, mse, stats)
 
 
-def _mean_squared_error(predictions, labels) -> float | None:
-    """Reduce a complete paired sample in the label's economic units."""
-    if not len(labels):
-        return None
-    with np.errstate(over="ignore", invalid="ignore"):
-        result = float(
-            np.mean(
-                np.square(
-                    np.asarray(predictions, dtype="float64")
-                    - np.asarray(labels, dtype="float64")
-                )
-            )
-        )
-    return result if np.isfinite(result) else None
-
-
 def _metric_chunk(
     frame: pd.DataFrame, *, label_column: str, prediction_column: str
 ) -> pd.DataFrame:
@@ -467,7 +454,7 @@ def score(config):
             "validation_axis",
             "output",
         },
-        {"label_spec", "label_unit", "correlation_clock", "sessions"},
+        {"label_unit", "correlation_clock", "sessions"},
     )
     if (
         type(config["validation_axis"]) is not str
@@ -500,10 +487,6 @@ def score(config):
     ):
         raise ValueError("global_selection_requires_complete_validation")
     source = config["labels"]
-    if config.get("label_spec") is not None:
-        if isinstance(source, Mapping):
-            raise ValueError("duplicate_input_spec")
-        source = {"path": source, "spec": config["label_spec"]}
     options = _dataset_input_options(
         source, time_window=window, discovery_windows=validation_windows
     )

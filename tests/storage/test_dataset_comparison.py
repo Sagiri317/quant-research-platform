@@ -326,7 +326,7 @@ def test_exact_comparison_keeps_missing_extra_and_nullable_changed_counts(
 
 
 @pytest.mark.parametrize("changed", [False, True])
-def test_compare_nested_values_and_float_keys_decodes_each_member_once(
+def test_compare_scalar_values_and_float_keys_decodes_each_member_once(
     tmp_path, monkeypatch, changed
 ):
     roots = {
@@ -338,7 +338,7 @@ def test_compare_nested_values_and_float_keys_decodes_each_member_once(
                 "market_id": ["a_share", "a_share"],
                 "asset_id": [-0.0 if side == "left" else 0.0, 1.0],
                 "timestamp": pd.to_datetime(["2020-01-01", "2020-01-02"]),
-                "value": [[1, None], [2, 4 if changed and side == "right" else 3]],
+                "value": [None, 4.0 if changed and side == "right" else 3.0],
             }
         )
         write_dataset(root, frame, spec=make_processed_dataset_spec(side))

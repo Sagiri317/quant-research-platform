@@ -396,23 +396,38 @@ def test_macro_release_checks_only_selected_observation_window(
     assert not invalid.exists()
 
 
-def test_downloaded_macro_window_ignores_other_observations_invalid_values(tmp_path):
+@pytest.mark.parametrize("provider", ["cboe", "alfred"])
+def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
+    tmp_path, provider
+):
     raw = tmp_path / "raw"
-    source = raw / "vvix"
+    source = raw / "observations"
     source.mkdir(parents=True)
+    filename, series = "daily.csv", "us_vvix"
     payload = b"DATE,VVIX\n01/02/2024,20.0\n02/02/2024,invalid\n"
-    (source / "daily.csv").write_bytes(payload)
+    if provider == "alfred":
+        filename, series = "vintages.zip", "us_fed_assets"
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr(
+                "obs._by_real-time_period.csv",
+                "period_start_date,WALCL,realtime_start_date,realtime_end_date\n"
+                "2024-01-02,20.0,2024-01-04,9999-12-31\n"
+                "2024-02-02,30.0,invalid,9999-12-31\n",
+            )
+        payload = buffer.getvalue()
+    (source / filename).write_bytes(payload)
     (raw / "download.json").write_text(
         json.dumps(
             {
                 "sources": {
-                    "vvix": {
+                    "observations": {
                         "status": "downloaded",
-                        "source": "cboe",
-                        "series_ids": ["us_vvix"],
+                        "source": provider,
+                        "series_ids": [series],
                         "responses": [
                             {
-                                "file": "daily.csv",
+                                "file": filename,
                                 "retrieved_at": "2026-11-05T00:00:00Z",
                                 "url": "https://example.org/vix",
                                 "bytes": len(payload),
@@ -434,6 +449,14 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_values(tmp_p
     result = read_dataset(output)
     assert result.observation_date.tolist() == [pd.Timestamp("2024-01-02")]
     assert result.value.tolist() == [20.0]
+    assert result.timestamp.tolist() == [
+        pd.Timestamp(
+            "2024-01-03T22:30:00" if provider == "alfred" else "2024-01-02T23:00:00"
+        )
+    ]
+    assert result.published_at.isna().all()
+    if provider == "alfred":
+        assert result.vintage_date.tolist() == [pd.Timestamp("2024-01-04")]
     with pytest.raises(ValueError):
         materialize_interim_data(
             raw_root=raw,

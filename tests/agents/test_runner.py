@@ -3,7 +3,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from quant_research_platform.agents.protocol import sandbox_context
+from quant_research_platform.agents.protocol import dataset_context
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import read_session
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
@@ -157,7 +157,7 @@ def test_sandbox_metadata_does_not_require_label_maturity_declaration(tmp_path, 
         frame = frame.iloc[:0]
     root = tmp_path / "input"
     write_dataset(root, frame, spec=replace(spec, label_availability_columns={}))
-    metadata = sandbox_context({"panel": root})["panel"]
+    metadata = dataset_context({"panel": root})["panel"]
     assert metadata["rows"] == len(frame)
     assert metadata["date_max"] == (None if empty else "2020-01-12")
     assert metadata["label_availability_columns"] == {}

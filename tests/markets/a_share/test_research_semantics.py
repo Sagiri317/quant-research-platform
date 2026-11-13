@@ -5,6 +5,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.compute.dataframe.cross_section import (
+    _neutralize_cross_section,
+)
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
@@ -15,7 +18,6 @@ from quant_research_platform.research.datasets.assembler import (
     _add_a_share_semantic_columns,
 )
 from quant_research_platform.research.features.transforms import (
-    _neutralize_cross_section,
     a_share_feature_pipeline,
 )
 from quant_research_platform.research.protocols.a_share import (

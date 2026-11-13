@@ -71,7 +71,7 @@ from quant_research_platform.research.labels.forward_returns import (
     add_on_id_decomposition,
 )
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime import resources
+from quant_research_platform.storage import parquet
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     _prepare_in_filter,
@@ -82,7 +82,7 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.identity import filesystem_exists
 
 # Amortize preparation for stateful panel and market-model session streams.
-DEFAULT_BATCH_ROWS = 8 * resources.DEFAULT_BATCH_ROWS
+DEFAULT_BATCH_ROWS = 8 * parquet.DEFAULT_BATCH_ROWS
 
 
 _FULL_HISTORY_SOURCE_IDS = {
@@ -408,11 +408,13 @@ def _market_model_frames(
     market_history: pd.DataFrame | None,
     min_fresh_fraction: float = 0.75,
 ) -> Iterator[pd.DataFrame]:
-    from quant_research_platform.compute.market_model import MarketModelRiskState
     from quant_research_platform.contracts.validation import (
         strict_bool_series,
         strict_integer_series,
         strict_timestamp_series,
+    )
+    from quant_research_platform.markets.implementations.a_share.market_model import (
+        MarketModelRiskState,
     )
     from quant_research_platform.markets.implementations.a_share.stock_pool import (
         a_share_eligibility,
@@ -1229,7 +1231,7 @@ def _processed_axis(
     asset_session_masks = {}
     session_positions = {}
     with closing_iterator(
-        iter_dataset_chunks(view, batch_rows=resources.DEFAULT_BATCH_ROWS)
+        iter_dataset_chunks(view, batch_rows=parquet.DEFAULT_BATCH_ROWS)
     ) as chunks:
         for frame in chunks:
             if panel_source:

@@ -30,14 +30,14 @@ def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path
     cases, scoring = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
     _, prediction_metadata = read_predictions(scoring["predictions"][0])
-    Path(prediction_metadata["inputs"]).unlink()
+    Path(prediction_metadata["inputs"]["path"]).unlink()
     shutil.rmtree(case.root)
     shutil.rmtree(case.root.with_name(case.root.name + ".trial"))
-    labels = pd.read_parquet(scoring["labels"])
+    labels = pd.read_parquet(scoring["labels"]["path"])
     labels.loc[
         labels.timestamp.eq(pd.Timestamp("2020-01-06")), "label_available_at"
     ] = pd.Timestamp("2020-01-10")
-    labels.to_parquet(scoring["labels"], index=False)
+    labels.to_parquet(scoring["labels"]["path"], index=False)
     scored = json.loads(score(scoring).read_text())
     assert "test_window" not in scored
     assert scored["common_rows"] == 4
@@ -60,9 +60,7 @@ def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path
         cutoff="2020-01-10",
         role="test",
     )
-    request.update(
-        input_spec=scoring["label_spec"], predictions={"p": scoring["predictions"][0]}
-    )
+    request.update(predictions={"p": scoring["predictions"][0]})
     _, tables = read_evaluation_outputs(evaluate(request))
     assert tables["metrics"].n_obs.tolist() == [2, 2, 2]
     assert tables["metrics"].ic.tolist() == pytest.approx([1.0] * 3)
@@ -83,7 +81,7 @@ def test_custom_maturity_mapping_and_units_are_consumed_at_fit(tmp_path):
         label_availability_columns={"label": "settled_at"},
     )
     config = fit_config(tmp_path, source)
-    config["input_spec"] = declared
+    config["inputs"]["spec"] = declared
     config.pop("label_unit")
     model = fit(config)
     saved = load_model(model)[0].metadata
@@ -406,7 +404,7 @@ def test_explicit_input_projection_limits_business_columns_but_adds_support(
 
     source = data(tmp_path)
     config = fit_config(tmp_path, source)
-    config.pop("input_spec")
+    config["inputs"].pop("spec")
     config["inputs"] = {"path": str(source), "spec": input_spec(), "columns": ["label"]}
     with pytest.raises(ValueError, match="model_input_projection_missing"):
         fit(config)
@@ -451,7 +449,7 @@ def test_fit_reader_closes_on_primary_failure_before_model_publication(
     import quant_research_platform.research.models.production as production
 
     config = fit_config(tmp_path, data(tmp_path))
-    frame = pd.read_parquet(config["inputs"]).iloc[:3]
+    frame = pd.read_parquet(config["inputs"]["path"]).iloc[:3]
     primary = RuntimeError("training read failed")
 
     class Source:
@@ -517,8 +515,7 @@ def test_saved_model_allows_later_prediction_evaluation_and_refit(tmp_path):
     model = fit(fit_config(tmp_path, source))
     request = {
         "model": str(model),
-        "inputs": str(source),
-        "input_spec": input_spec(),
+        "inputs": {"path": str(source), "spec": input_spec()},
         "prediction_window": window,
         "output": str(tmp_path / "prediction"),
     }
@@ -560,7 +557,8 @@ def test_saved_model_allows_later_prediction_evaluation_and_refit(tmp_path):
         cutoff="2020-01-10",
         role="test",
     )
-    evaluation.update(input_spec=input_spec(), predictions={"p": str(prediction)})
+    evaluation["inputs"] = {"path": evaluation["inputs"], "spec": input_spec()}
+    evaluation.update(predictions={"p": str(prediction)})
     _, tables = read_evaluation_outputs(evaluate(evaluation))
     assert tables["metrics"].n_obs.tolist() == [3, 3, 3]
     later = {
@@ -582,7 +580,7 @@ def test_score_coverage_uses_current_mature_labels_and_requested_subwindow(
     tmp_path, missing_label
 ):
     _, config = candidates(tmp_path, algorithms=("linear_regression",))
-    labels = pd.read_parquet(config["labels"])
+    labels = pd.read_parquet(config["labels"]["path"])
     labels = labels.loc[
         labels.timestamp.eq(pd.Timestamp("2020-01-04"))
         & labels.asset_id.isin(["b", "c"])
@@ -596,7 +594,7 @@ def test_score_coverage_uses_current_mature_labels_and_requested_subwindow(
         )
         labels.loc[labels.asset_id.eq("c"), "label"] = 1e6
     pd.concat([labels, extra], ignore_index=True).to_parquet(
-        config["labels"], index=False
+        config["labels"]["path"], index=False
     )
     window = {"start": "2020-01-04", "end": "2020-01-04"}
     config.update(
@@ -619,9 +617,9 @@ def test_score_selects_disjoint_windows_from_the_same_prediction_file(
     tmp_path, gap_value
 ):
     _, config = candidates(tmp_path, algorithms=("linear_regression",))
-    labels = pd.read_parquet(config["labels"])
+    labels = pd.read_parquet(config["labels"]["path"])
     labels.loc[labels.timestamp.eq(pd.Timestamp("2020-01-05")), "label"] = gap_value
-    labels.to_parquet(config["labels"], index=False)
+    labels.to_parquet(config["labels"]["path"], index=False)
     source = config["predictions"][0]
     config.update(
         predictions=[[source, source]],

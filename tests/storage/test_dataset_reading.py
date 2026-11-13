@@ -180,16 +180,25 @@ def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
     assert sum(len(chunk) for chunk in chunks) == 3
 
 
-def test_schema_hash_is_descriptive_and_not_an_admission_gate(tmp_path: Path) -> None:
+@pytest.mark.parametrize("extra", [{}, {"schema_hash": "0" * 64}])
+def test_storage_and_diagnostics_do_not_require_persisted_schema_hash(
+    tmp_path: Path, extra: dict
+) -> None:
     root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
+    expected = make_default_dataset_frame().astype({"timestamp": "datetime64[ns]"})
+    write_dataset(root, expected, spec=make_processed_dataset_spec())
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["schema_hash"] = "0" * 64
+    assert "schema_hash" not in manifest
+    manifest.update(extra)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    assert len(read_dataset(root)) == 3
+    keys = ["timestamp", "asset_id"]
+    pd.testing.assert_frame_equal(
+        read_dataset(root).sort_values(keys).reset_index(drop=True),
+        expected.sort_values(keys).reset_index(drop=True),
+    )
+    assert inspect_dataset(root).row_count == len(expected)
+    assert fingerprint_dataset(root).schema_hash
 
 
 @pytest.mark.parametrize(
@@ -258,7 +267,6 @@ def test_inspect_dataset_returns_expanded_metadata(tmp_path: Path) -> None:
     assert inspection.spec["data_id"] == "x"
     assert inspection.spec["kind"] == "factor"
     assert inspection.columns == ("market_id", "asset_id", "timestamp", "value")
-    assert inspection.schema_hash
     assert inspection.file_count == 2
     assert inspection.row_count == 3
     assert inspection.partitions == ("year=2014", "year=2015")
@@ -433,7 +441,7 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
         return original_writer(*args, **kwargs)
 
     monkeypatch.setattr(pq, "ParquetWriter", writer_with_statistics)
-    root = make_dataset_artifact_root(tmp_path, "nested_before_timestamp")
+    root = tmp_path / "extra_vendor_fields.parquet"
     spec = ProcessedDataSpec(
         data_id="nested_before_timestamp",
         market_id=MarketId("a_share"),
@@ -465,10 +473,8 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
             "value": [1.0],
         }
     )
-    write_dataset(root, frame, spec=spec)
-    parts = list((root / "data").rglob("part-*.parquet"))
-    assert len(parts) == 1
-    with pq.ParquetFile(parts[0]) as parquet:
+    pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), root)
+    with pq.ParquetFile(root) as parquet:
         top_level_position = parquet.schema_arrow.get_field_index("timestamp")
         leaf_position = next(
             index
@@ -486,7 +492,10 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
         assert pd.Timestamp(correct_stats.max) == target
         assert pd.Timestamp(wrong_stats.max) < target
     result = read_dataset(
-        root, time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime())
+        root,
+        spec=spec,
+        columns=["timestamp", "value"],
+        time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime()),
     )
     assert len(result) == 1, "retained_target_row_missing"
     assert result.loc[0, "timestamp"] == target
@@ -511,29 +520,6 @@ def test_fingerprint_hashes_ordinary_frame_without_normalized_copy(
     assert len(observed) == 1
     assert slices == [len(frame)]
     np.testing.assert_array_equal(observed[0], expected)
-
-
-@pytest.mark.parametrize(
-    ("data_type", "values"),
-    (
-        (pa.list_(pa.int64()), [[1], [2]]),
-        (pa.map_(pa.string(), pa.int64()), [[("a", 1)], [("b", 2)]]),
-    ),
-)
-def test_fingerprint_hashes_nested_values_with_exact_scalar_grammar(
-    data_type: pa.DataType, values: list[object], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    frame = pd.DataFrame({"value": values})
-    schema = pa.schema([("value", data_type)])
-    monkeypatch.setattr(
-        pd.util,
-        "hash_pandas_object",
-        lambda *_args, **_kwargs: pytest.fail("nested_value_was_hashed"),
-    )
-    (hashes,) = dataset_fingerprinting._iter_fingerprint_hashes(
-        frame, arrow_schema=schema
-    )
-    assert len(hashes) == 2 and hashes[0] != hashes[1]
 
 
 @pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))

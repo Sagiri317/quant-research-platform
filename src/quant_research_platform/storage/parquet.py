@@ -18,14 +18,12 @@ import pyarrow.fs as fs
 import pyarrow.parquet as pq
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    DEFAULT_BATCH_ROWS,
-)
 from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
 
+DEFAULT_BATCH_ROWS = 65536
 _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
 
 

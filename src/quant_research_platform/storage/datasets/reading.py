@@ -28,7 +28,6 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.inventory import (
     DatasetSessionInventory,
 )
@@ -56,8 +55,10 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
+    DEFAULT_BATCH_ROWS,
     DatasetPartMetadata,
     PreparedMembershipValues,
+    _matching_row_groups,
     _physical_filter_scalar,
     dataset_part_fragments,
     inspect_dataset_part,
@@ -75,7 +76,6 @@ class DatasetSession:
     physical_columns: tuple[str, ...]
     timestamp_column: str | None
     time_window: TimeWindow | None
-    schema_hash: str
     arrow_schema: pa.Schema
     _logical_dtypes: dict[str, Any]
     native: bool
@@ -420,7 +420,6 @@ def _bare_dataset_session(
         ),
         timestamp_column=timestamp,
         time_window=time_window,
-        schema_hash="",
         arrow_schema=schema,
         _logical_dtypes=logical,
         native=False,
@@ -525,7 +524,7 @@ def open_dataset_session(
         columns=columns,
         time_window=time_window,
         row_filters=row_filters,
-        years=_validated_years(years),
+        years=years,
     )
     return session
 
@@ -555,7 +554,6 @@ def _build_dataset_session(
     schema = manifest["physical_schema"]
     arrow_schema = arrow_schema_from_payload(schema)
     schema_columns = physical_schema_columns(schema)
-    schema_hash = manifest["schema_hash"]
     logical_dtypes = manifest["logical_dtypes"]
     logical_columns = resolve_columns_from_schema(
         schema_columns, spec=spec_payload, columns=columns
@@ -602,19 +600,12 @@ def _build_dataset_session(
         physical_columns=physical_columns,
         timestamp_column=timestamp_column,
         time_window=time_window,
-        schema_hash=schema_hash,
         arrow_schema=arrow_schema,
         _spec=deepcopy(spec_payload),
         _manifest=deepcopy(manifest),
         _logical_dtypes=deepcopy(logical_dtypes),
         native=True,
-        parquet_filters=tuple(
-            (
-                (column, operator, _freeze_filter_value(value))
-                for column, operator, value in physical_filters
-            )
-        )
-        or None,
+        parquet_filters=tuple(physical_filters) or None,
     )
     return session
 
@@ -643,22 +634,6 @@ def iter_dataset_chunks(
                 pa.types.is_floating(values.type) and pc.any(pc.is_nan(values)).as_py()
             ):
                 raise ValueError("dataset_primary_key_null")
-        if not all(column in batch.schema.names for column in keys):
-            from quant_research_platform.storage.exact_keys import (
-                _append_arrow_scalar_payload,
-            )
-
-            for column in keys:
-                if column not in batch.schema.names:
-                    continue
-                values = batch.column(column)
-                value_type = values.type
-                if pa.types.is_dictionary(value_type):
-                    values = pc.dictionary_decode(values)
-                    value_type = values.type
-                if pa.types.is_nested(value_type):
-                    for value in values:
-                        _append_arrow_scalar_payload(bytearray(), value, value_type)
         # Native primary-key uniqueness was established by the atomic writer.
         # Inspection revalidates it explicitly; bare external inputs admit it here.
         if not context.native and all(column in batch.schema.names for column in keys):
@@ -702,6 +677,133 @@ def iter_dataset_chunks(
         yield _empty_frame(context, context.logical_columns)
 
 
+def iter_dataset_time_chunks(
+    context: DatasetSession,
+    *,
+    batch_rows: int = DEFAULT_BATCH_ROWS,
+    one_timestamp: bool = False,
+) -> Iterator[pd.DataFrame]:
+    """Read complete chronological cross-sections, independent of member order.
+
+    Nonoverlapping bounded row groups use the ordinary streaming path. Otherwise
+    SQLite owns the disk-backed sort; only projected rows are scanned once and
+    converted in bounded batches. The generic dataset reader keeps member order.
+    ``one_timestamp`` yields one cross-section without another completion pass.
+    """
+    import pickle
+    import sqlite3
+    from contextlib import closing
+
+    from quant_research_platform.compute.dataframe.streaming import (
+        iter_complete_time_frames,
+    )
+    from quant_research_platform.contracts.validation import strict_timestamp_series
+
+    rows = _validated_batch_rows(batch_rows)
+    timestamp = context.timestamp_column
+    if timestamp is None or timestamp not in context.logical_columns:
+        raise ValueError("missing_time_chunk_timestamp_column")
+    fragments = context._fragments or dataset_part_fragments(context.read_paths)
+    context = replace(context, _fragments=fragments)
+    previous = None
+    separated = True
+    for path in context.read_paths:
+        metadata = fragments[path].metadata
+        positions = [
+            i
+            for i in range(metadata.num_columns)
+            if metadata.schema.column(i).path == timestamp
+        ]
+        if len(positions) != 1:
+            separated = False
+            break
+        for i in _matching_row_groups(fragments[path], context.parquet_filters):
+            group = metadata.row_group(i)
+            stats = group.column(positions[0]).statistics
+            if (
+                group.num_rows > rows
+                or stats is None
+                or not stats.has_min_max
+                or stats.null_count
+                or (previous is not None and stats.min < previous)
+            ):
+                separated = False
+                break
+            previous = stats.max
+        if not separated:
+            break
+
+    def sorted_chunks():
+        # Empty-name SQLite databases are private temporary disk files removed
+        # on close. Payloads are created and consumed here, never external pickle.
+        with closing(sqlite3.connect("")) as database:
+            database.execute(
+                "CREATE TABLE rows "
+                "(time INTEGER, ordinal INTEGER PRIMARY KEY, payload BLOB)"
+            )
+            template = None
+            ordinal = 0
+            with closing_iterator(
+                iter_dataset_chunks(context, batch_rows=rows)
+            ) as source:
+                for frame in source:
+                    if template is None:
+                        template = frame.iloc[:0]
+                    times = (
+                        strict_timestamp_series(
+                            frame[timestamp],
+                            error="invalid_time_chunk_timestamp_values",
+                        )
+                        .astype("datetime64[ns]")
+                        .astype("int64")
+                    )
+                    database.executemany(
+                        "INSERT INTO rows VALUES (?, ?, ?)",
+                        (
+                            (int(t), ordinal + i, pickle.dumps(row, protocol=5))
+                            for i, (t, row) in enumerate(
+                                zip(
+                                    times,
+                                    frame.itertuples(index=False, name=None),
+                                    strict=True,
+                                )
+                            )
+                        ),
+                    )
+                    ordinal += len(frame)
+            if not ordinal:
+                if template is not None:
+                    yield template
+                return
+            cursor = database.execute("SELECT payload FROM rows ORDER BY time, ordinal")
+            while payloads := cursor.fetchmany(rows):
+                values = [pickle.loads(payload) for (payload,) in payloads]
+                columns = {}
+                for i, (name, dtype) in enumerate(template.dtypes.items()):
+                    column = [row[i] for row in values]
+                    if isinstance(dtype, (pd.Float32Dtype, pd.Float64Dtype)):
+                        missing = np.array([value is pd.NA for value in column])
+                        column = pd.arrays.FloatingArray(
+                            np.array(
+                                [
+                                    np.nan if value is pd.NA else value
+                                    for value in column
+                                ],
+                                dtype=dtype.numpy_dtype,
+                            ),
+                            missing,
+                        )
+                    columns[name] = pd.Series(column, dtype=dtype)
+                yield pd.DataFrame(columns)
+
+    source = (
+        iter_dataset_chunks(context, batch_rows=rows) if separated else sorted_chunks()
+    )
+    yield from iter_complete_time_frames(
+        source, timestamp_column=timestamp, one_timestamp=one_timestamp
+    )
+
+
 def iter_declared_parquet_member_batches(
     path: Path,
     *,
@@ -711,7 +813,6 @@ def iter_declared_parquet_member_batches(
     dtype_overrides: Mapping[str, object] | None = None,
     fragment=None,
     metadata_observer: Callable[[DatasetPartMetadata], None] | None = None,
-    persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
     """Traverse one frozen member through the sole logical Pandas converter."""
@@ -731,7 +832,6 @@ def iter_declared_parquet_member_batches(
                 batch,
                 batch_rows=rows_per_batch,
                 dtype_overrides=dtype_overrides,
-                persisted_frame_observer=persisted_frame_observer,
                 batch_observer=batch_observer,
             )
 
@@ -815,32 +915,6 @@ def _validated_batch_rows(value: int) -> int:
     return value
 
 
-def _freeze_filter_value(value: Any) -> Any:
-    if isinstance(value, PreparedMembershipValues):
-        return value
-    if isinstance(value, tuple):
-        return tuple(_freeze_filter_value(item) for item in value)
-    if isinstance(
-        value,
-        (
-            str,
-            bytes,
-            bool,
-            int,
-            float,
-            Decimal,
-            date,
-            datetime,
-            time,
-            timedelta,
-            pd.Timestamp,
-            pd.Timedelta,
-        ),
-    ):
-        return value
-    raise ValueError("invalid_dataset_physical_filter_value")
-
-
 def _filter_value_is_representable(field: pa.Field, value: Any) -> bool:
     source = _physical_filter_scalar(field, value)
     try:
@@ -867,25 +941,24 @@ def _prepare_in_filter(
 
 
 def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
-    frozen = _freeze_filter_value(value)
     data_type = field.type
-    if frozen is pd.NaT or isinstance(frozen, np.generic):
+    if value is pd.NaT or isinstance(value, np.generic):
         raise ValueError("invalid_dataset_physical_filter_value")
-    if isinstance(frozen, (float, Decimal)) and (not math.isfinite(frozen)):
+    if isinstance(value, (float, Decimal)) and (not math.isfinite(value)):
         raise ValueError("invalid_dataset_physical_filter_value")
     if pa.types.is_boolean(data_type):
-        valid = type(frozen) is bool
+        valid = type(value) is bool
     elif pa.types.is_integer(data_type):
-        valid = type(frozen) is int
+        valid = type(value) is int
     elif pa.types.is_floating(data_type):
-        valid = type(frozen) is float
+        valid = type(value) is float
     elif pa.types.is_decimal(data_type):
-        valid = type(frozen) is Decimal
+        valid = type(value) is Decimal
     elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):
-        valid = type(frozen) is str
+        valid = type(value) is str
         if valid:
             try:
-                frozen.encode("utf-8")
+                value.encode("utf-8")
             except UnicodeEncodeError:
                 raise ValueError("invalid_dataset_physical_filter_value") from None
     elif (
@@ -893,21 +966,21 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
         or pa.types.is_large_binary(data_type)
         or pa.types.is_fixed_size_binary(data_type)
     ):
-        valid = type(frozen) is bytes
+        valid = type(value) is bytes
     elif pa.types.is_timestamp(data_type):
-        valid = type(frozen) in (pd.Timestamp, datetime)
+        valid = type(value) in (pd.Timestamp, datetime)
     elif pa.types.is_date(data_type):
-        valid = type(frozen) is date
+        valid = type(value) is date
     elif pa.types.is_time32(data_type) or pa.types.is_time64(data_type):
-        valid = type(frozen) is time
+        valid = type(value) is time
     elif pa.types.is_duration(data_type):
-        valid = type(frozen) in (pd.Timedelta, timedelta)
+        valid = type(value) in (pd.Timedelta, timedelta)
     else:
         valid = False
     if not valid:
         raise ValueError("invalid_dataset_physical_filter_value")
     try:
-        pa.scalar(frozen, type=data_type)
+        pa.scalar(value, type=data_type)
     except (
         pa.ArrowInvalid,
         pa.ArrowNotImplementedError,
@@ -915,7 +988,7 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
         OverflowError,
     ):
         raise ValueError("invalid_dataset_physical_filter_value") from None
-    return frozen
+    return value
 
 
 def _empty_frame(context: DatasetSession, columns: tuple[str, ...]) -> pd.DataFrame:
@@ -948,7 +1021,6 @@ def _arrow_batch_to_bounded_pandas(
     *,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     dtype_overrides: Mapping[str, object] | None = None,
-    persisted_frame_observer: Callable[[pd.DataFrame], None] | None = None,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
 ) -> Iterator[pd.DataFrame]:
     if batch.num_rows == 0:
@@ -967,8 +1039,6 @@ def _arrow_batch_to_bounded_pandas(
     for start in range(0, batch.num_rows, rows):
         arrow_slice = batch.slice(start, rows)
         frame = _arrow_slice_to_pandas(arrow_slice, dtype_overrides=overrides)
-        if persisted_frame_observer is not None:
-            persisted_frame_observer(frame)
         output = frame.astype(ordinary) if ordinary else frame
         for name, dtype in categorical.items():
             codes = dtype.categories.get_indexer(frame[name])
@@ -1143,15 +1213,9 @@ def projection_columns_for_window(
 
 
 def _iter_dataset_session_frames(session, columns):
-    from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-
     with closing_iterator(
-        iter_dataset_chunks(session.projected_view(columns))
-    ) as batches:
-        source = batches
-        with closing_iterator(
-            iter_complete_session_frames(source, timestamp_column="timestamp")
-        ) as frames:
-            for frame in frames:
-                if not frame.empty:
-                    yield frame
+        iter_dataset_time_chunks(session.projected_view(columns), one_timestamp=True)
+    ) as frames:
+        for frame in frames:
+            if not frame.empty:
+                yield frame

@@ -29,7 +29,7 @@
   "tools": {
     "search": {
       "operation": "search-factors",
-      "description": "Propose causal expressions using x; compare the signs and select a discovery candidate. Inputs are dimensionless x and decimal-return label.",
+      "description": "用无量纲输入x提出只依赖当时信息的公式，比较正负方向并选择候选；label以小数收益计。",
       "config": {
         "dataset": "data/research/agent-source",
         "columns": [
@@ -74,7 +74,7 @@
     },
     "apply": {
       "operation": "apply-formula",
-      "description": "Apply the frozen discovery formula to later development dates. Bind search to the search evidence.",
+      "description": "将选定公式应用到后续开发区间；search绑定公式搜索产物。",
       "config": {
         "search": "bound",
         "dataset": "data/research/agent-source",
@@ -96,7 +96,7 @@
     },
     "assemble": {
       "operation": "assemble",
-      "description": "Join the candidate factor with the baseline x, labels, maturity and portfolio context. Bind inputs.formula.path to apply evidence.",
+      "description": "将候选因子、基线x、标签、成熟时点和组合上下文拼接；inputs.formula.path绑定公式应用产物。",
       "config": {
         "market_id": "a_share",
         "dataset_id": "agent_candidate",
@@ -140,7 +140,7 @@
     },
     "evaluate": {
       "operation": "evaluate",
-      "description": "Compare candidate and baseline on later development days; inspect their separate IC and coverage. Bind inputs to assembled evidence.",
+      "description": "在后续开发区间分别比较候选与基线的IC和覆盖；inputs绑定拼装产物。",
       "config": {
         "inputs": "bound",
         "output": "assigned",
@@ -252,7 +252,7 @@
     },
     "statistics": {
       "operation": "statistics-factors",
-      "description": "Calculate native factor inference; undefined small-sample inference must remain undefined. Bind dataset to assembled evidence.",
+      "description": "调用原生因子统计，样本不足时保留未定义推断；dataset绑定拼装产物。",
       "config": {
         "dataset": "bound",
         "output": "assigned",
@@ -358,7 +358,7 @@
     },
     "fit": {
       "operation": "fit",
-      "description": "Fit a candidate on Dec 12-23 only, after formula discovery. Bind inputs to assembled evidence; the later development and final dates remain excluded.",
+      "description": "公式选定后，仅用12月12日至23日拟合模型；inputs绑定拼装产物，后续开发和最终评价日期不参与拟合。",
       "config": {
         "market_id": "a_share",
         "inputs": "bound",
@@ -395,7 +395,7 @@
     },
     "predict": {
       "operation": "predict",
-      "description": "Predict on the later development dates. Bind model to fitted-model evidence and inputs to assembled evidence.",
+      "description": "在后续开发区间预测；model绑定已拟合模型，inputs绑定拼装产物。",
       "config": {
         "model": "bound",
         "inputs": "bound",
@@ -415,7 +415,7 @@
     },
     "backtest": {
       "operation": "backtest",
-      "description": "Run the native A-share share-account backtest including fees. Bind predictions.0.path to prediction evidence. Keep initial cash, costs and selection rule fixed.",
+      "description": "调用原生A股股数账户回测并计入费用；predictions.0.path绑定预测产物，初始资金、费用和选择规则保持固定。",
       "config": {
         "candidate": {
           "candidate_id": "agent_candidate",
@@ -491,7 +491,7 @@
   "final_evaluation": [
     {
       "operation": "apply-formula",
-      "description": "Apply the frozen discovery formula to later development dates. Bind search to the search evidence.",
+      "description": "将选定公式应用到最终评价区间；search引用保存的公式搜索产物。",
       "config": {
         "search": "artifact:formula",
         "dataset": "data/research/agent-source",
@@ -509,7 +509,7 @@
     },
     {
       "operation": "assemble",
-      "description": "Join the candidate factor with the baseline x, labels, maturity and portfolio context. Bind inputs.formula.path to apply evidence.",
+      "description": "将候选因子、基线x、标签、成熟时点和组合上下文拼接；inputs.formula.path引用公式应用产物。",
       "config": {
         "market_id": "a_share",
         "dataset_id": "agent_candidate",
@@ -549,7 +549,7 @@
     },
     {
       "operation": "evaluate",
-      "description": "Compare candidate and baseline on later development days; inspect their separate IC and coverage. Bind inputs to assembled evidence.",
+      "description": "在最终评价区间分别比较候选与基线的IC和覆盖；inputs引用拼装产物。",
       "config": {
         "inputs": "artifact:final_assemble",
         "output": "assigned",
@@ -657,7 +657,7 @@
     },
     {
       "operation": "statistics-factors",
-      "description": "Calculate native factor inference; undefined small-sample inference must remain undefined. Bind dataset to assembled evidence.",
+      "description": "调用原生因子统计，样本不足时保留未定义推断；dataset引用拼装产物。",
       "config": {
         "dataset": "artifact:final_assemble",
         "output": "assigned",
@@ -760,7 +760,7 @@
     },
     {
       "operation": "predict",
-      "description": "Predict on the later development dates. Bind model to fitted-model evidence and inputs to assembled evidence.",
+      "description": "在最终评价区间预测；model引用已拟合模型，inputs引用拼装产物。",
       "config": {
         "model": "artifact:model",
         "inputs": "artifact:final_assemble",
@@ -775,7 +775,7 @@
     },
     {
       "operation": "backtest",
-      "description": "Run the native A-share share-account backtest including fees. Bind predictions.0.path to prediction evidence. Keep initial cash, costs and selection rule fixed.",
+      "description": "调用原生A股股数账户回测并计入费用；predictions.0.path引用预测产物，初始资金、费用和选择规则保持固定。",
       "config": {
         "candidate": {
           "candidate_id": "agent_candidate",
@@ -840,7 +840,7 @@
     {
       "name": "final_curve",
       "operation": "plot",
-      "description": "Render the final native account curve from its saved ledger.",
+      "description": "从已保存的最终评价账本绘制账户净值曲线。",
       "parameters": {},
       "metrics": {},
       "config": {

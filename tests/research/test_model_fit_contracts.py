@@ -78,7 +78,7 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
         )
 
 
-def test_training_retention_preserves_all_legal_rows_and_same_day_order():
+def test_training_retention_preserves_all_legal_rows_in_canonical_key_order():
     chunk_rows = 5
     spec = ModelSpec(
         model_id="linear",
@@ -107,7 +107,9 @@ def test_training_retention_preserves_all_legal_rows_and_same_day_order():
         fitting_cutoff="2017-12-31",
     )
     pd.testing.assert_frame_equal(
-        prepared.training, expected.reset_index(drop=True), check_exact=True
+        prepared.training,
+        expected.sort_values(["timestamp", "asset_id"], ignore_index=True),
+        check_exact=True,
     )
 
 

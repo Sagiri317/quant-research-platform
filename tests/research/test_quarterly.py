@@ -45,7 +45,7 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
     frame.to_parquet(inputs, index=False)
     results = run_quarterly(
         {
-            "inputs": str(inputs),
+            "inputs": {"path": str(inputs), "spec": input_spec()},
             "output": str(tmp_path / "rolling"),
             "market_id": "a_share",
             "models": [fit_config(tmp_path, inputs)["model"]],
@@ -53,7 +53,6 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
             "rolling_window": {"start": "2020-04-01", "end": "2020-09-30"},
             "evaluation_cutoff": "2020-10-01",
             "label_unit": "decimal_return",
-            "input_spec": input_spec(),
             "evaluation": {
                 "evaluation_id": "quarterly",
                 "market_id": "a_share",

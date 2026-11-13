@@ -20,7 +20,6 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import (
-    canonical_json_hash,
     render_qrp_json_object,
 )
 from quant_research_platform.storage.datasets.paths import relative_partition_label
@@ -33,8 +32,10 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     filesystem_stat,
-    filesystem_write_text,
     native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_write_text,
 )
 
 
@@ -234,7 +235,6 @@ def _write_runtime_manifest(
         if "timestamp" in frame
         else pd.Series(dtype="datetime64[ns]")
     )
-    primary_key = list(spec["primary_key"])
     logical_dtypes = logical_dtype_payload_from_frame(
         frame.loc[:, list(spec["required_columns"])]
     )
@@ -242,7 +242,6 @@ def _write_runtime_manifest(
         "schema_id": "qrp-dataset-manifest",
         "columns": list(physical_schema_columns(first_schema)),
         "physical_schema": first_schema,
-        "schema_hash": canonical_json_hash(first_schema),
         "logical_dtypes": logical_dtypes,
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
         "partition_count": len(partition_row_counts),
@@ -256,11 +255,6 @@ def _write_runtime_manifest(
         "date_max": None
         if timestamp_values.empty
         else timestamp_values.max().date().isoformat(),
-        "null_count_summary": {
-            column: int(frame[column].isna().sum()) for column in primary_key
-        },
-        "non_finite_count_summary": {},
-        "duplicate_primary_key_count": int(frame.duplicated(primary_key).sum()),
         "factor_nan_profile": {},
         "label_nan_profile": {},
     }

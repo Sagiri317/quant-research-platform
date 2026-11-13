@@ -139,7 +139,7 @@ def test_weighted_scaler_finite_population_bound(half_life):
 
 @pytest.mark.parametrize("index_start", [None, 0, 1000])
 def test_standardized_residual_preserves_index_and_units(index_start):
-    from quant_research_platform.research.features.transforms import (
+    from quant_research_platform.compute.dataframe.cross_section import (
         _industry_size_residuals,
     )
 

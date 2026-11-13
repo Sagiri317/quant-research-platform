@@ -63,8 +63,7 @@ def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
     source = tmp_path / "future.parquet"
     config = {
         "model": str(case.root),
-        "inputs": str(source),
-        "input_spec": case.config["input_spec"],
+        "inputs": {"path": str(source), "spec": case.config["inputs"]["spec"]},
         "prediction_window": {"start": "2020-01-04", "end": None},
         "sample_role": "validation",
     }
@@ -152,8 +151,7 @@ def test_open_prediction_preserves_nanoseconds_in_filter_and_saved_extent(tmp_pa
     frame.drop(columns=["label", "label_available_at"]).to_parquet(source, index=False)
     config = {
         "model": str(case.root),
-        "inputs": str(source),
-        "input_spec": case.config["input_spec"],
+        "inputs": {"path": str(source), "spec": case.config["inputs"]["spec"]},
         "prediction_window": {"start": stamps[3].isoformat(), "end": None},
         "sample_role": "validation",
         "output": str(tmp_path / "prediction"),
@@ -190,17 +188,32 @@ def test_selected_refit_predicts_open_windows_for_any_purpose(tmp_path):
             "selection": str(selection),
         }
     )
-    future = pd.read_parquet(config["labels"])
+    premature = tmp_path / "premature-refit"
+    with pytest.raises(ValueError, match="^refit_selection_mismatch$"):
+        fit(
+            {
+                **case.config,
+                "inputs": config["labels"],
+                "output": str(premature),
+                "fit_windows": [{"start": "2020-01-01", "end": "2020-01-05"}],
+                "fit_cutoff": "2020-01-05",
+                "selection": str(selection),
+            }
+        )
+    assert not premature.exists()
+    future = pd.read_parquet(config["labels"]["path"])
     future["timestamp"] += pd.Timedelta(days=6)
     future["label_available_at"] += pd.Timedelta(days=6)
-    future.to_parquet(config["labels"], index=False)
+    future.to_parquet(config["labels"]["path"], index=False)
     for role in ("test", "validation", "later_research"):
         actual, metadata = read_predictions(
             predict(
                 {
                     "model": str(final),
-                    "inputs": config["labels"],
-                    "input_spec": case.config["input_spec"],
+                    "inputs": {
+                        "path": config["labels"]["path"],
+                        "spec": case.config["inputs"]["spec"],
+                    },
                     "output": str(tmp_path / role),
                     "prediction_window": {"start": "2020-01-07", "end": None},
                     "sample_role": role,
@@ -213,12 +226,29 @@ def test_selected_refit_predicts_open_windows_for_any_purpose(tmp_path):
         assert actual.timestamp.max() == pd.Timestamp("2020-01-12")
         expected = actual.asset_id.map({"a": 0.1, "b": 0.2, "c": 0.3})
         np.testing.assert_allclose(actual.prediction_score, expected, rtol=1e-12)
-    with pytest.raises(ValueError, match="prediction_must_follow_fit_cutoff"):
+    empty, empty_metadata = read_predictions(
         predict(
             {
                 "model": str(final),
                 "inputs": config["labels"],
-                "input_spec": case.config["input_spec"],
+                "output": str(tmp_path / "empty"),
+                "prediction_window": {"start": "2020-01-13", "end": None},
+            }
+        )
+    )
+    assert empty.empty and empty_metadata["status"] == "empty"
+    for cutoff in ("fit_cutoff", "selection_cutoff"):
+        assert pd.Timestamp(empty_metadata["model_facts"][cutoff]) == pd.Timestamp(
+            "2020-01-06"
+        )
+    with pytest.raises(ValueError, match="prediction_must_follow_fit_cutoff"):
+        predict(
+            {
+                "model": str(final),
+                "inputs": {
+                    "path": config["labels"]["path"],
+                    "spec": case.config["inputs"]["spec"],
+                },
                 "output": str(tmp_path / "overlap"),
                 "prediction_window": {"start": "2020-01-06", "end": None},
             }

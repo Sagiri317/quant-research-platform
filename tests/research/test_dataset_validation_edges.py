@@ -22,7 +22,7 @@ def test_direct_consumers_require_actual_declared_inputs(tmp_path, operation, ca
 
     source = data(tmp_path)
     config = fit_config(tmp_path, source)
-    declared = config["input_spec"]
+    declared = config["inputs"]["spec"]
     if case == "undeclared_input":
         del declared["column_roles"]["x"]
     elif case == "wrong_input_role":
@@ -42,8 +42,7 @@ def test_direct_consumers_require_actual_declared_inputs(tmp_path, operation, ca
     else:
         run = evaluate
         config = {
-            "inputs": str(source),
-            "input_spec": declared,
+            "inputs": {"path": str(source), "spec": declared},
             "output": str(tmp_path / "evaluation"),
             "evaluation": {
                 "evaluation_id": "declared-inputs",
@@ -133,15 +132,14 @@ def test_evaluation_key_validation_has_one_owner_per_invariant(
         return original_add(self, table, **kwargs)
 
     monkeypatch.setattr(ExactPrimaryKeyIndex, "add_table", observed_add)
-    original_chunks = runner.iter_dataset_chunks
+    original_chunks = runner.iter_dataset_time_chunks
     monkeypatch.setattr(
         runner,
-        "iter_dataset_chunks",
-        lambda session: original_chunks(session, batch_rows=1),
+        "iter_dataset_time_chunks",
+        lambda session, **kwargs: original_chunks(session, batch_rows=1, **kwargs),
     )
     config = dict(
-        inputs=str(source),
-        input_spec=spec,
+        inputs={"path": str(source), "spec": spec},
         output=str(tmp_path / "evaluation"),
         window={"start": dates[0].isoformat(), "end": dates[-1].isoformat()},
         cutoff="2024-01-02",

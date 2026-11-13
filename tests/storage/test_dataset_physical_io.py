@@ -26,10 +26,12 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_rename,
-    filesystem_write_bytes,
     native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_glob,
+    filesystem_write_bytes,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -46,14 +48,10 @@ def test_writer_rejects_mixed_incompatible_category_values(tmp_path: Path) -> No
         write_dataset(root, frame, spec=make_processed_dataset_spec("mixed_category"))
 
 
-@pytest.mark.parametrize("ordered", (False, True))
+@pytest.mark.parametrize("ordered", [False, True])
 @pytest.mark.parametrize(
     "categories",
-    (
-        [1, 2, 3],
-        pd.date_range("2020-01-01", periods=3, tz="America/New_York"),
-        pd.date_range("2020-01-01", periods=3, tz="America/New_York").as_unit("ns"),
-    ),
+    ([1, 2, 3],),
 )
 def test_nonstring_categorical_native_roundtrip(tmp_path, categories, ordered):
     frame = make_default_dataset_frame()
@@ -423,7 +421,6 @@ def test_physical_filter_rejects_invalid_operator_and_values(
 @pytest.mark.parametrize(
     ("mutation", "error"),
     (
-        ({"duplicate_primary_key_count": 999}, "manifest_summary_count_invalid"),
         ({"date_min": None, "date_max": None}, "manifest_date_range_invalid"),
         (
             {"date_min": "2099-01-01", "date_max": "2099-12-31"},

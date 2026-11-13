@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import sys
+from fnmatch import fnmatchcase
 from pathlib import Path
 from xml.etree import ElementTree
 from zipfile import ZipFile
@@ -47,15 +48,29 @@ TOOLS = {
     ),
 }
 
+_SECRET_PATH_PATTERNS = (
+    ".git",
+    "__pycache__",
+    ".ssh",
+    "ssh",
+    "private.log",
+    ".env*",
+    "*credential*",
+    "*secret*",
+    "*activation*",
+    "*license*",
+    "*apikey*",
+    "*api_key*",
+    "*api-key*",
+    "*token.json*",
+)
+
 
 def _secret(path):
     return any(
-        part in {".git", "__pycache__", ".ssh", "ssh", "private.log"}
-        or part.startswith(".env")
-        or re.search(
-            r"credential|secret|activation|license|api[_-]?key|token\.json", part
-        )
+        fnmatchcase(part, pattern)
         for part in (item.casefold() for item in path.parts)
+        for pattern in _SECRET_PATH_PATTERNS
     )
 
 
@@ -124,9 +139,9 @@ def read_local(arguments, state, root):
         if (path / "spec.json").is_file() and (
             path / "_manifest" / "manifest.json"
         ).is_file():
-            from quant_research_platform.agents.protocol import sandbox_context
+            from quant_research_platform.agents.protocol import dataset_context
 
-            result["dataset"] = sandbox_context({"data": path})["data"]
+            result["dataset"] = dataset_context({"data": path})["data"]
         return result
     suffix = path.suffix.casefold()
     if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}:
@@ -253,28 +268,9 @@ def search_local(arguments, state, root, *, timeout):
         arguments, {"query"}, {"scope", "path", "files", "offset", "limit"}
     )
     path = local_path(arguments.get("path", "."), state)
-    args = [
-        "rg",
-        "--hidden",
-        "--path-separator",
-        "/",
-        "-g",
-        "!.git",
-        "-g",
-        "!.env*",
-        "-g",
-        "!*credential*",
-        "-g",
-        "!*secret*",
-        "-g",
-        "!*activation*",
-        "-g",
-        "!*license*",
-        "-g",
-        "!private.log",
-        "-g",
-        "!__pycache__",
-    ]
+    args = ["rg", "--hidden", "--path-separator", "/"]
+    for pattern in _SECRET_PATH_PATTERNS:
+        args.extend(("--iglob", f"!{pattern}"))
     if arguments.get("files", False):
         args += ["--files", "--no-ignore", "."]
     else:
@@ -305,7 +301,6 @@ def search_local(arguments, state, root, *, timeout):
             line
             for line in text.splitlines()
             if arguments["query"].casefold() in line.casefold()
-            and not _secret(Path(line))
         )
     prefix = (
         arguments.get("path", ".").replace("\\", "/").rstrip("/").removeprefix("./")

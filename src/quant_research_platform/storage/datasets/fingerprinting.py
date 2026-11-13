@@ -15,7 +15,6 @@ import pyarrow as pa
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
@@ -29,6 +28,7 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.datasets.types import DatasetFingerprint
 from quant_research_platform.storage.exact_keys import _append_arrow_scalar_payload
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 def fingerprint_dataset(
@@ -171,11 +171,7 @@ def _iter_fingerprint_hashes(
 ):
     """Hash one streamed batch; exact comparison remains the final authority."""
     if arrow_schema is not None and any(
-        pa.types.is_nested(arrow_schema.field(column).type)
-        or (
-            column in primary_key
-            and pa.types.is_floating(arrow_schema.field(column).type)
-        )
+        column in primary_key and pa.types.is_floating(arrow_schema.field(column).type)
         for column in frame.columns
         if column in arrow_schema.names
     ):

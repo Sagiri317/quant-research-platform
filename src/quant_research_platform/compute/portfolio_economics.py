@@ -2,7 +2,25 @@
 
 from math import fsum, isfinite
 
+import numpy as np
+
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
+
+
+def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
+    """Bound ordinary NAV-ratio roundoff in dimensionless return units."""
+    before = np.asarray(start, dtype="float64")
+    after = np.asarray(end, dtype="float64")
+    data = np.asarray(returns, dtype="float64")
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        tolerance = (
+            4 * np.finfo(float).eps * (np.abs(after / before) + np.abs(data) + 1)
+        )
+    return np.where(
+        (before > 0) & np.isfinite(before) & np.isfinite(after) & np.isfinite(data),
+        tolerance,
+        np.inf,
+    )
 
 
 def cash_equity_positions(rows):

@@ -37,7 +37,8 @@ def test_daily_equal_weight_metrics_pairing_and_missing_clock(tmp_path):
         config = fit_config(tmp_path, inputs, model_id=name)
         if name == "constant":
             config["model"]["input_feature_columns"] = ["constant"]
-        config.update(input_spec=declaration, fit_cutoff=f"2020-01-0{last}T23:59:59")
+        config["inputs"]["spec"] = declaration
+        config.update(fit_cutoff=f"2020-01-0{last}T23:59:59")
         config["fit_windows"][0]["end"] = f"2020-01-0{last}"
         model = fit(config)
         predictions[name] = [
@@ -45,8 +46,7 @@ def test_daily_equal_weight_metrics_pairing_and_missing_clock(tmp_path):
                 predict(
                     {
                         "model": str(model),
-                        "inputs": str(inputs),
-                        "input_spec": declaration,
+                        "inputs": {"path": str(inputs), "spec": declaration},
                         "prediction_window": {
                             "start": "2020-01-04",
                             "end": "2020-01-06",
@@ -817,3 +817,97 @@ def test_common_metric_families_match_errors_without_using_inapplicable_candidat
     assert common["a"].loc["mse", "observation_count"] == 3
     assert common["a"].loc["ic", "observation_count"] == 6
     assert common["inapplicable"].loc["mse", "reason"] == "no_observations"
+
+
+@pytest.mark.parametrize("axis", ["single_asset_time_series", "cross_sectional"])
+def test_evaluation_assets_are_intersected_before_materialization(
+    tmp_path, monkeypatch, axis
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.storage.datasets import reading, write_dataset
+
+    times = pd.date_range("2024-01-03T01:30", periods=5, freq="3s").as_unit("ns")
+    frame = pd.DataFrame(
+        {
+            "timestamp": np.repeat(times, 4),
+            "asset_id": list("abcd") * len(times),
+            "eligible": True,
+            "label": np.arange(20, dtype=float) / 1000,
+            "factor": np.arange(20, dtype=float),
+        }
+    )
+    frame["label_available_at"] = frame.timestamp
+    frame.loc[1, "label"] = np.nan
+    frame.loc[6, "factor"] = np.nan
+    frame.loc[13, "eligible"] = False
+    roles = {
+        "timestamp": "timestamp",
+        "asset_id": "key",
+        "eligible": "universe",
+        "label": "label",
+        "factor": "factor",
+        "label_available_at": "context",
+    }
+    spec = DataSpec(
+        data_id="evaluation_domain",
+        frequency="tick",
+        grain="asset_timestamp",
+        column_roles=roles,
+        primary_key=("timestamp", "asset_id"),
+        partition_columns=("year",),
+        label_availability_columns={"label": "label_available_at"},
+    )
+    original = tmp_path / "inputs"
+    narrowed = tmp_path / "selected"
+    selected = frame.loc[frame.asset_id.isin(["b", "c"])].reset_index(drop=True)
+    write_dataset(original, frame, spec=spec)
+    write_dataset(narrowed, selected, spec=spec)
+    config = {
+        "inputs": {
+            "path": str(original),
+            "row_filters": [["asset_id", "in", ["a", "b", "c"]]],
+        },
+        "predictions": {},
+        "factor_columns": ["factor"],
+        "label": "label",
+        "window": {"start": "2024-01-03", "end": "2024-01-03"},
+        "cutoff": "2024-01-03T23:59:59",
+        "sessions": ["2024-01-03"],
+        "asset_ids": ["b", "c", "d"],
+        "evaluation_axis": axis,
+        "comparison_groups": {},
+        "inference_groups": {"factors": ["factor"]},
+        "statistics": {
+            "hac_lag": 0,
+            "block_size": 1,
+            "repetitions": 10,
+            "seed": 4,
+            "confidence": 0.95,
+            "fdr_method": "BY",
+            "alpha": 0.05,
+        },
+        "output": str(tmp_path / "evaluation"),
+    }
+    consumed = []
+    batches = reading.iter_dataset_file_batches
+
+    def observe(session, **kwargs):
+        for path, chunk in batches(session, **kwargs):
+            if session.root == original:
+                consumed.extend(chunk.asset_id)
+            yield path, chunk
+
+    monkeypatch.setattr(reading, "iter_dataset_file_batches", observe)
+    actual = evaluate_time_series(config)
+    expected = evaluate_time_series(
+        {
+            **config,
+            "inputs": str(narrowed),
+            "output": str(tmp_path / "reference"),
+        }
+    )
+    assert consumed == selected.asset_id.tolist()
+    for name in ("daily", "summary", "inference"):
+        pd.testing.assert_frame_equal(
+            read_dataset(actual / name), read_dataset(expected / name)
+        )

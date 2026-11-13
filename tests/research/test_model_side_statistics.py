@@ -66,16 +66,14 @@ def prediction_case(tmp_path_factory):
     prediction = predict(
         {
             "model": str(fitted.root),
-            "inputs": str(source),
-            "input_spec": fitted.config["input_spec"],
+            "inputs": {"path": str(source), "spec": fitted.config["inputs"]["spec"]},
             "asset_ids": list("abcdefghijk"),
             "prediction_window": window,
             "output": str(root / "prediction"),
         }
     )
     return {
-        "dataset": str(source),
-        "input_spec": fitted.config["input_spec"],
+        "dataset": {"path": str(source), "spec": fitted.config["inputs"]["spec"]},
         "window": window,
         "family_ids": ["timestamp"],
         "evaluation": {
@@ -197,12 +195,12 @@ def test_model_side_hac_uses_each_metric_series_and_shared_daily_clock(
     tmp_path, prediction_case
 ):
     config = deepcopy(prediction_case)
-    labels = pd.read_parquet(config["dataset"])
+    labels = pd.read_parquet(config["dataset"]["path"])
     positive = labels.timestamp.isin(pd.to_datetime(["2020-01-05", "2020-01-07"]))
     labels.loc[positive & labels.asset_id.eq("h"), "label"] = 0.0
     source = tmp_path / "varying-labels.parquet"
     labels.to_parquet(source, index=False)
-    config["dataset"] = str(source)
+    config["dataset"]["path"] = str(source)
     artifact = _run(tmp_path, config, quantile=0.4)
     with artifact.table("prediction_diagnostics.parquet") as rows:
         row = rows.iloc[0]

@@ -124,8 +124,7 @@ def test_other_market_comparison_intersects_exact_keys_without_mutating_full_out
     config = {
         "predictions": [str(path) for path in paths],
         "candidate_ids": ["left", "right"],
-        "labels": str(labels),
-        "label_spec": cases[0].config["input_spec"],
+        "labels": {"path": str(labels), "spec": cases[0].config["inputs"]["spec"]},
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": window["end"],

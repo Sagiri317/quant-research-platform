@@ -8,10 +8,6 @@ from pathlib import Path
 from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
-from quant_research_platform.contracts.models import (
-    validate_model_facts,
-    validate_model_metadata_core,
-)
 from quant_research_platform.research.models.fitting import (
     ModelFitResult,
 )
@@ -21,15 +17,11 @@ from quant_research_platform.storage.atomic import (
 )
 
 
-def save_model(path: Path, result: ModelFitResult, *, facts: dict, trial: dict) -> Path:
+def save_model(
+    path: Path, result: ModelFitResult, *, facts: dict, trial_id: str
+) -> Path:
     """Publish one already-fitted predictor and its scientific facts atomically."""
-    metadata = validate_model_metadata_core(result.metadata)
-    validate_model_facts(facts, metadata)
-    if (
-        trial.get("status") != "completed"
-        or trial.get("result", {}).get("model_metadata") != metadata
-    ):
-        raise ValueError("completed_model_trial_required")
+    metadata = result.metadata
     path = Path(path)
 
     def write(staging):
@@ -39,7 +31,7 @@ def save_model(path: Path, result: ModelFitResult, *, facts: dict, trial: dict) 
             )
         atomic_write_json(
             staging / "model.json",
-            {"model_metadata": metadata, "facts": facts, "trial_id": trial["trial_id"]},
+            {"model_metadata": metadata, "facts": facts, "trial_id": trial_id},
         )
 
     atomic_write_directory(path, write)

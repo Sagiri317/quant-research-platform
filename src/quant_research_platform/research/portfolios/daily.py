@@ -1719,16 +1719,6 @@ def _build_session(
     if missing_panel:
         raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
     decision_panel = panel.set_index("asset_id")
-    decision_markets, market_by_asset = (
-        {
-            str(asset): market_name_for_type(market_type)
-            for asset, market_type in frame.market_type.astype("Int64")
-            .reindex(assets)
-            .items()
-            if pd.notna(market_type)
-        }
-        for frame in (decision_panel, execution_panel)
-    )
     decision_adv, adv = (
         pd.Series(
             {
@@ -1753,14 +1743,6 @@ def _build_session(
     )
     for column in masks:
         masks[column].loc[masks[column].index.intersection(missing_assets)] = False
-    prepared = {
-        (market, side): prepare_trade_cost(
-            next_timestamp.date(), market, side, fee_schedule, assumptions
-        )
-        for market in set(market_by_asset.values()) | set(decision_markets.values())
-        for side in ("buy", "sell")
-    }
-
     execution_cash = cash + recovery_cash
     entry = execution_panel.reindex(assets)
     required = held_units.reindex(assets, fill_value=0.0).ne(0)
@@ -1817,11 +1799,30 @@ def _build_session(
         assets_frame["can_exit"] = ~unavailable
         assets_frame.loc[unavailable, "expected_alpha"] = 0.0
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
+        decision_markets = {
+            str(asset): market_name_for_type(market_type)
+            for asset, market_type in decision_panel.market_type.astype("Int64")
+            .reindex(assets)
+            .items()
+            if pd.notna(market_type)
+        }
         market_masks = {
-            market: assets_frame["asset_id"].map(decision_markets).eq(market).to_numpy()
+            market: (
+                assets_frame["asset_id"].map(decision_markets).eq(market).to_numpy()
+                & np.isfinite(adv_values)
+                & (adv_values > 0)
+            )
             for market in set(decision_markets.values())
         }
 
+        prepared = {
+            (market, side): prepare_trade_cost(
+                next_timestamp.date(), market, side, fee_schedule, assumptions
+            )
+            for market, active in market_masks.items()
+            if active.any()
+            for side in ("buy", "sell")
+        }
         cost_prices = assets_frame.asset_id.map(decision_panel.close).to_numpy()
         cost_face_values = (
             assets_frame.asset_id.map(decision_panel.face_value_per_share).to_numpy()
@@ -1834,8 +1835,7 @@ def _build_session(
             gradients = []
             for side, notionals in (("buy", buys), ("sell", sells)):
                 gradient = np.zeros(len(notionals), dtype="float64")
-                for market, market_mask in market_masks.items():
-                    active = market_mask & np.isfinite(adv_values) & (adv_values > 0)
+                for market, active in market_masks.items():
                     if active.any():
                         costs, gradient[active] = prepared[
                             market, side

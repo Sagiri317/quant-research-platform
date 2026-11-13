@@ -1,4 +1,4 @@
-"""Independent synthetic review counterexamples, without private source rows."""
+"""Share valuation, corporate actions, costs and paired inference."""
 
 from dataclasses import replace
 

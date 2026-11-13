@@ -91,42 +91,53 @@ def test_unselected_unheld_bad_cells_preserve_independent_account(
 
 
 @pytest.mark.parametrize(
-    "cap",
+    "cap,dtype,construction",
     [
-        -1.0,
-        0.0,
-        np.inf,
-        np.nan,
-        "unavailable",
-        True,
-        np.bool_(False),
-        1 + 2j,
-        pd.Timestamp("2024-01-01"),
-        pd.Timedelta(days=1),
-    ],
+        (cap, dtype, "quantile_float_cap")
+        for dtype, values in (
+            ("float64", [-1.0, 0.0, np.inf, np.nan]),
+            (
+                "object",
+                [
+                    -1.0,
+                    0.0,
+                    np.inf,
+                    np.nan,
+                    "unavailable",
+                ],
+            ),
+        )
+        for cap in values
+    ]
+    + [(np.nan, "float64", "quantile_equal_weight")],
 )
-def test_unavailable_selected_cap_preserves_independent_proven_exit(cap):
+def test_unavailable_selected_cap_blocks_only_dependent_target_and_keeps_exit(
+    cap, dtype, construction
+):
     args = _decision_inputs()
     args["enhanced_decision"] = None
     args["candidate"] = replace(
         args["candidate"],
-        construction="quantile_float_cap",
+        construction=construction,
         benchmark_id=None,
         top_quantile=1.0,
         risk_style_columns=(),
     )
     args["dataset"]["float_market_cap"] = args["dataset"]["float_market_cap"].astype(
-        object
+        dtype
     )
     args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = cap
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
     account, _, _, _, ledger = daily._build_session(**args)
-    assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
-    assert account.post_trade_cash == 50.0
-    assert (
-        ledger.attrs["decision_availability"]["decision_skip_reason"]
-        == "target_float_market_cap_missing"
-    )
+    availability = ledger.attrs["decision_availability"]
+    if construction == "quantile_float_cap":
+        assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
+        assert account.post_trade_cash == 50.0
+        assert availability["decision_skip_reason"] == "target_float_market_cap_missing"
+    else:
+        assert ledger.executed_delta_notional.tolist() == [50.0, -50.0]
+        assert account.post_trade_cash == 0.0
+        assert availability["decision_status"] == "AVAILABLE"
 
 
 def test_alpha_window_uses_complete_252_session_clock_and_mature_labels():

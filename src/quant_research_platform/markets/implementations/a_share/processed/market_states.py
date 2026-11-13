@@ -6,6 +6,7 @@ from dataclasses import replace
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors.market_structure import (
     FACTOR_UNITS as STRUCTURE_UNITS,
@@ -92,15 +93,22 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     selected = tuple(
         name for name, role in spec.column_roles.items() if role == "factor"
     )
+    signals = pd.DatetimeIndex(base.signal_session.dropna().unique())
     for source in dict.fromkeys(SOURCES[name] for name in selected):
         fields = tuple(name for name in selected if SOURCES[name] == source)
         session = open_dataset_session(
             **_dataset_input_options(inputs[source])
         ).projected_view(("timestamp", *fields))
         chunks = []
-        with closing_iterator(iter_dataset_chunks(session)) as frames:
-            for frame in frames:
-                chunks.append(frame.drop_duplicates("timestamp"))
+        if not signals.empty:
+            session = session.filtered_view(TimeWindow(signals.min(), signals.max()))
+            with closing_iterator(iter_dataset_chunks(session)) as frames:
+                for frame in frames:
+                    chunks.append(
+                        frame.loc[frame.timestamp.isin(signals)].drop_duplicates(
+                            "timestamp"
+                        )
+                    )
         values = (
             pd.concat(chunks, ignore_index=True)
             .drop_duplicates("timestamp")

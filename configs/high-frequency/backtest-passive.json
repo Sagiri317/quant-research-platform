@@ -1,4 +1,5 @@
 {
+  "candidate_id": "hft_passive",
   "panel": "data/processed/a_share/hft_panel",
   "predictions": ["results/hft/predictions"],
   "fee_schedule": "data/processed/a_share/fee_schedule",

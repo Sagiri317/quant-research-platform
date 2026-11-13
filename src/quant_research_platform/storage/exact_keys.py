@@ -398,64 +398,6 @@ def _append_arrow_scalar_payload(
         sink.extend(format(decimal, "f").encode("ascii"))
     elif pa.types.is_date(data_type):
         sink.extend(pd.Timestamp(value.as_py()).date().isoformat().encode("ascii"))
-    elif pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
-        for item in value.values:
-            _append_arrow_scalar_payload(
-                sink,
-                item,
-                data_type.value_type,
-                allow_null=allow_null,
-                allow_nonfinite=allow_nonfinite,
-                normalize_float_zero=normalize_float_zero,
-            )
-    elif pa.types.is_fixed_size_list(data_type):
-        for item in value.values:
-            _append_arrow_scalar_payload(
-                sink,
-                item,
-                data_type.value_type,
-                allow_null=allow_null,
-                allow_nonfinite=allow_nonfinite,
-                normalize_float_zero=normalize_float_zero,
-            )
-    elif pa.types.is_struct(data_type):
-        for field in data_type:
-            field_name = field.name.encode("utf-8")
-            field_length_offset, field_payload_start = _start_frame(sink, field_name)
-            _append_arrow_scalar_payload(
-                sink,
-                value[field.name],
-                field.type,
-                allow_null=allow_null,
-                allow_nonfinite=allow_nonfinite,
-                normalize_float_zero=normalize_float_zero,
-            )
-            _finish_frame(sink, field_length_offset, field_payload_start)
-    elif pa.types.is_map(data_type):
-        entries = []
-        for entry in value.values:
-            key, item = (bytearray(), bytearray())
-            _append_arrow_scalar_payload(
-                key,
-                entry["key"],
-                data_type.key_type,
-                allow_nonfinite=allow_nonfinite,
-                normalize_float_zero=normalize_float_zero,
-            )
-            _append_arrow_scalar_payload(
-                item,
-                entry["value"],
-                data_type.item_type,
-                allow_null=allow_null,
-                allow_nonfinite=allow_nonfinite,
-                normalize_float_zero=normalize_float_zero,
-            )
-            entries.append((key, item))
-        for key, item in sorted(entries):
-            offset, start = _start_frame(sink, b"entry")
-            sink.extend(key)
-            sink.extend(item)
-            _finish_frame(sink, offset, start)
     else:
         raise ValueError("invalid_dataset_primary_key_value")
     _finish_frame(sink, length_offset, payload_start)

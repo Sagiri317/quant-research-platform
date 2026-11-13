@@ -50,7 +50,6 @@ def test_manifest_actual_model_and_paths(tmp_path):
         ("effective_prediction_end", "NaT"),
         ("sample_role", ""),
         ("prediction_rows", True),
-        ("scope", "LOCAL_ONLY"),
         ("model_id", "another-model"),
         ("family_id", "another-family"),
         ("label_unit", "another-unit"),
@@ -160,3 +159,18 @@ def test_writer_collision_preserves_bytes_and_closes_unconsumed_source(tmp_path)
         )
     assert source.closed
     assert {p.name: p.read_bytes() for p in root.iterdir()} == before
+
+
+@pytest.mark.parametrize(
+    "field,value", [("input_spec", {"unused": True}), ("scope", "notes-only")]
+)
+def test_prediction_ignores_unconsumed_extra_metadata(tmp_path, field, value):
+    root, frame, _ = native_bundle(tmp_path)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert "input_spec" not in manifest["metadata"]
+    manifest["metadata"][field] = value
+    manifest_path.write_text(json.dumps(manifest))
+    actual, metadata = read_predictions(root)
+    assert metadata[field] == value
+    pd.testing.assert_frame_equal(actual, frame, check_dtype=False, check_exact=True)

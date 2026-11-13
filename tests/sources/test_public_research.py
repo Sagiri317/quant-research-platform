@@ -1346,6 +1346,7 @@ def test_release_clock_requires_explicit_timezone(tmp_path, clock, error):
         "calendar_timezone",
         "calendar_missing",
         "calendar_unrelated_source",
+        "calendar_duplicate",
     ],
 )
 def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_column):
@@ -1369,7 +1370,7 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
     clocks = None
     if clock_column.startswith("calendar_"):
         clocks = raw / "clocks.csv"
-        pd.DataFrame(
+        clock_rows = pd.DataFrame(
             {
                 "source": [
                     "cboe_put_call_extracted",
@@ -1397,7 +1398,10 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
                 "availability_basis": ["source_release"] * 2,
                 "evidence_url": ["https://example.org/rule"] * 2,
             }
-        ).to_csv(clocks, index=False)
+        )
+        if clock_column == "calendar_duplicate":
+            clock_rows = pd.concat([clock_rows, clock_rows.iloc[[-1]]])
+        clock_rows.to_csv(clocks, index=False)
     else:
         field = (
             "publication_date"
@@ -1449,6 +1453,8 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
         if clock_column == "calendar_missing"
         else "Unknown datetime string"
         if clock_column == "invalid_publication_date"
+        else "public_release_clock_duplicate"
+        if clock_column == "calendar_duplicate"
         else "public_release_clock_precedes_dependency"
     )
     with pytest.raises(ValueError, match=error):

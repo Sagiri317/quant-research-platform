@@ -25,11 +25,13 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_unlink,
     filesystem_walk,
-    filesystem_write_text,
     native_filesystem_path,
 )
 from tests.helpers.choice_raw import SDK, choice_session, response, write_css
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import (
+    StorageLayout,
+    filesystem_write_text,
+)
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 DATE_FIELDS = ("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE")
@@ -457,6 +459,103 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
                 .all()
                 .all()
             )
+
+
+@pytest.mark.parametrize("field", DATE_FIELDS)
+def test_complete_disclosure_accepts_consistent_partial_coordinates(tmp_path, field):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+        write_css(
+            session,
+            layout,
+            period="2019-12-31",
+            end_date="2025-01-01",
+            indicators=(field,),
+            data={CODE: ["2020/1/30" if field == "STMTACTDATE" else None]},
+        )
+    result = interim.materialize_interim_data(
+        raw_root=layout.raw_source_root("choice"),
+        data_ids=("financial_balance", "financial_first_disclosure"),
+        output_roots={
+            name: layout.interim_data_root("choice", name)
+            for name in ("financial_balance", "financial_first_disclosure")
+        },
+        end_date="2020-02-02",
+    )
+    frames = _read(result)
+    assert frames["financial_balance"].total_assets.tolist() == [100.0]
+    assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
+        pd.Timestamp("2020-01-30")
+    ]
+
+
+@pytest.mark.parametrize(
+    "mode", ["revision", "future_revision", "first_conflict", "coordinate_conflict"]
+)
+def test_partial_disclosure_still_contributes_events_and_conflicts(tmp_path, mode):
+    layout = StorageLayout(tmp_path)
+    field = "STMTACTDATE" if mode == "first_conflict" else "ITEMVALUECHANGEDATE"
+    value = "2020/2/03" if mode == "future_revision" else "2020/2/01"
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+        write_css(
+            session,
+            layout,
+            period="2019-12-31",
+            end_date="2025-01-01",
+            indicators=(field,),
+            data={CODE: [value]},
+        )
+        if mode == "coordinate_conflict":
+            write_css(
+                session,
+                layout,
+                period="2019-12-31",
+                end_date="2025-01-01",
+                indicators=(field, FIELDS[0]),
+                data={CODE: [None, 100.0]},
+            )
+    result = interim.materialize_interim_data(
+        raw_root=layout.raw_source_root("choice"),
+        data_ids=("financial_balance", "financial_first_disclosure"),
+        output_roots={
+            name: layout.interim_data_root("choice", name)
+            for name in ("financial_balance", "financial_first_disclosure")
+        },
+        end_date="2020-02-02",
+    )
+    frames = _read(result)
+    frame = frames["financial_balance"]
+    if mode.endswith("conflict"):
+        assert frame.empty
+        return
+    if mode == "future_revision":
+        assert frame.total_assets.tolist() == [100.0]
+    else:
+        assert frame.total_assets.iloc[0] == 100.0
+        assert pd.isna(frame.total_assets.iloc[1])
+        assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
+    sessions = pd.DatetimeIndex(["2020-01-31", "2020-02-03"])
+    events = construct_ttm_events(
+        financial_events_from_interim(
+            {"financial_balance": frame},
+            frames["financial_first_disclosure"],
+            trading_sessions=sessions,
+        )
+    )
+    pit = _prepare_pit_fundamentals(events.loc[events.metric_id.eq("total_assets")])(
+        _pit_observations(
+            pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions})
+        )
+    )
+    assert pit.value.iloc[0] == 100.0
+    if mode == "revision":
+        assert pd.isna(pit.value.iloc[1])
+    else:
+        assert pit.value.iloc[1] == 100.0
 
 
 @pytest.mark.parametrize("financial", [False, True])

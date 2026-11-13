@@ -827,3 +827,31 @@ def test_alpha_uses_native_normal_carry_endpoints(
     assert restored.status == "DEFINED"
     assert cutoff == "2023-01-06"
     assert saved.final_alpha_calibration == final[0]
+
+
+def test_native_daily_fees_follow_actual_order_side_and_session(tmp_path):
+    layout, roots, _, _ = _native_inputs(
+        tmp_path / "inputs", fault="normal_open", open_assets=0
+    )
+    expected = list(_ledger(layout, roots))
+    assert [len(batch.trades) for batch in expected] == [3, 3, 0, 0]
+    assert all(trade.quantity == 1600 for batch in expected for trade in batch.trades)
+    # The account buys on January 2/3, then holds. Neither a sell fee nor a
+    # January 4/5 fee is an input to these completed share transitions.
+    fees = read_dataset(layout["fees"])
+    restricted = fees.loc[fees.side.eq("buy")].assign(
+        end_date=pd.Timestamp("2023-01-03")
+    )
+    fee_root = tmp_path / "buy-fees"
+    write_dataset(
+        fee_root, restricted, spec=_interim_specs().get("a_share_fee_schedule")
+    )
+    actual = list(_ledger({**layout, "fees": fee_root}, roots))
+    assert actual == expected
+    ledger = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        capital=PortfolioCapital("buy-only", 1e6, "CNY", "cash_equity"),
+        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
+        produce=lambda emit: [emit(batch) for batch in actual],
+    )
+    assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == actual

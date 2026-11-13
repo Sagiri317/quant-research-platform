@@ -6,6 +6,7 @@ import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _compute_ic_and_grouped_label_values,
+    _mean_squared_error,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -124,3 +125,11 @@ def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None
 def test_compute_panel_rejects_invalid_label_columns(labels, expected_error):
     with pytest.raises(ValueError, match=expected_error):
         ComputePanelSpec(signal_columns=("factor",), label_columns=labels)
+
+
+def test_paired_mean_squared_error_has_independent_oracle():
+    # Decimal-return residuals are .01, -.02, .03: mean squared loss is 14 / 30000.
+    assert _mean_squared_error([0.02, -0.03, 0.07], [0.01, -0.01, 0.04]) == (
+        pytest.approx(14 / 30000, rel=1e-14)
+    )
+    assert _mean_squared_error([], []) is None

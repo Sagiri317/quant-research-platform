@@ -47,8 +47,7 @@ def test_validation_loss_uses_observed_history_between_sample_windows(
         predict(
             {
                 "model": str(model_path),
-                "inputs": str(inputs),
-                "input_spec": input_spec(),
+                "inputs": {"path": str(inputs), "spec": input_spec()},
                 "output": str(tmp_path / "pred"),
                 "prediction_window": {
                     "start": f"2020-01-{days[0]:02d}",
@@ -97,7 +96,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     spec = input_spec()
     spec["column_roles"]["episode"] = "context"
     config = fit_config(tmp_path, inputs)
-    config["input_spec"] = spec
+    config["inputs"]["spec"] = spec
     config["model"].update(
         model_algorithm=algorithm,
         hyperparameters={
@@ -181,8 +180,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
         predict(
             {
                 "model": str(fitted),
-                "inputs": str(inputs),
-                "input_spec": spec,
+                "inputs": {"path": str(inputs), "spec": spec},
                 "output": str(tmp_path / "pred"),
                 "prediction_window": window,
             }
@@ -200,8 +198,10 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
         explain(
             {
                 "model": str(fitted),
-                "inputs": str(inputs),
-                "input_spec": {**spec, "column_units": {"label": "decimal_return"}},
+                "inputs": {
+                    "path": str(inputs),
+                    "spec": {**spec, "column_units": {"label": "decimal_return"}},
+                },
                 "output": str(tmp_path / "explanation"),
                 "methods": ["permutation"],
                 "window": window,
@@ -252,7 +252,7 @@ def test_explicit_sequence_groups_and_historical_learning_curve(
     frame["episode"] = (frame.timestamp.dt.day - 1) // 2
     frame.to_parquet(inputs, index=False)
     config = fit_config(tmp_path, inputs)
-    config["input_spec"]["column_roles"]["episode"] = "context"
+    config["inputs"]["spec"]["column_roles"]["episode"] = "context"
     config["model"].update(
         model_algorithm=algorithm,
         hyperparameters={
@@ -293,3 +293,98 @@ def test_explicit_sequence_groups_and_historical_learning_curve(
     config["validation"]["windows"][0]["start"] = "2020-01-03"
     with pytest.raises(ValueError, match="model_validation_training_overlap"):
         fit(config)
+
+
+@pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_disjoint_fit_preserves_observed_gaps_without_consuming_gap_labels(
+    tmp_path, algorithm, grouped
+):
+    from quant_research_platform.contracts.models import _model_spec
+    from quant_research_platform.research.models.production import fit_model
+
+    inputs = data(tmp_path)
+    frame = pd.read_parquet(inputs)
+    frame["x"] += frame.timestamp.dt.day * 10
+    frame["episode"] = frame.timestamp.dt.day.map(
+        {1: "A", 2: "A", 3: "A", 4: "B", 5: "A", 6: "A", 7: "A", 8: "A", 9: "A"}
+    )
+    frame["label_available_at"] = frame.label_available_at.astype(str)
+    gap = frame.timestamp.dt.day.between(3, 5)
+    frame.loc[gap, "eligible"] = False
+    frame.loc[gap, "label"] = np.inf
+    frame.loc[gap, "label_available_at"] = "not-a-label-clock"
+    late = frame.timestamp.dt.day.eq(6) & frame.asset_id.eq("c")
+    frame.loc[late, "label_available_at"] = "2020-01-08"
+    frame.loc[frame.timestamp.dt.day.gt(6), "x"] = np.inf
+    frame.to_parquet(inputs, index=False, row_group_size=2)
+    config = fit_config(tmp_path, inputs)
+    config["inputs"]["spec"]["column_roles"]["episode"] = "context"
+    config["fit_windows"] = [
+        {"start": "2020-01-01", "end": "2020-01-02"},
+        {"start": "2020-01-06", "end": "2020-01-06"},
+    ]
+    config["fit_cutoff"] = "2020-01-06"
+    config["model"].update(
+        model_algorithm=algorithm,
+        hyperparameters={
+            "device": "cpu",
+            "epochs": 1,
+            "hidden_size": 4,
+            "sequence_length": 4,
+            "sequence_group_columns": ["episode"] if grouped else [],
+        },
+    )
+    result, facts = load_model(fit(config))
+    assert facts["fit_windows"] == config["fit_windows"]
+    assert result.metadata["rows_after_input_label_dropna"] == 8
+    assert result.metadata["label_available_max"] == "2020-01-06T00:00:00"
+    expected_mean = (
+        frame.loc[frame.timestamp.dt.day.isin([1, 2, 6]) & ~late]
+        .groupby("timestamp")
+        .x.mean()
+        .mean()
+    )
+    assert result.prediction_model.scaler.mean_ == pytest.approx((expected_mean,))
+    history = result.prediction_model.history
+    for asset in ("a", "b", "c"):
+        assert history.loc[history.asset_id.eq(asset), "timestamp"].dt.day.tolist() == [
+            4,
+            5,
+            6,
+        ]
+    lengths = result.metadata["learning_curve"]["sequence_lengths"]
+    assert lengths["max"] == (2 if grouped else 4)
+    assert lengths["mean"] == pytest.approx((13 if grouped else 17) / 8)
+
+    direct = fit_model(
+        (frame.iloc[start : start + 5] for start in range(0, len(frame), 5)),
+        _model_spec(config["model"]),
+        fit_windows=config["fit_windows"],
+        fit_cutoff=config["fit_cutoff"],
+    )
+    for name, value in result.prediction_model.state.items():
+        np.testing.assert_allclose(
+            value.numpy(), direct.prediction_model.state[name].numpy()
+        )
+
+
+def test_sequence_context_gaps_keep_nanosecond_window_boundaries():
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models.production import _fit_read_windows
+
+    windows = (
+        TimeWindow("2020-01-01", "2020-01-01"),
+        TimeWindow("2020-01-02T00:00:00.000000002", "2020-01-02T00:00:00.000000003"),
+    )
+    reads = tuple(_fit_read_windows(windows, sequence=True))
+    assert reads[0] == (windows[0], False)
+    assert reads[1] == (
+        TimeWindow("2020-01-02T00:00:00", "2020-01-02T00:00:00.000000001"),
+        True,
+    )
+    assert reads[2] == (windows[1], False)
+    assert tuple(_fit_read_windows(windows, sequence=False)) == (
+        (windows[0], False),
+        (windows[1], False),
+    )

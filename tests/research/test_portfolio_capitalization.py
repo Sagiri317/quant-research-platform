@@ -522,9 +522,7 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
     artifact = read_portfolio_ledger_artifact(backtest(config))
     assert list(artifact.iter_chunks())
     assert artifact.metadata["candidate"]["size_cap_column"] == "total_market_cap"
-    assert artifact.metadata["risk_config"]["weight_column"] == column
-    assert artifact.metadata["risk_config"]["weighting"] == "sqrt_cap"
-
+    assert "risk_config" not in artifact.metadata
     assert artifact.metadata["risk_model"] == model.to_dict()
     candidate = PortfolioCandidateSpec(
         **{**artifact.metadata["candidate"], "risk_style_columns": ("signal",)}
@@ -532,15 +530,27 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
     assert _portfolio_risk_models({"native": artifact}, (candidate,), {}) == {
         "native": model
     }
-    legacy = SimpleNamespace(
-        metadata={
-            key: value
-            for key, value in artifact.metadata.items()
-            if key != "risk_model"
-        }
-    )
+    legacy = SimpleNamespace(metadata={"risk_config": asdict(model.config)})
     assert _portfolio_risk_models({"native": legacy}, (candidate,), {}) == {
         "native": model
+    }
+    missing = SimpleNamespace(metadata={})
+    with pytest.raises(ValueError, match="portfolio_attribution_risk_model_required"):
+        _portfolio_risk_models({"native": missing}, (candidate,), {})
+    assert _portfolio_risk_models(
+        {"native": missing}, (candidate,), {"risk_model": model.to_dict()}
+    ) == {"native": model}
+    assert _portfolio_risk_models(
+        {"native": missing}, (candidate,), {"risk": asdict(model.config)}
+    ) == {"native": model}
+    simple = replace(
+        candidate,
+        construction="quantile_equal_weight",
+        top_quantile=0.2,
+        benchmark_id=None,
+    )
+    assert _portfolio_risk_models({"native": missing}, (simple,), {}) == {
+        "native": FactorRiskModel(candidate.risk_style_columns, FactorRiskConfig())
     }
     with pytest.raises(ValueError, match="portfolio_attribution_risk_model_conflict"):
         _portfolio_risk_models(

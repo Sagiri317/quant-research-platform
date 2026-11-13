@@ -16,6 +16,7 @@
       "end": "2018-02-14T06:57:00"
     },
     "account": {
+      "candidate_id": "execution_ppo",
       "panel": "data/processed/a_share/hft_panel",
       "fee_schedule": "data/processed/a_share/fee_schedule",
       "daily_inputs": {

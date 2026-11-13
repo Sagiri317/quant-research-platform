@@ -25,16 +25,18 @@ from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_glob,
     filesystem_mkdir,
     filesystem_stat,
     filesystem_walk,
-    filesystem_write_bytes,
-    filesystem_write_text,
     native_filesystem_path,
     open_filesystem_file,
 )
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import (
+    StorageLayout,
+    filesystem_glob,
+    filesystem_write_bytes,
+    filesystem_write_text,
+)
 from tests.helpers.source_preparation import prepared_source_evidence
 
 

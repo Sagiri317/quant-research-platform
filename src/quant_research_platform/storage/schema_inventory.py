@@ -182,7 +182,7 @@ def _inventory_item_from_session(
         raise ValueError("schema_inventory_invalid_timestamp")
     manifest = session.manifest
     verified_null_counts = {
-        **manifest["null_count_summary"],
+        **inspection["null_key_counts"],
         **{
             column: manifest[f"{role}_nan_profile"].get(column, 0)
             for column, role in spec_payload["column_roles"].items()
@@ -220,8 +220,8 @@ def _inventory_item_from_session(
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
         "min_timestamp": inspection["date_min"],
         "max_timestamp": inspection["date_max"],
-        "duplicate_primary_key_count": int(manifest["duplicate_primary_key_count"]),
-        "null_key_counts": dict(sorted(manifest["null_count_summary"].items())),
+        "duplicate_primary_key_count": inspection["duplicate_primary_key_count"],
+        "null_key_counts": inspection["null_key_counts"],
         "selected_important_column_null_counts": {
             column: verified_null_counts[column] for column in sorted(important_columns)
         },

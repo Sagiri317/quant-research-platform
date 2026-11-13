@@ -52,7 +52,7 @@ def run_quarterly(config):
             "evaluation",
             "evaluation_cutoff",
         },
-        {"input_spec", "label_unit", "asset_ids", "trading_calendar"},
+        {"label_unit", "asset_ids", "trading_calendar"},
     )
     folds = quarterly_folds(config["training_start"], config["rolling_window"])
     models = config["models"]
@@ -90,7 +90,6 @@ def run_quarterly(config):
                     **{
                         key: config[key]
                         for key in (
-                            "input_spec",
                             "label_unit",
                             "asset_ids",
                             "trading_calendar",
@@ -106,11 +105,7 @@ def run_quarterly(config):
                     "output": str(destination / "predictions"),
                     "prediction_window": window,
                     "sample_role": "quarterly_validation",
-                    **{
-                        key: config[key]
-                        for key in ("input_spec", "asset_ids")
-                        if key in config
-                    },
+                    **{key: config[key] for key in ("asset_ids",) if key in config},
                 }
             )
             evaluated = evaluate(
@@ -122,7 +117,6 @@ def run_quarterly(config):
                     "window": window,
                     "cutoff": config["evaluation_cutoff"],
                     "sample_role": "quarterly_validation",
-                    **{key: config[key] for key in ("input_spec",) if key in config},
                 }
             )
             results.append(

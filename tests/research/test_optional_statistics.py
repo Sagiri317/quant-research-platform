@@ -252,14 +252,14 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
         "label_availability_columns": {"return": "mature_at"},
     }
     projections = []
-    original = reading.iter_dataset_chunks
+    original = reading.iter_dataset_time_chunks
 
     def observed(session, **kwargs):
         projections.append(session.physical_columns)
         yield from original(session, **kwargs)
 
     monkeypatch.setattr(
-        "quant_research_platform.research.factors.statistics.iter_dataset_chunks",
+        "quant_research_platform.research.factors.statistics.iter_dataset_time_chunks",
         observed,
     )
     config = {
@@ -414,12 +414,12 @@ def standalone_predictions(tmp_path_factory):
         trial = case.root.with_name(case.root.name + ".trial")
         if trial.exists():
             shutil.rmtree(trial)
-    frame = pd.read_parquet(scoring["labels"])
+    frame = pd.read_parquet(scoring["labels"]["path"])
     frame.loc[frame.timestamp.eq(pd.Timestamp("2020-01-06")), "label_available_at"] = (
         pd.Timestamp("2020-01-10")
     )
-    frame.drop(columns="x").to_parquet(scoring["labels"], index=False)
-    del scoring["label_spec"]["column_roles"]["x"]
+    frame.drop(columns="x").to_parquet(scoring["labels"]["path"], index=False)
+    del scoring["labels"]["spec"]["column_roles"]["x"]
     return scoring
 
 
@@ -434,7 +434,6 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
     scoring = deepcopy(standalone_predictions)
     config = {
         "dataset": scoring["labels"],
-        "input_spec": scoring["label_spec"],
         "output": str(tmp_path / "statistics"),
         "window": scoring["scoring_window"],
         "label_cutoff": "2020-01-10",
@@ -524,7 +523,7 @@ def test_explicit_prediction_family_statistics_need_no_models_or_selection(
         assert diagnostics.reason.ne("not_requested").all()
     excluded_label = {
         **config,
-        "dataset": {"path": config["dataset"], "columns": ["timestamp", "asset_id"]},
+        "dataset": {**config["dataset"], "columns": ["timestamp", "asset_id"]},
         "output": str(tmp_path / "excluded_label"),
     }
     with pytest.raises(ValueError, match="statistics_required_columns_excluded"):

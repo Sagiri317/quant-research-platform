@@ -10,9 +10,9 @@ import pyarrow.dataset as ds
 
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.contracts.portfolios import A_SHARE_INSTRUMENT_TYPES
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import _hash_file_content
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 STREAM_FILES = {
     "hft_quotes": "行情.parquet",

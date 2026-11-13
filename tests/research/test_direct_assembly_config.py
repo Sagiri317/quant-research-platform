@@ -34,13 +34,13 @@ def test_single_factor_canonical_uses_auxiliary_size_without_putting_it_in_model
     )
     root, _ = _source(tmp_path, frame)
     calls = []
-    original = assembler.iter_dataset_chunks
+    original = assembler.iter_dataset_time_chunks
 
     def measured(session, **kwargs):
         calls.append((session.root, session.logical_columns, session.physical_columns))
         yield from original(session, **kwargs)
 
-    monkeypatch.setattr(assembler, "iter_dataset_chunks", measured)
+    monkeypatch.setattr(assembler, "iter_dataset_time_chunks", measured)
     output = assembler.assemble(
         _config(tmp_path, root, feature_recipe="a_share_canonical")
     )
@@ -529,9 +529,14 @@ def test_interleaved_file_order_cannot_silently_change_complete_sections(tmp_pat
         },
         time_window={"start": "2024-01-02", "end": "2024-01-03"},
     )
-    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        assembler.assemble(config)
-    assert not (tmp_path / "assembled").exists()
+    actual = read_dataset(assembler.assemble(config))
+    expected = pd.concat(
+        [frame, frame.assign(timestamp=pd.Timestamp("2024-01-03"))]
+    ).sort_values(
+        ["timestamp", "market_id", "asset_id"], kind="stable", ignore_index=True
+    )
+    expected["timestamp"] = expected.timestamp.astype("datetime64[ns]")
+    pd.testing.assert_frame_equal(actual, expected)
 
 
 def test_named_defaults_cannot_invent_missing_upstream_label_maturity(tmp_path):

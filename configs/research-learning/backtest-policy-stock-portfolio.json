@@ -25,6 +25,7 @@
       "quote_visibility_delay_ms": 1
     },
     "account": {
+      "candidate_id": "stock_portfolio",
       "panel": "data/processed/a_share/hft_panel",
       "fee_schedule": "data/processed/a_share/fee_schedule",
       "daily_inputs": {

@@ -1467,20 +1467,15 @@ def statistics_tables(ledgers, *, window, config, metadata=None):
             from quant_research_platform.research.portfolios.attribution import (
                 inventory_risk_attribution,
             )
-            from quant_research_platform.runtime.dataframes import (
-                iter_complete_session_frames,
-            )
             from quant_research_platform.storage.datasets.reading import (
-                iter_dataset_chunks,
+                iter_dataset_time_chunks,
             )
 
             observations, model, facts, available_at = risk_inputs
             selected, economic, parts = inventory_risk_attribution(
                 ledger,
                 model=model,
-                observations=iter_complete_session_frames(
-                    iter_dataset_chunks(observations), timestamp_column="timestamp"
-                ),
+                observations=iter_dataset_time_chunks(observations, one_timestamp=True),
                 risk_facts=facts,
                 available_at_column=available_at,
                 daily_views=_daily_market_views(config["inputs"]["daily"], window)
@@ -1821,7 +1816,7 @@ def backtest(config):
             "parameters",
             "output",
         },
-        {"trades", "stock_status"},
+        {"trades", "stock_status", "candidate_id"},
     )
     params = _parameters(config["parameters"])
     window = TimeWindow(**config["window"])
@@ -1844,7 +1839,10 @@ def backtest(config):
                 emit(batch)
 
     capital = PortfolioCapital(
-        "hft_inventory", params["initial_capital"], "CNY", "cash_equity"
+        config.get("candidate_id", "hft_inventory"),
+        params["initial_capital"],
+        "CNY",
+        "cash_equity",
     )
     return write_portfolio_ledger_artifact(
         Path(config["output"]),

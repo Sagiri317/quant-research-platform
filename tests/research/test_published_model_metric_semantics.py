@@ -56,8 +56,7 @@ def _case(root, algorithm="linear_regression", *, intercept=0.1, slope=0.2):
     labels = root / "labels.parquet"
     frame.to_parquet(labels, index=False)
     config = {
-        "dataset": str(labels),
-        "input_spec": case.config["input_spec"],
+        "dataset": {"path": str(labels), "spec": case.config["inputs"]["spec"]},
         "output": str(root / "stats"),
         "window": window,
         "label_cutoff": "2020-01-06",
@@ -85,7 +84,6 @@ def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm
                 "predictions": [str(prediction)],
                 "candidate_ids": ["model"],
                 "labels": config["dataset"],
-                "label_spec": config["input_spec"],
                 "validation_windows": [config["window"]],
                 "scoring_window": config["window"],
                 "cutoff": "2020-01-06",
@@ -125,7 +123,7 @@ def test_each_prediction_period_uses_its_own_training_calibration(tmp_path, algo
             second.loc[second.timestamp.ge("2020-01-04")],
         ]
     )
-    labels.to_parquet(config["dataset"], index=False)
+    labels.to_parquet(config["dataset"]["path"], index=False)
     config["periods"][0]["window"] = {"start": "2020-01-03", "end": "2020-01-03"}
     config["periods"].append(
         {
@@ -169,17 +167,17 @@ def test_incomparable_loss_is_local_and_keeps_ic_and_head(
     frame, _, _, _, config = _case(tmp_path)
     frame["raw_return"] = frame.label
     frame[target] = frame.label * 100 if unit == "percent" else frame.label
-    frame.to_parquet(config["dataset"], index=False)
+    frame.to_parquet(config["dataset"]["path"], index=False)
     config["evaluation"] = {"primary_label": target, "raw_return_label": "raw_return"}
-    config["input_spec"]["column_roles"].update(
+    config["dataset"]["spec"]["column_roles"].update(
         {target: "label", "raw_return": "label"}
     )
-    config["input_spec"]["label_availability_columns"] = {
+    config["dataset"]["spec"]["label_availability_columns"] = {
         target: "label_available_at",
         "raw_return": "label_available_at",
     }
-    config["input_spec"]["column_units"] = {} if unit is None else {target: unit}
-    config["input_spec"]["column_units"]["raw_return"] = "decimal_return"
+    config["dataset"]["spec"]["column_units"] = {} if unit is None else {target: unit}
+    config["dataset"]["spec"]["column_units"]["raw_return"] = "decimal_return"
     config["analyses"].append("prediction_hac")
     config["statistics"] = {"hac_lag": 0}
     artifact = read_statistics_artifact(model_statistics(config))
@@ -201,10 +199,10 @@ def test_incomparable_loss_is_local_and_keeps_ic_and_head(
 def test_ic_only_cross_target_avoids_all_loss_calculation(tmp_path, monkeypatch):
     frame, _, _, _, config = _case(tmp_path)
     frame["other_label"] = 100 * frame.label
-    frame.to_parquet(config["dataset"], index=False)
-    config["input_spec"]["column_roles"]["other_label"] = "label"
-    config["input_spec"]["column_units"] = {"other_label": "percent"}
-    config["input_spec"]["label_availability_columns"] = {
+    frame.to_parquet(config["dataset"]["path"], index=False)
+    config["dataset"]["spec"]["column_roles"]["other_label"] = "label"
+    config["dataset"]["spec"]["column_units"] = {"other_label": "percent"}
+    config["dataset"]["spec"]["label_availability_columns"] = {
         "other_label": "label_available_at"
     }
     config["evaluation"] = {"primary_label": "other_label"}
@@ -257,8 +255,7 @@ def test_permutation_and_selection_weight_dates_equally(tmp_path):
     output = explain(
         dict(
             model=str(case.root),
-            inputs=str(source),
-            input_spec=case.config["input_spec"],
+            inputs={"path": str(source), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "explain"),
             methods=["permutation"],
             window=window,
@@ -296,8 +293,7 @@ def test_permutation_and_selection_weight_dates_equally(tmp_path):
     )
     statistics = model_statistics(
         dict(
-            dataset=str(source),
-            input_spec=case.config["input_spec"],
+            dataset={"path": str(source), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "statistics"),
             window=window,
             label_cutoff="2020-01-04",
@@ -379,8 +375,7 @@ def test_stratified_fdr_keeps_undefined_declared_hypotheses(tmp_path, method):
     )
     evaluation = evaluate(
         dict(
-            inputs=str(source),
-            input_spec=spec,
+            inputs={"path": str(source), "spec": spec},
             output=str(tmp_path / "eval"),
             window={"start": "2020-01-01", "end": "2020-01-08"},
             cutoff="2020-01-09",
@@ -475,8 +470,7 @@ def test_temporal_permutation_retains_one_time_series_period(tmp_path):
     output = explain(
         dict(
             model=str(case.root),
-            inputs=str(source),
-            input_spec=case.config["input_spec"],
+            inputs={"path": str(source), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "explain"),
             methods=["permutation"],
             window={"start": "2020-01-02", "end": "2020-01-02"},
@@ -863,7 +857,7 @@ def test_model_facts_reject_invalid_target_definition(tmp_path, mutation):
         definition["spec_path"] = "not_a_scientific_definition"
     facts = {**case.facts, "target_definition": definition}
     with pytest.raises(ValueError, match="model_target_definition_invalid"):
-        validate_model_facts(facts, case.result.metadata)
+        validate_model_facts(facts)
 
 
 def test_raw_unclipped_model_target_can_compare_with_its_identical_source_label(
@@ -930,7 +924,7 @@ def test_scoring_honors_explicit_units_without_weakening_target_definition(
     from quant_research_platform.storage.datasets import write_dataset
 
     labels, _, prediction, metadata, config = _case(tmp_path)
-    config["input_spec"]["column_units"] = (
+    config["dataset"]["spec"]["column_units"] = (
         {} if declared_unit is None else {"label": declared_unit}
     )
     source = tmp_path / "native-labels"
@@ -943,8 +937,8 @@ def test_scoring_honors_explicit_units_without_weakening_target_definition(
             grain="asset_timestamp",
             primary_key=("timestamp", "asset_id"),
             partition_columns=("year",),
-            column_roles=config["input_spec"]["column_roles"],
-            column_units=config["input_spec"]["column_units"],
+            column_roles=config["dataset"]["spec"]["column_roles"],
+            column_units=config["dataset"]["spec"]["column_units"],
         ),
     )
     if not has_definition:

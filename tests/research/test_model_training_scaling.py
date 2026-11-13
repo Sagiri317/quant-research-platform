@@ -190,8 +190,7 @@ def test_unscaled_coefficients_do_not_sum_mixed_units(tmp_path, algorithm):
         explain(
             {
                 "model": str(case.root),
-                "inputs": str(source),
-                "input_spec": case.config["input_spec"],
+                "inputs": {"path": str(source), "spec": case.config["inputs"]["spec"]},
                 "output": str(tmp_path / "explanation"),
                 "methods": ["native_importance", "affine"],
                 "window": {"start": "2024-01-04", "end": "2024-01-04"},

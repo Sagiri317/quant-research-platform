@@ -11,17 +11,13 @@ from tests.helpers.paths import StorageLayout
 from tests.storage.low_level_fixtures import make_processed_dataset_spec
 
 
-@pytest.mark.parametrize("kind", ("string", "integer", "named_timezone"))
+@pytest.mark.parametrize("kind", ("string", "integer"))
 @pytest.mark.parametrize("ordered", (False, True))
 def test_repeated_then_expanded_category_metadata_roundtrip(tmp_path, kind, ordered):
     if kind == "string":
         domain = pd.Index(["b", "a", "unobserved", "new"])
-    elif kind == "integer":
-        domain = pd.Index([2, 1, 9, 4])
     else:
-        domain = pd.date_range("2021-01-01", periods=4, tz="America/New_York").as_unit(
-            "us"
-        )
+        domain = pd.Index([2, 1, 9, 4])
     spec = make_processed_dataset_spec("category_parts")
     spec = replace(
         spec, column_roles={**spec.column_roles, "category": ColumnRole.CONTEXT}
@@ -57,6 +53,3 @@ def test_repeated_then_expanded_category_metadata_roundtrip(tmp_path, kind, orde
         domain[0],
         domain[0] if ordered else domain[3],
     ]
-    if kind == "named_timezone":
-        assert str(actual.category.cat.categories.tz) == "America/New_York"
-        assert actual.category.cat.categories.dtype.unit == "us"

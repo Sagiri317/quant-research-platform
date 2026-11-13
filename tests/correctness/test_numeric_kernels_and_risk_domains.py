@@ -4,8 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.market_model import MarketModelRiskState
+from quant_research_platform.compute.dataframe import cross_section
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
+from quant_research_platform.markets.implementations.a_share.market_model import (
+    MarketModelRiskState,
+)
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
@@ -148,8 +151,6 @@ def test_covariance_shrinkage_matches_independent_oracle(shrinkage):
 
 
 def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles():
-    from quant_research_platform.compute.dataframe import cross_section
-    from quant_research_platform.research.features import transforms
 
     rng = np.random.default_rng(52)
     values = rng.normal(size=(504, 5)) * 0.01
@@ -165,13 +166,13 @@ def test_ordinary_kernels_use_vectorized_paths_and_independent_oracles():
     target = rng.normal(size=504)
     design = np.column_stack((pd.get_dummies(industries).to_numpy(dtype=float), sizes))
     expected = target - design @ np.linalg.lstsq(design, target, rcond=None)[0]
-    residual = transforms._industry_size_residuals(
+    residual = cross_section._industry_size_residuals(
         target, industries, sizes, rescale=False
     )
     np.testing.assert_allclose(residual, expected, rtol=2e-13, atol=2e-14)
     np.testing.assert_allclose(design.T @ residual, 0, atol=2e-11)
     np.testing.assert_allclose(
-        transforms._industry_size_residuals(target, industries, sizes, rescale=True),
+        cross_section._industry_size_residuals(target, industries, sizes, rescale=True),
         residual / np.abs(residual).max(),
         rtol=2e-14,
         atol=1e-16,

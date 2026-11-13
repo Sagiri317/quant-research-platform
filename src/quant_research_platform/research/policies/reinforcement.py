@@ -359,7 +359,14 @@ def backtest_policy(config, *, portfolio_context=None):
         if episode["kind"] == "hft"
         else episode["account"]["assumptions"]["initial_nav"]
     )
-    capital = PortfolioCapital("learned_policy", capital_value, "CNY", "cash_equity")
+    capital = PortfolioCapital(
+        episode["account"].get("candidate_id", "learned_policy")
+        if episode["kind"] == "hft"
+        else episode["account"]["candidate"]["candidate_id"],
+        capital_value,
+        "CNY",
+        "cash_equity",
+    )
     result = {}
 
     def produce(emit):

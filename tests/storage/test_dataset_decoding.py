@@ -28,11 +28,13 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_glob,
     filesystem_stat,
+    native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_glob,
     filesystem_write_bytes,
     filesystem_write_text,
-    native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -381,7 +383,6 @@ def test_arrow_batch_converter_observes_each_row_once(
         [pa.array(row_ids), pa.array(values)], names=["row_id", "value"]
     )
     conversions = 0
-    persisted_rows: list[int] = []
     logical_rows: list[int] = []
     original = dataset_reading._arrow_slice_to_pandas
 
@@ -395,16 +396,12 @@ def test_arrow_batch_converter_observes_each_row_once(
         dataset_reading._arrow_batch_to_bounded_pandas(
             batch,
             dtype_overrides={"value": "string"},
-            persisted_frame_observer=lambda frame: persisted_rows.extend(
-                frame["row_id"].tolist()
-            ),
             batch_observer=lambda _batch, frame: logical_rows.extend(
                 frame["row_id"].tolist()
             ),
         )
     )
     assert conversions == len(output) == 1
-    assert persisted_rows == list(row_ids)
     assert logical_rows == list(row_ids)
     assert tuple(row for frame in output for row in frame["row_id"]) == row_ids
     assert all(str(frame["value"].dtype) == "string" for frame in output)
@@ -854,10 +851,7 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
     assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
-@pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
-def test_declared_reader_preserves_observer_failure(
-    tmp_path, monkeypatch, observer_kind
-):
+def test_declared_reader_preserves_observer_failure(tmp_path, monkeypatch):
     path = tmp_path / "observer.parquet"
     pq.write_table(pa.table({"value": [1, 2, 3]}), native_filesystem_path(path))
     original = Path(native_filesystem_path(path)).read_bytes()
@@ -884,8 +878,7 @@ def test_declared_reader_preserves_observer_failure(
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
     frames = dataset_reading.iter_declared_parquet_member_batches(
         path,
-        persisted_frame_observer=observer if observer_kind == "persisted" else None,
-        batch_observer=observer if observer_kind == "batch" else None,
+        batch_observer=observer,
         batch_rows=128,
     )
     with pytest.raises(ValueError) as caught:
@@ -971,28 +964,20 @@ def test_numeric_infinity_is_rejected_independently_of_logical_dtype(
     assert not root.exists()
 
 
-@pytest.mark.parametrize("nested", [False, True])
 @pytest.mark.parametrize("values", [[2**53 + 1, None], [3, None], [2**53 + 1, 5]])
-def test_public_nested_integer_null_readback_is_exact(tmp_path, nested, values):
+def test_public_integer_null_readback_is_exact(tmp_path, values):
     from quant_research_platform.contracts.columns import ColumnRole
 
-    frame = make_default_dataset_frame().iloc[:1].copy()
-    frame["value"] = pd.Series(
-        [{"items": values} if nested else values], index=frame.index, dtype=object
-    )
-    root = make_dataset_artifact_root(tmp_path, "nested_exact")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.Series(values, index=frame.index, dtype="Int64")
+    root = make_dataset_artifact_root(tmp_path, "integer_exact")
     write_dataset(
         root,
         frame,
-        spec=make_processed_dataset_spec("nested_exact", value_role=ColumnRole.CONTEXT),
+        spec=make_processed_dataset_spec(
+            "integer_exact", value_role=ColumnRole.CONTEXT
+        ),
     )
-    physical = (
-        pq.read_table(next((root / "data").rglob("*.parquet")))
-        .column("value")[0]
-        .as_py()
-    )
-    expected = physical["items"] if nested else physical
-    assert expected == values
     for mode in (DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED):
         result = read_dataset(root, mode=mode)
         output = (
@@ -1000,11 +985,12 @@ def test_public_nested_integer_null_readback_is_exact(tmp_path, nested, values):
             if mode is DatasetReadMode.CHUNKED
             else result
         )
-        observed = output["value"].iloc[0]
-        observed = observed["items"] if nested else observed
-        assert int(observed[0]) == values[0]
-        assert (
-            pd.isna(observed[1]) if values[1] is None else int(observed[1]) == values[1]
+        output = output.sort_values(["asset_id", "timestamp"])
+        pd.testing.assert_series_equal(
+            output["value"].reset_index(drop=True),
+            frame.sort_values(["asset_id", "timestamp"])["value"].reset_index(
+                drop=True
+            ),
         )
 
 

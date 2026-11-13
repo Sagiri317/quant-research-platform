@@ -236,14 +236,14 @@ def _native_config(tmp_path, frame=None, extra_features=()):
 def test_native_roundtrip_and_shared_scan(tmp_path, monkeypatch):
     from quant_research_platform.research.evaluations import runner
 
-    original = runner.iter_dataset_chunks
+    original = runner.iter_dataset_time_chunks
     scans = []
 
     def scan(*args, **kwargs):
         scans.append(1)
         yield from original(*args, **kwargs)
 
-    monkeypatch.setattr(runner, "iter_dataset_chunks", scan)
+    monkeypatch.setattr(runner, "iter_dataset_time_chunks", scan)
     config = _native_config(tmp_path)
     root = evaluate(config)
     assert len(scans) == 1
@@ -379,7 +379,7 @@ def test_label_maturity_remains_horizon_local_and_no_anchors_are_created(tmp_pat
 def test_chunk_boundaries_and_empty_dates_do_not_change_response(tmp_path, monkeypatch):
     from quant_research_platform.research.evaluations import runner
 
-    original = runner.iter_dataset_chunks
+    original = runner.iter_dataset_time_chunks
     config = _native_config(tmp_path)
     output = evaluate(config)
     _, reference = read_evaluation_outputs(
@@ -391,7 +391,7 @@ def test_chunk_boundaries_and_empty_dates_do_not_change_response(tmp_path, monke
             for index in range(len(frame)):
                 yield frame.iloc[index : index + 1]
 
-    monkeypatch.setattr(runner, "iter_dataset_chunks", single_rows)
+    monkeypatch.setattr(runner, "iter_dataset_time_chunks", single_rows)
     config["output"] += "_chunks"
     output = evaluate(config)
     _, split = read_evaluation_outputs(output, tables=tuple(reference))

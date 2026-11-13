@@ -236,3 +236,74 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
                 "output": str(tmp_path / "invalid-coverage.json"),
             }
         )
+
+
+@pytest.mark.parametrize(
+    "expression,expected",
+    [
+        ("delay(x,1)", [np.nan, 10, np.nan, 100, np.nan, np.nan]),
+        ("mean(x,2)", [np.nan, 11, np.nan, 105, np.nan, np.nan]),
+        ("std(x,2)", [np.nan, np.sqrt(2), np.nan, np.sqrt(50), np.nan, np.nan]),
+    ],
+)
+def test_formula_windows_reset_at_known_and_unknown_listing_boundaries(
+    expression, expected
+):
+    frame = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=pd.date_range("2020-01-01", periods=6),
+            eligible=True,
+            x=[10.0, 12.0, 100.0, 110.0, 120.0, 130.0],
+            listing_date=pd.to_datetime(
+                ["2010-01-01"] * 2 + ["2020-01-03"] * 2 + [None, "2020-01-03"]
+            ),
+        )
+    )
+    np.testing.assert_allclose(
+        formula_values(frame, expression, ("x",)), expected, equal_nan=True
+    )
+
+
+def test_native_formula_application_retains_listing_context(tmp_path):
+    from quant_research_platform.storage.atomic import atomic_write_json
+
+    frame, spec = learning_panel(tmp_path / "base")
+    frame["listing_date"] = pd.Timestamp("2010-01-01")
+    frame.loc[frame.timestamp.ge("2020-01-10"), "listing_date"] = pd.Timestamp(
+        "2020-01-10"
+    )
+    root = tmp_path / "lifecycles"
+    write_dataset(
+        root,
+        frame,
+        spec=replace(
+            spec, column_roles={**spec.column_roles, "listing_date": "context"}
+        ),
+    )
+    selected = tmp_path / "selection.json"
+    atomic_write_json(
+        selected,
+        dict(
+            selected_expression="delay(x,1)",
+            selection_cutoff="2020-01-07",
+            config=dict(columns=["x"], baseline_columns=[]),
+        ),
+    )
+    output = apply_formula(
+        dict(
+            search=str(selected),
+            dataset=str(root),
+            input_window=dict(start="2020-01-08", end="2020-01-12"),
+            output_window=dict(start="2020-01-09", end="2020-01-12"),
+            output=str(tmp_path / "factor"),
+        )
+    )
+    values = read_dataset(output)
+    assert (
+        values.loc[values.timestamp.eq("2020-01-10"), "discovered_factor"].isna().all()
+    )
+    np.testing.assert_allclose(
+        values.loc[values.timestamp.ne("2020-01-10"), "discovered_factor"],
+        [1.0, 2.0, 3.0] * 3,
+    )

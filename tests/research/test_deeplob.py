@@ -181,14 +181,14 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
         from quant_research_platform.research.predictions import runner
 
         consumed = []
-        original_chunks = runner.iter_dataset_chunks
+        original_chunks = runner.iter_dataset_time_chunks
 
         def measured_chunks(session):
             for chunk in original_chunks(session):
                 consumed.extend(chunk.timestamp.tolist())
                 yield chunk
 
-        monkeypatch.setattr(runner, "iter_dataset_chunks", measured_chunks)
+        monkeypatch.setattr(runner, "iter_dataset_time_chunks", measured_chunks)
         built_predictions = []
         predictor_type = type(result.prediction_model)
         original_prediction_function = predictor_type.prediction_function

@@ -74,8 +74,7 @@ def test_transform_prediction_publication_keeps_real_domain(
     out = predict(
         {
             "model": str(case.root),
-            "inputs": str(path),
-            "input_spec": case.config["input_spec"],
+            "inputs": {"path": str(path), "spec": case.config["inputs"]["spec"]},
             "output": str(tmp_path / "prediction"),
             "prediction_window": {"start": "2019-02-01", "end": "2019-02-01"},
             "sample_role": "validation",
@@ -360,8 +359,7 @@ def test_causal_current_rank_permutation_and_exact_native_lookup(tmp_path):
         out = predict(
             {
                 "model": str(case.root),
-                "inputs": str(path),
-                "input_spec": case.config["input_spec"],
+                "inputs": {"path": str(path), "spec": case.config["inputs"]["spec"]},
                 "output": str(tmp_path / f"prediction{number}"),
                 "prediction_window": {"start": "2020-01-02", "end": "2020-01-02"},
                 "sample_role": "validation",

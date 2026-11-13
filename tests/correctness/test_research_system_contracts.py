@@ -7,6 +7,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _industry_size_residuals,
+)
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
@@ -15,7 +18,6 @@ from quant_research_platform.contracts.models import (
     model_spec_payload,
 )
 from quant_research_platform.research.features.transforms import (
-    _industry_size_residuals,
     a_share_feature_pipeline,
     apply_feature_transforms,
 )

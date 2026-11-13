@@ -52,8 +52,6 @@ class LabelCatalogResponse(_PublicModel):
 
 
 class ResearchDatasetRequirementsResponse(_PublicModel):
-    status: str
-    mode: str
     dataset_id: str
     market_id: str
     input_data_ids: list[str]

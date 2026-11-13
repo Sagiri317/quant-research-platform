@@ -91,6 +91,49 @@ def test_compression_retains_direction_and_unknown_flat_denominator():
 
 
 @pytest.mark.parametrize(
+    "columns",
+    [
+        ("volatility_compression_20_60", "compression_trend_20_60"),
+        ("compression_trend_20_60", "volatility_compression_20_60"),
+        ("compression_trend_20_60",),
+    ],
+)
+def test_compression_reuse_preserves_order_missing_windows_and_output_slice(columns):
+    blocks = []
+    expected = []
+    for asset, direction in (("a", 1), ("b", -1)):
+        frame = panel(np.ones(90)).assign(asset_id=asset)
+        returns = direction * (0.002 + 0.01 * np.sin(np.arange(90)))
+        if asset == "a":
+            returns[4] = np.nan
+        frame["period_return"] = returns
+        blocks.append(frame)
+        for end in range(59, 90):
+            window = returns[end - 59 : end + 1]
+            ratio = np.std(window[-20:], ddof=1) / np.std(window, ddof=1)
+            trend = max(1 - ratio, 0) * window[-20:].sum() / abs(window[-20:]).sum()
+            expected.append((asset, frame.timestamp.iloc[end], ratio, trend))
+    names = ("volatility_compression_20_60", "compression_trend_20_60")
+    reference = pd.DataFrame(expected, columns=["asset_id", "timestamp", *names])
+    source = pd.concat(blocks, ignore_index=True).iloc[::-1]
+    actual = calculate_price_volume_factors(
+        source,
+        factor_columns=columns,
+        output_window=TimeWindow(blocks[0].timestamp.iloc[59], source.timestamp.max()),
+    )
+    reference = reference.loc[reference.timestamp.isin(actual.timestamp)].reset_index(
+        drop=True
+    )
+    pd.testing.assert_frame_equal(
+        actual,
+        reference.loc[:, ["asset_id", "timestamp", *columns]],
+        check_exact=False,
+        rtol=1e-12,
+        atol=1e-14,
+    )
+
+
+@pytest.mark.parametrize(
     "reverse,expected", [(False, Fraction(1, 20)), (True, Fraction(-1, 20))]
 )
 def test_breakout_is_signed_excess_beyond_prior_range_per_path(reverse, expected):

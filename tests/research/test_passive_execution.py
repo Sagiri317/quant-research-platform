@@ -8,11 +8,13 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     summarize_portfolio_ledger,
     write_portfolio_ledger_artifact,
 )
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.contracts.policies import PolicyDecision
 from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.policies.reinforcement import backtest_policy
+from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.high_frequency import inventory_batches
 from tests.helpers.high_frequency import (
     daily_view,
@@ -480,6 +482,7 @@ def test_maker_taker_comparison_keeps_same_mother_order_and_separate_cash_ledger
     maker["account"]["trades"] = str(tmp_path / "events")
     summaries = []
     for name, branch in (("taker", episode), ("maker", maker)):
+        branch["account"]["candidate_id"] = name
         output = backtest_policy(
             {
                 "episode": branch,
@@ -497,6 +500,26 @@ def test_maker_taker_comparison_keeps_same_mother_order_and_separate_cash_ledger
         }
         assert initial == {"__cash__": 4000.0, "a": 100.0}
         assert ledger.capital.initial_capital == 5000.0
+    artifact = read_statistics_artifact(
+        portfolio_statistics(
+            {
+                "ledgers": [
+                    str(tmp_path / name / "ledger") for name in ("taker", "maker")
+                ],
+                "window": episode["window"],
+                "output": str(tmp_path / "comparison"),
+                "analyses": ["performance"],
+            }
+        )
+    )
+    with artifact.table("portfolio_performance.parquet") as performance:
+        values = (
+            performance.loc[performance.metric_id.eq("net_pnl")]
+            .set_index("candidate_id")
+            .value
+        )
+        # The taker pays one yuan of spread; the maker earns 0.30 yuan on 30 shares.
+        assert values.to_dict() == pytest.approx({"taker": -1.0, "maker": 0.3})
     assert episode["order"] == maker["order"] == {"asset_id": "a", "quantity": -100}
     assert [row["filled_quantity"] for row in summaries] == [100.0, 30.0]
     assert [row["unfilled_quantity"] for row in summaries] == [0.0, 70.0]

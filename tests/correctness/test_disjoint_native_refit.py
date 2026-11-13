@@ -62,8 +62,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
     }
     config = {
         "market_id": "other_market",
-        "inputs": str(source),
-        "input_spec": spec,
+        "inputs": {"path": str(source), "spec": spec},
         "model": {
             "model_id": "linear",
             "model_algorithm": "linear_regression",
@@ -86,8 +85,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
     validation = predict(
         {
             "model": str(train_path),
-            "inputs": str(source),
-            "input_spec": spec,
+            "inputs": {"path": str(source), "spec": spec},
             "output": str(tmp_path / "validation-pred"),
             "prediction_window": window(6, 8),
             "sample_role": "validation",
@@ -96,8 +94,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
     scored = score(
         {
             "predictions": [str(validation)],
-            "labels": str(source),
-            "label_spec": spec,
+            "labels": {"path": str(source), "spec": spec},
             "candidate_ids": ["linear"],
             "scoring_window": window(6, 8),
             "validation_windows": [window(6, 8)],
@@ -136,7 +133,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
         model_path = fit(
             {
                 **config,
-                "inputs": str(input_path),
+                "inputs": {**config["inputs"], "path": str(input_path)},
                 "output": str(tmp_path / variant),
                 "fit_windows": union,
                 "fit_cutoff": bound(8),
@@ -152,8 +149,7 @@ def test_disjoint_refit_counts_and_predictions_ignore_gap_and_late_labels(tmp_pa
         published = predict(
             {
                 "model": str(model_path),
-                "inputs": str(source),
-                "input_spec": spec,
+                "inputs": {"path": str(source), "spec": spec},
                 "output": str(tmp_path / (variant + "-pred")),
                 "prediction_window": window(9, 11),
                 "sample_role": "test",

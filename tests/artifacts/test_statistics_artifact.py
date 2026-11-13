@@ -831,8 +831,7 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
     prediction = predict(
         {
             "model": str(trained.root),
-            "inputs": str(source),
-            "input_spec": trained.config["input_spec"],
+            "inputs": {"path": str(source), "spec": trained.config["inputs"]["spec"]},
             "output": str(tmp_path / "prediction"),
             "prediction_window": window,
             "sample_role": "validation",
@@ -841,8 +840,7 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
     scored = score(
         {
             "predictions": [str(prediction)],
-            "labels": str(source),
-            "label_spec": trained.config["input_spec"],
+            "labels": {"path": str(source), "spec": trained.config["inputs"]["spec"]},
             "candidate_ids": ["rank"],
             "scoring_window": window,
             "validation_windows": [window],

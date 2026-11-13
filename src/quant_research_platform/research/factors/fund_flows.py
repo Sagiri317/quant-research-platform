@@ -415,16 +415,14 @@ def us_ownership_states(holdings, filings, *, assets):
             | holdings.put_call.astype("str").str.strip().eq("")
         )
     ]
-    grouped = h.groupby(["accession", "cusip"], sort=False)[
+    groups = h.groupby(["accession", "cusip"], sort=False)[
         ["shares_or_principal", "value_usd"]
-    ].sum(min_count=1)
-    positions = {}
-    index = {cusip: i for i, cusip in enumerate(cusips)}
-    for accession, block in grouped.groupby(level=0, sort=False):
-        matrix = np.zeros((n, 2))
-        for (_, cusip), row in block.iterrows():
-            matrix[index[cusip]] = row.to_numpy(float)
-        positions[accession] = matrix
+    ]
+    grouped = groups.sum(min_count=1).where(groups.count().eq(groups.size(), axis=0))
+    positions = {
+        accession: block.droplevel(0).reindex(cusips, fill_value=0).to_numpy(float)
+        for accession, block in grouped.groupby(level=0, sort=False)
+    }
     f = filings.loc[
         filings.available_at.notna() & filings.filing_type.isin(("13F-HR", "13F-HR/A"))
     ].copy()
@@ -537,7 +535,8 @@ def nport_flow_states(funds, holdings):
         & holdings.asset_category.isin(("EC", "OTHER"))
         & holdings.payoff_profile.eq("Long")
     ]
-    amounts = h.groupby(["accession", "cusip"], sort=False).value.sum(min_count=1)
+    groups = h.groupby(["accession", "cusip"], sort=False).value
+    amounts = groups.sum(min_count=1).where(groups.count().eq(groups.size()))
     cusips = tuple(h.cusip.dropna().unique())
     n = len(cusips)
     if not n:
@@ -556,8 +555,18 @@ def nport_flow_states(funds, holdings):
     rank = f.groupby(coordinates)._amendment.transform("max")
     f = f.loc[f._amendment.eq(rank)]
     # An ambiguous simultaneous amendment cannot identify a coherent holdings file.
-    counts = f.groupby(coordinates).accession.transform("nunique")
+    grouped = f.groupby(coordinates)
+    counts = grouped.accession.transform("nunique")
     f.loc[counts.ne(1), "accession"] = pd.NA
+    flow_fields = [
+        f"{kind}_month_{month}_usd"
+        for kind in ("sales", "reinvestment", "redemption")
+        for month in (1, 2, 3)
+    ]
+    numeric_fields = ["net_assets_usd", *flow_fields]
+    f[numeric_fields] = f[numeric_fields].where(
+        grouped[numeric_fields].transform("nunique", dropna=False).le(1)
+    )
     f = f.drop_duplicates(coordinates).sort_values(
         ["available_at", "timestamp"], kind="stable"
     )
@@ -574,23 +583,20 @@ def nport_flow_states(funds, holdings):
             vector, rate = np.zeros(n), 0.0
             if len(prior):
                 previous = prior.iloc[-1]
-                flow = [
-                    getattr(row, f"{kind}_month_{month}_usd")
-                    for kind in ("sales", "reinvestment", "redemption")
-                    for month in (1, 2, 3)
-                ]
-                if (
-                    pd.notna(previous.accession)
-                    and previous.net_assets_usd > 0
-                    and np.isfinite(flow).all()
-                ):
-                    vector = positions.get(previous.accession, np.zeros(n))
-                    vector = np.where(np.isfinite(vector) & (vector > 0), vector, 0)
+                flow = [getattr(row, name) for name in flow_fields]
+                vector = (
+                    np.maximum(positions.get(previous.accession, np.zeros(n)), 0)
+                    if pd.notna(previous.accession)
+                    else np.full(n, np.nan)
+                )
+                rate = np.nan
+                if previous.net_assets_usd > 0 and np.isfinite(flow).all():
                     rate = (sum(flow[:6]) - sum(flow[6:])) / previous.net_assets_usd
             events.append((row.available_at, row.timestamp, series, vector, rate))
     events.sort(key=lambda row: row[:2])
     active = {}
     weight, square, pressure = (np.zeros(n) for _ in range(3))
+    unknown = np.zeros(n, dtype=int)
     rows = []
     for date, report, series, vector, rate in events:
         old_report, old, old_rate = active.get(
@@ -598,11 +604,20 @@ def nport_flow_states(funds, holdings):
         )
         if report < old_report:
             continue
+        active[series] = report, vector, rate
+        # Unknown flows affect held securities, not known absent positions.
+        current_unknown = np.isnan(vector) | ((vector > 0) & np.isnan(rate))
+        prior_unknown = np.isnan(old) | ((old > 0) & np.isnan(old_rate))
+        unknown += current_unknown.astype(int) - prior_unknown
+        vector, old = np.nan_to_num(vector), np.nan_to_num(old)
         weight += vector - old
         square += vector**2 - old**2
-        pressure += vector * rate - old * old_rate
-        active[series] = report, vector, rate
-        rows.append((date, weight.copy(), square.copy(), pressure.copy()))
+        pressure += vector * (0 if np.isnan(rate) else rate) - old * (
+            0 if np.isnan(old_rate) else old_rate
+        )
+        rows.append(
+            (date, weight.copy(), square.copy(), np.where(unknown, np.nan, pressure))
+        )
     output = []
     for date, w, s, p in rows:
         score = np.divide(p * s, w**3, out=np.full(n, np.nan), where=w > 0)
@@ -779,58 +794,49 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     first_equity_release.index[first_equity_release.le(date)]
                 )
             ]
-            if "avg_volume_20d" not in block:
+            if "avg_volume_20d" not in block or flow.empty:
                 continue
             for width in widths:
                 history = []
+                unknown_baskets = 0
                 for fund, cutoff in flow[["asset_id", "_date"]].itertuples(
                     index=False, name=None
                 ):
                     end = session_days.searchsorted(cutoff, side="right")
                     needed = session_days[max(0, end - width) : end]
-                    tail = []
+                    unknown_baskets += width - len(needed)
                     for day in needed:
                         reports = share_versions.get((fund, day), ())
                         position = bisect_right(reports, date, key=lambda row: row[0])
-                        if not position or pd.isna(reports[position - 1][1]):
-                            break
-                        tail.append((fund, day, reports[position - 1][1]))
-                    if len(tail) == width:
-                        history.extend(tail)
-                if not history:
-                    continue
-                selected_baskets, completion = [], []
+                        change = reports[position - 1][1] if position else np.nan
+                        history.append((fund, day, change))
+                selected_baskets = []
                 for fund, day, change in history:
+                    # Zero primary-market activity does not consume basket quantities.
+                    if change == 0:
+                        continue
                     reports = baskets.get((fund, day), ())
                     position = bisect_right(reports, date, key=lambda row: row[0])
                     record = None if not position else reports[position - 1]
                     if record is None or not isinstance(record[1], tuple):
-                        completion.append(pd.NaT)
+                        unknown_baskets += 1
                         continue
-                    completion.append(record[2])
+                    incomplete = pd.isna(record[2]) or record[2] > date
+                    unknown_baskets += int(incomplete)
                     selected_baskets.extend(
-                        (fund, day, change, *row) for row in record[1]
+                        (fund, day, change, incomplete, *row) for row in record[1]
                     )
-                if not selected_baskets:
-                    continue
                 p = pd.DataFrame(
                     selected_baskets,
                     columns=[
                         "asset_id",
                         "timestamp",
                         "_share_delta_1d",
+                        "_incomplete",
                         *basket_fields,
                     ],
                 )
                 p = p.loc[p.component_kind.eq("equity_security")]
-                # Every constituent day must have its actual historical creation basket.
-                covered = (
-                    p[["asset_id", "timestamp"]]
-                    .drop_duplicates()
-                    .groupby("asset_id")
-                    .size()
-                )
-                p = p.loc[p.asset_id.map(covered).eq(width)]
                 units = pd.to_numeric(p.creation_unit_fund_shares)
                 contributions = (
                     pd.to_numeric(p.component_quantity)
@@ -840,11 +846,20 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 quantity = contributions.sum(min_count=1).where(
                     contributions.count().eq(contributions.size())
                 )
-                mapped = block.asset_id.map(quantity)
-                known = pd.Series(completion, dtype="datetime64[ns]")
-                if known.notna().all() and known.le(date).all():
-                    # Absence is zero only in a complete, publication-visible PCF list.
-                    mapped = mapped.where(block.asset_id.isin(quantity.index), 0)
+                explicit = (
+                    p.loc[p._incomplete.eq(True)]
+                    .drop_duplicates(["asset_id", "timestamp", "component_code"])
+                    .groupby("component_code")
+                    .size()
+                )
+                # Every incomplete fund/day needs an explicit contribution for this
+                # stock. Another fund's row cannot prove its absence is zero.
+                known = block.asset_id.map(explicit).fillna(0).eq(unknown_baskets)
+                mapped = (
+                    block.asset_id.map(quantity)
+                    .where(block.asset_id.isin(quantity.index), 0)
+                    .where(known)
+                )
                 pressure = mapped / block.avg_volume_20d.where(block.avg_volume_20d > 0)
                 name = f"stock_passive_flow_pressure_{width}d"
                 if name in usable:
@@ -912,34 +927,46 @@ def calculate(decisions, sources, *, columns, parameters=None):
             work.timestamp.drop_duplicates().tolist(),
             entity="economic_portfolio_id",
         )
+        previous_keys = None
         for date, at in work.groupby("timestamp", sort=False).indices.items():
             block = work.iloc[at]
-            keys = next(reports)
-            latest_headers = keys.merge(
-                headers,
-                left_on=["economic_portfolio_id", "_report", "_available"],
-                right_on=["economic_portfolio_id", "timestamp", "available_at"],
-                how="inner",
-                suffixes=("_decision", ""),
-            )
-            if latest_headers.empty:
+            keys = next(reports).drop(columns="timestamp")
+            if keys.empty:
                 continue
-            known = h.loc[
-                h.report_version_identity.isin(latest_headers.report_version_identity)
-            ]
-            known = (
-                known.groupby(["economic_portfolio_id", "stock_code"], sort=False)
-                .shares_held.sum(min_count=1)
-                .reset_index()
+            if previous_keys is None or not keys.equals(previous_keys):
+                previous_keys = keys
+                latest_headers = keys.merge(
+                    headers,
+                    left_on=["economic_portfolio_id", "_report", "_available"],
+                    right_on=["economic_portfolio_id", "timestamp", "available_at"],
+                    how="inner",
+                )
+                known = h.loc[
+                    h.report_version_identity.isin(
+                        latest_headers.report_version_identity
+                    )
+                ]
+                quantities = known.groupby(
+                    ["economic_portfolio_id", "stock_code"], sort=False
+                ).shares_held
+                known = (
+                    quantities.sum(min_count=1)
+                    .where(quantities.count().eq(quantities.size()))
+                    .reset_index()
+                )
+                quantities = known.groupby("stock_code", sort=False).shares_held
+                total = quantities.sum(min_count=1).where(
+                    quantities.count().eq(quantities.size())
+                )
+                squared = (
+                    (known.shares_held**2)
+                    .groupby(known.stock_code, sort=False)
+                    .sum(min_count=1)
+                )
+                hhi = squared / total.where(total > 0) ** 2
+            values = block.asset_id.map(total).where(
+                block.asset_id.isin(total.index), 0
             )
-            total = known.groupby("stock_code", sort=False).shares_held.sum(min_count=1)
-            squared = (
-                (known.shares_held**2)
-                .groupby(known.stock_code, sort=False)
-                .sum(min_count=1)
-            )
-            hhi = squared / total.where(total > 0) ** 2
-            values = block.asset_id.map(total).fillna(0)
             for name in usable & ownership:
                 if name == FUNDS[0] and "a_float_shares" in block:
                     result.loc[at, name] = (
@@ -990,17 +1017,24 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     earlier = h.loc[
                         h.report_version_identity.isin(earlier.report_version_identity)
                     ]
-                    changes = (
-                        common.groupby("stock_code")
-                        .shares_held.sum(min_count=1)
-                        .subtract(
-                            earlier.groupby("stock_code").shares_held.sum(min_count=1),
-                            fill_value=0,
+                    endpoints = []
+                    for endpoint in (common, earlier):
+                        grouped = endpoint.groupby("stock_code").shares_held
+                        endpoints.append(
+                            grouped.sum(min_count=1).where(
+                                grouped.count().eq(grouped.size())
+                            )
                         )
+                    after, before = endpoints
+                    stocks = after.index.union(before.index)
+                    changes = after.reindex(stocks, fill_value=0) - before.reindex(
+                        stocks, fill_value=0
                     )
                     if "a_float_shares" in block:
                         result.loc[at, name] = (
-                            block.asset_id.map(changes).fillna(0)
+                            block.asset_id.map(changes).where(
+                                block.asset_id.isin(changes.index), 0
+                            )
                             / block.a_float_shares.where(block.a_float_shares > 0)
                         ).to_numpy()
                 elif name == FUNDS[9] and "peak_drawdown_20d" in block:

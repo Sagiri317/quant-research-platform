@@ -4,17 +4,23 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.dataframe import cross_section
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.research.features import transforms
 
 
-def _apply(frame, **options):
+def _apply(frame, *, direct=False, **options):
+    if direct:
+        return transforms.a_share_feature_pipeline(
+            frame, factor_columns=("x",), **options
+        )
     return transforms.apply_feature_transforms(
         frame,
         (FeatureTransformSpec("a_share_canonical", ("x",), **options),),
     )
 
 
+@pytest.mark.parametrize("direct", [False, True])
 @pytest.mark.parametrize(
     "center,scale,expected",
     [
@@ -24,7 +30,7 @@ def _apply(frame, **options):
         (False, True, np.sqrt(1.5) * np.array([1.0, 2.0, 3.0])),
     ],
 )
-def test_off_steps_do_not_require_industry_or_size(center, scale, expected):
+def test_off_steps_do_not_require_industry_or_size(center, scale, expected, direct):
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2024-01-02"),
@@ -34,6 +40,7 @@ def test_off_steps_do_not_require_industry_or_size(center, scale, expected):
     )
     result = _apply(
         frame,
+        direct=direct,
         clip="none",
         industry_neutralize=False,
         size_neutralize=False,
@@ -139,13 +146,13 @@ def test_neutralization_reuses_only_identical_valid_domains(monkeypatch):
     )
     frame.loc[0, "z"] = np.nan
     calls = []
-    original = transforms._neutralization_design
+    original = cross_section._neutralization_design
 
     def measured(groups, sizes):
         calls.append(len(groups))
         return original(groups, sizes)
 
-    monkeypatch.setattr(transforms, "_neutralization_design", measured)
+    monkeypatch.setattr(cross_section, "_neutralization_design", measured)
     actual = transforms.apply_feature_transforms(
         frame, (FeatureTransformSpec("a_share_canonical", ("x", "y", "z")),)
     )
@@ -282,7 +289,6 @@ def test_missing_total_size_never_falls_back_to_float():
         frame.assign(log_total_market_cap=np.nan), industry_neutralize=False
     )
     assert actual.feature_x.isna().all()
-    assert actual.feature_x.isna().all()
     assert (
         _apply(frame, industry_neutralize=False, size_neutralize=False)
         .feature_x.notna()
@@ -325,7 +331,9 @@ def test_neutralization_keeps_true_zero_and_resolvable_small_signal(variation):
     industry = pd.Series(np.arange(120) % 3)
     sizes = 15 + axis / 16
     target = 3 + industry.to_numpy() * 4 + 2 * sizes + variation * np.sin(axis)
-    actual = transforms._industry_size_residuals(target, industry, sizes, rescale=False)
+    actual = cross_section._industry_size_residuals(
+        target, industry, sizes, rescale=False
+    )
     if not variation:
         np.testing.assert_array_equal(actual, np.zeros(120))
     else:
@@ -335,7 +343,7 @@ def test_neutralization_keeps_true_zero_and_resolvable_small_signal(variation):
         expected = target - design @ np.linalg.lstsq(design, target, rcond=None)[0]
         np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=2e-13)
         assert np.max(np.abs(actual)) > 1e-9
-        standardized = transforms._industry_size_residuals(
+        standardized = cross_section._industry_size_residuals(
             target, industry, sizes, rescale=True
         )
         assert np.max(np.abs(standardized)) == pytest.approx(1.0)
@@ -344,7 +352,7 @@ def test_neutralization_keeps_true_zero_and_resolvable_small_signal(variation):
 def test_size_collinear_with_industry_keeps_projection_undefined():
     industry = pd.Series(["a", "b"] * 60)
     sizes = np.tile([15.0, 20.0], 60)
-    actual = transforms._industry_size_residuals(
+    actual = cross_section._industry_size_residuals(
         np.sin(np.arange(120)), industry, sizes, rescale=True
     )
     assert np.isnan(actual).all()
@@ -391,7 +399,7 @@ def test_projection_preserves_residual_under_replication_units_and_group_localit
             * unit
         )
         order = np.arange(len(x))[::-1] if reverse else np.arange(len(x))
-        actual = transforms._industry_size_residuals(
+        actual = cross_section._industry_size_residuals(
             y[order], industry[order], x[order], rescale=False
         )
         np.testing.assert_allclose(actual, oracle[order], rtol=1e-12, atol=2e-14 * unit)
@@ -402,7 +410,7 @@ def test_non_dyadic_exact_fit_does_not_become_standardized_alpha():
     industry = np.arange(120) % 3
     target = 0.07 + 0.13 * industry + 0.37 * sizes
     for order in (np.arange(120), np.arange(120)[::-1]):
-        actual = transforms._industry_size_residuals(
+        actual = cross_section._industry_size_residuals(
             target[order], industry[order], sizes[order], rescale=True
         )
         np.testing.assert_array_equal(actual, np.zeros(120))

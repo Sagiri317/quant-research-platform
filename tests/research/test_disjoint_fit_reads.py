@@ -72,8 +72,8 @@ def test_fit_rejects_model_axis_duplicates_in_each_window(tmp_path, day, wide_ke
     frame = pd.read_parquet(source)
     if wide_key:
         frame["revision"] = 0
-        config["input_spec"]["primary_key"].append("revision")
-        config["input_spec"]["column_roles"]["revision"] = "key"
+        config["inputs"]["spec"]["primary_key"].append("revision")
+        config["inputs"]["spec"]["column_roles"]["revision"] = "key"
     duplicate = frame.loc[frame.timestamp.dt.day.eq(day)].iloc[[0]].copy()
     if wide_key:
         duplicate["revision"] = 1
@@ -90,7 +90,7 @@ def test_fit_keeps_parent_selection_and_maturity(tmp_path):
     frame = pd.read_parquet(source)
     frame.loc[frame.asset_id.eq("c"), "label_available_at"] = pd.Timestamp("2020-01-10")
     frame.to_parquet(source, index=False)
-    spec = config.pop("input_spec")
+    spec = config["inputs"].pop("spec")
     spec["label_availability_columns"] = {"label": "label_available_at"}
     config["inputs"] = {
         "path": str(source),
@@ -160,7 +160,7 @@ def test_fit_asset_pushdown_intersects_parent_rows_and_ignores_excluded_bad_valu
     frame = pd.read_parquet(source)
     frame.loc[frame.asset_id.eq("b"), "x"] = float("inf")
     frame.to_parquet(source, index=False)
-    declared = config.pop("input_spec")
+    declared = config["inputs"].pop("spec")
     config["inputs"] = {
         "path": str(source),
         "spec": declared,
@@ -191,8 +191,10 @@ def test_prediction_asset_output_selection_keeps_full_candidate_ranks(tmp_path):
     model = fit(fit_config(tmp_path, source))
     config = {
         "model": str(model),
-        "inputs": str(source),
-        "input_spec": fit_config(tmp_path, source)["input_spec"],
+        "inputs": {
+            "path": str(source),
+            "spec": fit_config(tmp_path, source)["inputs"]["spec"],
+        },
         "prediction_window": {"start": "2020-01-04", "end": "2020-01-04"},
         "output": str(tmp_path / "all_predictions"),
     }

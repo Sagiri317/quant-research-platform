@@ -583,7 +583,7 @@ def test_evaluation_failure_closes_source_with_traceback_retained(
             if cleanup_fails:
                 raise RuntimeError("secondary_close")
 
-    monkeypatch.setattr(runner, "iter_dataset_chunks", lambda *a, **k: Source())
+    monkeypatch.setattr(runner, "iter_dataset_time_chunks", lambda *a, **k: Source())
     with pytest.raises(PermissionError) as caught:
         runner.evaluate(
             evaluation_config(
@@ -947,7 +947,7 @@ def test_evaluation_early_failure_closes_native_source_without_gc(
         label_availability_columns={"label": "available_at"},
         n_groups=2,
     )
-    read = runner.iter_dataset_chunks
+    read = runner.iter_dataset_time_chunks
     closed = []
 
     def chunks(*args, **kwargs):
@@ -965,7 +965,7 @@ def test_evaluation_early_failure_closes_native_source_without_gc(
         next(iter(chunks))
         raise primary
 
-    monkeypatch.setattr(runner, "iter_dataset_chunks", chunks)
+    monkeypatch.setattr(runner, "iter_dataset_time_chunks", chunks)
     monkeypatch.setattr(runner, "write_evaluation_outputs_from_chunks", interrupt)
     with pytest.raises(KeyboardInterrupt) as caught:
         runner.evaluate(
@@ -1373,7 +1373,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
             "effective_prediction_end": None,
         },
     )
-    source_chunks = runner.iter_dataset_chunks
+    source_chunks = runner.iter_dataset_time_chunks
     merge = pd.DataFrame.merge
     chunk_sizes = []
 
@@ -1390,7 +1390,7 @@ def test_direct_evaluation_pairs_actual_prediction_keys_with_current_mature_labe
         return merge(left, right, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(runner, "iter_dataset_chunks", small_chunks)
+        patch.setattr(runner, "iter_dataset_time_chunks", small_chunks)
         patch.setattr(pd.DataFrame, "merge", no_prediction_merge)
         _, tables = read_evaluation_outputs(
             runner.evaluate({**config, "predictions": {"pred": str(mutated)}})
@@ -1526,7 +1526,7 @@ def test_evaluation_collision_never_opens_input_or_overwrites(tmp_path, monkeypa
     marker.write_bytes(b"old-good")
     monkeypatch.setattr(
         runner,
-        "iter_dataset_chunks",
+        "iter_dataset_time_chunks",
         lambda *a, **k: pytest.fail("collision consumed input"),
     )
     with pytest.raises(ValueError, match="already_exists"):

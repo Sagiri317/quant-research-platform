@@ -38,7 +38,18 @@ def fit_frame(
 
     config = {
         "market_id": market_id,
-        "inputs": str(path),
+        "inputs": {
+            "path": str(path),
+            "spec": {
+                "data_id": "synthetic",
+                "frequency": "1d",
+                "grain": "asset_timestamp",
+                "primary_key": ["timestamp", "asset_id"],
+                "partition_columns": ["year"],
+                "column_roles": roles,
+                "column_units": {spec.target_column: "decimal_return"},
+            },
+        },
         "output": str(root / "model"),
         "model": model_spec_payload(spec),
         "fit_windows": [
@@ -46,15 +57,6 @@ def fit_frame(
         ],
         "fit_cutoff": (cutoff or frame.timestamp.max()).isoformat(),
         "label_unit": "decimal_return",
-        "input_spec": {
-            "data_id": "synthetic",
-            "frequency": "1d",
-            "grain": "asset_timestamp",
-            "primary_key": ["timestamp", "asset_id"],
-            "partition_columns": ["year"],
-            "column_roles": roles,
-            "column_units": {spec.target_column: "decimal_return"},
-        },
     }
     if trading_calendar is not None:
         calendar_path = root / "calendar.parquet"
@@ -94,8 +96,7 @@ def predict_frame(root, frame, case, *, window):
     output = predict(
         {
             "model": str(case.root),
-            "inputs": str(source),
-            "input_spec": case.config["input_spec"],
+            "inputs": {"path": str(source), "spec": case.config["inputs"]["spec"]},
             "output": str(root / "prediction"),
             "prediction_window": window,
             "sample_role": "validation",
@@ -140,8 +141,7 @@ def candidates(tmp_path, *, algorithms=("linear_regression", "lasso_regression")
         frame.to_parquet(future, index=False)
         config = {
             "model": str(case.root),
-            "inputs": str(future),
-            "input_spec": case.config["input_spec"],
+            "inputs": {"path": str(future), "spec": case.config["inputs"]["spec"]},
             "output": str(tmp_path / algorithm / "predictions"),
             "prediction_window": window,
             "sample_role": "validation",
@@ -153,8 +153,7 @@ def candidates(tmp_path, *, algorithms=("linear_regression", "lasso_regression")
     config = {
         "predictions": paths,
         "candidate_ids": list(algorithms),
-        "labels": str(labels),
-        "label_spec": cases[0].config["input_spec"],
+        "labels": {"path": str(labels), "spec": cases[0].config["inputs"]["spec"]},
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": "2020-01-06",

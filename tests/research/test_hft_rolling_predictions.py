@@ -10,6 +10,8 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
 )
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
+from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.high_frequency import backtest
 from tests.helpers.high_frequency import parameters, quotes
 from tests.helpers.output_frames import make_price_volume_prediction_output_frame
@@ -57,8 +59,10 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
         "window": {"start": "2024-01-02", "end": "2024-01-03"},
         "predictions": paths,
         "output": str(tmp_path / "rolling"),
+        "candidate_id": "rolling",
     }
     ledger = read_portfolio_ledger_artifact(backtest(config))
+    assert ledger.capital.candidate_id == "rolling"
     batches = list(ledger.iter_chunks())
     trades = [trade for batch in batches for trade in batch.trades]
     assert [trade.quantity for trade in trades] == [200, -100, -200]
@@ -75,9 +79,29 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
                 "output": str(tmp_path / "overlap"),
             }
         )
-    held = read_portfolio_ledger_artifact(
-        backtest({**config, "predictions": [], "output": str(tmp_path / "holding")})
+    holding_config = {**config, "predictions": [], "output": str(tmp_path / "holding")}
+    del holding_config["candidate_id"]
+    held = read_portfolio_ledger_artifact(backtest(holding_config))
+    assert held.capital.candidate_id == "hft_inventory"
+    statistics = read_statistics_artifact(
+        portfolio_statistics(
+            {
+                "ledgers": [config["output"], holding_config["output"]],
+                "window": config["window"],
+                "output": str(tmp_path / "statistics"),
+                "analyses": ["performance"],
+            }
+        )
     )
+    with statistics.table("portfolio_performance.parquet") as performance:
+        values = (
+            performance.loc[performance.metric_id.eq("net_pnl")]
+            .set_index("candidate_id")
+            .value
+        )
+        assert values.to_dict() == pytest.approx(
+            {"rolling": -5.0, "hft_inventory": 0.0}
+        )
     assert summarize_portfolio_ledger(held.capital, held.iter_chunks())["nav"] == 5000.0
     from quant_research_platform.research.portfolios.inventory_analysis import (
         analyze_inventory,
@@ -99,3 +123,18 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
     assert analysis.decomposition_residual.abs().max() < 1e-9
     assert analysis.fill_events.sum() == 3
     assert analysis.maximum_fill_wait_seconds.max() > 0
+    different_capital = {
+        **holding_config,
+        "parameters": {**holding_config["parameters"], "initial_capital": 6000.0},
+        "output": str(tmp_path / "different-capital"),
+    }
+    backtest(different_capital)
+    with pytest.raises(ValueError, match="inventory_benchmark_scope_mismatch"):
+        analyze_inventory(
+            {
+                "ledger": config["output"],
+                "benchmark": different_capital["output"],
+                "output": str(tmp_path / "invalid-comparison"),
+            }
+        )
+    assert not (tmp_path / "invalid-comparison").exists()

@@ -212,3 +212,62 @@ def test_closing_failed_break_is_not_a_retest_of_the_frozen_level():
     result = calculate_price_volume_factors(late, factor_columns=names)
     assert result.loc[24, names[0]] == 0
     assert np.isclose(result.loc[24, names[1]], 0.01)
+
+
+def test_style_baskets_retain_boundary_ties_and_missing_selected_holdings():
+    dates = pd.bdate_range("2024-01-01", periods=21)
+    panel = pd.DataFrame(
+        {
+            "asset_id": np.tile(np.arange(5).astype(str), len(dates)),
+            "timestamp": np.repeat(dates, 5),
+            "log_total_market_cap": np.tile([0.0, 0.0, 1.0, 2.0, 2.0], len(dates)),
+            "beta_252d": np.tile(np.arange(5, dtype=float), len(dates)),
+            "momentum_252_20": 1.0,
+            "period_return": np.tile([0.0, 0.02, 0.04, 0.06, 0.10], len(dates)),
+            "is_a_share_scope": True,
+        }
+    )
+    panel.loc[
+        (panel.timestamp == dates[9]) & (panel.asset_id == "2"), "period_return"
+    ] = np.nan
+    panel.loc[
+        (panel.timestamp == dates[10]) & (panel.asset_id == "3"), "period_return"
+    ] = np.nan
+    names = tuple(
+        f"style_{style}_return_trend_20d"
+        for style in ("size", "market_beta", "momentum")
+    )
+    result = style_factors(panel.sample(frac=1, random_state=7), factor_columns=names)
+    last = result.loc[result.timestamp.eq(dates[-1]), list(names)]
+    # Size retains both tied extremes. One selected missing return invalidates
+    # that whole basket, not just its holding; missing middle returns do not.
+    np.testing.assert_allclose(last[names[0]], 19 * ((0.06 + 0.10) / 2 - 0.02 / 2))
+    np.testing.assert_allclose(last[names[1]], 20 * 0.10)
+    assert last[names[2]].isna().all()
+
+
+@pytest.mark.parametrize("side", ["up", "down"])
+def test_unknown_close_ends_a_frozen_breakout_episode(side):
+    upward = side == "up"
+    price = np.r_[np.full(20, 95.0), 110.0, 115.0, 105.0, 99.0]
+    reference = np.r_[np.full(20, 100.0), 111.0, 116.0, 106.0, 100.0]
+    if not upward:
+        price, reference = 200 - price, 200 - reference
+    panel = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=len(price)),
+            "adj_close": price,
+            "close": price,
+            "high" if upward else "low": reference,
+        }
+    )
+    name = f"failed_close_{side}_breakout_3_20d"
+    known = calculate_price_volume_factors(panel, factor_columns=(name,))
+    # Both directions cross the frozen 100 boundary by 1% three sessions later.
+    assert known[name].iloc[-1] == pytest.approx(0.01)
+    panel.loc[21, "adj_close"] = np.nan
+    unknown = calculate_price_volume_factors(panel, factor_columns=(name,))
+    assert np.isnan(unknown[name].iloc[21])
+    # An unobserved close ends the episode; the later cross cannot revive it.
+    np.testing.assert_array_equal(unknown[name].iloc[22:], 0.0)

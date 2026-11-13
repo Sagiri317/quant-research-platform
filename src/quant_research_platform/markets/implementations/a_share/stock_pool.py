@@ -26,19 +26,23 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
 )
 
-_A_SHARE_FUSION_ELIGIBILITY_FACTS = (
-    "is_nonfinancial_industry",
-    "has_legal_fundamental_pit",
+_A_SHARE_INDUSTRY_COLUMNS = (
+    "industry_standard_id",
+    "industry_level1_code",
+    "industry_level1_name",
 )
 
 
 def a_share_eligibility_columns(
     *,
+    recipe: str = "a_share_all",
     minimum_listing_sessions: int = 252,
     exclude_st: bool = True,
     exclude_pt: bool = True,
 ) -> tuple[str, ...]:
     """Select only the facts used by the requested research scope."""
+    if recipe not in {"a_share_all", "a_share_nonfinancial", "a_share_fundamental"}:
+        raise ValueError("invalid_a_share_eligibility_recipe")
     if (
         type(minimum_listing_sessions) is not int
         or minimum_listing_sessions < 0
@@ -57,6 +61,10 @@ def a_share_eligibility_columns(
             if minimum_listing_sessions == 252
             else "listing_age_trading_days"
         )
+    if recipe != "a_share_all":
+        columns.extend(("is_nonfinancial_industry", *_A_SHARE_INDUSTRY_COLUMNS))
+    if recipe == "a_share_fundamental":
+        columns.append("has_legal_fundamental_pit")
     return tuple(columns)
 
 
@@ -76,9 +84,8 @@ def a_share_eligibility(
 
     Unknown relevant facts are retained in the input and never affirmed as eligible.
     """
-    if recipe not in {"a_share_all", "a_share_nonfinancial", "a_share_fundamental"}:
-        raise ValueError("invalid_a_share_eligibility_recipe")
     columns = a_share_eligibility_columns(
+        recipe=recipe,
         minimum_listing_sessions=minimum_listing_sessions,
         exclude_st=exclude_st,
         exclude_pt=exclude_pt,
@@ -97,6 +104,9 @@ def a_share_eligibility(
             if ((values.dropna() < 0) | (values.dropna() % 1 != 0)).any():
                 raise ValueError(f"invalid_a_share_eligibility_fact: {column}")
             eligible &= values.ge(minimum_listing_sessions)
+        elif column in _A_SHARE_INDUSTRY_COLUMNS:
+            values = frame[column].astype("string").str.strip()
+            eligible &= values.notna() & values.ne("")
         else:
             fact = strict_bool_series(
                 frame[column],
@@ -104,29 +114,6 @@ def a_share_eligibility(
                 allow_null=True,
             )
             eligible &= ~fact if column in {"is_st", "is_pt"} else fact
-    if recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
-        required = (
-            ("is_nonfinancial_industry",)
-            if recipe == "a_share_nonfinancial"
-            else _A_SHARE_FUSION_ELIGIBILITY_FACTS
-        )
-        for column in required:
-            if column not in frame:
-                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
-            eligible &= strict_bool_series(
-                frame[column],
-                error=f"invalid_a_share_eligibility_fact: {column}",
-                allow_null=True,
-            )
-        for column in (
-            "industry_standard_id",
-            "industry_level1_code",
-            "industry_level1_name",
-        ):
-            if column not in frame:
-                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
-            values = frame[column].astype("string").str.strip()
-            eligible &= values.notna() & values.ne("")
     return eligible if preserve_unknown else eligible.fillna(False).astype(bool)
 
 

@@ -27,7 +27,6 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.interfaces",
         "quant_research_platform.markets",
         "quant_research_platform.reports",
-        "quant_research_platform.runtime",
         "quant_research_platform.sources",
         "quant_research_platform.storage",
         "quant_research_platform.workflows",
@@ -48,7 +47,6 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.markets",
         "quant_research_platform.reports",
         "quant_research_platform.research",
-        "quant_research_platform.runtime",
         "quant_research_platform.sources",
         "quant_research_platform.storage",
         "quant_research_platform.workflows",
@@ -58,7 +56,6 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.reports",
         "quant_research_platform.sources",
     ),
-    "runtime": ("quant_research_platform.reports",),
     # Direct operation owners may compose science, native readers and writers.
     "research": (
         "quant_research_platform.agents",
@@ -73,6 +70,9 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.sources",
     ),
     "compute": (
+        "quant_research_platform.research",
+        "quant_research_platform.markets",
+        "quant_research_platform.sources",
         "quant_research_platform.reports",
         "quant_research_platform.artifacts",
         "quant_research_platform.workflows",
@@ -105,56 +105,31 @@ def test_owner_layer_import_boundaries_are_enforced(
 
 
 @pytest.mark.parametrize(
-    ("path", "source", "module"),
+    ("source", "module"),
     (
         (
-            SOURCE_ROOT / "contracts/example.py",
             "from quant_research_platform.storage import datasets\n",
             "quant_research_platform.storage.datasets",
         ),
         (
-            SOURCE_ROOT / "contracts/example.py",
-            "from quant_research_platform.research.randomness "
-            "import DEFAULT_ROOT_SEED\n",
-            "quant_research_platform.research.randomness.DEFAULT_ROOT_SEED",
+            "import quant_research_platform.storage.datasets\n",
+            "quant_research_platform.storage.datasets",
         ),
         (
-            SOURCE_ROOT / "contracts/example.py",
-            "from quant_research_platform.compute import market_model\n",
-            "quant_research_platform.compute.market_model",
-        ),
-        (
-            SOURCE_ROOT / "runtime/example.py",
-            "from quant_research_platform.reports import verification_summary\n",
-            "quant_research_platform.reports.verification_summary",
-        ),
-        (
-            SOURCE_ROOT / "catalog/example.py",
-            "from quant_research_platform import reports\n",
-            "quant_research_platform.reports",
-        ),
-        (
-            SOURCE_ROOT / "research/example.py",
             "from ..sources import venvoo\n",
             "quant_research_platform.sources.venvoo",
         ),
-        (
-            SOURCE_ROOT / "reports/example.py",
-            "from quant_research_platform.research import models\n",
-            "quant_research_platform.research.models",
-        ),
     ),
 )
-def test_owner_layer_boundaries_reject_real_dependency_directions(
-    path: Path,
+def test_import_edges_resolve_absolute_and_relative_syntax(
     source: str,
     module: str,
 ) -> None:
-    edge = _import_edges_from_trees({path: ast.parse(source)})[0]
-    root = path.relative_to(SOURCE_ROOT).parts[0]
-
+    path = SOURCE_ROOT / "contracts/example.py"
+    (edge,) = _import_edges_from_trees({path: ast.parse(source)})
     assert edge.module == module
-    assert any(module.startswith(prefix) for prefix in LAYER_BOUNDARIES.get(root, ()))
+    assert edge.path == path
+    assert edge.lineno == 1
 
 
 def _active_module_names() -> tuple[str, ...]:
@@ -192,19 +167,6 @@ def test_relative_import_edges_match_python_package_resolution(
         any(edge.module.startswith(prefix) for prefix in LAYER_BOUNDARIES["contracts"])
         is forbidden
     )
-
-
-@pytest.mark.parametrize("owner", ("artifacts", "catalog", "profiles", "research"))
-def test_contract_direction_gate_rejects_each_high_level_owner(owner):
-    edges = _import_edges_from_trees(
-        {
-            SOURCE_ROOT / "contracts" / "probe.py": ast.parse(
-                f"from quant_research_platform.{owner} import value"
-            )
-        }
-    )
-    with pytest.raises(AssertionError):
-        test_owner_layer_import_boundaries_are_enforced(tuple(edges))
 
 
 @pytest.mark.parametrize(

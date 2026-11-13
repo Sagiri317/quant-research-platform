@@ -493,11 +493,11 @@ def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
     from tests.research.direct_model_test_support import candidates
 
     _, config = candidates(tmp_path)
-    labels = pd.read_parquet(config["labels"])
+    labels = pd.read_parquet(config["labels"]["path"])
     labels["label"] *= 100
-    config["label_spec"]["column_units"]["label"] = "percent"
+    config["labels"]["spec"]["column_units"]["label"] = "percent"
     config["label_unit"] = "percent"
-    labels.to_parquet(config["labels"], index=False)
+    labels.to_parquet(config["labels"]["path"], index=False)
     score(config)
     scored = json.loads(Path(config["output"]).read_text())
     assert all(row["validation_mse"] is None for row in scored["metrics"])

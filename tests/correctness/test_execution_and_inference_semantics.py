@@ -1,4 +1,4 @@
-"""Independent regression oracles for execution and statistical boundaries."""
+"""Independent oracles for execution and statistical boundaries."""
 
 import pickle
 from math import erfc, sqrt

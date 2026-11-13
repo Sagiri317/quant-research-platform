@@ -5,6 +5,7 @@ labels.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
@@ -41,11 +42,9 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.research.labels.targets import a_share_model_target
 from quant_research_platform.research.risk import FactorRiskState
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
-    iter_dataset_chunks,
-    materialize_dataset_session,
+    iter_dataset_time_chunks,
     open_dataset_session,
 )
 from quant_research_platform.storage.datasets.writing import (
@@ -112,7 +111,6 @@ def _iter_joined_processed_chunks(
     diagnostics: dict | None = None,
     risk_exposure_input: Mapping | None = None,
 ) -> Iterator[pd.DataFrame]:
-    base_session = sessions[dataset_spec.base_input_data_id]
     physical_order = (
         "timestamp",
         *(key for key in dataset_spec.primary_key if key != "timestamp"),
@@ -129,40 +127,67 @@ def _iter_joined_processed_chunks(
         else None
     )
     risk_cache = {}
-    with closing_iterator(
-        iter_complete_time_frames(
-            iter_dataset_chunks(base_session), timestamp_column="timestamp"
-        )
-    ) as chunks:
-        auxiliary = {}
-        for data_id, session in sessions.items():
-            if data_id in {dataset_spec.base_input_data_id, risk_input_id}:
-                continue
-            # Asset-major members can span every base interval. Scan them once,
-            # then consume time slices without re-decoding overlapping row groups.
-            frame = materialize_dataset_session(session)
-            frame["timestamp"] = strict_timestamp_series(
-                frame.timestamp, error="invalid_time_chunk_timestamp_values"
+    with ExitStack() as stack:
+        streams = {
+            data_id: stack.enter_context(
+                closing_iterator(iter_dataset_time_chunks(session))
             )
-            auxiliary[data_id] = frame.sort_values("timestamp", kind="stable")
+            for data_id, session in sessions.items()
+            if data_id != risk_input_id
+        }
+
+        def next_auxiliary(data_id):
+            frame = next(streams[data_id], None)
+            if frame is not None:
+                frame = frame.assign(
+                    timestamp=strict_timestamp_series(
+                        frame.timestamp, error="invalid_time_chunk_timestamp_values"
+                    )
+                )
+            return frame
+
+        auxiliary = {
+            data_id: next_auxiliary(data_id)
+            for data_id in streams
+            if data_id != dataset_spec.base_input_data_id
+        }
+        empty = {data_id: selected.iloc[:0] for data_id, selected in auxiliary.items()}
         yielded = False
-        for frame in chunks:
+        for frame in streams[dataset_spec.base_input_data_id]:
             if frame.empty:
                 continue
             timestamps = strict_timestamp_series(
                 frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
+            frame = frame.assign(timestamp=timestamps)
+            base_keys = set(_scalar_keys(frame, dataset_spec.primary_key))
             inputs = {}
             for data_id, selected in auxiliary.items():
-                stop = selected.timestamp.searchsorted(
-                    timestamps.iloc[-1], side="right"
+                pieces = []
+                while selected is not None:
+                    stop = selected.timestamp.searchsorted(
+                        timestamps.iloc[-1], side="right"
+                    )
+                    if stop:
+                        consumed = selected.iloc[:stop]
+                        matched = [
+                            key in base_keys
+                            for key in _scalar_keys(consumed, dataset_spec.primary_key)
+                        ]
+                        if any(matched):
+                            pieces.append(consumed.loc[matched])
+                    if stop < len(selected):
+                        selected = selected.iloc[stop:]
+                        break
+                    selected = next_auxiliary(data_id)
+                auxiliary[data_id] = selected
+                inputs[data_id] = (
+                    pd.concat(pieces, ignore_index=True) if pieces else empty[data_id]
                 )
-                inputs[data_id] = selected.iloc[:stop]
-                auxiliary[data_id] = selected.iloc[stop:]
             chunk = _join_processed_inputs(
                 dataset_spec=dataset_spec,
                 input_frames=inputs,
-                base_frame=frame.assign(timestamp=timestamps),
+                base_frame=frame,
                 diagnostics=diagnostics,
                 risk_exposure_input=risk_exposure_input,
                 risk_facts=risk_facts,
@@ -294,22 +319,12 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
     if "eligible" in generated and spec.eligibility_recipe is not None:
         columns.extend(
             a_share_eligibility_columns(
+                recipe=spec.eligibility_recipe,
                 minimum_listing_sessions=spec.minimum_listing_sessions,
                 exclude_st=spec.exclude_st,
                 exclude_pt=spec.exclude_pt,
             )
         )
-        if spec.eligibility_recipe in {"a_share_nonfinancial", "a_share_fundamental"}:
-            columns.extend(
-                (
-                    "is_nonfinancial_industry",
-                    "industry_standard_id",
-                    "industry_level1_code",
-                    "industry_level1_name",
-                )
-            )
-        if spec.eligibility_recipe == "a_share_fundamental":
-            columns.append("has_legal_fundamental_pit")
     if "model_target" in generated:
         if spec.target_transform == "industry_size_residual":
             columns.extend(

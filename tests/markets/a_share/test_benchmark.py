@@ -88,7 +88,9 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
 def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.runtime.dataframes import iter_complete_session_frames
+    from quant_research_platform.compute.dataframe.streaming import (
+        iter_complete_session_frames,
+    )
     from quant_research_platform.storage.datasets.reading import (
         DatasetReadMode,
         read_dataset,

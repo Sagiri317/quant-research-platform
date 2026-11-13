@@ -11,6 +11,13 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_real_numeric_series
+from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.sources.tabular import (
+    read_csv as _read_csv,
+)
+from quant_research_platform.sources.tabular import (
+    read_excel as _read_excel,
+)
 
 DATASETS = {
     "public_index_weights": {
@@ -576,33 +583,39 @@ def normalize(data_id, path, record):
         yield result
         return
     if source == "sec_nport_target_holdings_extracted":
-        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
-            result = _rename(
-                frame,
-                {
-                    "accession": "accession",
-                    "series_id": "series_id",
-                    "issuer_cusip": "cusip",
-                    "report_date": "report_date",
-                    "sub_type": "filing_type",
-                    "currency_value_as_provided": "value",
-                    "currency_code_as_provided": "currency",
-                    "balance_as_provided": "balance",
-                    "balance_units_as_provided": "balance_unit",
-                    "asset_category": "asset_category",
-                    "percentage_as_provided": "portfolio_weight_percent",
-                    "payoff_profile": "payoff_profile",
-                    "derivative_category": "derivative_category",
-                    "filing_date": "publication_date",
-                    "published_at": "published_at",
-                    "source_zip_sha256": "source_sha256",
-                    "source_retrieved_at": "retrieved_at",
-                    "evidence_url": "source_url",
-                },
+        mapping = {
+            "accession": "accession",
+            "series_id": "series_id",
+            "issuer_cusip": "cusip",
+            "report_date": "report_date",
+            "sub_type": "filing_type",
+            "currency_value_as_provided": "value",
+            "currency_code_as_provided": "currency",
+            "balance_as_provided": "balance",
+            "balance_units_as_provided": "balance_unit",
+            "asset_category": "asset_category",
+            "percentage_as_provided": "portfolio_weight_percent",
+            "payoff_profile": "payoff_profile",
+            "derivative_category": "derivative_category",
+            "filing_date": "publication_date",
+            "published_at": "published_at",
+            "source_zip_sha256": "source_sha256",
+            "source_retrieved_at": "retrieved_at",
+            "evidence_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path, columns=(*mapping, "holding_id"), dtype="str", chunksize=50000
             )
-            result["asset_id"] = result.accession + ":" + frame.holding_id
-            result["timestamp"] = result.report_date
-            yield result
+        ) as source_frames:
+            for frame in source_frames:
+                result = _rename(
+                    frame,
+                    mapping,
+                )
+                result["asset_id"] = result.accession + ":" + frame.holding_id
+                result["timestamp"] = result.report_date
+                yield result
         return
     if source == "eastmoney_cn_etf_daily":
         payload = json.loads(path.read_bytes())["data"]
@@ -633,90 +646,120 @@ def normalize(data_id, path, record):
         "sec_13f_submission_metadata_extracted",
         "sec_13f_target_holdings_extracted",
     }:
-        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
-            common = {
-                "accession": "accession",
-                "manager_cik": "manager_cik",
-                "report_period": "report_date",
-                "filing_type": "filing_type",
-                "is_amendment": "is_amendment",
-                "amendment_type": "amendment_type",
-                "filing_date": "publication_date",
-                "published_at": "published_at",
-                "source_zip_sha256": "source_sha256",
-            }
-            mapping = {
-                **common,
-                **(
-                    {
-                        "amendment_number": "amendment_number",
-                        "report_type": "report_type",
-                        "reported_table_entry_total": "reported_table_entry_total",
-                        "source_infotable_row_count": "source_infotable_row_count",
-                        "target_holding_row_count": "target_holding_row_count",
-                        "source_url": "source_url",
-                    }
-                    if data_id == "public_13f_filings"
-                    else {
-                        "cusip": "cusip",
-                        "value_usd": "value_usd",
-                        "shares_or_principal_as_provided": "shares_or_principal",
-                        "share_type": "share_type",
-                        "put_call": "put_call",
-                        "investment_discretion": "investment_discretion",
-                        "evidence_url": "source_url",
-                    }
-                ),
-            }
-            result = _rename(frame, mapping)
-            if "source_retrieved_at" in frame:
-                result["retrieved_at"] = frame.source_retrieved_at
-            result["timestamp"] = result.report_date
-            result["asset_id"] = (
-                result.accession
-                if data_id == "public_13f_filings"
-                else result.accession + ":" + frame.infotable_sk
-            )
-            result["_clock_source"] = "sec_13f:" + result.accession
-            yield result
-    elif source == "csrc_official_fund_financial_cells_extracted":
-        for frame in pd.read_csv(path, dtype="str", chunksize=50000):
-            result = _rename(
-                frame,
+        common = {
+            "accession": "accession",
+            "manager_cik": "manager_cik",
+            "report_period": "report_date",
+            "filing_type": "filing_type",
+            "is_amendment": "is_amendment",
+            "amendment_type": "amendment_type",
+            "filing_date": "publication_date",
+            "published_at": "published_at",
+            "source_zip_sha256": "source_sha256",
+        }
+        mapping = {
+            **common,
+            **(
                 {
-                    "primary_fund_code": "fund_code",
-                    "economic_portfolio_id": "economic_portfolio_id",
-                    "share_class_header_as_provided": "share_class_header",
-                    "report_period_end": "report_period_end",
-                    "value_observation_date": "value_observation_date",
-                    "table_kind": "table_kind",
-                    "field": "field",
-                    "unit": "unit",
-                    "denominator": "denominator",
-                    "value_decimal": "value",
-                    "report_version_identity": "report_version_identity",
-                    "source_retrieved_at": "retrieved_at",
+                    "amendment_number": "amendment_number",
+                    "report_type": "report_type",
+                    "reported_table_entry_total": "reported_table_entry_total",
+                    "source_infotable_row_count": "source_infotable_row_count",
+                    "target_holding_row_count": "target_holding_row_count",
                     "source_url": "source_url",
-                    "source_sha256": "source_sha256",
-                    "published_at": "published_at",
-                },
+                }
+                if data_id == "public_13f_filings"
+                else {
+                    "cusip": "cusip",
+                    "value_usd": "value_usd",
+                    "shares_or_principal_as_provided": "shares_or_principal",
+                    "share_type": "share_type",
+                    "put_call": "put_call",
+                    "investment_discretion": "investment_discretion",
+                    "evidence_url": "source_url",
+                }
+            ),
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=(
+                    *mapping,
+                    *(() if data_id == "public_13f_filings" else ("infotable_sk",)),
+                ),
+                optional_columns=("source_retrieved_at",),
+                dtype="str",
+                chunksize=50000,
             )
-            result["timestamp"] = result.report_period_end
-            result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
-            result["publication_date"] = frame.publication_date
-            result["_report_declared_send_date"] = frame.report_declared_send_date
-            result["asset_id"] = (
-                result.report_version_identity
-                + ":"
-                + result.table_kind
-                + ":"
-                + frame.leaf_table_index
-                + ":"
-                + frame.source_row_index
-                + ":"
-                + frame.expanded_column_index
+        ) as source_frames:
+            for frame in source_frames:
+                result = _rename(frame, mapping)
+                if "source_retrieved_at" in frame:
+                    result["retrieved_at"] = frame.source_retrieved_at
+                result["timestamp"] = result.report_date
+                result["asset_id"] = (
+                    result.accession
+                    if data_id == "public_13f_filings"
+                    else result.accession + ":" + frame.infotable_sk
+                )
+                result["_clock_source"] = "sec_13f:" + result.accession
+                yield result
+    elif source == "csrc_official_fund_financial_cells_extracted":
+        mapping = {
+            "primary_fund_code": "fund_code",
+            "economic_portfolio_id": "economic_portfolio_id",
+            "share_class_header_as_provided": "share_class_header",
+            "report_period_end": "report_period_end",
+            "value_observation_date": "value_observation_date",
+            "table_kind": "table_kind",
+            "field": "field",
+            "unit": "unit",
+            "denominator": "denominator",
+            "value_decimal": "value",
+            "report_version_identity": "report_version_identity",
+            "source_retrieved_at": "retrieved_at",
+            "source_url": "source_url",
+            "source_sha256": "source_sha256",
+            "published_at": "published_at",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=(
+                    *mapping,
+                    "publication_date",
+                    "report_declared_send_date",
+                    "leaf_table_index",
+                    "source_row_index",
+                    "expanded_column_index",
+                ),
+                dtype="str",
+                chunksize=50000,
             )
-            yield result
+        ) as source_frames:
+            for frame in source_frames:
+                result = _rename(
+                    frame,
+                    mapping,
+                )
+                result["timestamp"] = result.report_period_end
+                result["_clock_source"] = (
+                    "cn_fund_report:" + result.report_version_identity
+                )
+                result["publication_date"] = frame.publication_date
+                result["_report_declared_send_date"] = frame.report_declared_send_date
+                result["asset_id"] = (
+                    result.report_version_identity
+                    + ":"
+                    + result.table_kind
+                    + ":"
+                    + frame.leaf_table_index
+                    + ":"
+                    + frame.source_row_index
+                    + ":"
+                    + frame.expanded_column_index
+                )
+                yield result
     elif source == "cffex_contract_parameters":
         frame = pd.DataFrame(
             [
@@ -842,31 +885,31 @@ def normalize(data_id, path, record):
         result["asset_id"] = result.fund_code
         yield result
     elif source == "public_index_weight_history_extracted":
-        frame = pd.read_csv(path, dtype="str")
+        mapping = {
+            "index_code": "source_asset_id",
+            "constituent_code": "constituent_asset_id",
+            "observation_date": "timestamp",
+            "weight_percent": "weight",
+            **{
+                name: name
+                for name in (
+                    "source_url",
+                    "source_sha256",
+                    "retrieved_at",
+                    "publication_date",
+                    "published_at",
+                )
+            },
+        }
+        frame = _read_csv(path, columns=mapping, dtype="str")
         result = _rename(
             frame,
-            {
-                "index_code": "source_asset_id",
-                "constituent_code": "constituent_asset_id",
-                "observation_date": "timestamp",
-                "weight_percent": "weight",
-                **{
-                    name: name
-                    for name in (
-                        "source_url",
-                        "source_sha256",
-                        "retrieved_at",
-                        "publication_date",
-                        "published_at",
-                    )
-                },
-            },
+            mapping,
         )
         # Interpret percentages only after selecting observation dates.
         result["asset_id"] = result.source_asset_id + ":" + result.constituent_asset_id
         yield result
     elif source.startswith("etf_pcf_"):
-        frame = pd.read_csv(path, dtype="str")
         mapping = {
             "trading_date": "timestamp",
             **{name: name for name in DATASETS[data_id]},
@@ -884,6 +927,7 @@ def normalize(data_id, path, record):
         if data_id == "public_etf_pcf_baskets":
             mapping.pop("declared_component_count")
             mapping["original_component_count"] = "declared_component_count"
+        frame = _read_csv(path, columns=mapping, dtype="str")
         result = _rename(frame, mapping)
         result["asset_id"] = result.fund_code
         if data_id == "public_etf_pcf_components":
@@ -898,37 +942,37 @@ def normalize(data_id, path, record):
         )
         yield result
     elif source == "finra_margin":
-        frame = pd.read_excel(path, dtype="str")
+        mapping = {
+            "Year-Month": "timestamp",
+            ("Debit Balances in Customers' Securities Margin Accounts"): "margin_debit",
+            "Free Credit Balances in Customers' Cash Accounts": "cash_free_credit",
+            (
+                "Free Credit Balances in Customers' Securities Margin Accounts"
+            ): "margin_free_credit",
+        }
+        frame = _read_excel(path, columns=mapping, dtype="str")
         result = _rename(
             frame,
-            {
-                "Year-Month": "timestamp",
-                (
-                    "Debit Balances in Customers' Securities Margin Accounts"
-                ): "margin_debit",
-                "Free Credit Balances in Customers' Cash Accounts": "cash_free_credit",
-                (
-                    "Free Credit Balances in Customers' Securities Margin Accounts"
-                ): "margin_free_credit",
-            },
+            mapping,
         )
         result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y-%m")
         result["asset_id"] = "US_MARGIN_ACCOUNTS"
         _numbers(result, DATASETS[data_id])
         yield result
     elif source == "cboe_put_call_extracted":
-        table = pd.read_csv(path, dtype="str")
+        mapping = {
+            "observation_date": "timestamp",
+            "ratio_name": "ratio_name",
+            "put_call_ratio": "put_call_ratio",
+            "source_url": "source_url",
+            "source_sha256": "source_sha256",
+            "publication_date": "publication_date",
+            "published_at": "published_at",
+        }
+        table = _read_csv(path, columns=mapping, dtype="str")
         result = _rename(
             table,
-            {
-                "observation_date": "timestamp",
-                "ratio_name": "ratio_name",
-                "put_call_ratio": "put_call_ratio",
-                "source_url": "source_url",
-                "source_sha256": "source_sha256",
-                "publication_date": "publication_date",
-                "published_at": "published_at",
-            },
+            mapping,
         )
         _numbers(result, ("put_call_ratio",))
         result["asset_id"] = result.ratio_name
@@ -937,77 +981,92 @@ def normalize(data_id, path, record):
         "cn_fund_report_full_holdings_csv_evidence",
         "cn_fund_report_descriptors_extracted",
     }:
+        mapping = {
+            "primary_fund_code": "fund_code",
+            "economic_portfolio_id": "economic_portfolio_id",
+            "report_version_identity": "report_version_identity",
+            "report_period_end": "timestamp",
+            "disclosure_scope": "disclosure_scope",
+            "published_at": "published_at",
+            "source_url": "source_url",
+            "source_sha256": "source_sha256",
+            "source_retrieved_at": "retrieved_at",
+        }
         if data_id == "public_fund_holdings":
-            frames = pd.read_csv(path, dtype="str", chunksize=50000)
+            mapping.update(
+                {
+                    field: field
+                    for field in (
+                        "stock_code",
+                        "stock_market",
+                        "shares_held",
+                        "fair_value_cny",
+                        "nav_weight_percent",
+                    )
+                }
+            )
+            mapping["source_path"] = "report_path"
+        else:
+            mapping.update(
+                {
+                    "stock_disclosure_status": "stock_disclosure_status",
+                    "stock_rows": "stock_rows",
+                }
+            )
+        if data_id == "public_fund_holdings":
+            frames = _read_csv(
+                path,
+                columns=(
+                    *mapping,
+                    "published_date",
+                    "report_declared_send_date",
+                    "html_section_anchor",
+                    "source_row_index",
+                ),
+                optional_columns=("source_leaf_table_index",),
+                dtype="str",
+                chunksize=50000,
+            )
         else:
             frames = (
                 pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"]),
             )
-        for frame in frames:
-            if frame.empty:
-                continue
-            mapping = {
-                "primary_fund_code": "fund_code",
-                "economic_portfolio_id": "economic_portfolio_id",
-                "report_version_identity": "report_version_identity",
-                "report_period_end": "timestamp",
-                "disclosure_scope": "disclosure_scope",
-                "published_at": "published_at",
-                "source_url": "source_url",
-                "source_sha256": "source_sha256",
-                "source_retrieved_at": "retrieved_at",
-            }
-            if data_id == "public_fund_holdings":
-                mapping.update(
-                    {
-                        field: field
-                        for field in (
-                            "stock_code",
-                            "stock_market",
-                            "shares_held",
-                            "fair_value_cny",
-                            "nav_weight_percent",
-                        )
-                    }
+        with closing_iterator(frames) as source_frames:
+            for frame in source_frames:
+                if frame.empty:
+                    continue
+                result = _rename(frame, mapping)
+                result["publication_date"] = frame[
+                    "published_date"
+                    if data_id == "public_fund_holdings"
+                    else "publication_date"
+                ]
+                result["_report_declared_send_date"] = frame.report_declared_send_date
+                result["asset_id"] = result.report_version_identity
+                result["_clock_source"] = (
+                    "cn_fund_report:" + result.report_version_identity
                 )
-                mapping["source_path"] = "report_path"
-            else:
-                mapping.update(
-                    {
-                        "stock_disclosure_status": "stock_disclosure_status",
-                        "stock_rows": "stock_rows",
-                    }
-                )
-            result = _rename(frame, mapping)
-            result["publication_date"] = frame[
-                "published_date"
-                if data_id == "public_fund_holdings"
-                else "publication_date"
-            ]
-            result["_report_declared_send_date"] = frame.report_declared_send_date
-            result["asset_id"] = result.report_version_identity
-            result["_clock_source"] = "cn_fund_report:" + result.report_version_identity
-            if data_id == "public_fund_holdings":
-                leaf = frame.get(
-                    "source_leaf_table_index", pd.Series("", index=frame.index)
-                ).fillna("")
-                result["asset_id"] += (
-                    ":"
-                    + leaf
-                    + ":"
-                    + frame.html_section_anchor.fillna("")
-                    + ":"
-                    + frame.source_row_index
-                    + ":"
-                    + result.stock_market
-                    + ":"
-                    + result.stock_code
-                )
-            else:
-                result["explicit_no_stock"] = (
-                    frame.explicit_no_stock_statement_in_official_report
-                )
-            yield result
+                if data_id == "public_fund_holdings":
+                    leaf = frame.get(
+                        "source_leaf_table_index", pd.Series("", index=frame.index)
+                    ).fillna("")
+                    result["asset_id"] += (
+                        ":"
+                        + leaf
+                        + ":"
+                        + frame.html_section_anchor.fillna("")
+                        + ":"
+                        + frame.source_row_index
+                        + ":"
+                        + result.stock_market
+                        + ":"
+                        + result.stock_code
+                    )
+                else:
+                    result["explicit_no_stock"] = (
+                        frame.explicit_no_stock_statement_in_official_report
+                    )
+                yield result
     elif source in {"chinaamc_extracted_holdings", "cn_fund_report_holdings_extracted"}:
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"])
         result = _rename(
@@ -1075,30 +1134,34 @@ def normalize(data_id, path, record):
         result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
         yield result
     elif source.startswith("szse_"):
-        frame = pd.read_excel(path, dtype="str")
+        mapping = (
+            {
+                "日期": "timestamp",
+                "基金代码": "asset_id",
+                "基金规模(份)": "shares_outstanding",
+            }
+            if data_id == "public_fund_shares"
+            else {
+                "证券代码": "asset_id",
+                "融资买入额(元)": "financing_buy_amount",
+                "融资余额(元)": "financing_balance",
+                "融券卖出量(股/份)": "lending_sell_quantity",
+                "融券余量(股/份)": "lending_quantity",
+                "融券余额(元)": "lending_balance",
+            }
+        )
+        frame = _read_excel(
+            path,
+            columns=mapping,
+            optional_columns=("融券偿还量(股/份)",)
+            if data_id != "public_fund_shares"
+            else (),
+            dtype="str",
+        )
         if frame.empty:
             return
-        if data_id == "public_fund_shares":
-            result = _rename(
-                frame,
-                {
-                    "日期": "timestamp",
-                    "基金代码": "asset_id",
-                    "基金规模(份)": "shares_outstanding",
-                },
-            )
-        else:
-            result = _rename(
-                frame,
-                {
-                    "证券代码": "asset_id",
-                    "融资买入额(元)": "financing_buy_amount",
-                    "融资余额(元)": "financing_balance",
-                    "融券卖出量(股/份)": "lending_sell_quantity",
-                    "融券余量(股/份)": "lending_quantity",
-                    "融券余额(元)": "lending_balance",
-                },
-            )
+        result = _rename(frame, mapping)
+        if data_id != "public_fund_shares":
             result["timestamp"] = (
                 pd.Timestamp(record["requested_observation_date"])
                 if record.get("requested_observation_date")
@@ -1128,46 +1191,59 @@ def normalize(data_id, path, record):
             ]
             if len(members) != 1:
                 raise ValueError("cftc_archive_members_invalid")
-            for chunk in pd.read_csv(
-                archive.open(members[0]), dtype="str", chunksize=100000
-            ):
-                result = _rename(
-                    chunk,
-                    {
-                        "Report_Date_as_YYYY-MM-DD": "timestamp",
-                        "CFTC_Contract_Market_Code": "asset_id",
-                        "Lev_Money_Positions_Long_All": "leveraged_long",
-                        "Lev_Money_Positions_Short_All": "leveraged_short",
-                        "Lev_Money_Positions_Spread_All": "leveraged_spread",
-                        "Asset_Mgr_Positions_Long_All": "asset_manager_long",
-                        "Asset_Mgr_Positions_Short_All": "asset_manager_short",
-                        "Dealer_Positions_Long_All": "dealer_long",
-                        "Dealer_Positions_Short_All": "dealer_short",
-                        "Open_Interest_All": "open_interest",
-                    },
+            mapping = {
+                "Report_Date_as_YYYY-MM-DD": "timestamp",
+                "CFTC_Contract_Market_Code": "asset_id",
+                "Lev_Money_Positions_Long_All": "leveraged_long",
+                "Lev_Money_Positions_Short_All": "leveraged_short",
+                "Lev_Money_Positions_Spread_All": "leveraged_spread",
+                "Asset_Mgr_Positions_Long_All": "asset_manager_long",
+                "Asset_Mgr_Positions_Short_All": "asset_manager_short",
+                "Dealer_Positions_Long_All": "dealer_long",
+                "Dealer_Positions_Short_All": "dealer_short",
+                "Open_Interest_All": "open_interest",
+            }
+            with closing_iterator(
+                _read_csv(
+                    archive.open(members[0]),
+                    columns=mapping,
+                    dtype="str",
+                    chunksize=100000,
                 )
-                result["report_type"] = (
-                    "futures_only"
-                    if path.name.startswith(("fut_fin", "fin_fut"))
-                    else "futures_and_options"
-                )
-                result["asset_id"] = result.asset_id + ":" + result.report_type
-                yield result
+            ) as source_frames:
+                for chunk in source_frames:
+                    result = _rename(
+                        chunk,
+                        mapping,
+                    )
+                    result["report_type"] = (
+                        "futures_only"
+                        if path.name.startswith(("fut_fin", "fin_fut"))
+                        else "futures_and_options"
+                    )
+                    result["asset_id"] = result.asset_id + ":" + result.report_type
+                    yield result
     elif source == "finra_short_volume":
-        frame = pd.read_csv(
-            path, sep="|", dtype="str", keep_default_na=False, na_values=[""]
+        mapping = {
+            "Date": "timestamp",
+            "Symbol": "asset_id",
+            "ShortVolume": "short_volume",
+            "ShortExemptVolume": "short_exempt_volume",
+            "TotalVolume": "total_volume",
+            "Market": "market",
+        }
+        frame = _read_csv(
+            path,
+            columns=mapping,
+            sep="|",
+            dtype="str",
+            keep_default_na=False,
+            na_values=[""],
         )
         frame = frame.loc[frame.Date.str.fullmatch(r"\d{8}", na=False)]
         result = _rename(
             frame,
-            {
-                "Date": "timestamp",
-                "Symbol": "asset_id",
-                "ShortVolume": "short_volume",
-                "ShortExemptVolume": "short_exempt_volume",
-                "TotalVolume": "total_volume",
-                "Market": "market",
-            },
+            mapping,
         )
         result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y%m%d")
         result["asset_id"] = result.asset_id + ":" + result.market
@@ -1197,7 +1273,6 @@ def normalize(data_id, path, record):
         "yahoo_corporate_actions_extracted",
         "eastmoney_cn_etf_corporate_actions_extracted",
     }:
-        frame = pd.read_csv(path, dtype="str", keep_default_na=False, na_values=[""])
         mapping = {
             "symbol": "asset_id",
             "observation_date": "timestamp",
@@ -1208,6 +1283,16 @@ def normalize(data_id, path, record):
         }
         fields = DATASETS[data_id]
         mapping.update({name: name for name in fields if name != "adjustment_basis"})
+        frame = _read_csv(
+            path,
+            columns=(
+                *mapping,
+                *(("currency",) if source == "yahoo_chart_extracted" else ()),
+            ),
+            dtype="str",
+            keep_default_na=False,
+            na_values=[""],
+        )
         result = _rename(frame, mapping)
         if source == "yahoo_chart_extracted":
             result["adjustment_basis"] = (
@@ -1227,15 +1312,16 @@ def normalize(data_id, path, record):
         )
         yield result
     elif source == "ssga_nav_shares":
-        frame = pd.read_excel(path, header=3)
+        mapping = {
+            "Date": "timestamp",
+            "NAV": "nav",
+            "Shares Outstanding": "shares_outstanding",
+            "Total Net Assets": "total_net_assets",
+        }
+        frame = _read_excel(path, columns=mapping, header=3)
         result = _rename(
             frame,
-            {
-                "Date": "timestamp",
-                "NAV": "nav",
-                "Shares Outstanding": "shares_outstanding",
-                "Total Net Assets": "total_net_assets",
-            },
+            mapping,
         )
         result = result.loc[
             pd.to_datetime(result.timestamp, errors="coerce").notna()
@@ -1285,26 +1371,29 @@ def normalize_selected_facts(frame, *, source):
 
 
 def _cffex(payload, date):
-    frame = pd.read_csv(io.BytesIO(payload), encoding="gb18030", dtype="str")
-    frame.columns = frame.columns.str.strip()
+    mapping = {
+        "合约代码": "asset_id",
+        "今开盘": "open",
+        "最高价": "high",
+        "最低价": "low",
+        "今收盘": "close",
+        "今结算": "settlement",
+        "前结算": "previous_settlement",
+        "成交量": "volume",
+        "持仓量": "open_interest",
+        "持仓变化": "open_interest_change",
+    }
+    frame = _read_csv(
+        io.BytesIO(payload),
+        columns=mapping,
+        encoding="gb18030",
+        dtype="str",
+        strip_headers=True,
+    )
     frame = frame.loc[
         frame["合约代码"].str.strip().str.fullmatch(r"(?:IF|IH|IC|IM)\d{4}", na=False)
     ]
-    result = _rename(
-        frame,
-        {
-            "合约代码": "asset_id",
-            "今开盘": "open",
-            "最高价": "high",
-            "最低价": "low",
-            "今收盘": "close",
-            "今结算": "settlement",
-            "前结算": "previous_settlement",
-            "成交量": "volume",
-            "持仓量": "open_interest",
-            "持仓变化": "open_interest_change",
-        },
-    )
+    result = _rename(frame, mapping)
     result["asset_id"] = result.asset_id.str.strip()
     result["product"] = result.asset_id.str[:2]
     result["timestamp"] = pd.to_datetime(date, format="%Y%m%d")
@@ -1317,15 +1406,28 @@ def _cffex(payload, date):
 def _sec(path, source, *, data_id):
     """Keep filings separate; amendments are not independent aggregate positions."""
     with zipfile.ZipFile(path) as archive:
-        submission = pd.read_csv(archive.open("SUBMISSION.tsv"), sep="\t", dtype="str")
+        submission_columns = {"ACCESSION_NUMBER", "FILING_DATE"}
+        submission_columns |= (
+            {"CIK", "PERIODOFREPORT", "SUBMISSIONTYPE"}
+            if source == "sec_13f"
+            else {"SUB_TYPE"}
+        )
+        if data_id in {"public_nport_funds", "public_security_identifiers"}:
+            submission_columns.add("REPORT_DATE")
+        submission = _read_csv(
+            archive.open("SUBMISSION.tsv"),
+            columns=submission_columns,
+            sep="\t",
+            dtype="str",
+        )
         if submission.ACCESSION_NUMBER.duplicated().any():
             raise ValueError("sec_submission_accession_duplicate")
         if source == "sec_13f":
-            covers = pd.read_csv(
+            covers = _read_csv(
                 archive.open("COVERPAGE.tsv"),
                 sep="\t",
                 dtype="str",
-                usecols=["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
+                columns=["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
             )
             submission = submission.merge(
                 covers, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
@@ -1345,11 +1447,11 @@ def _sec(path, source, *, data_id):
                         for month in (1, 2, 3)
                     ),
                 ]
-            funds = pd.read_csv(
+            funds = _read_csv(
                 archive.open("FUND_REPORTED_INFO.tsv"),
                 sep="\t",
                 dtype="str",
-                usecols=fund_columns,
+                columns=fund_columns,
             )
             submission = submission.merge(
                 funds, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
@@ -1386,102 +1488,140 @@ def _sec(path, source, *, data_id):
             return
         identifiers = None
         if data_id == "public_security_identifiers":
-            identifiers = pd.read_csv(
+            identifiers = _read_csv(
                 archive.open("IDENTIFIERS.tsv"),
                 sep="\t",
                 dtype="str",
-                usecols=[
+                columns=[
                     "HOLDING_ID",
                     "IDENTIFIERS_ID",
                     "IDENTIFIER_ISIN",
                     "IDENTIFIER_TICKER",
                 ],
             )
-        for chunk in pd.read_csv(
-            archive.open(member),
-            sep="\t",
-            dtype="str",
-            chunksize=100000,
-            usecols=["ACCESSION_NUMBER", "HOLDING_ID", "ISSUER_CUSIP"]
+        holding_columns = (
+            {"ACCESSION_NUMBER", "HOLDING_ID", "ISSUER_CUSIP"}
             if data_id == "public_security_identifiers"
-            else None,
-        ):
-            joined = chunk.merge(
-                submission,
-                on="ACCESSION_NUMBER",
-                how="left",
-                validate="many_to_one",
-                indicator=True,
+            else {
+                "ACCESSION_NUMBER",
+                "CUSIP",
+                "VALUE",
+                "SSHPRNAMT",
+                "SSHPRNAMTTYPE",
+                "PUTCALL",
+                "INVESTMENTDISCRETION",
+                "INFOTABLE_SK",
+            }
+            if source == "sec_13f"
+            else {
+                "ACCESSION_NUMBER",
+                "ISSUER_CUSIP",
+                "REPORT_DATE",
+                "CURRENCY_VALUE",
+                "CURRENCY_CODE",
+                "BALANCE",
+                "UNIT",
+                "ASSET_CAT",
+                "PERCENTAGE",
+                "HOLDING_ID",
+            }
+        )
+        with closing_iterator(
+            _read_csv(
+                archive.open(member),
+                sep="\t",
+                dtype="str",
+                chunksize=100000,
+                columns=holding_columns,
+                optional_columns=("PAYOFF_PROFILE", "DERIVATIVE_CAT")
+                if source != "sec_13f" and data_id != "public_security_identifiers"
+                else (),
             )
-            if not joined._merge.eq("both").all():
-                raise ValueError("sec_holding_submission_missing")
-            if data_id == "public_security_identifiers":
-                joined = joined.merge(
-                    identifiers, on="HOLDING_ID", how="inner", validate="one_to_many"
+        ) as source_frames:
+            for chunk in source_frames:
+                joined = chunk.merge(
+                    submission,
+                    on="ACCESSION_NUMBER",
+                    how="left",
+                    validate="many_to_one",
+                    indicator=True,
                 )
-                result = _rename(
-                    joined,
-                    {
-                        "ACCESSION_NUMBER": "accession",
-                        "HOLDING_ID": "holding_id",
-                        "SERIES_ID": "series_id",
-                        "ISSUER_CUSIP": "cusip",
-                        "IDENTIFIER_ISIN": "isin",
-                        "IDENTIFIER_TICKER": "ticker",
-                        "REPORT_DATE": "report_date",
-                        "SUB_TYPE": "filing_type",
-                        "FILING_DATE": "publication_date",
-                        "IDENTIFIERS_ID": "_holding_id",
-                    },
-                )
-            elif source == "sec_13f":
-                result = _rename(
-                    joined,
-                    {
-                        "ACCESSION_NUMBER": "accession",
-                        "CIK": "manager_cik",
-                        "CUSIP": "cusip",
-                        "PERIODOFREPORT": "report_date",
-                        "SUBMISSIONTYPE": "filing_type",
-                        "ISAMENDMENT": "is_amendment",
-                        "AMENDMENTTYPE": "amendment_type",
-                        "VALUE": "value_usd",
-                        "SSHPRNAMT": "shares_or_principal",
-                        "SSHPRNAMTTYPE": "share_type",
-                        "PUTCALL": "put_call",
-                        "INVESTMENTDISCRETION": "investment_discretion",
-                        "FILING_DATE": "publication_date",
-                        "INFOTABLE_SK": "_holding_id",
-                    },
-                )
-            else:
-                result = _rename(
-                    joined,
-                    {
-                        "ACCESSION_NUMBER": "accession",
-                        "SERIES_ID": "series_id",
-                        "ISSUER_CUSIP": "cusip",
-                        "REPORT_DATE": "report_date",
-                        "SUB_TYPE": "filing_type",
-                        "CURRENCY_VALUE": "value",
-                        "CURRENCY_CODE": "currency",
-                        "BALANCE": "balance",
-                        "UNIT": "balance_unit",
-                        "ASSET_CAT": "asset_category",
-                        "PERCENTAGE": "portfolio_weight_percent",
-                        "FILING_DATE": "publication_date",
-                        "HOLDING_ID": "_holding_id",
-                    },
-                )
-                result["payoff_profile"] = (
-                    joined["PAYOFF_PROFILE"] if "PAYOFF_PROFILE" in joined else pd.NA
-                )
-                result["derivative_category"] = (
-                    joined["DERIVATIVE_CAT"] if "DERIVATIVE_CAT" in joined else pd.NA
-                )
-            result["asset_id"] = result.accession + ":" + result._holding_id
-            if source == "sec_13f":
-                result["_clock_source"] = "sec_13f:" + result.accession
-            result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
-            result["report_date"] = result.timestamp
-            yield result
+                if not joined._merge.eq("both").all():
+                    raise ValueError("sec_holding_submission_missing")
+                if data_id == "public_security_identifiers":
+                    joined = joined.merge(
+                        identifiers,
+                        on="HOLDING_ID",
+                        how="inner",
+                        validate="one_to_many",
+                    )
+                    result = _rename(
+                        joined,
+                        {
+                            "ACCESSION_NUMBER": "accession",
+                            "HOLDING_ID": "holding_id",
+                            "SERIES_ID": "series_id",
+                            "ISSUER_CUSIP": "cusip",
+                            "IDENTIFIER_ISIN": "isin",
+                            "IDENTIFIER_TICKER": "ticker",
+                            "REPORT_DATE": "report_date",
+                            "SUB_TYPE": "filing_type",
+                            "FILING_DATE": "publication_date",
+                            "IDENTIFIERS_ID": "_holding_id",
+                        },
+                    )
+                elif source == "sec_13f":
+                    result = _rename(
+                        joined,
+                        {
+                            "ACCESSION_NUMBER": "accession",
+                            "CIK": "manager_cik",
+                            "CUSIP": "cusip",
+                            "PERIODOFREPORT": "report_date",
+                            "SUBMISSIONTYPE": "filing_type",
+                            "ISAMENDMENT": "is_amendment",
+                            "AMENDMENTTYPE": "amendment_type",
+                            "VALUE": "value_usd",
+                            "SSHPRNAMT": "shares_or_principal",
+                            "SSHPRNAMTTYPE": "share_type",
+                            "PUTCALL": "put_call",
+                            "INVESTMENTDISCRETION": "investment_discretion",
+                            "FILING_DATE": "publication_date",
+                            "INFOTABLE_SK": "_holding_id",
+                        },
+                    )
+                else:
+                    result = _rename(
+                        joined,
+                        {
+                            "ACCESSION_NUMBER": "accession",
+                            "SERIES_ID": "series_id",
+                            "ISSUER_CUSIP": "cusip",
+                            "REPORT_DATE": "report_date",
+                            "SUB_TYPE": "filing_type",
+                            "CURRENCY_VALUE": "value",
+                            "CURRENCY_CODE": "currency",
+                            "BALANCE": "balance",
+                            "UNIT": "balance_unit",
+                            "ASSET_CAT": "asset_category",
+                            "PERCENTAGE": "portfolio_weight_percent",
+                            "FILING_DATE": "publication_date",
+                            "HOLDING_ID": "_holding_id",
+                        },
+                    )
+                    result["payoff_profile"] = (
+                        joined["PAYOFF_PROFILE"]
+                        if "PAYOFF_PROFILE" in joined
+                        else pd.NA
+                    )
+                    result["derivative_category"] = (
+                        joined["DERIVATIVE_CAT"]
+                        if "DERIVATIVE_CAT" in joined
+                        else pd.NA
+                    )
+                result["asset_id"] = result.accession + ":" + result._holding_id
+                if source == "sec_13f":
+                    result["_clock_source"] = "sec_13f:" + result.accession
+                result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
+                result["report_date"] = result.timestamp
+                yield result

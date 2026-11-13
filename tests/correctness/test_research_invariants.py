@@ -4,7 +4,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.contracts.experiments import legal_training_rows
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.markets.implementations.a_share.execution import (
@@ -13,6 +12,9 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
     _pit_observations,
     _prepare_pit_fundamentals,
+)
+from quant_research_platform.markets.implementations.a_share.market_model import (
+    MarketModelRiskState,
 )
 from quant_research_platform.research.factors.fundamental.calculations import (
     calculate_fundamental_factors,
@@ -332,8 +334,6 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
 def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
     from dataclasses import replace
 
-    from quant_research_platform.contracts.models import validate_model_metadata_core
-
     spec = ModelSpec(
         model_id="fixed",
         model_algorithm=algorithm,
@@ -358,16 +358,12 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
         spec,
         estimator=build_estimator_from_model_spec(spec),
     )
-    metadata = validate_model_metadata_core(result.metadata)
+    metadata = result.metadata
     assert metadata["hyperparameters"] == metadata["resolved_hyperparameters"] == {}
     if algorithm == "linear_regression":
         np.testing.assert_allclose(
             result.prediction_model.predict(frame[["x"]]), frame.y
         )
-    metadata["hyperparameters"] = {"fit_intercept": False}
-    metadata["resolved_hyperparameters"] = {"fit_intercept": False}
-    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
-        validate_model_metadata_core(metadata)
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
@@ -1450,8 +1446,6 @@ def test_decimal_constant_scaler_freezes_exact_training_value(count):
         ).constant.iloc[0]
         == 0.1
     )
-    training.loc[0, "constant"] = np.nextafter(0.1, 1.0)
-    assert ModelMatrixScaler.fit(training).scale_[0] != 1.0
 
 
 @pytest.mark.parametrize(

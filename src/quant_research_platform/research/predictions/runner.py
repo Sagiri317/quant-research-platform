@@ -12,7 +12,6 @@ from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
     PROBABILITY_COLUMNS,
     SEQUENCE_ALGORITHMS,
-    _model_spec,
     _validate_model_prediction_window,
     model_context_window,
     sequence_context_columns,
@@ -34,7 +33,7 @@ from quant_research_platform.research.predictions.outputs import (
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
-    iter_dataset_chunks,
+    iter_dataset_time_chunks,
     open_dataset_session,
 )
 
@@ -43,7 +42,7 @@ def predict(config: Mapping) -> Path:
     config = _strict_config(
         config,
         {"model", "inputs", "output", "prediction_window"},
-        {"input_spec", "asset_ids", "sample_role"},
+        {"asset_ids", "sample_role"},
     )
     reject_if_exists(Path(config["output"]))
     role = config.get("sample_role", "prediction")
@@ -67,20 +66,17 @@ def predict(config: Mapping) -> Path:
     from quant_research_platform.contracts.filtering import required_filter_columns
 
     source = config["inputs"]
-    if config.get("input_spec") is not None:
-        if isinstance(source, Mapping):
-            raise ValueError("duplicate_input_spec")
-        source = {"path": source, "spec": config["input_spec"]}
     options = _dataset_input_options(source, time_window=read_window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
     validate_model_input_roles(
         session.spec,
-        _model_spec(facts["model"]),
+        facts["model"],
         market_id=facts["market_id"],
         selected_columns=selected_columns,
         input_units=facts["input_units"],
+        hyperparameters=result.metadata["hyperparameters"],
     )
     columns = tuple(
         dict.fromkeys(
@@ -95,9 +91,8 @@ def predict(config: Mapping) -> Path:
             )
         )
     )
-    frames = iter_dataset_chunks(session.projected_view(columns))
+    frames = iter_dataset_time_chunks(session.projected_view(columns))
     from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
     def outputs():
         predict_values = (
@@ -107,9 +102,7 @@ def predict(config: Mapping) -> Path:
                 tuple(result.metadata["input_columns"]), result.prediction_model
             )
         )
-        with closing_iterator(
-            iter_complete_time_frames(iter(frames), timestamp_column="timestamp")
-        ) as source:
+        with closing_iterator(frames) as source:
             for frame in source:
                 usable = prediction_rows(
                     frame,
@@ -209,7 +202,6 @@ def predict(config: Mapping) -> Path:
                 "selection_cutoff",
             )
         },
-        "input_spec": config.get("input_spec"),
         "asset_ids": assets,
     }
     if "early_stopping" in result.metadata:

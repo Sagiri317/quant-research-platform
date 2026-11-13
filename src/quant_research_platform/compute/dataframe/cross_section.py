@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import fsum
+
 import numpy as np
 import pandas as pd
 
@@ -11,6 +13,23 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_METRICS_COLUMNS,
 )
 from quant_research_platform.contracts.signals import DEFAULT_N_GROUPS
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
+
+
+def _mean_squared_error(predictions, labels) -> float | None:
+    """Reduce a complete paired sample in the label's economic units."""
+    if not len(labels):
+        return None
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = float(
+            np.mean(
+                np.square(
+                    np.asarray(predictions, dtype="float64")
+                    - np.asarray(labels, dtype="float64")
+                )
+            )
+        )
+    return result if np.isfinite(result) else None
 
 
 def leave_one_out_mean(values, group_ids):
@@ -244,20 +263,22 @@ def _centered_values(
     values = np.asarray(values, dtype="float64")
     if paired is None:
         differences = values - values[..., :1]
-        return differences - differences.mean(axis=-1, keepdims=True)
+        differences -= differences.mean(axis=-1, keepdims=True)
+        return differences
     origin = np.take_along_axis(values, paired.argmax(axis=-1, keepdims=True), axis=-1)
-    differences = np.where(paired, values - origin, 0.0)
+    differences = np.subtract(values, origin, out=np.zeros_like(values), where=paired)
     mean = differences.sum(axis=-1, keepdims=True) / np.maximum(
         paired.sum(axis=-1, keepdims=True), 1
     )
-    return np.where(paired, differences - mean, 0.0)
+    np.subtract(differences, mean, out=differences, where=paired)
+    return differences
 
 
 def _pearson_correlations(left, right, *, paired=None):
     """Reduce complete or explicitly paired arrays along their last axis."""
     left, right = _centered_values(left, paired), _centered_values(right, paired)
-    covariance = np.sum(left * right, axis=-1)
-    denominator = np.sqrt(np.sum(left * left, axis=-1) * np.sum(right * right, axis=-1))
+    covariance = np.vecdot(left, right)
+    denominator = np.sqrt(np.vecdot(left, left) * np.vecdot(right, right))
     return np.clip(
         np.divide(
             covariance,
@@ -487,3 +508,148 @@ def _industry_group_codes(
         for column in ("industry_standard_id", industry_column)
     )
     return standard.str.cat(code, sep=":")
+
+
+def _neutralization_design(industries, sizes):
+    """Cache grouped centered size coordinates for a shared valid domain."""
+    codes, _ = pd.factorize(industries, sort=False)
+    first = np.unique(codes, return_index=True)[1]
+    centered = None
+    xx = None
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        if sizes is not None:
+            sizes = np.asarray(sizes, dtype="float64")
+            centered = sizes - sizes[first[codes]]
+            centered -= (
+                pd.Series(centered)
+                .groupby(codes, sort=False)
+                .transform("mean")
+                .to_numpy()
+            )
+            xx = fsum(pd.Series(centered * centered).groupby(codes, sort=False).sum())
+    return codes, first, centered, xx
+
+
+def _industry_size_residuals(target, industries, sizes, *, rescale, design=None):
+    """Project onto industry intercepts and one within-industry size slope."""
+    target = np.asarray(target, dtype="float64")
+    codes, first, x, xx = (
+        _neutralization_design(industries, sizes) if design is None else design
+    )
+    y = target - target[first[codes]]
+    y -= pd.Series(y).groupby(codes, sort=False).transform("mean").to_numpy()
+    residual = y
+    if x is not None:
+        if xx == 0:
+            return np.full(len(target), np.nan)
+        xy = fsum(pd.Series(x * y).groupby(codes, sort=False).sum())
+        residual = y - x * (xy / xx)
+    magnitude = np.max(np.abs(residual))
+    # Compensated group sums keep roundoff independent of group replication.
+    # Judge an exact fit at each industry's own scale, not the largest industry.
+    scale = pd.Series(np.abs(y)).groupby(codes, sort=False).transform("max").to_numpy()
+    if np.all(np.abs(residual) <= 8 * np.finfo(float).eps * scale):
+        return np.zeros(len(target))
+    return residual / magnitude if rescale else residual
+
+
+def _neutralize_cross_section(
+    frame,
+    *,
+    factor_columns,
+    industry_column,
+    size_column,
+    minimum_observations=100,
+    rescale,
+    industry_neutralize=True,
+    size_neutralize=True,
+    time_groups=None,
+):
+    required = {"timestamp", *factor_columns}
+    if industry_neutralize:
+        required.add(industry_column)
+    if not required.issubset(frame.columns):
+        raise ValueError("neutralization_columns_invalid")
+    if type(minimum_observations) is not int or minimum_observations < 1:
+        raise ValueError("neutralization_minimum_observations_invalid")
+    if not industry_neutralize and not size_neutralize:
+        return frame
+    result = frame.copy()
+    for column in factor_columns:
+        result[column] = np.nan
+    if time_groups is None:
+        time_groups = frame.groupby("timestamp", sort=False).indices
+    for positions in time_groups.values():
+        cross = frame.iloc[positions]
+        industry = (
+            cross[industry_column]
+            if industry_neutralize
+            else pd.Series(0, index=cross.index)
+        )
+        valid_industry = industry.notna()
+        if not valid_industry.any():
+            continue
+        size = None
+        if size_neutralize and any(factor != size_column for factor in factor_columns):
+            if size_column not in cross:
+                raise ValueError("neutralization_size_column_required")
+            size = strict_finite_numeric_series(
+                cross.loc[valid_industry, size_column],
+                error="invalid_neutralization_size",
+                allow_null=True,
+            )
+        designs = {}
+        for factor in factor_columns:
+            # A size source is never regressed on itself. With no industry step,
+            # its value passes through to the separately selected centering step.
+            use_size = size_neutralize and factor != size_column
+            if not industry_neutralize and not use_size:
+                result.loc[cross.index, factor] = cross[factor].to_numpy(
+                    dtype="float64", na_value=np.nan
+                )
+                continue
+            values = strict_finite_numeric_series(
+                cross.loc[valid_industry, factor],
+                error=f"invalid_neutralization_factor: {factor}",
+                allow_null=True,
+            )
+            valid = values.notna()
+            if use_size:
+                valid &= size.notna()
+            indices = values.index[valid]
+            groups = industry.loc[indices]
+            parameters = groups.nunique() + use_size
+            if len(indices) < max(minimum_observations, 5 * parameters):
+                continue
+            target = values.loc[indices].to_numpy(dtype="float64", copy=False)
+            sizes = size.loc[indices].to_numpy() if use_size else None
+            key = (use_size, valid.to_numpy(dtype=bool).tobytes())
+            if key not in designs:
+                designs[key] = _neutralization_design(groups, sizes)
+            result.loc[indices, factor] = _industry_size_residuals(
+                target, groups, sizes, rescale=rescale, design=designs[key]
+            )
+    return result
+
+
+def _center_scale(values, *, center, scale, weights=None):
+    if center and scale and weights is None:
+        return _stable_zscore(values)
+    if not center and not scale:
+        return values.astype("float64")
+    observed = values.dropna()
+    output = pd.Series(np.nan, index=values.index, dtype="float64")
+    if not len(observed) or (scale and len(observed) < 2):
+        return output
+    shifted = observed - observed.iloc[0]
+    centered = shifted - shifted.mean()
+    targets = centered if center else observed
+    if center and weights is not None:
+        targets = shifted - np.average(shifted, weights=weights.loc[observed.index])
+    if scale:
+        std = centered.std(ddof=0)
+        if std == 0:
+            return output
+        targets = targets / std
+    output.loc[observed.index] = targets
+    return output

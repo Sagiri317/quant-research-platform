@@ -639,8 +639,10 @@ def test_native_intraday_skips_unobserved_day_with_history_prefix(tmp_path):
 
 
 def test_native_intraday_keeps_complete_cross_sections_across_reader_batches(tmp_path):
+    from quant_research_platform.compute.dataframe.streaming import (
+        iter_complete_time_frames,
+    )
     from quant_research_platform.markets.prepare import prepare
-    from quant_research_platform.runtime.dataframes import iter_complete_time_frames
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.reading import (
         iter_dataset_chunks,

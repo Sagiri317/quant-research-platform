@@ -364,24 +364,34 @@ def produce(spec, *, inputs, time_window, processed_catalog):
         # links delimit history without inventing a calendar or persisted state.
         previous_decisions = frame.groupby("asset_id", sort=False).timestamp.shift()
         segments = frame.signal_session.ne(previous_decisions.dt.normalize()).cumsum()
-        result = calculate_price_volume_factors(
-            frame.assign(timestamp=frame.signal_session, _calendar_segment=segments),
-            factor_columns=selected,
-            history_keys=("asset_id", "_calendar_segment"),
-            **json.loads(spec.parameters_json),
-        )
-        result["timestamp"] = frame.timestamp
-        result["market_id"] = frame.market_id
+        keys = frame.loc[
+            frame.timestamp.ge(start)
+            & (frame.timestamp.le(end) if closed else frame.timestamp.lt(end)),
+            [*KEY, "signal_session"],
+        ]
+        if keys.empty:
+            result = keys.assign(**dict.fromkeys(selected, np.nan))
+        else:
+            # Retain causal warmup and recursive state, but calculate only the
+            # signal sessions consumed by this decision window.
+            calculated = calculate_price_volume_factors(
+                frame.assign(
+                    timestamp=frame.signal_session, _calendar_segment=segments
+                ),
+                factor_columns=selected,
+                output_window=TimeWindow(
+                    keys.signal_session.min(), keys.signal_session.max()
+                ),
+                history_keys=("asset_id", "_calendar_segment"),
+                **json.loads(spec.parameters_json),
+            )
+            result = keys.merge(
+                calculated.rename(columns={"timestamp": "signal_session"}),
+                on=["asset_id", "signal_session"],
+                how="left",
+            )
         yield (
-            (
-                result.loc[
-                    result.timestamp.ge(start)
-                    & (
-                        result.timestamp.le(end) if closed else result.timestamp.lt(end)
-                    ),
-                    list(spec.column_roles),
-                ],
-            ),
+            (result.loc[:, list(spec.column_roles)],),
             {
                 "producer_diagnostics": {
                     "formula_owner": "price_volume",

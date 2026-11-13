@@ -1,4 +1,3 @@
-import pickle
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from statistics import median
@@ -28,7 +27,6 @@ from quant_research_platform.research.features.transforms import (
     _mad_winsorize,
     a_share_feature_pipeline,
 )
-from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from quant_research_platform.research.risk import (
     preprocess_risk_styles,
 )
@@ -43,48 +41,6 @@ from tests.helpers.research_specs import (
     assemble_research_dataset,
     make_demo_research_dataset_spec,
 )
-
-
-@pytest.mark.parametrize("weights", ([1.0, 1.0], [1.0, 3.0]))
-def test_scaler_preserves_weighted_center_across_chunks_and_pickle(weights):
-    frame = pd.DataFrame({"x": [1.0, 3.0]})
-    exact = [Fraction.from_float(value) for value in frame.x]
-    exact_weights = [Fraction.from_float(weight) for weight in weights]
-    center = sum(
-        value * weight for value, weight in zip(exact, exact_weights, strict=True)
-    ) / sum(exact_weights)
-    variance = sum(
-        (value - center) ** 2 * weight
-        for value, weight in zip(exact, exact_weights, strict=True)
-    ) / sum(exact_weights)
-    with localcontext() as context:
-        context.prec = 100
-        scale = (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
-        expected = [
-            float(
-                Decimal((value - center).numerator)
-                / Decimal((value - center).denominator)
-                / scale
-            )
-            for value in exact
-        ]
-    scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
-    actual = scaler.transform(frame).x.to_numpy()
-    np.testing.assert_allclose(actual, expected, rtol=1e-15, atol=0)
-    assert np.dot(actual, weights) == pytest.approx(0, abs=1e-15)
-    restored = pickle.loads(pickle.dumps(scaler))
-    chunks = pd.concat(
-        [restored.transform(frame.iloc[:1]), restored.transform(frame.iloc[1:])]
-    )
-    pd.testing.assert_frame_equal(chunks, scaler.transform(frame))
-    assert restored.to_payload() == scaler.to_payload()
-    assert restored.to_payload()["scaling"] is True
-    assert set(restored.to_payload()) == {
-        "columns",
-        "scaling",
-        "weighted_mean",
-        "weighted_population_scale",
-    }
 
 
 def test_risk_styles_remain_zero_centered():
@@ -192,9 +148,7 @@ def test_amihud_mean_survives_native_write_and_read(tmp_path, window):
         ),
         check_exact=True,
     )
-    assert (
-        inspect_dataset(root).manifest["non_finite_count_summary"].get(column, 0) == 0
-    )
+    assert inspect_dataset(root).row_count == len(calculated)
 
 
 def test_amihud_mean_uses_valid_observations_and_freshness():

@@ -21,7 +21,6 @@ from quant_research_platform.markets.implementations.a_share.stock_pool import (
 )
 from quant_research_platform.research.labels.quote_returns import QuoteReturnLookup
 from quant_research_platform.research.protocols import a_share_hft as protocol
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import (
@@ -30,6 +29,7 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session,
     open_dataset_session,
 )
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 def _sample_block(

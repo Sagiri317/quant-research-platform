@@ -11,7 +11,6 @@ from quant_research_platform.artifacts.statistics import read_statistics_artifac
 from quant_research_platform.contracts.models import (
     ModelSpec,
     TrainingWeighting,
-    validate_model_metadata_core,
 )
 from quant_research_platform.research.models.statistics import (
     _prediction_quality,
@@ -88,7 +87,7 @@ def test_period_specific_frozen_means_survive_changed_evaluation_targets(tmp_pat
         ]
     )
     labels["label"] += 1.0
-    labels.to_parquet(config["dataset"], index=False)
+    labels.to_parquet(config["dataset"]["path"], index=False)
     config["evaluation"]["baseline"] = "training_mean"
     config["periods"][0]["window"] = {"start": "2020-01-03", "end": "2020-01-03"}
     config["periods"].append(
@@ -128,15 +127,6 @@ def test_requested_training_mean_requires_saved_training_evidence(tmp_path):
     model_statistics(ic_only)
     config["evaluation"]["baseline"] = "zero_prediction"
     model_statistics(config)
-
-
-@pytest.mark.parametrize("invalid", [True, "1.0", None])
-def test_model_metadata_rejects_invalid_training_mean(tmp_path, invalid):
-    _, case, _, _, _ = _case(tmp_path)
-    with pytest.raises(ValueError, match="invalid_model_training_target_mean"):
-        validate_model_metadata_core(
-            {**case.result.metadata, "training_target_mean": invalid}
-        )
 
 
 @pytest.mark.parametrize("baseline", [None, "evaluation_mean", 1, []])

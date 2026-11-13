@@ -34,7 +34,7 @@ def _config(
     ]
     scoring["candidate_ids"] = list(algorithms)
     if constant:
-        labels = pd.read_parquet(scoring["labels"])
+        labels = pd.read_parquet(scoring["labels"]["path"])
         labels.loc[labels.timestamp.between("2020-01-04", "2020-01-06"), "label"] = 0.2
         consumed = labels.loc[
             labels.timestamp.between("2020-01-04", "2020-01-06")
@@ -44,11 +44,10 @@ def _config(
         ]
         assert consumed.groupby("timestamp").size().tolist() == [2, 2, 2]
         assert consumed.groupby("timestamp").label.nunique().tolist() == [1, 1, 1]
-        scoring["labels"] = str(tmp_path / "constant-labels.parquet")
-        labels.to_parquet(scoring["labels"], index=False)
+        scoring["labels"]["path"] = str(tmp_path / "constant-labels.parquet")
+        labels.to_parquet(scoring["labels"]["path"], index=False)
     return {
         "dataset": scoring["labels"],
-        "input_spec": scoring["label_spec"],
         "output": str(tmp_path / "statistics"),
         "window": window,
         "family_ids": scoring["candidate_ids"],
@@ -74,7 +73,7 @@ def test_model_statistics_rejects_window_without_observations(
     )
     if empty_stream:
         monkeypatch.setattr(
-            model_stats, "iter_dataset_chunks", lambda session: iter(())
+            model_stats, "iter_dataset_time_chunks", lambda session, **kwargs: iter(())
         )
     with pytest.raises(ValueError, match="statistics_model_observations_empty"):
         model_stats.model_statistics(config)
@@ -95,7 +94,7 @@ def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
             "window": {"start": "2020-01-07", "end": "2020-01-08"},
         }
     )
-    original = model_stats.iter_complete_session_frames
+    original = model_stats.iter_dataset_time_chunks
 
     def with_empty_frames(*args, **kwargs):
         for frame in original(*args, **kwargs):
@@ -103,7 +102,7 @@ def test_model_statistics_keeps_sparse_windows_and_skips_empty_frames(
             yield frame
             yield frame.iloc[:0]
 
-    monkeypatch.setattr(model_stats, "iter_complete_session_frames", with_empty_frames)
+    monkeypatch.setattr(model_stats, "iter_dataset_time_chunks", with_empty_frames)
     saved = read_statistics_artifact(model_stats.model_statistics(config))
     with saved.table("prediction_diagnostics.parquet") as diagnostics:
         assert diagnostics.input_date_count.tolist() == [3]

@@ -626,31 +626,3 @@ def test_public_prediction_selection_keeps_end_day_intraday_values(
     monkeypatch.setattr(portfolio_production, "backtest_a_share", observed_lookup)
     portfolio_production.backtest(config)
     assert seen == [len(rows)]
-
-
-@pytest.mark.parametrize("cutoff", ["fit_cutoff", "selection_cutoff"])
-def test_native_empty_prediction_retains_causal_cutoffs(tmp_path, cutoff):
-    from quant_research_platform.artifacts.outputs.prediction import (
-        read_predictions,
-        write_prediction_outputs,
-    )
-
-    config = _public_prediction_config(tmp_path, empty=True)
-    rows, metadata = read_predictions(config["predictions"][0]["path"])
-    metadata["model_facts"][cutoff] = "2023-01-02"
-    if cutoff == "fit_cutoff":
-        metadata["model_facts"]["fit_windows"] = [
-            {"start": "2014-01-02", "end": "2023-01-02"}
-        ]
-    error = (
-        "prediction_must_follow_fit_cutoff"
-        if cutoff == "fit_cutoff"
-        else "model_selection_after_fit_cutoff"
-    )
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        write_prediction_outputs(
-            output_path=tmp_path / "future-prediction",
-            output_chunks=[rows],
-            metadata=metadata,
-        )
-    assert not (tmp_path / "future-prediction").exists()

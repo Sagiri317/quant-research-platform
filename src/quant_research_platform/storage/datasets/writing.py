@@ -16,14 +16,10 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
-    canonical_json_hash,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    DEFAULT_BATCH_ROWS,
-)
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.observation import DatasetSummaryObserver
 from quant_research_platform.storage.datasets.paths import (
@@ -35,17 +31,15 @@ from quant_research_platform.storage.datasets.paths import (
 )
 from quant_research_platform.storage.datasets.reading import iter_frame_chunks
 from quant_research_platform.storage.datasets.schema import (
-    arrow_type_has_null,
-    arrow_type_resolves_null,
     data_spec_payload,
     encode_logical_category_value,
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
     merge_dataset_metadata,
     merge_logical_dtype_payloads,
+    object_string_columns,
     physical_schema_columns,
     physical_schema_from_schema,
-    validate_frame_objects,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
@@ -57,6 +51,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 from quant_research_platform.storage.parquet import (
+    DEFAULT_BATCH_ROWS,
     parquet_table_writer,
 )
 
@@ -72,7 +67,6 @@ class _WriteStats:
     partitions: set[str] = field(default_factory=set)
     partition_row_counts: dict[str, int] = field(default_factory=dict)
     columns: tuple[str, ...] | None = None
-    schema_hash: str | None = None
     logical_dtypes: dict[str, Any] | None = None
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
@@ -123,11 +117,10 @@ class _WriteStats:
         self,
         frame: pd.DataFrame,
         *,
-        schema: pa.Schema | None,
         object_string_columns: tuple[str, ...],
     ) -> pa.Table:
         try:
-            table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
+            table = pa.Table.from_pandas(frame, preserve_index=False)
         except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError) as exc:
             raise ValueError("unsupported_dataset_logical_dtype") from exc
         for name in frame:
@@ -160,7 +153,7 @@ class _WriteStats:
             except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
                 raise ValueError("dataset_schema_mismatch") from error
             if any(
-                not arrow_type_resolves_null(old.type, new.type)
+                not (pa.types.is_null(old.type) or old.type == new.type)
                 for source in (self._arrow_schema, physical_schema)
                 for old, new in zip(source, unified, strict=True)
             ):
@@ -177,7 +170,6 @@ class _WriteStats:
             )
             self._schema = physical_schema
             self.columns = physical_schema_columns(physical_schema)
-            self.schema_hash = canonical_json_hash(physical_schema)
         partition = relative_partition_label(self.data_root, path)
         self.file_count += 1
         self.file_size_bytes += filesystem_stat(path).st_size
@@ -219,7 +211,7 @@ class _WriteStats:
         )
 
     def payload(self) -> dict[str, Any]:
-        if self.columns is None or self._schema is None or self.schema_hash is None:
+        if self.columns is None or self._schema is None:
             raise ValueError("dataset_schema_missing")
         self.logical_dtypes = self.materialized_logical_dtypes()
         payload = {}
@@ -231,7 +223,6 @@ class _WriteStats:
                 "file_size_bytes": int(self.file_size_bytes),
                 "columns": list(self.columns),
                 "physical_schema": self._schema,
-                "schema_hash": self.schema_hash,
                 "logical_dtypes": self.logical_dtypes,
                 "partition_row_counts": {
                     key: int(value)
@@ -297,7 +288,6 @@ def write_dataset(
                 data_root=final_root / "data",
                 spec=spec_payload,
                 columns=tuple(manifest["columns"]),
-                schema_hash=manifest["schema_hash"],
                 file_count=manifest["file_count"],
                 row_count=manifest["row_count"],
                 partitions=tuple(manifest["partitions"]),
@@ -331,7 +321,7 @@ def _write_contents(
     def observe_pending() -> None:
         schema = accumulator._arrow_schema
         assert schema is not None
-        if any(arrow_type_has_null(field.type) for field in schema):
+        if any(pa.types.is_null(field.type) for field in schema):
             return
         for pending in pending_parts:
             with closing_iterator(
@@ -348,7 +338,7 @@ def _write_contents(
     saw_empty_schema = False
     for chunk in chunks:
         declared = pd.DataFrame(accumulator.declared_frame(chunk), copy=False)
-        object_string_columns = validate_frame_objects(declared)
+        string_columns = object_string_columns(declared)
         for bounded_frame in (
             (declared,)
             if declared.empty
@@ -356,9 +346,7 @@ def _write_contents(
         ):
             frame, logical_dtypes = accumulator.prepare_frame(bounded_frame)
             if frame.empty:
-                accumulator.table_for_frame(
-                    frame, schema=None, object_string_columns=object_string_columns
-                )
+                accumulator.table_for_frame(frame, object_string_columns=string_columns)
                 accumulator.dtype_metadata(logical_dtypes)
                 saw_empty_schema = True
                 continue
@@ -369,8 +357,7 @@ def _write_contents(
             ):
                 table = accumulator.table_for_frame(
                     partition_frame,
-                    schema=None,
-                    object_string_columns=object_string_columns,
+                    object_string_columns=string_columns,
                 )
                 persisted = table.replace_schema_metadata(
                     {b"qrp.logical-dtypes": accumulator.dtype_metadata(logical_dtypes)}
@@ -386,8 +373,7 @@ def _write_contents(
                 write_parquet_file(persisted, path, timestamp_column=timestamp_column)
                 assert accumulator._arrow_schema is not None
                 if any(
-                    arrow_type_has_null(field.type)
-                    for field in accumulator._arrow_schema
+                    pa.types.is_null(field.type) for field in accumulator._arrow_schema
                 ):
                     pending_parts.append(path)
                 else:
@@ -439,30 +425,12 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
                 if pa.types.is_dictionary(field.type)
                 else pa.timestamp("ms", tz=field.type.tz)
                 if pa.types.is_timestamp(field.type) and field.type.unit == "s"
-                else _parquet_nested_type(field.type),
+                else field.type,
                 nullable=field.nullable,
             )
             for field in schema
         ]
     )
-
-
-def _parquet_nested_type(data_type: pa.DataType) -> pa.DataType:
-    # Parquet's compliant list representation names every value field "element".
-    if pa.types.is_struct(data_type):
-        return pa.struct(
-            [field.with_type(_parquet_nested_type(field.type)) for field in data_type]
-        )
-    if pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
-        field = data_type.value_field.with_name("element").with_type(
-            _parquet_nested_type(data_type.value_type)
-        )
-        return (
-            pa.large_list(field)
-            if pa.types.is_large_list(data_type)
-            else pa.list_(field)
-        )
-    return data_type
 
 
 def write_parquet_file(

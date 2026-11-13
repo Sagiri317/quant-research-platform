@@ -203,7 +203,7 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
             source, frame.drop(columns="unused_payload"), spec=DataSpec(**values)
         )
     config = {
-        "dataset": str(source),
+        "dataset": {"path": str(source), "spec": declared} if bare else str(source),
         "output": str(tmp_path / "published"),
         **metadata,
         "evaluation": {
@@ -218,7 +218,6 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
             "fdr_primary": "BY_5pct",
             "fdr_robustness": "BH_5pct",
         },
-        **({"input_spec": declared} if bare else {}),
     }
     if omit_fdr_defaults:
         config["statistics"].pop("fdr_primary")
@@ -237,7 +236,7 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
         assert actual.observation_count.eq(12 if intraday else 11).all()
     if bare:
         broken = {**config, "output": str(tmp_path / "unpublished")}
-        broken.pop("input_spec")
+        broken["dataset"] = {"path": config["dataset"]["path"]}
         with pytest.raises(ValueError, match="parquet_semantic_spec_required"):
             factor_statistics(broken)
         assert not (tmp_path / "unpublished").exists()
@@ -480,7 +479,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
             "fama_macbeth_core_factors": [],
         },
     }
-    original = factor_stats.iter_dataset_chunks
+    original = factor_stats.iter_dataset_time_chunks
     artifacts = []
     closed = []
     for batch_rows in (1000, 7):
@@ -491,7 +490,7 @@ def test_factor_statistics_complete_batches_preserve_dates_and_masks(
             finally:
                 closed.append(batch_rows)
 
-        monkeypatch.setattr(factor_stats, "iter_dataset_chunks", chunks)
+        monkeypatch.setattr(factor_stats, "iter_dataset_time_chunks", chunks)
         artifacts.append(
             read_statistics_artifact(
                 factor_stats.factor_statistics(

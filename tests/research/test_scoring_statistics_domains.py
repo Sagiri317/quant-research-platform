@@ -87,13 +87,12 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
         ] = pd.Timestamp("2020-01-10")
     window = {"start": "2020-01-04", "end": "2020-01-06"}
     source, declared = _source(
-        tmp_path / "inputs", frame, case.config["input_spec"], bare=bare
+        tmp_path / "inputs", frame, case.config["inputs"]["spec"], bare=bare
     )
     prediction = predict(
         {
             "model": str(case.root),
-            "inputs": str(source),
-            **({"input_spec": declared} if bare else {}),
+            "inputs": {"path": str(source), "spec": declared} if bare else str(source),
             "prediction_window": window,
             "output": str(tmp_path / "predictions"),
         }
@@ -108,8 +107,7 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
     scoring = {
         "predictions": [str(prediction)],
         "candidate_ids": ["linear"],
-        "labels": str(labels),
-        **({"label_spec": label_spec} if bare else {}),
+        "labels": {"path": str(labels), "spec": label_spec} if bare else str(labels),
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": "2020-01-06",
@@ -125,8 +123,7 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
     assert scored["metrics"][0]["validation_rows"] == sum(expected_counts)
     assert scored["metrics"][0]["validation_mse"] < 1e-24
     statistics = {
-        "dataset": str(labels),
-        **({"input_spec": label_spec} if bare else {}),
+        "dataset": {"path": str(labels), "spec": label_spec} if bare else str(labels),
         "output": str(tmp_path / "statistics"),
         "window": window,
         "family_ids": ["linear"],
@@ -151,8 +148,7 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
     )
     selected = {
         **statistics,
-        "dataset": str(source),
-        **({"input_spec": declared} if bare else {}),
+        "dataset": {"path": str(source), "spec": declared} if bare else str(source),
         "output": str(tmp_path / "selected-statistics"),
         "selection_group": "global",
         "prediction_id": "selected",
@@ -181,7 +177,9 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
         score(
             {
                 **scoring,
-                "labels": str(missing_labels),
+                "labels": {"path": str(missing_labels), "spec": label_spec}
+                if bare
+                else str(missing_labels),
                 "output": str(tmp_path / "missing-scores.json"),
             }
         ).read_text()
@@ -200,7 +198,9 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
         model_statistics(
             {
                 **statistics,
-                "dataset": str(missing_labels),
+                "dataset": {"path": str(missing_labels), "spec": label_spec}
+                if bare
+                else str(missing_labels),
                 "output": str(tmp_path / "missing-statistics"),
             }
         )

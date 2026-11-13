@@ -26,13 +26,6 @@ def _statistics_window_bounds(window):
 
 def _statistics_input_session(config, window):
     value = config["dataset"]
-    if "input_spec" in config:
-        if isinstance(value, dict):
-            if "spec" in value:
-                raise ValueError("dataset_spec_already_declared")
-            value = {**value, "spec": config["input_spec"]}
-        else:
-            value = {"path": value, "spec": config["input_spec"]}
     options = _dataset_input_options(value, time_window=window)
     session = open_dataset_session(**options)
     spec = session.spec

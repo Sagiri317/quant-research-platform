@@ -1,15 +1,10 @@
 """Saved models preserve fitted floating moments."""
 
-import copy
-
 import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.models import (
-    ModelSpec,
-    validate_model_metadata_core,
-)
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.persisted import load_model
 from tests.research.direct_model_test_support import fit_frame
 
@@ -38,12 +33,6 @@ def _case(tmp_path):
 
 def test_native_fit_preserves_frozen_moments_and_nonbinary_center(tmp_path):
     case = _case(tmp_path)
-    metadata = case.result.metadata
-    for bad in [None, True, "0", [0, 1], np.nan, np.inf]:
-        changed = copy.deepcopy(metadata)
-        changed["scaler"]["weighted_mean"][0] = bad
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            validate_model_metadata_core(changed)
     predictor = case.result.prediction_model
     scaler = predictor.scaler
     assert scaler.mean_[0] == pytest.approx(1 / 3, rel=1e-14)

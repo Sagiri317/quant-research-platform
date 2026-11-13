@@ -177,7 +177,7 @@ def test_score_compares_science_without_binding_fold_training_windows(
 ):
     cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
-    future = pd.read_parquet(config["labels"])
+    future = pd.read_parquet(config["labels"]["path"])
     future["timestamp"] += pd.Timedelta(days=3)
     future["label_available_at"] += pd.Timedelta(days=3)
     source = tmp_path / "next.parquet"
@@ -196,8 +196,7 @@ def test_score_compares_science_without_binding_fold_training_windows(
     output = predict(
         dict(
             model=str(model),
-            inputs=str(source),
-            input_spec=case.config["input_spec"],
+            inputs={"path": str(source), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "next_prediction"),
             prediction_window=window,
         )
@@ -211,12 +210,12 @@ def test_score_compares_science_without_binding_fold_training_windows(
     manifest.write_text(json.dumps(payload))
     labels = pd.concat(
         [
-            pd.read_parquet(config["labels"]),
+            pd.read_parquet(config["labels"]["path"]),
             future.loc[future.timestamp.ge("2020-01-07")],
         ],
         ignore_index=True,
     )
-    labels.to_parquet(config["labels"], index=False)
+    labels.to_parquet(config["labels"]["path"], index=False)
     config.update(
         predictions=[[config["predictions"][0], str(output)]],
         validation_windows=[config["scoring_window"], window],
@@ -245,7 +244,7 @@ def test_completed_scores_and_selection_do_not_reopen_ancestors(tmp_path):
         shutil.rmtree(prediction)
     shutil.rmtree(case.root)
     shutil.rmtree(case.root.with_name(case.root.name + ".trial"))
-    Path(case.config["inputs"]).unlink()
+    Path(case.config["inputs"]["path"]).unlink()
     selected = select(request)
     Path(request["scores"]).unlink()
     assert (
@@ -282,7 +281,7 @@ def test_refit_rejects_changed_science_before_training(tmp_path, mutation, monke
     if mutation == "random_seed":
         next_fit["model"]["random_seed"] = 987
     elif mutation == "input_units":
-        next_fit["input_spec"]["column_units"]["x"] = "percent_return"
+        next_fit["inputs"]["spec"]["column_units"]["x"] = "percent_return"
     else:
         # An ordinary target cannot acquire a different economic definition.
         # Use a native label producer carrying changed scientific semantics.
@@ -291,13 +290,13 @@ def test_refit_rejects_changed_science_before_training(tmp_path, mutation, monke
         source = tmp_path / "changed"
         write_dataset(
             source,
-            pd.read_parquet(config["labels"]),
+            pd.read_parquet(config["labels"]["path"]),
             spec=DataSpec(
                 **{
                     key: tuple(value)
                     if key in {"primary_key", "partition_columns"}
                     else value
-                    for key, value in next_fit.pop("input_spec").items()
+                    for key, value in next_fit["inputs"].pop("spec").items()
                 }
             ),
             metadata={
@@ -354,7 +353,7 @@ def test_open_prediction_pushes_lower_bound_before_bad_key_validation(
     frame = pd.DataFrame(
         dict(timestamp=stamps, asset_id=["old", "new"], x=[1.0, 2.0], eligible=True)
     )
-    declared = copy.deepcopy(case.config["input_spec"])
+    declared = copy.deepcopy(case.config["inputs"]["spec"])
     declared["column_roles"] = {
         key: value for key, value in declared["column_roles"].items() if key in frame
     }
@@ -556,7 +555,7 @@ def test_statistics_compares_selected_science_without_reopening_ancestors(
 
     case, scoring, request = _selection(tmp_path)
     selection = select(request)
-    future = pd.read_parquet(scoring["labels"])
+    future = pd.read_parquet(scoring["labels"]["path"])
     future["timestamp"] += pd.Timedelta(days=6)
     future["label_available_at"] += pd.Timedelta(days=6)
     source = tmp_path / "future_statistics.parquet"
@@ -565,8 +564,7 @@ def test_statistics_compares_selected_science_without_reopening_ancestors(
     prediction = predict(
         dict(
             model=str(case.root),
-            inputs=str(source),
-            input_spec=case.config["input_spec"],
+            inputs={"path": str(source), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "future_predictions"),
             prediction_window=window,
         )
@@ -582,8 +580,7 @@ def test_statistics_compares_selected_science_without_reopening_ancestors(
         _mutate(payload["metadata"]["model_facts"], mutation)
         manifest.write_text(json.dumps(payload))
     config = dict(
-        dataset=str(source),
-        input_spec=case.config["input_spec"],
+        dataset={"path": str(source), "spec": case.config["inputs"]["spec"]},
         output=str(tmp_path / "statistics"),
         window=window,
         label_cutoff="2020-01-12",
@@ -693,11 +690,11 @@ def test_refit_preserves_selected_training_unit_when_scoring_unit_differs(tmp_pa
 
     cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
-    frame = pd.read_parquet(config["labels"])
+    frame = pd.read_parquet(config["labels"]["path"])
     frame["label"] *= 100
-    frame.to_parquet(config["labels"], index=False)
-    config["label_spec"] = copy.deepcopy(config["label_spec"])
-    config["label_spec"]["column_units"]["label"] = "percent_return"
+    frame.to_parquet(config["labels"]["path"], index=False)
+    config["labels"]["spec"] = copy.deepcopy(config["labels"]["spec"])
+    config["labels"]["spec"]["column_units"]["label"] = "percent_return"
     config["label_unit"] = "percent_return"
     scores = score(config)
     payload = json.loads(scores.read_text())
@@ -739,10 +736,10 @@ def test_score_preserves_candidate_science_without_reopening_features(
     first_payload = json.loads(first_manifest.read_text())
     second_payload = json.loads(second_manifest.read_text())
     first_meta, second_meta = first_payload["metadata"], second_payload["metadata"]
-    first_meta["input_spec"]["column_units"]["x"] = "decimal_return"
+    first_meta["inputs"]["spec"]["column_units"]["x"] = "decimal_return"
     first_meta["model_facts"]["input_units"] = {"x": "decimal_return"}
     second_meta["inputs"] = first_meta["inputs"]
-    second_meta["input_spec"] = copy.deepcopy(first_meta["input_spec"])
+    second_meta["inputs"]["spec"] = copy.deepcopy(first_meta["inputs"]["spec"])
     second_meta["model_id"] = "second_linear"
     second_meta["model_facts"]["model"]["model_id"] = "second_linear"
     second_meta["model_facts"]["input_units"] = {"x": "decimal_return"}
@@ -765,7 +762,7 @@ def test_score_preserves_candidate_science_without_reopening_features(
         "prediction_rows",
         lambda *args, **kwargs: pytest.fail("score reconstructed ancestral features"),
     )
-    Path(first_meta["inputs"]).unlink()
+    Path(first_meta["inputs"]["path"]).unlink()
     result = json.loads(score(config).read_text())
     assert [row["validation_rows"] for row in result["metrics"]] == [6, 6]
     by_id = {item["model_id"]: item for item in result["candidates"]}

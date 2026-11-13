@@ -244,7 +244,7 @@ def test_native_own_common_strata_and_persisted_reduction(
     def forbidden(*args, **kwargs):
         raise AssertionError("persisted reduction must not rescan or recompute")
 
-    monkeypatch.setattr(factor_stats, "iter_dataset_chunks", forbidden)
+    monkeypatch.setattr(factor_stats, "iter_dataset_time_chunks", forbidden)
     monkeypatch.setattr(dataset_stats, "open_dataset_session", forbidden)
     monkeypatch.setattr(factor_stats, "cross_sectional_correlations", forbidden)
     monkeypatch.setattr(factor_stats, "fama_macbeth_period", forbidden)
@@ -541,14 +541,14 @@ def test_scans_each_actual_input_selection_once(tmp_path, monkeypatch):
     _, config = _fixture(tmp_path, days=3)
     from quant_research_platform.research.evaluations import runner
 
-    original = runner.iter_dataset_chunks
+    original = runner.iter_dataset_time_chunks
     scans = []
 
-    def counted(session):
+    def counted(session, **kwargs):
         scans.append(tuple(session.logical_columns))
-        yield from original(session)
+        yield from original(session, **kwargs)
 
-    monkeypatch.setattr(runner, "iter_dataset_chunks", counted)
+    monkeypatch.setattr(runner, "iter_dataset_time_chunks", counted)
     evaluate(
         {
             **config,

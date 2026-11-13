@@ -7,25 +7,6 @@ import pytest
 from quant_research_platform.storage import manifests
 
 
-def test_manifest_writers_render_the_snapshot_checked_for_safety(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    payload = {"schema_id": "qrp-test", "value": "safe"}
-    original = manifests.assert_internal_artifact_metadata_safe
-
-    def mutate_caller_after_check(value):
-        result = original(value)
-        payload["value"] = "C:" + chr(92) + "private" + chr(92) + "report"
-        return result
-
-    monkeypatch.setattr(
-        manifests, "assert_internal_artifact_metadata_safe", mutate_caller_after_check
-    )
-    path = tmp_path / "manifest.json"
-    manifests.write_internal_artifact_manifest(path, payload)
-    assert manifests.read_manifest(path)["value"] == "safe"
-
-
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [

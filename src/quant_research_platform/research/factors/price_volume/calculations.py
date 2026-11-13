@@ -224,6 +224,39 @@ def _calculate_values(
         return sums["amount_profile_60d"][factor][start:stop].copy()
     if factor in PRICE_VOLUME_LEVEL_DESCRIPTIONS:
         return _calculate_level_values(values, sums, factor, start, stop)
+    if factor in {"volatility_compression_20_60", "compression_trend_20_60"}:
+        size = windows[0]
+        first = max(start, size - 1)
+        if first >= stop:
+            return np.full(stop - start, np.nan)
+        key = "volatility_compression_20_60"
+        if key not in sums:
+            ratio = np.full(stop - start, np.nan)
+            returns = sliding_window_view(
+                values["period_return"][first - size + 1 : stop], size
+            )
+            valid = np.isfinite(returns).all(axis=1)
+            current = returns[valid]
+            long = _sample_standard_deviation(current)
+            short = _sample_standard_deviation(current[:, -20:])
+            ratio[first - start :][valid] = np.divide(
+                short, long, out=np.full(len(long), np.nan), where=long > 0
+            )
+            sums[key] = ratio
+        ratio = sums[key]
+        if factor == key:
+            return ratio.copy()
+        recent = sliding_window_view(values["period_return"][first - 19 : stop], 20)
+        path = np.abs(recent).sum(axis=1)
+        trend = np.divide(
+            recent.sum(axis=1),
+            path,
+            out=np.full(len(path), np.nan),
+            where=path > 0,
+        )
+        output = np.full(stop - start, np.nan)
+        output[first - start :] = np.maximum(1 - ratio[first - start :], 0) * trend
+        return output
     if factor in PRICE_VOLUME_THEME_DESCRIPTIONS:
         return _calculate_theme_values(values, factor, start, stop)
     if factor.startswith(("alpha101_", "alpha191_", "qlib_")):
@@ -635,21 +668,6 @@ def _calculate_theme_values(values, factor, start, stop):
             out=np.full(len(scale), np.nan),
             where=scale > 0,
         )
-    elif "compression" in factor:
-        returns = selected["period_return"]
-        long = _sample_standard_deviation(returns)
-        short = _sample_standard_deviation(returns[:, -20:])
-        ratio = np.divide(short, long, out=np.full(len(long), np.nan), where=long > 0)
-        result = ratio
-        if factor == "compression_trend_20_60":
-            path = np.abs(returns[:, -20:]).sum(axis=1)
-            trend = np.divide(
-                returns[:, -20:].sum(axis=1),
-                path,
-                out=np.full(len(path), np.nan),
-                where=path > 0,
-            )
-            result = np.maximum(1 - ratio, 0) * trend
     elif factor == "breakout_efficiency_20d":
         prices = selected["adj_close"]
         prior, current = prices[:, :-1], prices[:, -1]
@@ -884,8 +902,9 @@ def _closing_breakout_failure(values, sums, side, width):
     age, distance = np.full((2, len(price)), np.nan)
     sign = 1 if side == "high" else -1
     active, level, began = False, np.nan, 0
+    known = np.isfinite(price)
     for i in range(1, len(price)):
-        if not np.isfinite(price[i]):
+        if not known[i]:
             active = False
             continue
         if active:
@@ -1030,7 +1049,7 @@ def _calculate_published_values(
 def _sample_standard_deviation(windows: np.ndarray) -> np.ndarray:
     finite = np.isfinite(windows)
     centered = _centered_values(windows, finite)
-    return np.sqrt(np.sum(centered * centered, axis=1) / (finite.sum(axis=1) - 1))
+    return np.sqrt(np.vecdot(centered, centered) / (finite.sum(axis=1) - 1))
 
 
 def _log(values: np.ndarray) -> np.ndarray:

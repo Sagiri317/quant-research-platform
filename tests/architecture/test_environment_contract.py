@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
-GITIGNORE = PROJECT_ROOT / ".gitignore"
 
 CONDA_NAMES = {
     "arch": "arch-py",
@@ -31,10 +31,18 @@ def test_python_and_ruff_contracts_follow_root_config() -> None:
 
 
 def test_repo_output_ignore_does_not_hide_source_packages() -> None:
-    rules = GITIGNORE.read_text(encoding="utf-8").splitlines()
-
-    assert "outputs/" not in rules
-    assert "/outputs/" in rules
+    result = subprocess.run(
+        ["git", "check-ignore", "--no-index", "-z", "--stdin"],
+        input=(
+            "outputs/research.json\0"
+            "src/quant_research_platform/artifacts/outputs/prediction.py\0"
+        ),
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.split("\0") == ["outputs/research.json", ""]
 
 
 def test_core_dependencies_have_version_boundaries() -> None:

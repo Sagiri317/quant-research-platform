@@ -256,7 +256,6 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
     scoring = deepcopy(model_analysis_candidates)
     config = {
         "dataset": scoring["labels"],
-        "input_spec": scoring["label_spec"],
         "output": str(tmp_path / "statistics"),
         "window": scoring["scoring_window"],
         "label_cutoff": "2020-01-10",
@@ -299,7 +298,7 @@ def test_public_model_analysis_subsets_require_only_used_inputs(
                     derive_seed(
                         root_seed,
                         "a_share_statistics_bootstrap",
-                        scoring["label_spec"]["data_id"],
+                        scoring["labels"]["spec"]["data_id"],
                         identity,
                     )
                     for identity in saved.prediction_id
@@ -481,7 +480,6 @@ def test_public_prediction_inference_is_local_to_consumed_family(tmp_path):
         )
     config = {
         "dataset": scoring["labels"],
-        "input_spec": scoring["label_spec"],
         "window": scoring["scoring_window"],
         "family_ids": scoring["candidate_ids"],
         "comparison_model_id": scoring["candidate_ids"][0],

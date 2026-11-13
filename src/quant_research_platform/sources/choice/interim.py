@@ -472,12 +472,19 @@ def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]
         if first is not None and end is not None and first > end:
             continue
         coordinates = index.get(f"disclosure_coordinates:{pair[0]}:{pair[1]}", {})
-        complete = all(
-            _get(index, "disclosure_field", (*coordinate, field)) is not None
+        complete = any(
+            all(
+                _get(index, "disclosure_field", (*coordinate, field)) is not None
+                for field in _DISCLOSURE_INDICATORS
+            )
+            for coordinate in coordinates
+        )
+        conflicted = any(
+            index["disclosure_field"].get((*coordinate, field)) is _CONFLICT
             for coordinate in coordinates
             for field in _DISCLOSURE_INDICATORS
         )
-        if first is None or not complete:
+        if first is None or not complete or conflicted:
             diagnostics["excluded_unresolved_disclosure_rows"] = (
                 diagnostics.get("excluded_unresolved_disclosure_rows", 0) + 1
             )
@@ -577,24 +584,18 @@ def materialize_interim_data(
         frames = _frames(rows, spec)
         target = Path(output_roots[spec.data_id])
         with closing_iterator(rows), closing_iterator(frames):
-            try:
-                write_dataset(
-                    target,
-                    frames,
-                    spec=spec,
-                    metadata={
-                        **(metadata or {}),
-                        "producer_diagnostics": {"source_row_counts": counts},
-                        "source_evidence": {
-                            "source_id": str(SOURCE_ID),
-                            "content_hash": identities[spec.data_id],
-                        },
+            write_dataset(
+                target,
+                frames,
+                spec=spec,
+                metadata={
+                    **(metadata or {}),
+                    "producer_diagnostics": {"source_row_counts": counts},
+                    "source_evidence": {
+                        "source_id": str(SOURCE_ID),
+                        "content_hash": identities[spec.data_id],
                     },
-                )
-            except ValueError as error:
-                if str(error) != "empty_dataset_schema_missing":
-                    raise
-                skipped.append(spec.data_id)
-                continue
+                },
+            )
         written[spec.data_id] = target
     return ChoiceInterimImportResult(written, tuple(skipped))

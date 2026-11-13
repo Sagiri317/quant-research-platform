@@ -11,7 +11,10 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
-from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
+from quant_research_platform.compute.portfolio_economics import (
+    _LedgerEconomics,
+    _nav_return_roundoff,
+)
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 from quant_research_platform.contracts.risk import FactorRiskConfig, FactorRiskModel
@@ -28,7 +31,6 @@ from quant_research_platform.research.portfolios.attribution import (
 from quant_research_platform.research.portfolios.comparison import (
     COMPARISON_ANALYSES,
     _complete_daily,
-    _nav_return_roundoff,
     comparison_tables,
     selected_portfolio_analyses,
     validate_comparison_config,
@@ -382,6 +384,12 @@ def _portfolio_risk_models(ledgers, candidates, config):
                 FactorRiskConfig(**metadata["risk_config"]),
             )
         else:
+            if (
+                candidate.construction == "benchmark_enhanced"
+                and declared is None
+                and legacy is None
+            ):
+                raise ValueError("portfolio_attribution_risk_model_required")
             model = declared or FactorRiskModel(
                 candidate.risk_style_columns, legacy or FactorRiskConfig()
             )

@@ -1050,7 +1050,7 @@ def test_join_closes_every_open_input_on_coverage_failure(tmp_path, monkeypatch)
             spec=spec,
         )
     started, closed = [], []
-    original = assembler_module.iter_dataset_chunks
+    original = assembler_module.iter_dataset_time_chunks
 
     def observed(session, **kwargs):
         started.append(session.spec["data_id"])
@@ -1059,10 +1059,7 @@ def test_join_closes_every_open_input_on_coverage_failure(tmp_path, monkeypatch)
         finally:
             closed.append(session.spec["data_id"])
 
-    from quant_research_platform.storage.datasets import reading
-
-    monkeypatch.setattr(assembler_module, "iter_dataset_chunks", observed)
-    monkeypatch.setattr(reading, "iter_dataset_chunks", observed)
+    monkeypatch.setattr(assembler_module, "iter_dataset_time_chunks", observed)
     with pytest.raises(ValueError, match="missing_research_input_keys"):
         assemble_research_dataset(
             inputs={

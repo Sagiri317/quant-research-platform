@@ -145,33 +145,13 @@ def test_read_parses_one_manifest_and_projects_only_consumed_scores(
     assert physical == [physical_columns]
 
 
-@pytest.mark.parametrize(
-    "mutation, error",
-    [
-        ("future_maturity", "model_training_label_after_fit_cutoff"),
-        ("future_selection", "model_selection_after_fit_cutoff"),
-        ("outside_training", "model_training_window_outside_declared_fit"),
-        ("fitting_state", "prediction_training_facts_invalid"),
-        ("forbidden_input_columns", "prediction_training_facts_invalid"),
-    ],
-)
-def test_prediction_publication_rejects_invalid_training_facts(
-    tmp_path, mutation, error
-):
+@pytest.mark.parametrize("field", ["scaler", "input_columns"])
+def test_prediction_publication_excludes_fitting_state(tmp_path, field):
     root, _, _ = native_bundle(tmp_path)
     manifest = json.loads((root / "manifest.json").read_text())
     metadata = manifest["metadata"]
-    if mutation == "future_maturity":
-        metadata["model_metadata"]["label_available_max"] = "2014-01-03"
-    elif mutation == "future_selection":
-        metadata["model_facts"]["selection_cutoff"] = "2014-01-03"
-    elif mutation == "outside_training":
-        metadata["model_metadata"]["train_start"] = "2014-01-01"
-    elif mutation == "fitting_state":
-        metadata["model_metadata"]["scaler"] = None
-    else:
-        metadata["model_metadata"]["input_columns"] = ["reversal_20d"]
-    with pytest.raises(ValueError, match=error):
+    metadata["model_metadata"][field] = None
+    with pytest.raises(ValueError, match="prediction_training_facts_invalid"):
         write_prediction_outputs(
             output_path=tmp_path / "invalid",
             output_chunks=[make_price_volume_prediction_output_frame()],

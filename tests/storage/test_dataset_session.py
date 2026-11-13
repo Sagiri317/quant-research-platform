@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 import pandas as pd
-import pyarrow as pa
 import pytest
 
 import quant_research_platform.storage.datasets.reading as dataset_reading
@@ -16,8 +15,10 @@ from quant_research_platform.storage.datasets import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_unlink,
-    filesystem_write_text,
     native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -67,7 +68,6 @@ def test_writer_summarizes_input_without_decoding_its_output(tmp_path, monkeypat
             spec=make_processed_dataset_spec("canonical_stream"),
         )
     assert result.row_count == len(frame)
-    assert result.manifest["duplicate_primary_key_count"] == 0
     reread = read_dataset(root)
     pd.testing.assert_frame_equal(
         reread.sort_values(["timestamp", "asset_id"]).reset_index(drop=True),
@@ -75,7 +75,6 @@ def test_writer_summarizes_input_without_decoding_its_output(tmp_path, monkeypat
     )
     inspected = inspect_dataset(root)
     assert inspected.row_count == result.row_count
-    assert inspected.schema_hash == result.schema_hash
     assert inspected.partition_row_counts == result.partition_row_counts
 
 
@@ -111,25 +110,6 @@ def test_canonical_nonfinite_rows_rejected_before_publication(tmp_path: Path) ->
         )
     assert not root.exists()
     assert not list(root.parent.glob(".a-*"))
-
-
-def test_exact_primary_key_index_supports_nested_arrow_key_identity() -> None:
-    table = pa.table(
-        {
-            "key": pa.array(
-                [{"items": [1, 2], "label": "a"}, {"items": [2, 1], "label": "a"}],
-                type=pa.struct(
-                    [
-                        pa.field("items", pa.list_(pa.int64())),
-                        pa.field("label", pa.string()),
-                    ]
-                ),
-            )
-        }
-    )
-    index = dataset_writing.ExactPrimaryKeyIndex(primary_key=("key",))
-    assert index.add_table(table) == 0
-    assert index.add_table(table) == 2
 
 
 def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(

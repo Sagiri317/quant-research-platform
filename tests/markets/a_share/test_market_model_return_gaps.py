@@ -5,7 +5,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.compute.market_model import MarketModelRiskState
+from quant_research_platform.markets.implementations.a_share.market_model import (
+    MarketModelRiskState,
+)
 from quant_research_platform.research.risk import (
     FactorRiskState,
 )

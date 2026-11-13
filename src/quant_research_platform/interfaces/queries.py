@@ -31,8 +31,6 @@ def describe_research_dataset_requirements(
 ) -> ResearchDatasetRequirementsResponse:
     spec = profile.research_datasets.get(dataset_id)
     return ResearchDatasetRequirementsResponse(
-        status="available",
-        mode="requirements_query_only",
         dataset_id=spec.data_id,
         market_id=str(spec.market_id),
         input_data_ids=list(spec.input_data_ids),

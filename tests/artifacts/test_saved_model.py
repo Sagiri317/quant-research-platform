@@ -42,11 +42,7 @@ def test_published_recipes_with_omitted_defaults_remain_comparable(tmp_path):
         tmp_path / "omitted-defaults",
         fitted,
         facts=abbreviated,
-        trial={
-            "status": "completed",
-            "trial_id": "omitted-defaults",
-            "result": {"model_metadata": fitted.metadata},
-        },
+        trial_id="omitted-defaults",
     )
     _, restored = load_model(saved)
     compare_model_facts(restored, facts)
@@ -58,8 +54,7 @@ def test_published_recipes_with_omitted_defaults_remain_comparable(tmp_path):
     output = predict(
         {
             "model": str(saved),
-            "inputs": str(tmp_path / "data.parquet"),
-            "input_spec": input_spec(),
+            "inputs": {"path": str(tmp_path / "data.parquet"), "spec": input_spec()},
             "output": str(tmp_path / "from-omitted-model"),
             "prediction_window": {"start": "2020-01-04", "end": "2020-01-06"},
         }
@@ -121,21 +116,23 @@ def test_prediction_writer_defaults_reach_scoring(tmp_path, input_role):
         {
             "predictions": [str(prediction)],
             "candidate_ids": [metadata["model_id"]],
-            "labels": str(tmp_path / "labels.parquet"),
-            "label_spec": {
-                "data_id": "labels",
-                "frequency": "1d",
-                "grain": "asset_timestamp",
-                "primary_key": ["timestamp", "asset_id"],
-                "partition_columns": [],
-                "column_roles": {
-                    "timestamp": "timestamp",
-                    "asset_id": "key",
-                    "eligible": "mask",
-                    label: "label",
-                    availability: "context",
+            "labels": {
+                "path": str(tmp_path / "labels.parquet"),
+                "spec": {
+                    "data_id": "labels",
+                    "frequency": "1d",
+                    "grain": "asset_timestamp",
+                    "primary_key": ["timestamp", "asset_id"],
+                    "partition_columns": [],
+                    "column_roles": {
+                        "timestamp": "timestamp",
+                        "asset_id": "key",
+                        "eligible": "mask",
+                        label: "label",
+                        availability: "context",
+                    },
+                    "column_units": {label: "decimal_return"},
                 },
-                "column_units": {label: "decimal_return"},
             },
             "validation_windows": [metadata["prediction_window"]],
             "scoring_window": metadata["prediction_window"],

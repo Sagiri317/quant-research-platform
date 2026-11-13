@@ -93,7 +93,11 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 `statistics-portfolio` 可直接读取 `backtest-policy` 的 `ledger/` 和
 `backtest-cost-model` 的输出目录。日频绩效、容量、Sharpe/CSCV 推断及显式基准、
 对照、市场暴露和行情分段比较使用原生账本，不要求普通选股组合的 `candidate` 配置。
-统计保留账本资本中的 `learned_policy`、`cost_aware_allocator` 身份，不从账户配置
+候选身份只由账户配置提供并写入账本资本：高频用可选的 `episode.account.candidate_id`，
+省略时保留旧值 `learned_policy`；日频策略和成本模型直接使用已有的
+`episode.account.candidate.candidate_id`，不再用 `learned_policy` 或 `cost_aware_allocator` 覆盖。
+联合统计的每个候选须有不同身份，重复身份仍报错；旧日频配置无需新增字段，
+但重跑后的身份改为其原先声明值，已保存账本不改写。统计不从账户配置
 复制选股方法或 G/Q 选择事实。持仓归因和 G/Q 组合比较仍须有实际匹配的候选元数据，
 缺失时明确失败。高频账本按自身 `kind` 使用日终绩效口径，不与日频账本混合统计；
 学习账本也不因缺少 `candidate` 而被误判为高频。
@@ -101,7 +105,7 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 ## ETF 动态库存基线
 
 `backtest-policy` 的 `strategy="etf_inventory"` 使用同一个 `TradingEnv`、高频账户、
-队列、成交与费用 owner，不建立子账户或第二个回测器。
+队列、成交与费用模块，不建立子账户或第二个回测器。
 [动态 ETF 示例](../configs/research-learning/backtest-policy-etf-inventory.json)同时包含股票 ETF 与黄金 ETF。
 `episode.prediction.paths` 选择已保存的滚动向前预测；先训练/验证、之后预测，
 后续轮次可使用届时已成熟的历史样本，不额外要求独立最终留出。
@@ -171,7 +175,7 @@ T+1 不可卖部分，再分配剩余预算；数量上限截断后的剩余资�
 总波动率沿风险模型的年化单位，只作独立约束，不与 30 秒 alpha 直接相加。
 返回的总波动率不是 tracking error；未提供完整风险事实时诊断保持未定义，
 只有依赖缺失风险的策略计算受阻，已发布的 raw PRED 不会被抹除。
-默认决策成本复用原费用 owner 的比例费用及可见不利价差导数，**不含最低佣金**；
+默认决策成本复用原费用模块的比例费用及可见不利价差导数，**不含最低佣金**；
 `trade_cost_bps` 可显式替换该凸成本近似，真实账本仍按原规则扣费一次。
 
 市值权重和完整风险可通过可选 `portfolio_context` 源配置接入 Python 与 CLI：
@@ -198,7 +202,7 @@ T+1 不可卖部分，再分配剩余预算；数量上限截断后的剩余资�
 }
 ```
 
-`stock_pool` 复用共同采样的同一配置与 owner。日收益源必须是完整研究市场，不能裁成持仓；
+`stock_pool` 复用共同采样的同一配置与模块。日收益源必须是完整研究市场，不能裁成持仓；
 其 timestamp 表示收益结束的日会话，listing_date 是该终点的上市生命，包含
 period_return、is_trading、实际区间起点 return_start_at 和真实成熟时刻 return_available_at。
 `daily_return_input` 可用 column、start_at_column、available_at_column 映射已有列；
@@ -210,7 +214,7 @@ period_return、is_trading、实际区间起点 return_start_at 和真实成熟�
 日历缺收益行仍推进该会话的年龄；明确休市不增加该证券的特质风险会话数。
 普通新日仅追加，过去收益晚到才重放模型当前保留的真实会话，复用已冻结的设计，
 不重放无关全历史、不拿日频方差缩放成 30 秒方差。模型定义继承风险源或显式 risk_model，保存到账本配置。
-原始前沿读取、标准化、WLS、协方差及特质风险继续分别复用现有 owner，没有第二套风险引擎。
+原始前沿读取、标准化、WLS、协方差及特质风险继续分别复用现有模块，没有第二套风险引擎。
 
 默认等权不打开这些输入；市值组合不打开日收益源。首次有需要的有效预测才建立 provider。
 若历史不足或所需风险事实未知，该次依赖风险的新目标为空，原账户、旧单及独立退出继续，

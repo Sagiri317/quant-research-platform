@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.portfolio_economics import _nav_return_roundoff
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.statistics import (
     _hac_linear_regression,
@@ -49,22 +50,6 @@ _BASES = {
 }
 _COSTS = {"frictionless", "execution_costs", "zero_cash"}
 _CLOCKS = {"trading_day_open", "trading_day_close", "utc"}
-
-
-def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
-    """Bound ordinary NAV-ratio roundoff in dimensionless return units."""
-    before = np.asarray(start, dtype="float64")
-    after = np.asarray(end, dtype="float64")
-    data = np.asarray(returns, dtype="float64")
-    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
-        tolerance = (
-            4 * np.finfo(float).eps * (np.abs(after / before) + np.abs(data) + 1)
-        )
-    return np.where(
-        (before > 0) & np.isfinite(before) & np.isfinite(after) & np.isfinite(data),
-        tolerance,
-        np.inf,
-    )
 
 
 def selected_portfolio_analyses(config, allowed):

@@ -24,12 +24,14 @@ from quant_research_platform.sources.reference.a_share_fees import (
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     filesystem_stat,
-    filesystem_write_text,
     native_filesystem_path,
     open_filesystem_file,
 )
 from tests.helpers.choice_raw import SDK, choice_session, response, write_css
-from tests.helpers.paths import StorageLayout
+from tests.helpers.paths import (
+    StorageLayout,
+    filesystem_write_text,
+)
 
 
 def _write_csmar(root, data_id, rows, *, extra_columns=()):

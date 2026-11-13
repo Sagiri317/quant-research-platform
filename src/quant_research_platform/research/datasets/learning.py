@@ -55,8 +55,9 @@ def research_frame(
         *columns,
         *context_columns,
     ]
-    if "segment_id" in spec["column_roles"]:
-        selected.append("segment_id")
+    for column in ("segment_id", "listing_date"):
+        if column in spec["column_roles"]:
+            selected.append(column)
     availability = None
     if label is not None:
         availability = spec.get("label_availability_columns", {}).get(label)

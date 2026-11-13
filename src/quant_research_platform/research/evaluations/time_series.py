@@ -609,13 +609,16 @@ def evaluate_time_series(config):
         ):
             raise ValueError("evaluation_comparison_group_invalid")
     session = open_dataset_session(
-        **_dataset_input_options(config["inputs"], time_window=window)
+        **_dataset_input_options(
+            config["inputs"],
+            time_window=window,
+            row_filters=(("asset_id", "in", asset_ids),),
+        )
     )
     label = config["label"]
     availability = session.spec["label_availability_columns"][label]
     columns = ["timestamp", "asset_id", "eligible", label, availability, *factors]
     frame = materialize_dataset_session(session.projected_view(columns))
-    frame = frame.loc[frame.asset_id.isin(config["asset_ids"])].copy()
     if frame.duplicated(["timestamp", "asset_id"]).any():
         raise ValueError("evaluation_input_keys_duplicate")
     mature = label_maturity_mask(

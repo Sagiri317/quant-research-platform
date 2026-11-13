@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.models import ModelSpec
@@ -35,16 +36,14 @@ def test_empty_family_is_native_empty_without_fabricated_prediction(tmp_path):
     path = tmp_path / "future.parquet"
     future.to_parquet(path, index=False)
     window = {"start": "2020-01-02", "end": "2020-01-02"}
-    output = predict(
-        {
-            "model": str(case.root),
-            "inputs": str(path),
-            "input_spec": case.config["input_spec"],
-            "output": str(tmp_path / "prediction"),
-            "prediction_window": window,
-            "sample_role": "validation",
-        }
-    )
+    prediction_config = {
+        "model": str(case.root),
+        "inputs": {"path": str(path), "spec": case.config["inputs"]["spec"]},
+        "output": str(tmp_path / "prediction"),
+        "prediction_window": window,
+        "sample_role": "validation",
+    }
+    output = predict(prediction_config)
     empty, metadata = read_predictions(output)
     assert empty.empty and list(empty) == [
         "timestamp",
@@ -57,12 +56,26 @@ def test_empty_family_is_native_empty_without_fabricated_prediction(tmp_path):
         and metadata["prediction_rows"] == 0
         and metadata["effective_prediction_end"] is None
     )
+    assert pd.Timestamp(metadata["model_facts"]["fit_cutoff"]) == pd.Timestamp(
+        "2020-01-01"
+    )
+    # An empty usable domain cannot excuse a noncausal prediction request.
+    for start in ("2019-12-31", "2020-01-01"):
+        invalid_output = tmp_path / f"prediction-{start}"
+        with pytest.raises(ValueError, match="^prediction_must_follow_fit_cutoff$"):
+            predict(
+                {
+                    **prediction_config,
+                    "prediction_window": {**window, "start": start},
+                    "output": str(invalid_output),
+                }
+            )
+        assert not invalid_output.exists()
     scored = score(
         {
             "predictions": [str(output)],
             "candidate_ids": ["x"],
-            "labels": str(path),
-            "label_spec": case.config["input_spec"],
+            "labels": {"path": str(path), "spec": case.config["inputs"]["spec"]},
             "validation_windows": [window],
             "scoring_window": window,
             "cutoff": "2020-01-02",
@@ -75,15 +88,24 @@ def test_empty_family_is_native_empty_without_fabricated_prediction(tmp_path):
     result = json.loads(scored.read_text())
     assert result["common_rows"] == 0
     assert result["metrics"][0]["validation_mse"] is None
-    selected = select(
-        {
-            "scores": str(scored),
-            "output": str(tmp_path / "selection.json"),
-            "selection_metric": "validation_mse",
-            "selection_direction": "minimize",
-            "tie_break_order": ["x"],
-            "refit_windows": case.config["fit_windows"],
-            "refit_cutoff": "2020-01-02",
-        }
-    )
+    selection_config = {
+        "scores": str(scored),
+        "output": str(tmp_path / "selection.json"),
+        "selection_metric": "validation_mse",
+        "selection_direction": "minimize",
+        "tie_break_order": ["x"],
+        "refit_windows": case.config["fit_windows"],
+        "refit_cutoff": "2020-01-02",
+    }
+    selected = select(selection_config)
     assert json.loads(selected.read_text())["selected_model_id"] is None
+    invalid_selection = tmp_path / "premature-selection.json"
+    with pytest.raises(ValueError, match="^refit_cutoff_before_selection$"):
+        select(
+            {
+                **selection_config,
+                "output": str(invalid_selection),
+                "refit_cutoff": "2020-01-01",
+            }
+        )
+    assert not invalid_selection.exists()

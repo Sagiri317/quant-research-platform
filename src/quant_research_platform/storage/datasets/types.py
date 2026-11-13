@@ -21,7 +21,6 @@ class DatasetInspection:
     data_root: Path
     spec: dict[str, Any]
     columns: tuple[str, ...]
-    schema_hash: str
     file_count: int
     row_count: int
     partitions: tuple[str, ...]

@@ -536,3 +536,122 @@ def test_native_foreign_beta_keeps_listing_boundaries_local_to_response(tmp_path
     assert result.us_sector_own_beta.iloc[129] == pytest.approx(2, rel=1e-10)
     assert result.us_sector_own_beta.iloc[130:].isna().all()
     assert result.us_sector_etf_return_shock_1d.iloc[-1] == pytest.approx(shocks[-1])
+
+
+@pytest.mark.parametrize("revised_asset", ["SPY", "XLK"])
+@pytest.mark.parametrize("replacement", [150.0, np.nan])
+def test_native_foreign_revision_windows_preserve_each_visible_endpoint(
+    tmp_path, revised_asset, replacement
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2024-01-02", periods=15)
+    assets = ("SPY", "XLK", "XLF")
+    raw = pd.DataFrame(
+        [
+            (asset, day, day + pd.Timedelta(hours=21), 100.0 + i)
+            for asset in assets
+            for i, day in enumerate(days)
+            if not (asset == "XLF" and i == 13)
+        ],
+        columns=["asset_id", "timestamp", "available_at", "adjusted_close"],
+    )
+    for index, decision_index in ((7, 8), (9, 14)):
+        revision = raw.loc[
+            raw.asset_id.eq(revised_asset) & raw.timestamp.eq(days[index])
+        ]
+        raw = pd.concat(
+            [
+                raw,
+                revision.assign(
+                    adjusted_close=replacement,
+                    available_at=days[decision_index] + pd.Timedelta(hours=22),
+                ),
+            ],
+            ignore_index=True,
+        )
+    cutoffs = [
+        days[i] + pd.Timedelta(hours=21, minutes=30) + delta
+        for i in (8, 14)
+        for delta in (pd.Timedelta(0), pd.Timedelta(minutes=30))
+    ]
+    decisions = pd.DataFrame(
+        [(asset, clock) for asset in assets for clock in cutoffs],
+        columns=["asset_id", "timestamp"],
+    ).assign(market_id="a_share", return_available_at=pd.NaT)
+    decisions["signal_session"] = decisions.timestamp.dt.normalize()
+    decisions["execution_session"] = decisions.signal_session
+    source = tmp_path / "prices"
+    write_dataset(
+        source,
+        raw,
+        spec=DataSpec(
+            data_id="public_etf_prices",
+            frequency="1d",
+            grain="research_row",
+            primary_key=("asset_id", "timestamp", "available_at"),
+            partition_columns=(),
+            column_roles={
+                c: "timestamp"
+                if c == "timestamp"
+                else "key"
+                if c in ("asset_id", "available_at")
+                else "context"
+                for c in raw
+            },
+        ),
+    )
+    fields = [
+        "us_sector_etf_return_shock_1d",
+        "us_sector_etf_return_shock_5d",
+        "us_relative_sector_shock",
+    ]
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="linked_market_factors",
+            inputs=dict(
+                decision_panel=_input(
+                    tmp_path, "decision_panel", decisions, native=True
+                ),
+                public_etf_prices=str(source),
+            ),
+            factor_columns=fields,
+            parameters={"asset_us_tickers": {a: a for a in assets}},
+            time_window=dict(start=cutoffs[0].isoformat(), end=cutoffs[-1].isoformat()),
+            output_root=str(tmp_path / "factors"),
+        )
+    )
+    actual = read_dataset(output).set_index(["asset_id", "timestamp"])
+    for cutoff in cutoffs:
+        # Independently replay published endpoint facts, then apply the formulas.
+        visible = (
+            raw.loc[raw.available_at.le(cutoff)]
+            .sort_values("available_at", kind="stable")
+            .drop_duplicates(["asset_id", "timestamp"], keep="last")
+        )
+        prices = visible.set_index(["asset_id", "timestamp"]).adjusted_close.to_dict()
+        for asset in assets:
+            expected = []
+            for field, width in zip(fields, (1, 5, 1), strict=True):
+                value = np.nan
+                for i in range(width, len(days)):
+                    endpoints = [(asset, days[i]), (asset, days[i - width])]
+                    if field == fields[2]:
+                        endpoints += [("SPY", days[i]), ("SPY", days[i - 1])]
+                    if not all(key in prices for key in endpoints):
+                        continue
+                    value = prices[endpoints[0]] / prices[endpoints[1]] - 1
+                    if field == fields[2]:
+                        value -= prices[endpoints[2]] / prices[endpoints[3]] - 1
+                expected.append(value)
+            np.testing.assert_allclose(
+                actual.loc[(asset, cutoff), fields].to_numpy(float),
+                expected,
+                rtol=1e-12,
+                atol=1e-14,
+                equal_nan=True,
+            )

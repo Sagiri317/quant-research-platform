@@ -136,15 +136,14 @@ def test_saved_predictions_common_intersection_reranks_and_preserves_own(tmp_pat
     window = {"start": "2020-01-04", "end": "2020-01-05"}
     for name, column in (("dense", "x"), ("sparse", "z")):
         config = fit_config(tmp_path, inputs, name)
-        config["input_spec"] = declaration
+        config["inputs"]["spec"] = declaration
         config["model"]["input_feature_columns"] = [column]
         model = fit(config)
         predictions[name] = str(
             predict(
                 {
                     "model": str(model),
-                    "inputs": str(inputs),
-                    "input_spec": declaration,
+                    "inputs": {"path": str(inputs), "spec": declaration},
                     "prediction_window": window,
                     "output": str(tmp_path / (name + "-pred")),
                 }
@@ -200,8 +199,7 @@ def test_saved_predictions_common_intersection_reranks_and_preserves_own(tmp_pat
     score_config = {
         "predictions": list(predictions.values()),
         "candidate_ids": list(predictions),
-        "labels": str(inputs),
-        "label_spec": declaration,
+        "labels": {"path": str(inputs), "spec": declaration},
         "label_unit": "decimal_return",
         "validation_windows": [window],
         "scoring_window": window,

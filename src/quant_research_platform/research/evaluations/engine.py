@@ -20,6 +20,9 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_result,
     _summarize_correlation_aggregates,
 )
+from quant_research_platform.compute.dataframe.streaming import (
+    iter_complete_time_frames,
+)
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
@@ -43,7 +46,6 @@ from quant_research_platform.research.signals.normalization import (
     normalize_signal_frame,
 )
 from quant_research_platform.research.statistics import common_correlation_mask
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
 type _EvaluationOutputChunk = tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]
 

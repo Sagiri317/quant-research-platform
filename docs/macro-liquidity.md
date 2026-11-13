@@ -30,9 +30,9 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 官方接口的覆盖并不统一。SOFR、IORB 有各自起始日；IOER 已终止。新旧美元指数保持独立；信用利差受发布方当前历史下载范围限制。Shibor 使用 CFETS 官方历史接口，国债与 AAA 中短期票据使用中债官方日终曲线，均按来源的一年查询上限分年请求；社融增量使用商务部转载的央行数据。公开市场操作、社融存量等仍可通过明确的发布文件接入，不能用其他利率代理或补零冒充缺失指标。下载及规范表元数据记录实际覆盖，独立年度请求的成功响应可保留为不完整来源。
 
-结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at`、`release_date`、`estimated_available_at` 其中一列。两个时刻列必须显式含 UTC 偏移。真实发布时间与日期沿用原规则；估计可用时刻记为 `inferred_snapshot_release`，`published_at` 和未知历史版本日期保持空，具体估计依据留在结构化 raw 来源证据。每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
+结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`，并且只选择 `published_at`、`release_date`、`estimated_available_at` 其中一列。消费字段及所选时钟的原始表头必须唯一，未消费说明列不参与检查。两个时刻列必须显式含 UTC 偏移。真实发布时间与日期沿用原规则；估计可用时刻记为 `inferred_snapshot_release`，`published_at` 和未知历史版本日期保持空，具体估计依据留在结构化 raw 来源证据。每次修订是独立一行。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
 
-`release_csv` 按观察日选择记录，再验证所选数值、单位与发布时钟。下载数据先解析原格式中的观察日、下载时刻和历史版本日期，再按观察日选域并验证所选数值、单位和业务时序。同一已选观察日的修订全部保留，发布时间推定口径沿用原规则。
+`release_csv` 按观察日选择记录，再验证所选数值、单位与发布时钟。下载数据同样先解析原格式中的观察日并选域，再解释所选记录的下载时刻、历史版本日期、数值、单位和业务时序；窗外版本日期异常不阻塞已选观察。同一已选观察日的修订全部保留，发布时间推定口径沿用原规则。
 
 ## 日频决策时钟
 
@@ -50,7 +50,7 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 ## 因子公式与缺失
 
-独立因子族为 `macro_liquidity`，名称以 `ml_` 开头。完整定义来自 `research.factors.macro_liquidity.definitions.RECIPES`，通过现有因子目录查询。计算 owner 为同目录的 `calculations.py`；市场适配只负责输入投影、决策轴和持久化。
+独立因子族为 `macro_liquidity`，名称以 `ml_` 开头。完整定义来自 `research.factors.macro_liquidity.definitions.RECIPES`，通过现有因子目录查询。计算模块为同目录的 `calculations.py`；市场适配只负责输入投影、决策轴和持久化。
 
 基础变换在原始 D/W/M/Q/event 观测频率上计算：水平、一期变化、二阶变化、同比差、滚动 zscore、分位、变化波动、相对历史均值的创新及标准化创新、相对历史 EWMA 的偏离。正值序列额外支持增长率和同比增长；只有投放、到期、净投放及社融增量等流量变量支持窗口求和。利率水平为百分数，利率差及变化转成基点。
 

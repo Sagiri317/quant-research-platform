@@ -28,10 +28,12 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
     scoped = predict(
         {
             "model": str(second.root),
-            "inputs": str(
-                tmp_path / second.facts["model"]["model_id"] / "future.parquet"
-            ),
-            "input_spec": second.config["input_spec"],
+            "inputs": {
+                "path": str(
+                    tmp_path / second.facts["model"]["model_id"] / "future.parquet"
+                ),
+                "spec": second.config["inputs"]["spec"],
+            },
             "output": str(tmp_path / "scoped"),
             "prediction_window": config["scoring_window"],
             "sample_role": "validation",
@@ -153,7 +155,7 @@ def test_selection_requires_full_declared_validation_science(tmp_path, mutation)
 
 def test_future_labels_do_not_change_prior_causal_selection(tmp_path):
     _cases, config = candidates(tmp_path)
-    labels = Path(config["labels"])
+    labels = Path(config["labels"]["path"])
     frame = pd.read_parquet(labels)
     future = frame.timestamp.eq(pd.Timestamp("2020-01-06"))
     assert future.sum() == 3
@@ -266,7 +268,6 @@ def test_failed_attempt_stays_in_complete_candidate_score(tmp_path, failed_famil
         statistics = model_statistics(
             {
                 "dataset": config["labels"],
-                "input_spec": config["label_spec"],
                 "output": str(tmp_path / "statistics"),
                 "window": config["scoring_window"],
                 "sample_role": "validation",
@@ -354,9 +355,12 @@ def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
     for index, case in enumerate(cases):
         refit = {
             **case.config,
-            "inputs": str(
-                tmp_path / case.facts["model"]["model_id"] / "future.parquet"
-            ),
+            "inputs": {
+                **case.config["inputs"],
+                "path": str(
+                    tmp_path / case.facts["model"]["model_id"] / "future.parquet"
+                ),
+            },
             "output": str(tmp_path / f"final-{index}"),
             "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "fit_cutoff": "2020-01-06",
@@ -390,8 +394,10 @@ def test_output_asset_projection_preserves_full_current_cross_section(
     path = predict(
         {
             "model": str(case.root),
-            "inputs": str(tmp_path / algorithm / "future.parquet"),
-            "input_spec": case.config["input_spec"],
+            "inputs": {
+                "path": str(tmp_path / algorithm / "future.parquet"),
+                "spec": case.config["inputs"]["spec"],
+            },
             "output": str(tmp_path / "scoped"),
             "prediction_window": config["validation_windows"][0],
             "sample_role": "validation",
@@ -446,8 +452,7 @@ def test_other_market_validation_axis_follows_current_samples(tmp_path, explicit
     predictions = predict(
         {
             "model": str(model),
-            "inputs": str(inputs),
-            "input_spec": case.config["input_spec"],
+            "inputs": {"path": str(inputs), "spec": case.config["inputs"]["spec"]},
             "output": str(tmp_path / "pred"),
             "prediction_window": window,
             "sample_role": "validation",
@@ -456,8 +461,7 @@ def test_other_market_validation_axis_follows_current_samples(tmp_path, explicit
     config = {
         "predictions": [str(predictions)],
         "candidate_ids": ["single"],
-        "labels": str(inputs),
-        "label_spec": case.config["input_spec"],
+        "labels": {"path": str(inputs), "spec": case.config["inputs"]["spec"]},
         "validation_windows": [window],
         "scoring_window": window,
         "cutoff": "2020-01-06",
@@ -489,7 +493,7 @@ def test_scoring_uses_saved_training_domain_without_reopening_training_data(tmp_
     cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
     assert case.result.metadata["training_asset_ids"] == ["a", "b", "c"]
-    Path(case.config["inputs"]).unlink()
+    Path(case.config["inputs"]["path"]).unlink()
     assert json.loads(score(config).read_text())["common_rows"] == 6
 
 
@@ -500,7 +504,7 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
     from quant_research_platform.research.models import trial_selection
 
     _cases, config = candidates(tmp_path)
-    labels = pd.read_parquet(config["labels"])
+    labels = pd.read_parquet(config["labels"]["path"])
     labels.loc[
         labels.timestamp.eq("2020-01-04") & labels.asset_id.eq("b"), "eligible"
     ] = False
@@ -511,7 +515,7 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
     labels.loc[labels.timestamp.eq("2020-01-06") & labels.asset_id.eq("c"), "label"] = (
         0.4
     )
-    labels.to_parquet(config["labels"], index=False)
+    labels.to_parquet(config["labels"]["path"], index=False)
     # Literal mature shared keys: neither production filtering nor metric reduction
     # participates in this independent date-equal loss oracle.
     expected_keys = pd.MultiIndex.from_tuples(

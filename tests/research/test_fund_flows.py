@@ -149,7 +149,8 @@ def test_etf_share_growth_and_nav_premium_require_same_economic_day():
     )
 
 
-def test_us_complete_reports_supplements_restatements_and_empty_positions():
+@pytest.mark.parametrize("unknown", [None, "shares_or_principal", "value_usd"])
+def test_us_complete_reports_supplements_restatements_and_empty_positions(unknown):
     submissions = [
         ("a0", "a", "2024-01-31", "2024-02-01", "N", 0, ""),
         ("b0", "b", "2024-01-31", "2024-02-01", "N", 0, ""),
@@ -187,19 +188,32 @@ def test_us_complete_reports_supplements_restatements_and_empty_positions():
         ],
         columns=["accession", "cusip", "shares_or_principal", "value_usd"],
     )
+    if unknown is not None:
+        extra = h.iloc[[0]].assign(shares_or_principal=0.0, value_usd=0.0)
+        extra[unknown] = np.nan
+        h = pd.concat([h, extra], ignore_index=True)
     h["share_type"] = "SH"
     h["put_call"] = None
     states = us_ownership_states(h, filings, assets={"SPY": "s", "XLF": "x"})
     spy = states.loc[states.asset_id.eq("SPY")].set_index("timestamp")
     field = "us_institution_ownership_concentration"
-    assert spy.loc["2024-02-01", field] == pytest.approx(0.5)
-    assert spy.loc["2024-02-02", field] == pytest.approx((15**2 + 10**2) / 25**2)
+    if unknown == "shares_or_principal":
+        assert spy.loc[:"2024-02-02", field].isna().all()
+    else:
+        assert spy.loc["2024-02-01", field] == pytest.approx(0.5)
+        assert spy.loc["2024-02-02", field] == pytest.approx((15**2 + 10**2) / 25**2)
+    allocation = "us_institution_sector_allocation"
+    if unknown == "value_usd":
+        assert states.loc[states.timestamp.le("2024-02-02"), allocation].isna().all()
+    else:
+        assert spy.loc["2024-02-01", allocation] == pytest.approx(0.5)
     assert spy.loc["2024-02-03", field] == pytest.approx((2**2 + 10**2) / 12**2)
     assert spy.loc["2024-05-01", field] == 1
     assert spy.loc["2024-05-02", field] == 1
 
 
-def test_nport_flows_use_prior_net_assets_and_empty_reports_replace_positions():
+@pytest.mark.parametrize("unknown", [False, True])
+def test_nport_flows_use_prior_net_assets_and_empty_reports_replace_positions(unknown):
     funds = pd.DataFrame(
         [
             ("a0", "a", "2023-12-31", "2024-02-01", 100.0),
@@ -233,13 +247,20 @@ def test_nport_flows_use_prior_net_assets_and_empty_reports_replace_positions():
         ],
         columns=["accession", "series_id", "cusip", "value", "payoff_profile"],
     )
+    known = holdings.loc[holdings.payoff_profile.eq("Long")].assign(cusip="x")
+    holdings = pd.concat([holdings, known], ignore_index=True)
+    if unknown:
+        holdings = pd.concat([holdings, holdings.iloc[[0]].assign(value=np.nan)])
     holdings["balance_unit"], holdings["asset_category"] = "NS", "EC"
-    states = nport_flow_states(funds, holdings).set_index("timestamp")
+    states = nport_flow_states(funds, holdings).set_index(["timestamp", "asset_id"])
     name = "us_crowded_sector_flow_pressure"
-    assert states.loc["2024-05-01", name] == pytest.approx(
-        0.1 * (20**2 + 40**2) / 60**2
-    )
-    assert states.loc["2024-08-01", name] == pytest.approx(0.05)
+    expected = 0.1 * (20**2 + 40**2) / 60**2
+    if unknown:
+        assert pd.isna(states.loc[("2024-05-01", "s"), name])
+    else:
+        assert states.loc[("2024-05-01", "s"), name] == pytest.approx(expected)
+    assert states.loc[("2024-05-01", "x"), name] == pytest.approx(expected)
+    np.testing.assert_allclose(states.loc["2024-08-01", name], 0.05)
 
 
 def test_share_history_keeps_missing_declared_sessions():
@@ -670,3 +691,535 @@ def test_passive_pressure_aggregates_each_funds_visible_historical_window():
         result[names].to_numpy(float),
         [[0.07 + 0.24, 0.25 + 0.8], [0.07 + 0.28, 0.25 + 1.0]],
     )
+
+
+@pytest.mark.parametrize("unknown_period", ["old", "new"])
+def test_native_ownership_keeps_unknown_quantities_distinct_from_absence(
+    tmp_path, unknown_period
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    headers = pd.DataFrame(
+        [
+            (fund, period + fund, pd.Timestamp(day), pd.Timestamp(released))
+            for period, day, released in (
+                ("old", "2023-12-31", "2024-03-20"),
+                ("new", "2024-06-30", "2024-08-20"),
+            )
+            for fund in ("f1", "f2")
+        ],
+        columns=[
+            "economic_portfolio_id",
+            "report_version_identity",
+            "timestamp",
+            "available_at",
+        ],
+    ).assign(
+        disclosure_scope="full_stock_holdings",
+        stock_disclosure_status="full_stock_table_as_reported_unreconciled",
+        explicit_no_stock="false",
+        stock_rows=6,
+    )
+    holdings = pd.DataFrame(
+        [
+            (period + fund, fund, stock, quantity)
+            for period in ("old", "new")
+            for fund, rows in (
+                (
+                    "f1",
+                    [
+                        ("a", 10.0),
+                        ("a", 20.0),
+                        ("b", 30.0),
+                        ("c", 40.0),
+                        ("e", 15.0),
+                        ("f", 25.0),
+                    ],
+                ),
+                ("f2", [("a", 5.0), ("b", 5.0), ("c", 5.0)]),
+            )
+            for stock, quantity in rows
+            if not (period == "new" and stock == "e")
+        ],
+        columns=[
+            "report_version_identity",
+            "economic_portfolio_id",
+            "stock_code",
+            "shares_held",
+        ],
+    ).assign(stock_market="CN_MAINLAND")
+    unknown = holdings.report_version_identity.eq(unknown_period + "f1") & (
+        holdings.stock_code.isin(("b", "f"))
+        | (holdings.stock_code.eq("a") & holdings.shares_held.eq(20))
+    )
+    holdings.loc[unknown, "shares_held"] = np.nan
+    headers["stock_rows"] = headers.report_version_identity.map(
+        holdings.groupby("report_version_identity").size()
+    )
+    holdings["asset_id"] = np.arange(len(holdings)).astype(str)
+    holdings["timestamp"] = holdings.report_version_identity.map(
+        headers.set_index("report_version_identity").timestamp
+    )
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=list("abcdef"),
+            timestamp=pd.Timestamp("2024-08-21"),
+            signal_session=pd.Timestamp("2024-08-20"),
+            execution_session=pd.Timestamp("2024-08-21"),
+            return_available_at=pd.NaT,
+            a_float_shares=100.0,
+        )
+    )
+    inputs = {}
+    for name, frame, keys in (
+        ("decision_panel", decisions, ("asset_id", "timestamp")),
+        ("public_fund_holdings", holdings, ("asset_id", "timestamp")),
+        (
+            "public_fund_holdings_reports",
+            headers,
+            ("report_version_identity", "timestamp"),
+        ),
+    ):
+        path = tmp_path / name
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                data_id=name,
+                frequency="1d",
+                grain="research_row",
+                primary_key=keys,
+                partition_columns=(),
+                column_roles={
+                    c: "timestamp"
+                    if c == "timestamp"
+                    else "key"
+                    if c in keys
+                    else "context"
+                    for c in frame
+                },
+            ),
+        )
+        inputs[name] = str(path)
+    fields = [
+        "cn_fund_ownership_float_share",
+        "cn_fund_holder_concentration",
+        "cn_disclosed_ownership_change",
+    ]
+    path = prepare(
+        dict(
+            market_id="a_share",
+            data_id="fund_flow_factors",
+            inputs=inputs,
+            factor_columns=fields,
+            time_window=dict(start="2024-08-21", end="2024-08-21"),
+            output_root=str(tmp_path / "factors"),
+        )
+    )
+    result = read_dataset(path).set_index("asset_id")
+    assert result.loc[["a", "b", "f"], fields[2]].isna().all()
+    if unknown_period == "new":
+        assert result.loc[["a", "b", "f"], fields[:2]].isna().all(axis=None)
+    else:
+        np.testing.assert_allclose(
+            result.loc[["a", "b", "f"], fields[0]], [0.35, 0.35, 0.25]
+        )
+    np.testing.assert_allclose(
+        result.loc["c", fields].to_numpy(float), [0.45, (40**2 + 5**2) / 45**2, 0]
+    )
+    np.testing.assert_allclose(result.loc[["d", "e"], fields[0]], [0, 0])
+    np.testing.assert_allclose(result.loc[["d", "e"], fields[2]], [0, -0.15])
+
+
+def test_ownership_snapshot_reuse_keeps_revisions_unknowns_and_daily_context():
+    dates = pd.date_range("2024-01-01", periods=9)
+    headers = pd.DataFrame(
+        dict(
+            economic_portfolio_id=["f", "g", "f", "f", "f", "f"],
+            report_version_identity=["f1", "g1", "f2", "f3", "f4", "f5"],
+            timestamp=pd.to_datetime(
+                ["2023-12-31"] * 3 + ["2024-01-05", "2023-12-31", "2024-01-07"]
+            ),
+            available_at=dates[[1, 1, 3, 5, 6, 7]],
+            disclosure_scope="full_stock_holdings",
+            stock_disclosure_status="full_stock_table_reconciled",
+            explicit_no_stock=["false"] * 3 + ["true", "false", "false"],
+            stock_rows=[2, 1, 2, 0, 2, 2],
+        )
+    )
+    holdings = pd.DataFrame(
+        dict(
+            economic_portfolio_id=["f"] * 8 + ["g"],
+            report_version_identity=np.repeat(["f1", "f2", "f4", "f5"], 2).tolist()
+            + ["g1"],
+            stock_market="CN_MAINLAND",
+            stock_code=["a", "b"] * 4 + ["a"],
+            shares_held=pd.Series(
+                [10, 20, 30, pd.NA, 90, 90, 10, 40, 10], dtype="Float64"
+            ),
+        )
+    )
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["a", "b"] * len(dates),
+            timestamp=dates.repeat(2),
+            a_float_shares=np.repeat(np.arange(1, 10) * 100.0, 2),
+            peak_drawdown_20d=np.repeat(np.arange(1, 10) / 100.0, 2),
+            amihud_20d=np.repeat(np.arange(1, 10), 2),
+            amihud_60d=1.0,
+        )
+    )
+    names = [
+        "cn_fund_holder_concentration",
+        "cn_fund_ownership_float_share",
+        "ownership_crowding_x_drawdown",
+        "ownership_crowding_x_liquidity_stress",
+    ]
+    result = calculate(
+        decisions,
+        dict(public_fund_holdings=holdings, public_fund_holdings_reports=headers),
+        columns=names,
+    )
+    # The late f4 amendment cannot replace f3's newer zero-holdings period.
+    hhi = np.array(
+        [
+            [np.nan, np.nan],
+            [0.5, 1],
+            [0.5, 1],
+            [0.625, np.nan],
+            [0.625, np.nan],
+            [1, np.nan],
+            [1, np.nan],
+            [0.5, 1],
+            [0.5, 1],
+        ]
+    ).ravel()
+    quantity = np.array(
+        [
+            [np.nan, np.nan],
+            [20, 20],
+            [20, 20],
+            [40, np.nan],
+            [40, np.nan],
+            [10, 0],
+            [10, 0],
+            [20, 40],
+            [20, 40],
+        ]
+    ).ravel()
+    for name, expected in zip(
+        names,
+        [
+            hhi,
+            quantity / decisions.a_float_shares,
+            hhi * decisions.peak_drawdown_20d,
+            hhi * (decisions.amihud_20d - 1),
+        ],
+        strict=True,
+    ):
+        np.testing.assert_allclose(
+            result[name].to_numpy(float), expected, equal_nan=True
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["complete", "missing_basket", "partial_basket", "unknown_delta", "zero_delta"],
+)
+def test_native_passive_pressure_preserves_each_funds_unknown_contribution(
+    tmp_path, case
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    days = pd.bdate_range("2024-01-02", periods=7)
+    shares = pd.concat(
+        [
+            pd.DataFrame(
+                dict(
+                    asset_id=fund,
+                    timestamp=days,
+                    available_at=days + pd.Timedelta(hours=16),
+                    shares_outstanding=100.0 + 10 * np.arange(7),
+                )
+            )
+            for fund in ("f1", "f2")
+        ],
+        ignore_index=True,
+    )
+    parts = pd.concat(
+        [
+            pd.DataFrame(
+                dict(
+                    fund_code=fund,
+                    timestamp=days,
+                    available_at=days + pd.Timedelta(hours=16),
+                    component_code="s",
+                    component_kind="equity_security",
+                    component_quantity_unit="share",
+                    component_quantity=10.0,
+                    creation_unit_fund_shares=100.0,
+                )
+            )
+            for fund in ("f1", "f2")
+        ],
+        ignore_index=True,
+    )
+    headers = parts[["fund_code", "timestamp", "available_at"]].assign(
+        declared_component_count=1
+    )
+    last = parts.fund_code.eq("f2") & parts.timestamp.eq(days[-1])
+    if case in {"missing_basket", "zero_delta"}:
+        parts = parts.loc[~last]
+    elif case == "partial_basket":
+        parts.loc[last, "component_code"] = "other"
+        headers.loc[last, "declared_component_count"] = 2
+    if case in {"unknown_delta", "zero_delta"}:
+        shares.loc[
+            shares.asset_id.eq("f2") & shares.timestamp.eq(days[-1]),
+            "shares_outstanding",
+        ] = np.nan if case == "unknown_delta" else 150.0
+    decision_time = days[-1] + pd.Timedelta(days=1)
+    decisions = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id=["s", "other", "outside"],
+            timestamp=decision_time,
+            signal_session=days[-1],
+            execution_session=decision_time,
+            return_available_at=pd.NaT,
+            avg_volume_20d=100.0,
+            industry_standard_id="standard",
+            industry_level1_code=["s_industry", "other_industry", "outside_industry"],
+        )
+    )
+    calendar = _calendar(days)
+    calendar["timestamp"] = calendar.calendar_date
+    inputs = {}
+    for name, frame, keys in (
+        ("decision_panel", decisions, ("asset_id", "timestamp")),
+        ("public_fund_shares", shares, ("asset_id", "timestamp")),
+        (
+            "public_etf_pcf_components",
+            parts,
+            ("fund_code", "timestamp", "component_code"),
+        ),
+        ("public_etf_pcf_baskets", headers, ("fund_code", "timestamp")),
+        ("trading_calendar", calendar, ("source_market_type", "timestamp")),
+    ):
+        path = tmp_path / name
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                data_id=name,
+                frequency="1d",
+                grain="research_row",
+                primary_key=keys,
+                partition_columns=(),
+                column_roles={
+                    c: "timestamp"
+                    if c == "timestamp"
+                    else "key"
+                    if c in keys
+                    else "context"
+                    for c in frame
+                },
+            ),
+        )
+        inputs[name] = str(path)
+    fields = [
+        f"{scope}_passive_flow_pressure_{width}d"
+        for scope in ("stock", "industry")
+        for width in (1, 5)
+    ]
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="fund_flow_factors",
+            inputs=inputs,
+            factor_columns=fields,
+            time_window=dict(
+                start=str(decision_time.date()), end=str(decision_time.date())
+            ),
+            output_root=str(tmp_path / "pressure"),
+        )
+    )
+    result = read_dataset(output).set_index("asset_id")
+    if case in {"missing_basket", "partial_basket", "unknown_delta"}:
+        assert result.loc["s", fields].isna().all()
+    else:
+        expected = [0.01, 0.09] if case == "zero_delta" else [0.02, 0.10]
+        np.testing.assert_allclose(
+            result.loc["s", fields].to_numpy(float), expected * 2
+        )
+    if case in {"missing_basket", "partial_basket"}:
+        assert result.loc["outside", fields].isna().all()
+    else:
+        np.testing.assert_allclose(result.loc["outside", fields].to_numpy(float), 0)
+    if case == "partial_basket":
+        # A disclosed component is known even when another component is omitted.
+        np.testing.assert_allclose(result.loc["other", fields].to_numpy(float), 0.01)
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "flow",
+        "prior_nav",
+        "prior_nav_conflict",
+        "ambiguous",
+        "ambiguous_reversed",
+        "ambiguous_same_flow",
+    ],
+)
+def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
+    tmp_path, missing
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    funds = pd.DataFrame(
+        [
+            (f"{series}{i}", series, day, released, nav)
+            for series in ("a", "b")
+            for i, (day, released, nav) in enumerate(
+                (
+                    ("2023-12-31", "2024-02-01", 100.0),
+                    ("2024-03-31", "2024-05-01", 200.0),
+                    ("2024-06-30", "2024-08-01", 300.0),
+                )
+            )
+        ],
+        columns=[
+            "accession",
+            "series_id",
+            "timestamp",
+            "available_at",
+            "net_assets_usd",
+        ],
+    ).assign(filing_type="NPORT-P")
+    for column in ("timestamp", "available_at"):
+        funds[column] = pd.to_datetime(funds[column])
+    for kind in ("sales", "reinvestment", "redemption"):
+        for month in (1, 2, 3):
+            funds[f"{kind}_month_{month}_usd"] = 0.0
+    funds["sales_month_1_usd"] = 10.0
+    accession, field = (
+        ("a1", "sales_month_1_usd") if missing == "flow" else ("a0", "net_assets_usd")
+    )
+    if missing in {"flow", "prior_nav"}:
+        funds.loc[funds.accession.eq(accession), field] = np.nan
+    elif missing == "prior_nav_conflict":
+        funds = pd.concat(
+            [funds, funds.loc[funds.accession.eq("a0")].assign(net_assets_usd=200.0)],
+            ignore_index=True,
+        )
+    else:
+        funds.loc[funds.accession.eq("a1"), "filing_type"] = "NPORT-P/A"
+        amendment = funds.loc[funds.accession.eq("a1")]
+        funds = pd.concat(
+            [
+                funds,
+                amendment.assign(
+                    accession="conflict",
+                    sales_month_1_usd=10.0
+                    if missing == "ambiguous_same_flow"
+                    else 30.0,
+                ),
+                amendment.assign(
+                    accession="resolved", available_at=pd.Timestamp("2024-05-03")
+                ),
+            ],
+            ignore_index=True,
+        )
+        if missing == "ambiguous_reversed":
+            funds = funds.iloc[::-1].reset_index(drop=True)
+    holdings = pd.DataFrame(
+        [("a0", "a", "s", 20.0), ("a1", "a", "s", 30.0)]
+        + [
+            (f"b{i}", "b", stock, value)
+            for i in (0, 1)
+            for stock, value in (("s", 40.0), ("x", 50.0))
+        ],
+        columns=["accession", "series_id", "cusip", "value"],
+    ).assign(balance_unit="NS", asset_category="EC", payoff_profile="Long")
+    if missing.startswith("ambiguous"):
+        holdings = pd.concat(
+            [
+                holdings,
+                holdings.loc[holdings.accession.eq("a1")].assign(accession="resolved"),
+            ],
+            ignore_index=True,
+        )
+    holdings["timestamp"] = holdings.accession.map(
+        funds.drop_duplicates("accession").set_index("accession").timestamp
+    )
+    funds["source_sha256"] = np.arange(len(funds)).astype(str)
+    decisions = pd.DataFrame(
+        [
+            (asset, pd.Timestamp(date))
+            for date in ("2024-05-02", "2024-08-02")
+            for asset in ("SPY", "XLK")
+        ],
+        columns=["asset_id", "timestamp"],
+    ).assign(market_id="a_share", return_available_at=pd.NaT)
+    decisions["signal_session"] = decisions.timestamp - pd.Timedelta(days=1)
+    decisions["execution_session"] = decisions.timestamp
+    inputs = {}
+    for name, frame, keys in (
+        ("decision_panel", decisions, ("asset_id", "timestamp")),
+        ("public_nport_funds", funds, ("accession", "timestamp", "source_sha256")),
+        ("public_nport_holdings", holdings, ("accession", "cusip", "timestamp")),
+    ):
+        path = tmp_path / name
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                data_id=name,
+                frequency="1d",
+                grain="research_row",
+                primary_key=keys,
+                partition_columns=(),
+                column_roles={
+                    c: "timestamp"
+                    if c == "timestamp"
+                    else "key"
+                    if c in keys
+                    else "context"
+                    for c in frame
+                },
+            ),
+        )
+        inputs[name] = str(path)
+    name = "us_crowded_sector_flow_pressure"
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="fund_flow_factors",
+            inputs=inputs,
+            factor_columns=[name],
+            parameters={"us_assets": {"SPY": "s", "XLK": "x"}},
+            time_window=dict(start="2024-05-02", end="2024-08-02"),
+            output_root=str(tmp_path / "factors"),
+        )
+    )
+    result = read_dataset(output).set_index(["timestamp", "asset_id"])[name]
+    if missing == "ambiguous_same_flow":
+        assert result.loc[("2024-05-02", "SPY")] == pytest.approx(
+            0.1 * (20**2 + 40**2) / 60**2
+        )
+    else:
+        assert pd.isna(result.loc[("2024-05-02", "SPY")])
+    assert result.loc[("2024-05-02", "XLK")] == pytest.approx(0.1)
+    assert result.loc[("2024-08-02", "SPY")] == pytest.approx(
+        0.05 * (30**2 + 40**2) / 70**2
+    )
+    assert result.loc[("2024-08-02", "XLK")] == pytest.approx(0.05)

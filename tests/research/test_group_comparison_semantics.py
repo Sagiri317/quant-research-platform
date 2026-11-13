@@ -59,14 +59,14 @@ def test_native_comparison_reuses_the_single_dataset_scan(
     paired_sources, tmp_path, monkeypatch
 ):
     _case, configs, _paths = paired_sources
-    actual_chunks = model_stats.iter_dataset_chunks
+    actual_chunks = model_stats.iter_dataset_time_chunks
     scans = []
 
     def counted_chunks(*args, **kwargs):
         scans.append(1)
         yield from actual_chunks(*args, **kwargs)
 
-    monkeypatch.setattr(model_stats, "iter_dataset_chunks", counted_chunks)
+    monkeypatch.setattr(model_stats, "iter_dataset_time_chunks", counted_chunks)
     model_statistics({**configs["quarterly"], "output": str(tmp_path / "right")})
     assert len(scans) == 1
 

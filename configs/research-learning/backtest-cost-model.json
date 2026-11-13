@@ -28,7 +28,7 @@
         "equity_events": "data/interim/reference/a_share_equity_events"
       },
       "candidate": {
-        "candidate_id": "learned",
+        "candidate_id": "cost_allocator",
         "selection_group": "global",
         "construction": "quantile_equal_weight",
         "prediction_selector": "policy",

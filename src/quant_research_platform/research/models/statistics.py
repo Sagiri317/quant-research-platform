@@ -15,6 +15,7 @@ from quant_research_platform.artifacts.statistics import (
     PREDICTION_CORRELATION_FIELDS,
     STATISTICS_TABLE_COLUMNS,
 )
+from quant_research_platform.compute.dataframe.cross_section import _mean_squared_error
 from quant_research_platform.contracts.evaluations import CORRELATION_METRICS
 from quant_research_platform.contracts.experiments import (
     DEFAULT_ROOT_SEED,
@@ -35,7 +36,6 @@ from quant_research_platform.research.datasets.statistics import (
     _statistics_label_availability,
     _statistics_window_bounds,
 )
-from quant_research_platform.research.models.trial_selection import _mean_squared_error
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
 )
@@ -53,12 +53,9 @@ from quant_research_platform.research.statistics import (
     stationary_bootstrap_mean_ci,
     stepm_superior_models,
 )
-from quant_research_platform.runtime.dataframes import (
-    iter_complete_session_frames,
-)
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
-    iter_dataset_chunks,
+    iter_dataset_time_chunks,
 )
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
@@ -212,9 +209,8 @@ def build_a_share_statistics_tables(
         if isinstance(global_inference_blocker, Mapping)
         else dict.fromkeys(family_ids, global_inference_blocker)
     )
-    chunks = iter_complete_session_frames(
-        iter_dataset_chunks(dataset_session.projected_view(read_columns)),
-        timestamp_column="timestamp",
+    chunks = iter_dataset_time_chunks(
+        dataset_session.projected_view(read_columns), one_timestamp=True
     )
     with closing_iterator(chunks):
         for session in chunks:
@@ -1184,7 +1180,6 @@ def model_statistics(config):
         "selection_group",
         "prediction_id",
         "label_cutoff",
-        "input_spec",
         "global_predictions",
         "selection_is_exploratory",
         "expectations",

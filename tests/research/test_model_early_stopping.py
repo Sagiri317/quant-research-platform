@@ -10,7 +10,6 @@ from quant_research_platform.artifacts.outputs.prediction import read_prediction
 from quant_research_platform.contracts.models import (
     DEEPLOB_INPUT_COLUMNS,
     ModelSpec,
-    validate_model_facts,
 )
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
@@ -53,7 +52,7 @@ def stopping_config(tmp_path, algorithm):
             frame[f"bid_vol{level}"] = 50 + frame.x + level
         frame["session_date"] = frame.timestamp.dt.normalize()
         frame["segment_id"] = 0
-        roles = config["input_spec"]["column_roles"]
+        roles = config["inputs"]["spec"]["column_roles"]
         roles.update({column: "feature" for column in DEEPLOB_INPUT_COLUMNS})
         roles.update(session_date="context", segment_id="context")
         config["model"]["input_feature_columns"] = list(DEEPLOB_INPUT_COLUMNS)
@@ -82,7 +81,7 @@ def stopping_config(tmp_path, algorithm):
 def test_best_state_native_roundtrip_and_validation_maturity(tmp_path, algorithm):
     config, frame, late = stopping_config(tmp_path, algorithm)
     model = fit(config)
-    result, facts = load_model(model)
+    result, _ = load_model(model)
     stopped = result.metadata["early_stopping"]
     best = stopped["best_iteration"]
     assert 0 <= best < stopped["iterations"] <= 8
@@ -129,7 +128,7 @@ def test_best_state_native_roundtrip_and_validation_maturity(tmp_path, algorithm
 
     # The still-immature validation label cannot select the checkpoint.
     frame.loc[late, "label"] = 0.8
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     changed = {**config, "output": str(tmp_path / "late-changed")}
     unchanged, _ = load_model(fit(changed))
     assert unchanged.metadata["early_stopping"] == stopped
@@ -144,7 +143,6 @@ def test_best_state_native_roundtrip_and_validation_maturity(tmp_path, algorithm
         "model": str(model),
         "inputs": config["inputs"],
         "output": str(tmp_path / "prediction"),
-        "input_spec": config["input_spec"],
         "prediction_window": {"start": "2020-01-07", "end": "2020-01-09"},
         "sample_role": "test",
     }
@@ -155,11 +153,6 @@ def test_best_state_native_roundtrip_and_validation_maturity(tmp_path, algorithm
     assert len(predictions) == 6
     assert metadata["model_metadata"]["early_stopping"] == stopped
     assert metadata["model_facts"]["validation"] == config["validation"]
-
-    tampered = deepcopy(result.metadata)
-    tampered["early_stopping"]["label_available_max"] = "2020-01-08"
-    with pytest.raises(ValueError, match="invalid_model_validation_maturity"):
-        validate_model_facts(facts, tampered)
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "xgboost_regressor"])
@@ -175,7 +168,7 @@ def test_stopping_requires_independent_observed_validation(tmp_path, algorithm):
     with pytest.raises(ValueError, match="model_validation_training_overlap"):
         fit(overlap)
     frame.loc[frame.timestamp.ge("2020-01-04"), "label_available_at"] = pd.NaT
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     config["output"] = str(tmp_path / "unknown")
     with pytest.raises(ValueError, match="model_validation_sample_empty"):
         fit(config)

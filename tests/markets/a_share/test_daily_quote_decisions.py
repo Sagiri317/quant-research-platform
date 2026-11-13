@@ -81,6 +81,111 @@ def test_native_etf_price_volume_reuses_math_and_keeps_decision_clock(tmp_path):
     assert read_dataset(prepare(config))[name].iloc[20:].isna().all()
 
 
+@pytest.mark.parametrize("intraday_bounds", [False, True])
+def test_native_etf_narrow_window_keeps_warmup_recursive_state_and_missingness(
+    tmp_path, intraday_bounds
+):
+    import numpy as np
+
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.research.test_prepare_selection import _input
+
+    days = pd.bdate_range("2024-01-02", periods=62)
+    returns = np.sin(np.arange(61)) / 100
+    returns[54] = np.nan
+    frame = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="510300",
+            signal_session=days[:-1],
+            timestamp=days[1:] + pd.Timedelta(hours=1),
+            adj_close=np.r_[np.full(20, 100.0), 100 * 1.01 ** np.arange(1, 42)],
+            period_return=returns,
+            next_session_intraday_return=0.0,
+            next_session_intraday_return_available_at=days[1:] + pd.Timedelta(hours=7),
+        )
+    )
+    # A second asset has an omitted calendar link, so its prior episode and
+    # nominal statistical window cannot be resumed at the new segment.
+    interrupted = frame.loc[(frame.index < 34) | (frame.index >= 49)].assign(
+        asset_id="510500"
+    )
+    source = pd.concat([frame, interrupted], ignore_index=True)
+    lower, upper = frame.timestamp.iloc[[55, 58]]
+    window = dict(start=lower.date().isoformat(), end=upper.date().isoformat())
+    expected_indices = range(55, 59)
+    if intraday_bounds:
+        window = dict(
+            start=(lower + pd.Timedelta(microseconds=1)).isoformat(),
+            end=upper.isoformat(),
+        )
+        expected_indices = range(56, 59)
+    result = read_dataset(
+        prepare(
+            dict(
+                market_id="a_share",
+                data_id="etf_price_volume_factors",
+                inputs={
+                    "etf_daily_panel": _input(
+                        tmp_path, "etf_daily_panel", source, native=True
+                    )
+                },
+                factor_columns=[
+                    "reversal_5d",
+                    "volatility_20d",
+                    "signed_breakout_duration_20d",
+                ],
+                time_window=window,
+                output_root=str(tmp_path / "factors"),
+            )
+        )
+    )
+    for asset, rows in result.groupby("asset_id", sort=False):
+        assert (
+            rows.timestamp.tolist()
+            == frame.timestamp.iloc[list(expected_indices)].tolist()
+        )
+        assert rows.reversal_5d.tolist() == pytest.approx([-(1.01**5 - 1)] * len(rows))
+        if asset == "510500":
+            assert rows.volatility_20d.isna().all()
+            assert rows.signed_breakout_duration_20d.isna().all()
+        else:
+            assert rows.volatility_20d.tolist() == pytest.approx(
+                [np.nanstd(returns[i - 19 : i + 1], ddof=1) for i in expected_indices]
+            )
+            assert rows.signed_breakout_duration_20d.tolist() == [
+                i - 20 + 1 for i in expected_indices
+            ]
+
+
+def test_native_etf_window_without_decisions_publishes_empty_numeric_factors(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.research.test_prepare_selection import _input
+
+    prices, calendar = inputs()
+    frame = daily_quotes.daily_decisions(prices, calendar)
+    result = read_dataset(
+        prepare(
+            dict(
+                market_id="a_share",
+                data_id="etf_price_volume_factors",
+                inputs={
+                    "etf_daily_panel": _input(
+                        tmp_path, "etf_daily_panel", frame, native=True
+                    )
+                },
+                factor_columns=["reversal_5d"],
+                time_window=dict(start="2025-01-01", end="2025-01-02"),
+                output_root=str(tmp_path / "empty"),
+            )
+        )
+    )
+    assert result.empty
+    assert pd.api.types.is_numeric_dtype(result.reversal_5d)
+
+
 def test_etf_intraday_label_is_next_declared_session_and_cash_adjustment_cancels():
     prices, calendar = inputs()
     result = daily_quotes.daily_decisions(prices, calendar)
@@ -226,23 +331,68 @@ def test_total_return_uses_ex_date_cash_and_new_over_old_split_ratio():
     assert result.period_return.iloc[1] == pytest.approx(0)
 
 
-def test_native_market_states_count_stock_replicas_once_without_style_input(tmp_path):
+@pytest.mark.parametrize("empty", [False, True])
+def test_native_market_states_follow_selected_signal_sessions(
+    tmp_path, monkeypatch, empty
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        market_states,
+    )
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.storage.datasets import read_dataset
     from tests.research.test_prepare_selection import _input
 
-    prices, calendar = inputs()
-    benchmark = daily_quotes.daily_decisions(
-        prices.assign(asset_id="index:000300"), calendar
+    days = pd.date_range("2024-01-05", "2024-01-11")
+    calendar = pd.DataFrame(
+        [
+            dict(
+                calendar_date=day,
+                source_market_type=market,
+                is_trading_day=day.weekday() < 5,
+            )
+            for day in days
+            for market in CURRENT_MARKET_TYPES
+        ]
     )
-    state = pd.DataFrame(
+    prices = pd.DataFrame(
         dict(
-            market_id="a_share",
-            asset_id=["a", "b", "c"],
-            timestamp=pd.Timestamp("2024-01-05"),
-            market_up_fraction=0.5,
+            asset_id="index:000300",
+            timestamp=days[days.day_of_week < 5],
+            open=10.0,
+            close=11.0,
+            volume=100.0,
+            amount=1000.0,
         )
     )
+    benchmark = daily_quotes.daily_decisions(prices, calendar)
+    benchmark = benchmark.loc[benchmark.signal_session.ne(pd.Timestamp("2024-01-08"))]
+    state = pd.DataFrame(
+        [
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=pd.Timestamp(date),
+                market_up_fraction=value,
+            )
+            for asset in ("a", "b", "c")
+            for date, value in (
+                ("2023-12-29", 0.2),
+                ("2024-01-05", 0.5),
+                ("2024-01-08", 0.99),
+                ("2024-01-09", float("nan")),
+                ("2024-02-01", 0.8),
+            )
+        ]
+    )
+    scanned = []
+    original = market_states.iter_dataset_chunks
+
+    def observe_scan(session):
+        for frame in original(session):
+            scanned.extend(frame.timestamp)
+            yield frame
+
+    monkeypatch.setattr(market_states, "iter_dataset_chunks", observe_scan)
     path = prepare(
         dict(
             market_id="a_share",
@@ -256,13 +406,23 @@ def test_native_market_states_count_stock_replicas_once_without_style_input(tmp_
                 ),
             },
             factor_columns=["market_up_fraction"],
-            time_window=dict(start="2024-01-08", end="2024-01-08"),
+            time_window=dict(start="2025-01-01", end="2025-01-02")
+            if empty
+            else dict(start="2024-01-08", end="2024-01-11"),
             output_root=str(tmp_path / "state"),
         )
     )
     result = read_dataset(path)
-    assert len(result) == 1
-    assert result.market_up_fraction.iloc[0] == 0.5
+    if empty:
+        assert result.empty
+        assert not scanned
+    else:
+        assert result.timestamp.tolist() == benchmark.timestamp.tolist()
+        assert result.market_up_fraction.iloc[0] == 0.5
+        assert result.market_up_fraction.iloc[1:].isna().all()
+        assert set(scanned) == set(
+            pd.to_datetime(["2024-01-05", "2024-01-08", "2024-01-09"])
+        )
 
 
 def test_native_unknown_linked_factor_is_numeric_after_persistence(tmp_path):

@@ -85,8 +85,7 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
     window = {"start": "2024-01-04", "end": "2024-01-06"}
     request = dict(
         model=str(case.root),
-        inputs=str(source),
-        input_spec=case.config["input_spec"],
+        inputs={"path": str(source), "spec": case.config["inputs"]["spec"]},
         output=str(tmp_path / "prediction"),
         prediction_window=window,
     )
@@ -111,8 +110,7 @@ def test_single_asset_score_checks_final_domain_without_restricting_predictions(
     scoring = dict(
         predictions=predictions,
         candidate_ids=ids,
-        labels=str(source),
-        label_spec=case.config["input_spec"],
+        labels={"path": str(source), "spec": case.config["inputs"]["spec"]},
         validation_windows=[window],
         scoring_window=window,
         cutoff="2024-01-06",
@@ -187,7 +185,7 @@ def test_external_feature_names_do_not_invent_companions(tmp_path, column):
         start="2024-01-01",
         end="2024-01-03",
     )
-    config["input_spec"] = case.config["input_spec"]
+    config["inputs"]["spec"] = case.config["inputs"]["spec"]
     metrics = read_evaluation_outputs(evaluate(config))[1]["metrics"]
     assert metrics.n_obs.tolist() == [3, 3, 3]
     assert metrics.ic.tolist() == pytest.approx([1.0, 1.0, 1.0])
@@ -197,8 +195,7 @@ def test_external_feature_names_do_not_invent_companions(tmp_path, column):
     prediction = predict(
         dict(
             model=str(case.root),
-            inputs=str(path),
-            input_spec=case.config["input_spec"],
+            inputs={"path": str(path), "spec": case.config["inputs"]["spec"]},
             output=str(tmp_path / "predictions"),
             prediction_window={"start": "2024-01-04", "end": "2024-01-06"},
         )
@@ -237,10 +234,10 @@ def test_null_features_keep_domains_through_projection(
 ):
     from quant_research_platform.research.evaluations import runner
 
-    original = runner.iter_dataset_chunks
+    original = runner.iter_dataset_time_chunks
     monkeypatch.setattr(
         runner,
-        "iter_dataset_chunks",
+        "iter_dataset_time_chunks",
         lambda session: original(session, batch_rows=batch_rows),
     )
     frame = _canonical()
@@ -248,7 +245,7 @@ def test_null_features_keep_domains_through_projection(
     case = fit_frame(tmp_path, frame, _linear(column=indicator, feature=True))
     assert case.result.metadata["rows_after_input_label_dropna"] == 2
     spec = _evaluation("feature_x")
-    declared = case.config["input_spec"]
+    declared = case.config["inputs"]["spec"]
     declared["column_roles"]["feature_x"] = "feature"
     config = evaluation_config(
         case.config["inputs"],
@@ -258,7 +255,7 @@ def test_null_features_keep_domains_through_projection(
         end="2024-01-02",
     )
     config["inputs"] = {
-        "path": config["inputs"],
+        "path": config["inputs"]["path"],
         "spec": declared,
         "columns": ["timestamp", "asset_id", "feature_x", "label"],
     }
@@ -308,14 +305,18 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
 
     case = fit_frame(tmp_path, _training().assign(unused=2.0), _linear())
     declared = {
-        **case.config["input_spec"],
+        **case.config["inputs"]["spec"],
         "column_units": {
             "unused": "meter",
             **({"x": training_unit} if training_unit else {}),
         },
     }
     model = fit(
-        {**case.config, "input_spec": declared, "output": str(tmp_path / "unit_model")}
+        {
+            **case.config,
+            "inputs": {**case.config["inputs"], "spec": declared},
+            "output": str(tmp_path / "unit_model"),
+        }
     )
     manifest = json.loads((model / "model.json").read_text())
     assert manifest["facts"]["input_units"] == (
@@ -324,7 +325,7 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
     # Prediction must use saved scientific facts, not the original training source.
     from pathlib import Path
 
-    Path(case.config["inputs"]).unlink()
+    Path(case.config["inputs"]["path"]).unlink()
     future = (
         _training()
         .iloc[[0]]
@@ -342,8 +343,7 @@ def test_model_freezes_only_consumed_declared_units_before_predicting(
     }
     request = dict(
         model=str(model),
-        inputs=str(path),
-        input_spec=declared,
+        inputs={"path": str(path), "spec": declared},
         output=str(tmp_path / "prediction"),
         prediction_window={"start": "2024-01-04", "end": "2024-01-04"},
     )
@@ -368,12 +368,12 @@ def test_canonical_observation_projection_matches_factor_statistics(tmp_path):
 
     frame = _canonical()
     case = fit_frame(tmp_path, frame, _linear(column="feature_x", feature=True))
-    declared = case.config["input_spec"]
+    declared = case.config["inputs"]["spec"]
     artifact = read_statistics_artifact(
         factor_statistics(
             dict(
                 dataset={
-                    "path": case.config["inputs"],
+                    "path": case.config["inputs"]["path"],
                     "spec": declared,
                     "columns": ["feature_x", "label"],
                 },
@@ -415,7 +415,7 @@ def test_declared_outputs_resolve_prefixed_source_name_without_a_name_ban(tmp_pa
         tmp_path, produced, _linear(column="feature_missing_x", feature=True)
     )
     spec = _evaluation("feature_missing_x")
-    declared = case.config["input_spec"]
+    declared = case.config["inputs"]["spec"]
     declared["column_roles"]["feature_missing_x"] = "feature"
     config = evaluation_config(
         case.config["inputs"],
@@ -426,7 +426,7 @@ def test_declared_outputs_resolve_prefixed_source_name_without_a_name_ban(tmp_pa
         cutoff="2024-01-03",
     )
     config["inputs"] = {
-        "path": config["inputs"],
+        "path": config["inputs"]["path"],
         "spec": declared,
         "columns": ["feature_missing_x", "label"],
     }

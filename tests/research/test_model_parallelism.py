@@ -7,11 +7,7 @@ import pandas as pd
 import pytest
 from threadpoolctl import threadpool_info
 
-from quant_research_platform.contracts.models import (
-    ModelSpec,
-    _resolved_model_hyperparameters_match,
-    validate_model_metadata_core,
-)
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models import estimators, fitting
 
 ALGORITHMS = ("xgboost_regressor",)
@@ -33,14 +29,6 @@ def test_library_thread_parameters_are_not_hardware_gated(algorithm, requested):
         "device": "cuda",
         "tree_method": "hist",
     }
-    resolved = {**params, "device": "cuda", "tree_method": "hist"}
-    assert _resolved_model_hyperparameters_match(algorithm, params, resolved)
-    assert _resolved_model_hyperparameters_match(
-        algorithm, params, {**resolved, "n_jobs": 2}
-    )
-    assert not _resolved_model_hyperparameters_match(
-        algorithm, {**params, "n_estimators": 2}, {**resolved, "n_estimators": 3}
-    )
 
 
 def _spec(algorithm, params):
@@ -108,7 +96,6 @@ def test_actual_fit_preserves_thread_configuration_and_metadata(
     )
     assert observed == [before]
     assert threadpool_info() == before
-    validate_model_metadata_core(result.metadata)
     assert result.metadata["resolved_hyperparameters"] == (
         {**params, "device": "cuda", "tree_method": "hist"}
         if algorithm == "xgboost_regressor"

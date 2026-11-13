@@ -1,12 +1,12 @@
 """Normalize macro vintages with explicit historical publication assumptions."""
 
-import csv
 import hashlib
 import io
 import json
 import xml.etree.ElementTree as ET
 import zipfile
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +19,7 @@ from quant_research_platform.sources.macro.publication import (
     estimate_initial_archive_times,
     estimated_release_at,
 )
+from quant_research_platform.sources.tabular import read_csv as _read_selected_csv
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -74,9 +75,26 @@ def date_end_available(dates, timezone):
     )
 
 
-def _frame(name, values, dates, *, record, timezone, vintage=None, end_dates=None):
+def _frame(
+    name,
+    values,
+    dates,
+    *,
+    record,
+    timezone,
+    vintage=None,
+    end_dates=None,
+    start_date=None,
+    end_date=None,
+):
     series = SERIES[name]
-    output = pd.DataFrame({"observation_date": pd.to_datetime(dates), "value": values})
+    output = pd.DataFrame({"observation_date": dates, "value": values})
+    if vintage is not None:
+        output["vintage_date"] = vintage
+        output["realtime_end_date"] = end_dates
+    output = _select_observation_window(
+        output, start_date=start_date, end_date=end_date
+    )
     output["series_id"] = name
     output["unit"] = series.unit
     output["frequency"] = series.frequency
@@ -86,7 +104,9 @@ def _frame(name, values, dates, *, record, timezone, vintage=None, end_dates=Non
     output["published_at"] = pd.Series(
         pd.NaT, index=output.index, dtype="datetime64[ns, UTC]"
     )
-    output["retrieved_at"] = pd.Timestamp(record["retrieved_at"])
+    output["retrieved_at"] = (
+        pd.NaT if output.empty else pd.Timestamp(record["retrieved_at"])
+    )
     output["source_url"] = record["url"]
     if vintage is None:
         output["timestamp"] = estimated_release_at(name, output.observation_date)
@@ -94,24 +114,13 @@ def _frame(name, values, dates, *, record, timezone, vintage=None, end_dates=Non
         output["realtime_end_date"] = pd.Series(pd.NA, index=output.index, dtype="str")
         output["availability_basis"] = "inferred_snapshot_release"
     else:
-        output["vintage_date"] = pd.to_datetime(vintage)
+        output["vintage_date"] = pd.to_datetime(output.vintage_date)
         output["timestamp"] = date_end_available(output.vintage_date, timezone)
-        output["realtime_end_date"] = end_dates
         output["availability_basis"] = "archive_date_end"
     return output
 
 
-def _read_selected_csv(source, required, *, error, **options):
-    """Project consumed fields without letting pandas rename ambiguous headers."""
-    with io.TextIOWrapper(source, encoding="utf-8-sig", newline="") as text:
-        header = next(csv.reader(text), ())
-        if any(header.count(column) != 1 for column in required):
-            raise ValueError(error)
-        text.seek(0)
-        return pd.read_csv(text, usecols=list(required), **options)
-
-
-def normalize_alfred(payload, name, record):
+def normalize_alfred(payload, name, record, *, start_date=None, end_date=None):
     """Retain each new or revised value at its archive vintage's conservative cutoff."""
     series = SERIES[name]
     required = {
@@ -136,19 +145,30 @@ def normalize_alfred(payload, name, record):
         timezone="America/Chicago",
         vintage=data.realtime_start_date,
         end_dates=data.realtime_end_date,
+        start_date=start_date,
+        end_date=end_date,
     )
 
 
-def _normalize_response(payload, names, record, *, incomplete=False):
+def _normalize_response(
+    payload, names, record, *, incomplete=False, start_date=None, end_date=None
+):
     source = SERIES[names[0]].source
     if source == "alfred":
-        return [normalize_alfred(payload, names[0], record)]
+        return [
+            normalize_alfred(
+                payload, names[0], record, start_date=start_date, end_date=end_date
+            )
+        ]
+    frame = partial(_frame, start_date=start_date, end_date=end_date)
     if source == "cboe":
         name = names[0]
-        data = pd.read_csv(io.BytesIO(payload), na_values=["."])
         value_column = "CLOSE" if SERIES[name].code == "VIX9D" else SERIES[name].code
+        data = _read_selected_csv(
+            io.BytesIO(payload), ("DATE", value_column), na_values=["."]
+        )
         return [
-            _frame(
+            frame(
                 name,
                 data[value_column],
                 pd.to_datetime(data.DATE, format="%m/%d/%Y"),
@@ -173,7 +193,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             )
             selected = data.loc[data["曲线名称"].eq(curve)]
             frames.append(
-                _frame(
+                frame(
                     name,
                     selected[tenors[name]],
                     selected["日期"],
@@ -183,10 +203,10 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             )
         return frames
     if source == "sf_fed":
-        data = pd.read_csv(io.BytesIO(payload))
+        data = _read_selected_csv(io.BytesIO(payload), ("Date", SERIES[names[0]].code))
         # The publisher's chart declares basis points; current PCA weights are ex post.
         return [
-            _frame(
+            frame(
                 names[0],
                 data[SERIES[names[0]].code],
                 data.Date,
@@ -204,7 +224,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
         data = pd.DataFrame([item.attrib for item in series[0]])
         dates = pd.PeriodIndex(data.TIME_PERIOD, freq="Q").to_timestamp()
         return [
-            _frame(
+            frame(
                 names[0], data.OBS_VALUE, dates, record=record, timezone="Europe/Zurich"
             )
         ]
@@ -214,7 +234,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
         if data.empty:
             return []
         return [
-            _frame(
+            frame(
                 names[0],
                 data[SERIES[names[0]].code],
                 pd.to_datetime(data.date.astype(str), format="%Y%m"),
@@ -236,7 +256,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
             pd.Series(values["SURVEY_DATES"]).astype(str), format="%Y%m"
         )
         return [
-            _frame(
+            frame(
                 names[0], values["VALUES"], dates, record=record, timezone="Asia/Tokyo"
             )
         ]
@@ -256,7 +276,7 @@ def _normalize_response(payload, names, record, *, incomplete=False):
     if data.empty:
         return []
     return [
-        _frame(
+        frame(
             name,
             data[SERIES[name].code],
             data[date_column],
@@ -335,7 +355,6 @@ def read_release_csv(path, *, start_date=None, end_date=None):
     Source identity and units stay explicit, including for private vendor exports.
     """
     payload = Path(path).read_bytes()
-    data = pd.read_csv(io.BytesIO(payload))
     required = {
         "series_id",
         "observation_date",
@@ -348,8 +367,15 @@ def read_release_csv(path, *, start_date=None, end_date=None):
         "source_url",
         "retrieved_at",
     }
-    clocks = set(data) & {"published_at", "release_date", "estimated_available_at"}
-    if not required <= set(data) or len(clocks) != 1:
+    clock_columns = {"published_at", "release_date", "estimated_available_at"}
+    data = _read_selected_csv(
+        io.BytesIO(payload),
+        required,
+        optional_columns=clock_columns,
+        error="macro_release_columns_invalid",
+    )
+    clocks = set(data) & clock_columns
+    if len(clocks) != 1:
         raise ValueError("macro_release_columns_invalid")
     data = _select_observation_window(data, start_date=start_date, end_date=end_date)
     clock = next(iter(clocks))
@@ -469,6 +495,8 @@ def materialize_interim_data(
                         metadata["series_ids"],
                         record,
                         incomplete=metadata["status"] != "downloaded",
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                 )
             if chunks:
@@ -477,13 +505,7 @@ def materialize_interim_data(
             sources[key] = metadata
         if not frames:
             raise ValueError("macro_no_observations")
-        frame = validate_observations(
-            _select_observation_window(
-                pd.concat(frames, ignore_index=True),
-                start_date=start_date,
-                end_date=end_date,
-            )
-        )
+        frame = validate_observations(pd.concat(frames, ignore_index=True))
     frame = estimate_initial_archive_times(resolve_source_conflicts(frame))
     coverage = []
     for name, group in frame.groupby("series_id", sort=True):

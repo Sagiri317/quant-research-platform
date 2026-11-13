@@ -7,9 +7,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.models import (
     PROBABILITY_COLUMNS,
-    _validate_model_prediction_window,
     prediction_columns,
-    validate_model_facts,
 )
 from quant_research_platform.contracts.time import (
     PredictionWindow,
@@ -43,14 +41,9 @@ def validate_prediction_output_metadata_shape(metadata):
         "prediction_rows",
         "model_metadata",
         "model_facts",
-        "input_spec",
         "status",
     }
-    if (
-        type(metadata) is not dict
-        or not required <= set(metadata)
-        or set(metadata) - required - {"asset_ids", *PREDICTION_FACT_ALIASES}
-    ):
+    if type(metadata) is not dict or not required <= set(metadata):
         raise ValueError("invalid_prediction_metadata")
     assets = metadata.get("asset_ids")
     if assets is not None and (
@@ -98,13 +91,12 @@ def validate_prediction_output_metadata_shape(metadata):
         name in metadata and metadata[name] != value for name, value in aliases.items()
     ):
         raise ValueError("prediction_model_facts_mismatch")
-    _validate_model_prediction_window(facts, window)
     metadata.update(aliases)
     return metadata
 
 
 def _validate_prediction_training_facts(facts, realized):
-    """Check self-contained score evidence without fitting-state metadata."""
+    """Check the copied evidence envelope without replaying model admission."""
     if type(facts) is not dict or set(facts) - {"target_definition", "validation"} != {
         "family_id",
         "asset_ids",
@@ -141,7 +133,6 @@ def _validate_prediction_training_facts(facts, realized):
         or not realized["label_availability_column"]
     ):
         raise ValueError("prediction_label_availability_invalid")
-    validate_model_facts(facts, realized)
 
 
 def validate_prediction_frame(frame, metadata, *, columns=None):

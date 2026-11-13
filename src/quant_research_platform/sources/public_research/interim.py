@@ -10,6 +10,7 @@ import pandas as pd
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.sources.tabular import read_csv as _read_csv
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 from .normalization import DATASETS, _numbers, normalize, normalize_selected_facts
@@ -117,10 +118,10 @@ def materialize_interim_data(
     )
     fund_identities = None
     if fund_identity_csv is not None and "public_fund_nav" in data_ids:
-        fund_identities = pd.read_csv(
+        fund_identities = _read_csv(
             fund_identity_csv,
             dtype="str",
-            usecols=["fund_code", "clock_source_key", "clock_valid_from"],
+            columns=["fund_code", "clock_source_key", "clock_valid_from"],
         )
         if fund_identities.fund_code.duplicated().any():
             raise ValueError("public_fund_identity_duplicate")
@@ -430,7 +431,19 @@ def _report_observation_corrections(raw_root, records, data_ids):
                     raise ValueError("public_report_observation_correction_invalid")
                 report_dates[key] = date
         else:
-            frame = pd.read_csv(path, dtype="str")
+            frame = _read_csv(
+                path,
+                columns=(
+                    "report_version_identity",
+                    "table_kind",
+                    "leaf_table_index",
+                    "source_row_index",
+                    "expanded_column_index",
+                    "original_report_source_sha256",
+                    "corrected_value_observation_date",
+                ),
+                dtype="str",
+            )
             for row in frame.itertuples(index=False):
                 asset = ":".join(
                     [
@@ -494,7 +507,6 @@ def _release_clocks(path):
     if path is None:
         return None, None
     payload = Path(path).read_bytes()
-    import csv
     import io
 
     required = {
@@ -504,15 +516,12 @@ def _release_clocks(path):
         "availability_basis",
         "evidence_url",
     }
-    selected = required | {"published_at"}
-    header = next(csv.reader(io.StringIO(payload.decode("utf-8-sig"))), ())
-    if (
-        any(header.count(column) != 1 for column in required)
-        or header.count("published_at") > 1
-    ):
-        raise ValueError("public_release_clock_columns_invalid")
-    clocks = pd.read_csv(
-        io.BytesIO(payload), dtype="str", usecols=lambda column: column in selected
+    clocks = _read_csv(
+        io.BytesIO(payload),
+        required,
+        optional_columns=("published_at",),
+        error="public_release_clock_columns_invalid",
+        dtype="str",
     )
     if clocks[["source", "observation_date"]].isna().any(axis=None):
         raise ValueError("public_release_clock_required_value_missing")
@@ -521,8 +530,6 @@ def _release_clocks(path):
     clocks["observation_date"] = pd.to_datetime(clocks.observation_date)
     if clocks.observation_date.isna().any():
         raise ValueError("public_observation_date_invalid")
-    if clocks.duplicated(["source", "observation_date"]).any():
-        raise ValueError("public_release_clock_duplicate")
     return clocks.set_index(["source", "observation_date"]), hashlib.sha256(
         payload
     ).hexdigest()
@@ -530,8 +537,12 @@ def _release_clocks(path):
 
 def _select_release_clocks(clocks, keys):
     """Validate only the release facts used by the selected source observations."""
-    selected = clocks.reindex(keys)
-    matched = keys.isin(clocks.index)
+    positions = clocks.index.get_indexer_for(keys.unique())
+    consumed = clocks.iloc[positions[positions >= 0]]
+    if consumed.index.has_duplicates:
+        raise ValueError("public_release_clock_duplicate")
+    selected = consumed.reindex(keys)
+    matched = keys.isin(consumed.index)
     if (
         selected.loc[
             matched, ["estimated_available_at", "availability_basis", "evidence_url"]

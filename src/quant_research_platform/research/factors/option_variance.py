@@ -3,7 +3,10 @@
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.asof import latest_observations
+from quant_research_platform.compute.dataframe.asof import (
+    latest_observations,
+    observation_versions,
+)
 
 
 def implied_variances(decisions, risk, contracts):
@@ -22,10 +25,12 @@ def implied_variances(decisions, risk, contracts):
     meta = meta.rename(columns={"expiry_date": "expiry", "exercise_price": "strike"})
     fields = ("expiry", "strike", "underlying_id")
     cutoffs = decisions.groupby("signal_session", sort=False).timestamp.min()
-    visible = risk.loc[
-        risk.timestamp.isin(cutoffs.index)
-        & risk.underlying_id.isin(decisions.asset_id.unique())
-    ].copy()
+    risk = observation_versions(
+        risk,
+        keys=("asset_id", "contract_id", "timestamp"),
+        columns=("underlying_id", "option_type", "implied_volatility"),
+    )
+    visible = risk.loc[risk.timestamp.isin(cutoffs.index)].copy()
     visible["available_at"] = pd.to_datetime(
         visible.available_at, utc=True
     ).dt.tz_localize(None)
@@ -33,6 +38,10 @@ def implied_variances(decisions, risk, contracts):
     visible = visible.loc[
         visible.available_at.notna() & visible.available_at.le(visible._decision)
     ]
+    visible = visible.sort_values("available_at", kind="stable").drop_duplicates(
+        ["asset_id", "contract_id", "timestamp"], keep="last"
+    )
+    visible = visible.loc[visible.underlying_id.isin(decisions.asset_id.unique())]
     if visible.empty:
         return result
     visible["asset_id"] = visible.asset_id + ":" + visible.contract_id

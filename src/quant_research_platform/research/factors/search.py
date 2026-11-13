@@ -37,6 +37,9 @@ def formula_values(frame, expression, columns):
         raise ValueError("factor_formula_keys_invalid")
     ordered = frame.sort_values(["asset_id", "timestamp"])
     groups = [ordered.asset_id]
+    if "listing_date" in ordered:
+        listing = ordered.listing_date
+        groups.append((listing.isna() | listing.ne(listing.shift())).cumsum())
     if "segment_id" in ordered:
         groups.extend((ordered.timestamp.dt.normalize(), ordered.segment_id))
 

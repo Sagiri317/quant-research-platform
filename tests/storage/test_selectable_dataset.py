@@ -265,36 +265,24 @@ def test_categorical_asset_filter_uses_values_not_dictionary_codes(
     assert actual["value"].tolist() == [1.0, 3.0, 5.0, 6.0]
 
 
-@pytest.mark.parametrize("location", ["bare"])
-def test_unconsumed_logical_dtype_does_not_gate_selected_columns(tmp_path, location):
+def test_unconsumed_logical_dtype_does_not_gate_selected_columns(tmp_path):
     import json
 
     root = tmp_path / "native"
     write_dataset(root, frame(), spec=spec())
     part = next((root / "data").rglob("*.parquet"))
-    if location == "manifest":
-        path = root / "_manifest" / "manifest.json"
-        payload = json.loads(path.read_text())
-        descriptors = payload["logical_dtypes"]["columns"]
-    else:
-        table = pq.read_table(part)
-        metadata = dict(table.schema.metadata)
-        payload = json.loads(metadata[b"qrp.logical-dtypes"])
-        descriptors = payload["columns"]
-    next(item for item in descriptors if item["name"] == "unused")["dtype"] = (
+    table = pq.read_table(part)
+    metadata = dict(table.schema.metadata)
+    payload = json.loads(metadata[b"qrp.logical-dtypes"])
+    next(item for item in payload["columns"] if item["name"] == "unused")["dtype"] = (
         "unknown_dtype"
     )
-    if location == "manifest":
-        path.write_text(json.dumps(payload))
-    else:
-        metadata[b"qrp.logical-dtypes"] = json.dumps(payload).encode()
-        pq.write_table(table.replace_schema_metadata(metadata), part)
-    source = part if location == "bare" else root
-    options = {"spec": spec()} if location == "bare" else {}
-    actual = read_dataset(source, columns=["value"], **options)
+    metadata[b"qrp.logical-dtypes"] = json.dumps(payload).encode()
+    pq.write_table(table.replace_schema_metadata(metadata), part)
+    actual = read_dataset(part, columns=["value"], spec=spec())
     assert actual.value.tolist() == frame().value.tolist()
     with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-        read_dataset(source, columns=["unused"], **options)
+        read_dataset(part, columns=["unused"], spec=spec())
 
 
 def test_partial_primary_key_projection_rejects_nan_without_reading_other_keys(
@@ -410,10 +398,10 @@ def test_bare_pandas_index_fields_remain_selected_columns(
 
 
 @pytest.mark.parametrize("bad", [None, float("nan"), float("inf")])
-def test_partial_nested_key_rejects_invalid_consumed_component(tmp_path, bad):
-    path = tmp_path / "nested-key.parquet"
+def test_partial_scalar_key_rejects_invalid_consumed_component(tmp_path, bad):
+    path = tmp_path / "scalar-key.parquet"
     declared = DataSpec(
-        data_id="nested_keys",
+        data_id="scalar_keys",
         frequency="1d",
         grain="asset_timestamp",
         primary_key=("timestamp", "asset_id"),
@@ -423,22 +411,22 @@ def test_partial_nested_key_rejects_invalid_consumed_component(tmp_path, bad):
     table = pa.table(
         {
             "timestamp": pa.array([pd.Timestamp("2021-01-01")]),
-            "asset_id": pa.array([{"id": bad}], type=pa.struct([("id", pa.float64())])),
+            "asset_id": pa.array([bad], type=pa.float64()),
             "value": [2.0],
         }
     )
     pq.write_table(table, path)
     assert read_dataset(path, spec=declared, columns=["value"]).value.tolist() == [2.0]
     with pytest.raises(
-        ValueError, match="dataset_primary_key_null|invalid_dataset_primary_key_value"
+        ValueError, match="dataset_primary_key_null|dataset_infinite_value"
     ):
         read_dataset(path, spec=declared, columns=["asset_id"])
 
 
-def test_partial_nested_key_does_not_require_partial_uniqueness(tmp_path):
-    path = tmp_path / "nested-key.parquet"
+def test_partial_scalar_key_does_not_require_partial_uniqueness(tmp_path):
+    path = tmp_path / "scalar-key.parquet"
     declared = DataSpec(
-        data_id="nested_keys",
+        data_id="scalar_keys",
         frequency="1d",
         grain="asset_timestamp",
         primary_key=("timestamp", "asset_id"),
@@ -449,7 +437,7 @@ def test_partial_nested_key_does_not_require_partial_uniqueness(tmp_path):
         pa.table(
             {
                 "timestamp": pd.date_range("2021-01-01", periods=2),
-                "asset_id": pa.array([{"id": 1}, {"id": 1}]),
+                "asset_id": pa.array(["asset_a", "asset_a"]),
             }
         ),
         path,

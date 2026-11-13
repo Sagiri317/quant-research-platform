@@ -74,7 +74,6 @@ def _price_volume_prediction_metadata():
             "label_unit": "decimal_return",
             "selection_cutoff": None,
         },
-        "input_spec": None,
         "status": "complete",
     }
 

@@ -772,53 +772,6 @@ def test_half_step_neutrality_preserves_budgeted_stock_gross():
 
 
 @pytest.mark.parametrize(
-    "construction", ["quantile_float_cap", "quantile_equal_weight"]
-)
-def test_missing_float_cap_blocks_only_dependent_target_and_keeps_exit(construction):
-    args = _decision_inputs()
-    args["enhanced_decision"] = None
-    args["candidate"] = replace(
-        args["candidate"],
-        construction=construction,
-        benchmark_id=None,
-        top_quantile=1.0,
-        risk_style_columns=(),
-    )
-    args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = np.nan
-    args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
-    account, _, _, _, ledger = daily._build_session(**args)
-    if construction == "quantile_float_cap":
-        assert (
-            ledger.attrs["decision_availability"]["decision_skip_reason"]
-            == "target_float_market_cap_missing"
-        )
-        assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
-        assert account.post_trade_cash == 50.0
-    else:
-        assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
-        assert ledger.executed_delta_notional.tolist() == [50.0, -50.0]
-        assert account.post_trade_cash == 0.0
-
-
-@pytest.mark.parametrize("invalid", [-1.0, 0.0, np.inf])
-def test_invalid_float_cap_blocks_only_dependent_target(invalid):
-    args = _decision_inputs()
-    args["enhanced_decision"] = None
-    args["candidate"] = replace(
-        args["candidate"],
-        construction="quantile_float_cap",
-        benchmark_id=None,
-        top_quantile=1.0,
-        risk_style_columns=(),
-    )
-    args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = invalid
-    args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
-    account, _, _, _, ledger = daily._build_session(**args)
-    assert ledger.executed_delta_notional.tolist() == [0.0, -50.0]
-    assert account.post_trade_cash == 50.0
-
-
-@pytest.mark.parametrize(
     "holdings,neutrality,construction",
     [
         ((0.0, 0.0), "industry", "quantile_equal_weight_half_step"),

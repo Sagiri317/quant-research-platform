@@ -56,7 +56,7 @@ def data(tmp_path):
 def fit_config(tmp_path, inputs, model_id="linear"):
     return {
         "market_id": "a_share",
-        "inputs": str(inputs),
+        "inputs": {"path": str(inputs), "spec": input_spec()},
         "output": str(tmp_path / model_id),
         "model": {
             "model_id": model_id,
@@ -68,7 +68,6 @@ def fit_config(tmp_path, inputs, model_id="linear"):
         "fit_windows": [{"start": "2020-01-01", "end": "2020-01-03"}],
         "fit_cutoff": "2020-01-03",
         "label_unit": "decimal_return",
-        "input_spec": input_spec(),
     }
 
 
@@ -87,11 +86,10 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
     )
     prediction_config = {
         "model": str(model),
-        "inputs": str(inputs),
+        "inputs": {"path": str(inputs), "spec": input_spec()},
         "output": str(tmp_path / "pred"),
         "prediction_window": {"start": "2020-01-04", "end": "2020-01-06"},
         "sample_role": "validation",
-        "input_spec": input_spec(),
     }
     predictions = predict(prediction_config)
     other = predict({**prediction_config, "output": str(tmp_path / "pred-again")})
@@ -101,7 +99,7 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
     score_path = score(
         {
             "predictions": [str(predictions)],
-            "labels": str(inputs),
+            "labels": {"path": str(inputs), "spec": input_spec()},
             "candidate_ids": ["linear"],
             "scoring_window": prediction_config["prediction_window"],
             "validation_windows": [prediction_config["prediction_window"]],
@@ -110,7 +108,6 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
             "validation_axis": "cross_sectional",
             "output": str(tmp_path / "scores.json"),
             "label_unit": "decimal_return",
-            "label_spec": input_spec(),
         }
     )
     selection = select(
@@ -152,11 +149,10 @@ def test_prediction_role_is_usage_and_does_not_require_selection(tmp_path):
     prediction = predict(
         {
             "model": str(model),
-            "inputs": str(inputs),
+            "inputs": {"path": str(inputs), "spec": input_spec()},
             "output": str(tmp_path / "pred"),
             "prediction_window": {"start": "2020-01-04", "end": "2020-01-06"},
             "sample_role": "test",
-            "input_spec": input_spec(),
         }
     )
     assert len(read_predictions(prediction)[0]) == 9

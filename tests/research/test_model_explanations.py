@@ -57,12 +57,11 @@ def _case(tmp_path, algorithm="linear_regression", *, parameters=None):
     )
     future = tmp_path / "all.parquet"
     frame.to_parquet(future, index=False)
-    declared = copy.deepcopy(case.config["input_spec"])
+    declared = copy.deepcopy(case.config["inputs"]["spec"])
     declared["column_units"] = {"label": "decimal_return"}
     config = {
         "model": str(case.root),
-        "inputs": str(future),
-        "input_spec": declared,
+        "inputs": {"path": str(future), "spec": declared},
         "output": str(tmp_path / "explained"),
         "window": {"start": "2020-01-06", "end": "2020-01-10"},
         "sample_role": "test",
@@ -274,7 +273,6 @@ def test_linear_shap_uses_exact_explicit_historical_mean(tmp_path, algorithm):
     config["methods"] = ["linear_shap"]
     config["background"] = {
         "inputs": config["inputs"],
-        "input_spec": config["input_spec"],
         "window": {"start": "2020-01-01", "end": "2020-01-05"},
         "max_rows": 40,
         "root_seed": 1,
@@ -322,7 +320,6 @@ def test_real_tree_interventional_shap(tmp_path):
     config["methods"] = ["tree_shap_interventional"]
     config["background"] = {
         "inputs": config["inputs"],
-        "input_spec": config["input_spec"],
         "window": {"start": "2020-01-01", "end": "2020-01-05"},
         "max_rows": 40,
         "root_seed": 1,
@@ -387,7 +384,6 @@ def test_background_future_gap_and_assets_are_rejected(tmp_path):
     config["methods"] = ["linear_shap"]
     config["background"] = {
         "inputs": config["inputs"],
-        "input_spec": config["input_spec"],
         "window": {"start": "2020-01-01", "end": "2020-01-06"},
         "max_rows": 20,
         "root_seed": 1,
@@ -395,9 +391,9 @@ def test_background_future_gap_and_assets_are_rejected(tmp_path):
     with pytest.raises(ValueError, match="after_fit_cutoff"):
         explain(config)
     config["background"]["window"]["end"] = "2020-01-05"
-    source = pd.read_parquet(config["inputs"])
+    source = pd.read_parquet(config["inputs"]["path"])
     source.loc[0, "asset_id"] = "outside_training"
-    source.to_parquet(config["inputs"], index=False)
+    source.to_parquet(config["inputs"]["path"], index=False)
     with pytest.raises(ValueError, match="outside_fit_domain"):
         explain(config)
     manifest = case.root / "model.json"
@@ -408,7 +404,7 @@ def test_background_future_gap_and_assets_are_rejected(tmp_path):
     ]
     manifest.write_text(json.dumps(payload))
     source.loc[0, "asset_id"] = "a"
-    source.to_parquet(config["inputs"], index=False)
+    source.to_parquet(config["inputs"]["path"], index=False)
     with pytest.raises(ValueError, match="outside_fit_domain"):
         explain(config)
 
@@ -430,7 +426,7 @@ def test_permutation_maturity_grouped_values_determinism_and_units(tmp_path):
     _, frame, config = _case(tmp_path)
     config = _permutation(config)
     frame.loc[frame.asset_id.eq("a"), "label_available_at"] = pd.Timestamp("2030-01-01")
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     metadata, tables = read_explanation(explain(config))
     assert metadata["context_row_count"] == 24
     assert metadata["permutation"]["mature_scoring_rows"] == 21
@@ -442,7 +438,7 @@ def test_permutation_maturity_grouped_values_determinism_and_units(tmp_path):
         tables["permutation_repeats"], repeated["permutation_repeats"]
     )
     config["output"] += "-unit"
-    config["input_spec"]["column_units"]["label"] = "percent_return"
+    config["inputs"]["spec"]["column_units"]["label"] = "percent_return"
     _, mismatched = read_explanation(explain(config))
     rows = mismatched["permutation_repeats"]
     mse = rows.loc[rows.metric.eq("mse")]
@@ -465,8 +461,8 @@ def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path, step_seconds):
         freq=pd.Timedelta(seconds=step_seconds),
     ).as_unit("ns")
     frame["label_available_at"] = frame.timestamp
-    frame.to_parquet(config["inputs"], index=False)
-    config["input_spec"]["column_roles"]["episode"] = "context"
+    frame.to_parquet(config["inputs"]["path"], index=False)
+    config["inputs"]["spec"]["column_roles"]["episode"] = "context"
     config["selection"].update(max_dates=None, max_rows=5)
     config["methods"] = ["permutation"]
     config["permutation"] = {
@@ -485,7 +481,7 @@ def test_temporal_blocks_split_episodes_and_reject_gaps(tmp_path, step_seconds):
     assert tables["permutation_summary"].period_count.eq(1).all()
     config["output"] += "-gap"
     frame = frame.drop(frame.index[7])
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     with pytest.raises(ValueError, match="episode_too_short"):
         explain(config)
 
@@ -555,9 +551,9 @@ def test_explanation_without_labels_and_no_implicit_fit(tmp_path, monkeypatch):
     )
     frame = frame.drop(columns=["label", "label_available_at"])
     for column in ("label", "label_available_at"):
-        config["input_spec"]["column_roles"].pop(column)
-    config["input_spec"].pop("column_units")
-    frame.to_parquet(config["inputs"], index=False)
+        config["inputs"]["spec"]["column_roles"].pop(column)
+    config["inputs"]["spec"].pop("column_units")
+    frame.to_parquet(config["inputs"]["path"], index=False)
     _, tables = read_explanation(explain(config))
     assert len(tables["predictions"]) == 24
 
@@ -645,12 +641,11 @@ def test_date_only_background_end_cannot_admit_after_exact_fit_cutoff(tmp_path):
     after["timestamp"] = pd.Timestamp("2020-01-05T12:00:00")
     pd.concat([frame, after], ignore_index=True).sort_values(
         ["timestamp", "asset_id"]
-    ).to_parquet(config["inputs"], index=False)
+    ).to_parquet(config["inputs"]["path"], index=False)
     config.update(
         methods=["linear_shap"],
         background={
             "inputs": config["inputs"],
-            "input_spec": config["input_spec"],
             "window": {"start": "2020-01-01", "end": "2020-01-05"},
             "max_rows": 100,
             "root_seed": 1,
@@ -674,7 +669,7 @@ def test_permutation_mse_dispersion_matches_repeat_population_sd(tmp_path):
             random_seed=19,
         ),
     )
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     config["model"] = str(case.root)
     _permutation(config, metrics=["mse"])
     _, tables = read_explanation(explain(config))
@@ -864,7 +859,6 @@ def test_background_seed_default_matches_explicit_and_rejects_null(tmp_path):
     config["methods"] = ["linear_shap"]
     config["background"] = {
         "inputs": config["inputs"],
-        "input_spec": config["input_spec"],
         "window": {"start": "2020-01-01", "end": "2020-01-05"},
         "max_rows": 10,
     }
@@ -908,7 +902,7 @@ def test_imputed_native_importance_uses_original_feature_coordinates(
     assert scores[1] - scores[0] == pytest.approx(1.0 / scaler.scale_[0])
     assert scores[2] == pytest.approx(scores[0])
     frame.loc[frame.asset_id.eq("a"), "x"] = np.nan
-    frame.to_parquet(config["inputs"], index=False)
+    frame.to_parquet(config["inputs"]["path"], index=False)
     _, tables = read_explanation(explain(config))
     native = tables["native_importance"].set_index("feature")
     assert native.loc["x", "value"] == 1.0

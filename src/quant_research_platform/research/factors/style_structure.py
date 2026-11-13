@@ -77,27 +77,27 @@ def calculate(panel, *, factor_columns, history_keys=("asset_id",)):
     own = frame.groupby(list(history_keys), sort=False, dropna=False)
     prior = own[[STYLES[s] for s in requested]].shift()
     prior_scope = own.is_a_share_scope.shift().eq(True)
-    returns = frame.period_return
+    returns = frame.period_return.to_numpy(dtype=float, na_value=np.nan)
     daily = pd.DataFrame(index=pd.DatetimeIndex(sorted(frame.timestamp.unique())))
     time_groups = frame.groupby("timestamp", sort=True).indices
     for style in sorted(requested):
-        values = prior[STYLES[style]].where(prior_scope)
+        values = (
+            prior[STYLES[style]]
+            .where(prior_scope)
+            .to_numpy(dtype=float, na_value=np.nan)
+        )
         records = {}
         for date, indices in time_groups.items():
-            exposure = values.iloc[indices].dropna()
-            if len(exposure) < 2 or exposure.nunique() < 2:
+            indices = indices[~np.isnan(values[indices])]
+            exposure = values[indices]
+            if len(exposure) < 2 or np.all(exposure == exposure[0]):
                 records[date] = np.nan
                 continue
-            top = exposure.index[
-                _select_quantile_boundary(exposure, 0.2, ascending=False)
-            ]
-            bottom = exposure.index[
-                _select_quantile_boundary(exposure, 0.2, ascending=True)
-            ]
+            top = _select_quantile_boundary(exposure, 0.2, ascending=False)
+            bottom = _select_quantile_boundary(exposure, 0.2, ascending=True)
             # Missing returns do not replace exposure-selected holdings.
-            records[date] = returns.loc[top].mean(skipna=False) - returns.loc[
-                bottom
-            ].mean(skipna=False)
+            current = returns[indices]
+            records[date] = current[top].mean() - current[bottom].mean()
         daily[style] = pd.Series(records, dtype="Float64")
     out = frame.loc[:, ["asset_id", "timestamp"]].copy()
     for name in factor_columns:

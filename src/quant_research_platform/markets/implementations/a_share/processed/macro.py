@@ -33,10 +33,10 @@ from quant_research_platform.research.factors.macro_liquidity.definitions import
     RECIPES,
     factor_unit,
 )
-from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_chunks,
+    iter_dataset_time_chunks,
     materialize_dataset_session,
     open_dataset_session,
 )
@@ -412,9 +412,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             source = (
                 iter((materialize_dataset_session(session),))
                 if beta
-                else iter_complete_time_frames(
-                    iter_dataset_chunks(session), timestamp_column="timestamp"
-                )
+                else iter_dataset_time_chunks(session)
             )
             with closing_iterator(source) as chunks:
                 for panel in chunks:

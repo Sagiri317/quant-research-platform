@@ -155,7 +155,10 @@ def analyze_inventory(config):
     strategy = read_portfolio_ledger_artifact(Path(config["ledger"]))
     benchmark = read_portfolio_ledger_artifact(Path(config["benchmark"]))
     if (
-        strategy.capital != benchmark.capital
+        any(
+            getattr(strategy.capital, field) != getattr(benchmark.capital, field)
+            for field in ("initial_capital", "valuation_currency", "valuation_method")
+        )
         or strategy.metadata["window"] != benchmark.metadata["window"]
     ):
         raise ValueError("inventory_benchmark_scope_mismatch")

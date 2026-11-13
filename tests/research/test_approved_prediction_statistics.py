@@ -205,7 +205,6 @@ def test_model_statistics_resolves_bootstrap_default_and_persists_head_metrics(
         policy["bootstrap_repetitions"] = repetitions
     config = {
         "dataset": scoring["labels"],
-        "input_spec": scoring["label_spec"],
         "output": str(tmp_path / "statistics"),
         "window": scoring["scoring_window"],
         "label_cutoff": "2020-01-10",

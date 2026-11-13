@@ -6,8 +6,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -100,21 +99,16 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "file_size_bytes",
         "columns",
         "physical_schema",
-        "schema_hash",
         "logical_dtypes",
         "partition_row_counts",
         "partition_count",
         "partitions",
         "date_min",
         "date_max",
-        "null_count_summary",
-        "non_finite_count_summary",
-        "duplicate_primary_key_count",
         "factor_nan_profile",
         "label_nan_profile",
     }
 )
-_LOWER_HEX = frozenset("0123456789abcdef")
 
 
 def merge_dataset_metadata(
@@ -133,16 +127,6 @@ def merge_dataset_metadata(
     return result
 
 
-def _require_identity_hash(value: Any, error: str) -> str:
-    if (
-        type(value) is not str
-        or len(value) != 64
-        or any(c not in _LOWER_HEX for c in value)
-    ):
-        raise ValueError(error)
-    return value
-
-
 def validate_dataset_spec(spec: DataSpec) -> None:
     if type(spec) not in {
         DataSpec,
@@ -151,31 +135,6 @@ def validate_dataset_spec(spec: DataSpec) -> None:
         ResearchDatasetSpec,
     }:
         raise ValueError("dataset_spec_type_invalid")
-
-
-def arrow_type_has_null(data_type: pa.DataType) -> bool:
-    return pa.types.is_null(data_type) or any(
-        arrow_type_has_null(data_type.field(index).type)
-        for index in range(data_type.num_fields)
-    )
-
-
-def arrow_type_resolves_null(old: pa.DataType, new: pa.DataType) -> bool:
-    if pa.types.is_null(old):
-        return True
-    if old.id != new.id or old.num_fields != new.num_fields:
-        return False
-    if not old.num_fields:
-        return old == new
-    if pa.types.is_fixed_size_list(old) and old.list_size != new.list_size:
-        return False
-    if pa.types.is_map(old) and old.keys_sorted != new.keys_sorted:
-        return False
-    return all(
-        old.field(index).with_type(new.field(index).type) == new.field(index)
-        and arrow_type_resolves_null(old.field(index).type, new.field(index).type)
-        for index in range(old.num_fields)
-    )
 
 
 def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
@@ -202,12 +161,6 @@ def logical_dtype_payload_from_frame(
             _logical_dtype_descriptor(str(column), frame[column]) for column in selected
         ],
     }
-    for descriptor in payload["columns"]:
-        if descriptor["kind"] != "categorical" or descriptor["ordered"]:
-            continue
-        for category in descriptor["categories"]:
-            if category["type"] == "decimal" and "." in category["value"]:
-                category["value"] = category["value"].rstrip("0").rstrip(".")
     return payload
 
 
@@ -523,26 +476,6 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
         return {"type": "float", "value": value}
     if type(value) is str:
         return {"type": "str", "value": value}
-    if type(value) is bytes:
-        return {"type": "bytes", "value": value.hex()}
-    if type(value) is Decimal:
-        if not value.is_finite():
-            raise ValueError("dataset_categorical_value_invalid")
-        if value.is_zero():
-            value = Decimal(0)
-        return {"type": "decimal", "value": format(value, "f")}
-    if type(value) is date and type(value) is not datetime:
-        return {"type": "date", "value": value.isoformat()}
-    if isinstance(value, (pd.Timestamp, datetime)):
-        timestamp = pd.Timestamp(value)
-        if pd.isna(timestamp):
-            raise ValueError("dataset_categorical_value_invalid")
-        zone = getattr(timestamp.tz, "key", getattr(timestamp.tz, "zone", None))
-        return {
-            "type": "timestamp",
-            "value": f"{timestamp.isoformat()}@{timestamp.unit}"
-            + (f"[{zone}]" if zone is not None else ""),
-        }
     raise ValueError("dataset_categorical_value_invalid")
 
 
@@ -564,38 +497,6 @@ def _typed_category_value(value: Mapping[str, Any]) -> object:
         return payload
     if kind == "str" and type(payload) is str:
         return payload
-    if kind == "bytes" and type(payload) is str:
-        try:
-            return bytes.fromhex(payload)
-        except ValueError as exc:
-            raise ValueError("dataset_logical_dtypes_invalid") from exc
-    if kind == "decimal" and type(payload) is str:
-        if "e" in payload.lower():
-            raise ValueError("dataset_logical_dtypes_invalid")
-        try:
-            result = Decimal(payload)
-        except (ValueError, InvalidOperation) as exc:
-            raise ValueError("dataset_logical_dtypes_invalid") from exc
-        if result.is_finite():
-            return result
-    if kind == "date" and type(payload) is str:
-        try:
-            return date.fromisoformat(payload)
-        except ValueError as exc:
-            raise ValueError("dataset_logical_dtypes_invalid") from exc
-    if kind == "timestamp" and type(payload) is str:
-        try:
-            zone = None
-            if payload.endswith("]"):
-                payload, _, zone = payload[:-1].rpartition("[")
-            instant, _, unit = payload.rpartition("@")
-            result = pd.Timestamp(instant).as_unit(unit)
-            if zone is not None:
-                result = result.tz_convert(zone)
-        except (ValueError, TypeError, KeyError) as exc:
-            raise ValueError("dataset_logical_dtypes_invalid") from exc
-        if not pd.isna(result):
-            return result
     raise ValueError("dataset_logical_dtypes_invalid")
 
 
@@ -647,34 +548,6 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
         return {"kind": "large_binary"}
     if pa.types.is_fixed_size_binary(data_type):
         return {"kind": "fixed_size_binary", "byte_width": data_type.byte_width}
-    if pa.types.is_struct(data_type):
-        return {
-            "kind": "struct",
-            "fields": [_physical_field_payload(field) for field in data_type],
-        }
-    if pa.types.is_list(data_type):
-        return {
-            "kind": "list",
-            "value_field": _physical_field_payload(data_type.value_field),
-        }
-    if pa.types.is_large_list(data_type):
-        return {
-            "kind": "large_list",
-            "value_field": _physical_field_payload(data_type.value_field),
-        }
-    if pa.types.is_fixed_size_list(data_type):
-        return {
-            "kind": "fixed_size_list",
-            "list_size": data_type.list_size,
-            "value_field": _physical_field_payload(data_type.value_field),
-        }
-    if pa.types.is_map(data_type):
-        return {
-            "kind": "map",
-            "keys_sorted": data_type.keys_sorted,
-            "key_field": _physical_field_payload(data_type.key_field),
-            "item_field": _physical_field_payload(data_type.item_field),
-        }
     if pa.types.is_dictionary(data_type):
         return {
             "kind": "dictionary",
@@ -715,22 +588,6 @@ def arrow_schema_from_payload(value: list[dict[str, Any]]) -> pa.Schema:
             return pa.duration(item["unit"])
         if kind == "fixed_size_binary":
             return pa.binary(item["byte_width"])
-        if kind == "struct":
-            return pa.struct([field(child) for child in item["fields"]])
-        if kind in {"list", "large_list", "fixed_size_list"}:
-            return (
-                pa.list_(field(item["value_field"]), item["list_size"])
-                if kind == "fixed_size_list"
-                else (pa.large_list if kind == "large_list" else pa.list_)(
-                    field(item["value_field"])
-                )
-            )
-        if kind == "map":
-            return pa.map_(
-                field(item["key_field"]),
-                field(item["item_field"]),
-                keys_sorted=item["keys_sorted"],
-            )
         if kind == "dictionary":
             return pa.dictionary(
                 dtype(item["index_type"]),
@@ -1014,17 +871,13 @@ def validate_dataset_manifest_payload(
     ):
         raise ValueError("dataset_manifest_schema_id_invalid")
     expected_keys = _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
-    actual_keys = set(manifest)
-    if not expected_keys.issubset(actual_keys) or not (
-        actual_keys - expected_keys
-    ).issubset(_DATASET_METADATA_ALLOWED_KEYS):
+    if not expected_keys.issubset(manifest):
         raise ValueError("dataset_manifest_fields_invalid")
     for key in (
         "row_count",
         "file_count",
         "file_size_bytes",
         "partition_count",
-        "duplicate_primary_key_count",
     ):
         value = manifest.get(key)
         if not _is_exact_int(value) or value < 0:
@@ -1038,7 +891,6 @@ def validate_dataset_manifest_payload(
     validate_physical_schema_payload(physical_schema)
     if list(physical_schema_columns(physical_schema)) != columns:
         raise ValueError("manifest_columns_mismatch")
-    _require_identity_hash(manifest.get("schema_hash"), "manifest_schema_hash_invalid")
     logical_dtypes = validate_logical_dtype_payload(
         manifest.get("logical_dtypes"), selected_columns=logical_columns
     )
@@ -1061,16 +913,6 @@ def validate_dataset_manifest_payload(
     date_range = _validate_date_range(
         manifest.get("date_min"), manifest.get("date_max")
     )
-    null_counts = _require_count_mapping(
-        manifest.get("null_count_summary"),
-        allowed_keys=set(columns),
-        error="manifest_null_count_summary_invalid",
-    )
-    non_finite_counts = _require_count_mapping(
-        manifest.get("non_finite_count_summary"),
-        allowed_keys=set(columns),
-        error="manifest_non_finite_count_summary_invalid",
-    )
     factor_columns = {
         column
         for column, role in spec["column_roles"].items()
@@ -1092,18 +934,10 @@ def validate_dataset_manifest_payload(
         error="manifest_label_nan_profile_invalid",
     )
     row_count = manifest["row_count"]
-    if (
-        any(
-            count > row_count
-            for counts in (
-                null_counts,
-                non_finite_counts,
-                factor_counts,
-                label_counts,
-            )
-            for count in counts.values()
-        )
-        or manifest["duplicate_primary_key_count"] > row_count
+    if any(
+        count > row_count
+        for counts in (factor_counts, label_counts)
+        for count in counts.values()
     ):
         raise ValueError("manifest_summary_count_invalid")
     timestamp_column = timestamp_column_from_spec_payload(spec)
@@ -1241,34 +1075,6 @@ def _validate_physical_type_payload(value: object) -> None:
         if not (value["timezone"] is None or isinstance(value["timezone"], str)):
             raise ValueError("manifest_physical_schema_invalid")
         return
-    if kind == "struct":
-        _require_exact_keys(value, {"kind", "fields"})
-        fields = value["fields"]
-        if not isinstance(fields, list) or not fields:
-            raise ValueError("manifest_physical_schema_invalid")
-        names = [_validate_physical_field_payload(field) for field in fields]
-        if len(names) != len(set(names)):
-            raise ValueError("manifest_physical_schema_invalid")
-        return
-    if kind in {"list", "large_list"}:
-        _require_exact_keys(value, {"kind", "value_field"})
-        _validate_physical_field_payload(value["value_field"])
-        return
-    if kind == "fixed_size_list":
-        _require_exact_keys(value, {"kind", "list_size", "value_field"})
-        if not _is_exact_int(value["list_size"]) or value["list_size"] < 0:
-            raise ValueError("manifest_physical_schema_invalid")
-        _validate_physical_field_payload(value["value_field"])
-        return
-    if kind == "map":
-        _require_exact_keys(value, {"kind", "keys_sorted", "key_field", "item_field"})
-        if type(value["keys_sorted"]) is not bool:
-            raise ValueError("manifest_physical_schema_invalid")
-        _validate_physical_field_payload(value["key_field"])
-        if value["key_field"]["nullable"] is not False:
-            raise ValueError("manifest_physical_schema_invalid")
-        _validate_physical_field_payload(value["item_field"])
-        return
     if kind == "dictionary":
         _require_exact_keys(value, {"kind", "index_type", "value_type", "ordered"})
         if type(value["ordered"]) is not bool:
@@ -1397,41 +1203,11 @@ def _require_exact_keys(value: Mapping[str, Any], expected: set[str]) -> None:
         raise ValueError("manifest_physical_schema_invalid")
 
 
-def validate_frame_objects(frame: pd.DataFrame) -> tuple[str, ...]:
-    """Reject recursive object graphs and identify strings before batch slicing."""
-
-    def visit(value: object, active: list[object]) -> None:
-        if not isinstance(value, (dict, list, tuple, np.ndarray)):
-            return
-        if any(value is parent for parent in active):
-            raise ValueError("qrp_json_cycle")
-        if isinstance(value, np.ndarray) and value.dtype.kind != "O":
-            return
-        active.append(value)
-        try:
-            children = (
-                value.values()
-                if isinstance(value, dict)
-                else value.flat
-                if isinstance(value, np.ndarray)
-                else value
-            )
-            for child in children:
-                visit(child, active)
-        finally:
-            active.pop()
-
-    strings = []
-    for name, values in zip(frame.columns, frame._iter_column_arrays(), strict=True):
-        if not pd.api.types.is_object_dtype(values.dtype):
-            continue
-        has_string, strings_or_nulls = (False, True)
-        for value in values:
-            if isinstance(value, str):
-                has_string = True
-            elif not pd.api.types.is_scalar(value) or not pd.isna(value):
-                strings_or_nulls = False
-            visit(value, [])
-        if has_string and strings_or_nulls:
-            strings.append(name)
-    return tuple(strings)
+def object_string_columns(frame: pd.DataFrame) -> tuple[str, ...]:
+    """Identify scalar string columns before batch slicing can hide their values."""
+    return tuple(
+        name
+        for name, values in zip(frame.columns, frame._iter_column_arrays(), strict=True)
+        if pd.api.types.is_object_dtype(values.dtype)
+        and pd.api.types.infer_dtype(values, skipna=True) == "string"
+    )

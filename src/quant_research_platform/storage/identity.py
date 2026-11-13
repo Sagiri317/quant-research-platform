@@ -88,13 +88,6 @@ def filesystem_iterdir(path: Path):
         yield (logical_root / child.name)
 
 
-def filesystem_glob(path: Path, pattern: str):
-    logical_root = Path(path)
-    native_root = Path(native_filesystem_path(logical_root))
-    for child in native_root.glob(pattern):
-        yield (logical_root / child.relative_to(native_root))
-
-
 def filesystem_scandir(path: Path):
     return os.scandir(native_filesystem_path(path))
 
@@ -131,14 +124,6 @@ def open_filesystem_file(
         encoding=encoding,
         newline=newline,
     )
-
-
-def filesystem_write_bytes(path: Path, data: bytes) -> int:
-    return Path(native_filesystem_path(path)).write_bytes(data)
-
-
-def filesystem_write_text(path: Path, data: str, *, encoding: str) -> int:
-    return Path(native_filesystem_path(path)).write_text(data, encoding=encoding)
 
 
 def filesystem_rename(source: Path, target: Path) -> None:

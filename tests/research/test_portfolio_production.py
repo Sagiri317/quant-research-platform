@@ -367,6 +367,19 @@ def _build_producer(
     monkeypatch.setattr(market_sessions, "open_dataset_session", input_session)
     monkeypatch.setattr(daily, "open_dataset_session", input_session)
     monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", file_batches)
+
+    def time_chunks(session, *, one_timestamp=False, **kwargs):
+        from quant_research_platform.compute.dataframe.streaming import (
+            iter_complete_time_frames,
+        )
+
+        yield from iter_complete_time_frames(
+            dataset_reading.iter_dataset_chunks(session, **kwargs),
+            timestamp_column="timestamp",
+            one_timestamp=one_timestamp,
+        )
+
+    monkeypatch.setattr(dataset_reading, "iter_dataset_time_chunks", time_chunks)
     monkeypatch.setattr(
         daily,
         "materialize_dataset_session",

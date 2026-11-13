@@ -121,12 +121,37 @@ def test_native_dataset_directory_read_exposes_metadata_without_rows(tmp_path):
 def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
     state, root = state_and_event(tmp_path)
     (tmp_path / "factor.py").write_text("momentum = 5\n")
-    (tmp_path / ".env").write_text("momentum=private\n")
+    private_marker = "QRP_SYNTHETIC_PROTECTED_CONTENT"
+    protected_paths = (
+        ".env",
+        ".ENV.local",
+        ".ssh/id_ed25519",
+        "ssh/config",
+        "nested/.SSH/config",
+        "api_key.txt",
+        "API-KEY.txt",
+        "apikey.txt",
+        "TOKEN.JSON",
+    )
+    for relative in protected_paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"momentum {private_marker}\n")
+        with pytest.raises(ValueError, match="agent_path_not_allowed"):
+            read_local({"path": relative}, state, root)
     (tmp_path / "data").mkdir()
     (tmp_path / "data/private.csv").write_text("momentum,private-row\n")
     result = search_local({"query": "momentum"}, state, root, timeout=10)
     assert "factor.py" in result["text"]
     assert "private" not in result["text"]
+    assert private_marker not in result["text"]
+    filename_root = root.with_name("e0003")
+    filename_root.mkdir()
+    filenames = search_local(
+        {"query": "", "files": True}, state, filename_root, timeout=10
+    )
+    assert "factor.py" in filenames["text"].splitlines()
+    assert set(protected_paths).isdisjoint(filenames["text"].splitlines())
     with pytest.raises(ValueError, match="filenames_only"):
         search_local({"query": "private", "path": "data"}, state, root, timeout=10)
     root2 = root.with_name("e0002")

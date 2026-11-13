@@ -16,6 +16,11 @@ import quant_research_platform.storage.identity as identity
 import quant_research_platform.storage.parquet as physical
 from quant_research_platform.storage import atomic, manifests
 from quant_research_platform.storage import atomic as scratch_owner
+from tests.helpers.paths import (
+    filesystem_glob,
+    filesystem_write_bytes,
+    filesystem_write_text,
+)
 from tests.helpers.source_preparation import prepared_source_evidence
 
 _PRIMARY_EXCEPTION_TYPES = (
@@ -31,7 +36,7 @@ def test_content_hash_close_preserves_primary_and_closes_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
 ) -> None:
     path = tmp_path / "hash.bin"
-    identity.filesystem_write_bytes(path, b"synthetic")
+    filesystem_write_bytes(path, b"synthetic")
     raw = identity.open_filesystem_file(path, "rb")
     primary = primary_type("hash_primary")
     closed = []
@@ -352,7 +357,7 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
     primary_type: type[BaseException], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "manifest.json"
-    identity.filesystem_write_text(path, '{"schema_id":"qrp-test"}', encoding="utf-8")
+    filesystem_write_text(path, '{"schema_id":"qrp-test"}', encoding="utf-8")
     primary = primary_type("body_primary")
     monkeypatch.setattr(
         manifests,
@@ -380,10 +385,10 @@ def test_compare_expected_storage_validation_still_maps(
 
 def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     owned_file = tmp_path / "owned-file"
-    identity.filesystem_write_bytes(owned_file, b"x")
+    filesystem_write_bytes(owned_file, b"x")
     owned_directory = tmp_path / "owned-directory"
     identity.filesystem_mkdir(owned_directory)
-    identity.filesystem_write_bytes(owned_directory / "part", b"x")
+    filesystem_write_bytes(owned_directory / "part", b"x")
     scratch_owner.remove_owned_scratch(owned_file)
     scratch_owner.remove_owned_scratch(owned_directory)
     assert not identity.filesystem_exists(owned_file)
@@ -395,7 +400,7 @@ def test_content_hash_preserves_open_errors(tmp_path, monkeypatch, failure):
     import errno
 
     path = tmp_path / "member"
-    identity.filesystem_write_bytes(path, b"synthetic")
+    filesystem_write_bytes(path, b"synthetic")
     primary = {
         "missing": FileNotFoundError(errno.ENOENT, "missing"),
         "memory": MemoryError("primary"),
@@ -440,19 +445,19 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
                 data={"000001.SZ": ["2020/1/30"]},
             )
         root, data_id = (layout.raw_source_root("choice"), "financial_balance")
-        path = next(identity.filesystem_glob(root, "**/response.metadata.json"))
+        path = next(filesystem_glob(root, "**/response.metadata.json"))
         owner = choice
     elif source == "csmar":
         root, data_id = (tmp_path, "trading_calendar")
         path = root / "native-calendar.csv"
-        identity.filesystem_write_text(
+        filesystem_write_text(
             path, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
         )
         owner = csmar
     else:
         root = _write_reference_root(tmp_path / "raw") / "reference"
         data_id = reference.A_SHARE_FEE_SCHEDULE_DATA_ID
-        path = next(identity.filesystem_glob(root, "**/*.csv"))
+        path = next(filesystem_glob(root, "**/*.csv"))
         owner = reference
     primary = OSError(errno.EIO, "primary")
     from quant_research_platform.sources.csmar import raw_schemas
@@ -564,7 +569,7 @@ def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch):
     from quant_research_platform.sources.csmar import raw_schemas
 
     path = tmp_path / "member.csv"
-    identity.filesystem_write_bytes(path, b"value\n1\n")
+    filesystem_write_bytes(path, b"value\n1\n")
     original = raw_schemas._CsvRecords.close
 
     def close_then_fail(records):

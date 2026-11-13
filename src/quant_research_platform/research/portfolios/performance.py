@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from quant_research_platform.research.portfolios.comparison import _nav_return_roundoff
+from quant_research_platform.compute.portfolio_economics import _nav_return_roundoff
 from quant_research_platform.research.statistics import (
     _return_sharpes,
     return_standard_deviation,

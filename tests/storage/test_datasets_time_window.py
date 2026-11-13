@@ -29,8 +29,10 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_is_file,
-    filesystem_write_text,
     native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -303,46 +305,33 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
     assert {path.parent.name for path in read_paths} == {"year=2015"}
 
 
-def test_compare_datasets_time_window_compares_window_only(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "changed_at,window,status",
+    [
+        ("2016-01-04", TimeWindow("2014-01-01", "2015-12-31"), "MATCH"),
+        ("2015-01-05", TimeWindow("2015-01-01", "2015-01-05"), "CONTENT_MISMATCH"),
+    ],
+    ids=["outside-window", "inside-window"],
+)
+def test_compare_datasets_uses_only_selected_time_window(
+    tmp_path: Path, changed_at, window, status
+) -> None:
     left = make_dataset_artifact_root(tmp_path, "left")
     right = make_dataset_artifact_root(tmp_path, "right")
     write_dataset(
         left, make_time_window_dataset_frame(), spec=make_processed_dataset_spec("left")
     )
     changed = make_time_window_dataset_frame()
-    changed.loc[changed["timestamp"] == pd.Timestamp("2016-01-04"), "value"] = 99.0
+    changed.loc[changed["timestamp"] == pd.Timestamp(changed_at), "value"] = 99.0
     write_dataset(right, changed, spec=make_processed_dataset_spec("right"))
     comparison = compare_datasets(
         left,
         right,
         columns=["asset_id", "timestamp", "value"],
-        time_window=TimeWindow("2014-01-01", "2015-12-31"),
+        time_window=window,
     )
-    assert comparison.matches is True
-    assert comparison.status == "MATCH"
-
-
-def test_compare_datasets_time_window_detects_window_differences(
-    tmp_path: Path,
-) -> None:
-    left = make_dataset_artifact_root(tmp_path, "left_window_diff")
-    right = make_dataset_artifact_root(tmp_path, "right_window_diff")
-    write_dataset(
-        left,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("left_window_diff"),
-    )
-    changed = make_time_window_dataset_frame()
-    changed.loc[changed["timestamp"] == pd.Timestamp("2015-01-05"), "value"] = 99.0
-    write_dataset(right, changed, spec=make_processed_dataset_spec("right_window_diff"))
-    comparison = compare_datasets(
-        left,
-        right,
-        columns=["asset_id", "timestamp", "value"],
-        time_window=TimeWindow("2015-01-01", "2015-01-05"),
-    )
-    assert comparison.matches is False
-    assert comparison.status == "CONTENT_MISMATCH"
+    assert comparison.matches is (status == "MATCH")
+    assert comparison.status == status
 
 
 def test_time_window_without_timestamp_role_raises(tmp_path: Path) -> None:

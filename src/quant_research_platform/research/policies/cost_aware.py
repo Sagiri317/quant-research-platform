@@ -320,7 +320,7 @@ def backtest_cost_model(config):
     return write_portfolio_ledger_artifact(
         Path(config["output"]),
         capital=PortfolioCapital(
-            "cost_aware_allocator",
+            episode["account"]["candidate"]["candidate_id"],
             episode["account"]["assumptions"]["initial_nav"],
             "CNY",
             "cash_equity",

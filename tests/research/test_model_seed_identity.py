@@ -18,8 +18,6 @@ def test_estimator_defaults_and_seed_survive_persistence(algorithm, tmp_path):
 
     import pandas as pd
 
-    from quant_research_platform.contracts.models import validate_model_metadata_core
-
     rng = np.random.default_rng(27)
     x, z = rng.normal(size=(2, 120))
     frame = pd.DataFrame(
@@ -50,7 +48,7 @@ def test_estimator_defaults_and_seed_survive_persistence(algorithm, tmp_path):
         tmp_path, frame, spec, cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
     )
     fitted = case.result
-    metadata = validate_model_metadata_core(fitted.metadata)
+    metadata = fitted.metadata
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))
     assert metadata["random_seed"] == 731
     np.testing.assert_allclose(

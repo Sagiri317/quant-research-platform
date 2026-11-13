@@ -244,7 +244,7 @@ def test_saved_evaluation_annual_summary_reuses_daily_facts(tmp_path, monkeypatc
 
     import quant_research_platform.research.factors.statistics as factor_module
 
-    monkeypatch.setattr(factor_module, "iter_dataset_chunks", forbidden)
+    monkeypatch.setattr(factor_module, "iter_dataset_time_chunks", forbidden)
     published = read_statistics_artifact(
         factor_statistics(
             {

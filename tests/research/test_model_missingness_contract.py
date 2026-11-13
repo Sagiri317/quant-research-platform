@@ -154,8 +154,10 @@ def test_native_missing_training_column_roundtrips_without_imputation(
         explain(
             {
                 "model": str(case.root),
-                "inputs": str(tmp_path / "future" / "input.parquet"),
-                "input_spec": case.config["input_spec"],
+                "inputs": {
+                    "path": str(tmp_path / "future" / "input.parquet"),
+                    "spec": case.config["inputs"]["spec"],
+                },
                 "output": str(tmp_path / "explanation"),
                 "window": {"start": "2024-01-04", "end": "2024-01-04"},
                 "methods": [method],

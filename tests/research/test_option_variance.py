@@ -106,3 +106,141 @@ def test_batched_contract_alignment_keeps_each_decision_cutoff():
         ) / ((far - near) * target)
         assert row.implied_variance_20d == pytest.approx(expected)
         assert pd.isna(row.implied_variance_60d)
+
+
+@pytest.mark.parametrize(
+    "revision", ["known", "unknown", "conflict", "underlying_conflict"]
+)
+def test_option_risk_versions_are_selected_before_surface_aggregation(
+    tmp_path, revision
+):
+    date = pd.Timestamp("2024-01-05")
+    contracts, risk = [], []
+    for days in (20, 80):
+        for kind in ("认购", "认沽"):
+            code = f"{days}-{kind}"
+            contracts.append(
+                dict(
+                    security_id=code,
+                    contract_id=code,
+                    underlying_id="510300",
+                    timestamp=date,
+                    available_at=date + pd.Timedelta(hours=16),
+                    expiry_date=date + pd.Timedelta(days=days),
+                    exercise_price=100.0,
+                )
+            )
+            for hour, sigma in ((16, 0.2), (17, 0.4)):
+                risk.append(
+                    dict(
+                        asset_id=code,
+                        contract_id=code,
+                        underlying_id="510300",
+                        timestamp=date,
+                        available_at=date + pd.Timedelta(hours=hour),
+                        option_type=kind,
+                        implied_volatility=sigma,
+                        source_sha256=f"revision-{hour}",
+                    )
+                )
+                if hour == 17 and revision == "unknown":
+                    risk[-1]["implied_volatility"] = float("nan")
+                elif hour == 17 and revision == "conflict":
+                    risk.append(
+                        {
+                            **risk[-1],
+                            "implied_volatility": 0.5,
+                            "source_sha256": "conflicting-revision",
+                        }
+                    )
+                elif hour == 17 and revision == "underlying_conflict":
+                    risk.append(
+                        {
+                            **risk[-1],
+                            "underlying_id": "510500",
+                            "source_sha256": "conflicting-revision",
+                        }
+                    )
+    for hour in (16, 18):
+        decision = pd.DataFrame(
+            dict(
+                asset_id=["510300"],
+                signal_session=date,
+                timestamp=date + pd.Timedelta(hours=hour, minutes=30),
+                close=100.0,
+            )
+        )
+        result = implied_variances(
+            decision, pd.DataFrame(risk), pd.DataFrame(contracts)
+        )
+        if hour == 16:
+            assert result.implied_variance_20d.iloc[0] == pytest.approx(0.04)
+        elif revision == "known":
+            assert result.implied_variance_20d.iloc[0] == pytest.approx(0.16)
+        else:
+            assert pd.isna(result.implied_variance_20d.iloc[0])
+
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.markets.a_share.test_daily_quote_decisions import inputs
+
+    prices, calendar = inputs()
+    prices[["open", "close"]] = 100.0
+    prices["high"] = prices["low"] = 100.0
+    calendar["timestamp"] = calendar.calendar_date
+    sources = {}
+    for name, frame, keys in (
+        ("public_domestic_etf_prices", prices, ("asset_id", "timestamp")),
+        (
+            "trading_calendar",
+            calendar,
+            ("source_market_type", "timestamp"),
+        ),
+        (
+            "public_option_risk",
+            pd.DataFrame(risk),
+            ("asset_id", "timestamp", "source_sha256"),
+        ),
+        (
+            "public_option_contracts",
+            pd.DataFrame(contracts),
+            ("security_id", "contract_id", "timestamp"),
+        ),
+    ):
+        path = tmp_path / name
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                data_id=name,
+                frequency="1d",
+                grain="research_row",
+                primary_key=keys,
+                partition_columns=(),
+                column_roles={
+                    c: "timestamp"
+                    if c == "timestamp"
+                    else "key"
+                    if c in keys
+                    else "context"
+                    for c in frame
+                },
+            ),
+        )
+        sources[name] = str(path)
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="etf_daily_panel",
+            inputs=sources,
+            time_window=dict(start="2024-01-08", end="2024-01-08"),
+            output_root=str(tmp_path / "decisions"),
+        )
+    )
+    saved = read_dataset(output)
+    if revision == "known":
+        assert saved.implied_variance_20d.iloc[0] == pytest.approx(0.16)
+    else:
+        assert pd.isna(saved.implied_variance_20d.iloc[0])
+    assert saved.next_session_intraday_return.iloc[0] == pytest.approx(0)

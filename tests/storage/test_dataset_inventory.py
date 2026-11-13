@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,17 +11,18 @@ import quant_research_platform.storage.datasets.inspection as dataset_inspection
 import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
-import quant_research_platform.storage.manifests as storage_manifests
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import DatasetReadMode, write_dataset
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_mkdir,
     filesystem_rename,
+    native_filesystem_path,
+)
+from tests.helpers.paths import (
+    filesystem_glob,
     filesystem_write_bytes,
     filesystem_write_text,
-    native_filesystem_path,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -98,6 +98,8 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
             return None
 
     class Observer:
+        duplicate_primary_key_count = 0
+        non_finite_count_summary = {}
         row_count = 0
         date_min = None
         date_max = None
@@ -186,18 +188,3 @@ def test_private_writer_releases_result_when_publish_loses_race(
         "publication_staging_not_cleaned"
     )
     assert staging_paths and all(not filesystem_exists(path) for path in staging_paths)
-
-
-def test_bounded_metadata_reader_accepts_single_external_hardlink(
-    tmp_path: Path,
-) -> None:
-    external = tmp_path / "external.json"
-    filesystem_write_text(external, '{"schema_id":"outside"}', encoding="utf-8")
-    candidate = tmp_path / "manifest.json"
-    try:
-        os.link(native_filesystem_path(external), native_filesystem_path(candidate))
-    except OSError:
-        pytest.skip("hardlink_not_available")
-    assert storage_manifests.read_qrp_json_file(candidate)[1] == {
-        "schema_id": "outside"
-    }

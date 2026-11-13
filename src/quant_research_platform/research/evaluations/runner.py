@@ -45,7 +45,7 @@ from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     _selection_filters,
-    iter_dataset_chunks,
+    iter_dataset_time_chunks,
     open_dataset_session,
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -80,7 +80,6 @@ def evaluate(config):
         config,
         {"inputs", "output", "evaluation", "window", "cutoff"},
         {
-            "input_spec",
             "predictions",
             "sample_role",
             "sample_scope",
@@ -105,10 +104,6 @@ def evaluate(config):
         pd.Series([config["cutoff"]]), error="evaluation_cutoff_invalid"
     ).iloc[0]
     source = config["inputs"]
-    if config.get("input_spec") is not None:
-        if isinstance(source, Mapping):
-            raise ValueError("duplicate_input_spec")
-        source = {"path": source, "spec": config["input_spec"]}
     options = _dataset_input_options(source, time_window=window)
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
@@ -318,7 +313,7 @@ def evaluate(config):
         # Acquire the input in its consuming generator. A rejected destination or
         # failed initialization cannot leave an unstarted input session open.
         with closing_iterator(
-            iter_dataset_chunks(session.projected_view(columns))
+            iter_dataset_time_chunks(session.projected_view(columns))
         ) as source:
             for frame in source:
                 if (
@@ -553,7 +548,6 @@ def _scoped_evaluation_frames(sources):
     from contextlib import ExitStack
 
     from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 
     grouped = {}
     for source in sources:
@@ -577,9 +571,7 @@ def _scoped_evaluation_frames(sources):
             _allow_infinite_columns=tuple(dict.fromkeys(entry["allow_infinite"])),
         )
         with closing_iterator(
-            iter_complete_session_frames(
-                iter_dataset_chunks(session), timestamp_column="timestamp"
-            )
+            iter_dataset_time_chunks(session, one_timestamp=True)
         ) as frames:
             for frame in frames:
                 # The dataset reader owns its declared PK. The join may use a
