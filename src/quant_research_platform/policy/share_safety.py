@@ -6,8 +6,6 @@ import re
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from quant_research_platform.contracts.outputs import validate_output_identifier
-
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 
 
@@ -71,13 +69,6 @@ def evidence_json_value_unsafe_reason(
         reason = evidence_text_unsafe_reason(key)
         if reason is not None:
             return reason
-    if key in {"output_id", "output_definition_id"}:
-        if not isinstance(value, str):
-            return "invalid_output_id"
-        try:
-            validate_output_identifier(value)
-        except ValueError:
-            return "invalid_output_id"
     if isinstance(value, Mapping):
         for item_key, item in value.items():
             reason = evidence_json_value_unsafe_reason(item, key=str(item_key))

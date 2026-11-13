@@ -168,6 +168,12 @@ def test_share_safety_preserves_noncredential_counterexamples() -> None:
         assert evidence_json_value_unsafe_reason({"message": text}) is None
         assert sanitize_shared_text(text) == text
 
+    identifiers = {
+        "output_id": "沪深股票预测",
+        "output_definition_id": "Model evaluation",
+    }
+    assert evidence_json_value_unsafe_reason(identifiers) is None
+
     public_key = {"public_key": "ssh-ed25519 AAAAexample"}
     assert unsafe_for_share_reason(str(public_key)) is None
     assert evidence_json_value_unsafe_reason(public_key) is None

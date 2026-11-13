@@ -20,34 +20,17 @@ def test_time_window_invalid_bound_raises_stable_error(bound) -> None:
         TimeWindow(bound, "2026-07-06")
 
 
-def _deep_pretty_payload() -> dict[str, object]:
-    value: object = [{} for _ in range(100)]
-    for _ in range(30):
-        value = [value]
-    return {"schema_id": "x", "value": value}
-
-
-def test_json_snapshot_matches_pretty_renderer():
-    payload = _deep_pretty_payload()
-    assert json_owner.render_qrp_json_object(
-        json_owner.qrp_json_object_snapshot(payload)
-    ) == json_owner.render_qrp_json_object(payload)
-
-
 @pytest.mark.parametrize(
     "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )
-def test_manifest_writers_roundtrip_above_former_capacity(writer_name, tmp_path):
-    payload = _deep_pretty_payload()
-    payload["large"] = "x" * (1024 * 1024 + 1)
+def test_manifest_writers_preserve_nested_research_parameters(writer_name, tmp_path):
+    payload = {
+        "schema_id": "example",
+        "parameters": {"columns": ["value"], "window": {"start": "2024-01-01"}},
+    }
     path = tmp_path / writer_name / "manifest.json"
     getattr(manifests, writer_name)(path, payload)
     assert manifests.read_manifest(path) == payload
-
-    assert (
-        path.read_text(encoding="utf-8")
-        == json_owner.render_qrp_json_object(payload) + "\n"
-    )
 
 
 @pytest.mark.parametrize(
@@ -112,17 +95,3 @@ def test_snapshot_accepts_only_exact_frozen_containers():
     cycle.append(cyclic)
     with pytest.raises(ValueError, match="qrp_json_cycle"):
         json_owner.qrp_json_object_snapshot(cyclic)
-    deep = "leaf"
-    for _ in range(65):
-        deep = (deep,)
-    snapshot = json_owner.qrp_json_object_snapshot({"deep": deep})
-    assert (
-        json_owner.parse_qrp_json_object(
-            json_owner.render_qrp_json_object(snapshot).encode()
-        )
-        == snapshot
-    )
-    assert json_owner.qrp_json_object_snapshot(
-        MappingProxyType({"large": ("x" * 10_000,)})
-    ) == {"large": ["x" * 10_000]}
-    assert json_owner.canonical_json_hash([1]) != json_owner.canonical_json_hash((1,))

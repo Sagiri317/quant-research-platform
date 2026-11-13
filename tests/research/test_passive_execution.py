@@ -39,6 +39,8 @@ def replay(
     account_parameters=None,
     policy=None,
     execution_order=None,
+    window=None,
+    max_quote_gap_seconds=6,
 ):
     params = parameters(tuple(panel.asset_id.unique()))
     params.update(
@@ -48,7 +50,7 @@ def replay(
     )
     params.update(account_parameters or {})
     events = trade_input(root / "trades", records)
-    window = TimeWindow(
+    window = window or TimeWindow(
         panel.timestamp.min().isoformat(), panel.timestamp.max().isoformat()
     )
     cap = PortfolioCapital("hft_inventory", capital, "CNY", "cash_equity")
@@ -62,6 +64,7 @@ def replay(
             trade_session=events,
             decision_columns=("mid",) if policy is not None else None,
             execution_order=execution_order,
+            max_quote_gap_seconds=max_quote_gap_seconds,
         )
         try:
             event = next(stream)
@@ -339,6 +342,7 @@ def test_native_book_segments_and_unquoted_unheld_asset_allow_passive_fill(tmp_p
                 panel.timestamp.min().isoformat(), panel.timestamp.max().isoformat()
             ),
             trade_session=events,
+            max_quote_gap_seconds=6,
         )
     )
     assert panel.segment_id.map(type).eq(str).all()
@@ -404,6 +408,7 @@ def test_passive_owner_rejects_replayed_trade_but_accepts_distinct_same_time_pri
         schedule(),
         ExecutionAssumptions(5000.0, 0.0, 0.0, 1.0, (1.0,), 0.0),
         1.0,
+        max_quote_gap_seconds=6,
     )
     orders.request(panel.timestamp.iloc[0], {"a": 300.0}, {"a": at.value})
     orders.quote(

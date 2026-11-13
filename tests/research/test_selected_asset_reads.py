@@ -1,6 +1,7 @@
 """Asset-scoped market inputs stay selected before materialization and key checks."""
 
 from dataclasses import replace
+from json import dumps
 
 import pandas as pd
 
@@ -35,6 +36,7 @@ def test_hft_quotes_and_trades_push_assets_and_preserve_parent_selection(
         primary_key=("timestamp", "asset_id"),
         partition_columns=(),
         column_roles=declared["column_roles"],
+        parameters_json=dumps(declared["parameters"]),
     )
     root = tmp_path / "quotes"
     write_dataset(root, panel, spec=replace(spec, partition_columns=("year",)))
@@ -72,9 +74,10 @@ def test_hft_quotes_and_trades_push_assets_and_preserve_parent_selection(
             yield path, frame
 
     monkeypatch.setattr(reading, "iter_dataset_file_batches", observe)
-    sessions, _, selected_trades = inventory_inputs(
+    sessions, _, selected_trades, gap = inventory_inputs(
         config, TimeWindow(**episode["window"]), decision_columns=("mid",)
     )
+    assert gap == 6
     rows = list(sessions)
     assert len(rows) == 1
     assert rows[0][1].asset_id.tolist() == ["a", "a"]

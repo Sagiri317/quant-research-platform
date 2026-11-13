@@ -20,6 +20,7 @@ from quant_research_platform.research.factors.intraday_context import (
     KEY,
     UNITS,
     calculate,
+    calculate_activity,
 )
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
@@ -124,6 +125,32 @@ def produce(spec, *, inputs, time_window, processed_catalog):
     }
 
     def frames():
+        activity_history = None
+        activity_columns = (
+            *KEY,
+            "observed_trade_volume",
+            *(
+                ("exchange", "instrument_type")
+                if "late_session_relative_activity" in activity
+                else ()
+            ),
+        )
+        if activity and calendar is not None:
+            position = calendar.searchsorted(pd.Timestamp(lower).normalize())
+            if position < len(calendar) and position:
+                prefix = materialize_dataset_session(
+                    sessions["hft_panel"]
+                    .filtered_view(
+                        TimeWindow(
+                            calendar[max(0, position - 20)],
+                            calendar[position] - pd.Timedelta(1, "ns"),
+                        )
+                    )
+                    .projected_view(activity_columns)
+                )
+                _, activity_history = calculate_activity(
+                    prefix, columns=activity, session_days=calendar
+                )
         for day in pd.date_range(
             pd.Timestamp(lower).normalize(),
             (pd.Timestamp(upper) - pd.Timedelta(0 if closed else 1, "ns")).normalize(),
@@ -141,7 +168,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 day + pd.Timedelta(days=1) - pd.Timedelta(1, "ns"),
                 pd.Timestamp(upper) - pd.Timedelta(0 if closed else 1, "ns"),
             )
-            window = TimeWindow(first if activity else day, end)
+            window = TimeWindow(day, end)
             panel_columns = (
                 *KEY,
                 "mid",
@@ -155,8 +182,15 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                 "exchange",
                 "instrument_type",
             )
-            if all(name.startswith("trade_profile_") for name in selected):
-                panel_columns = (*KEY, "mid")
+            ordinary = tuple(name for name in selected if name not in activity)
+            if not ordinary:
+                panel_columns = activity_columns
+            elif all(name.startswith("trade_profile_") for name in ordinary):
+                panel_columns = tuple(
+                    dict.fromkeys(
+                        (*KEY, "mid", *(activity_columns if activity else ()))
+                    )
+                )
             panel = materialize_dataset_session(
                 sessions["hft_panel"]
                 .filtered_view(window)
@@ -166,7 +200,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
             if current.empty:
                 continue
             daily = None
-            if "daily_context" in sessions:
+            if ordinary and "daily_context" in sessions:
                 source = sessions["daily_context"]
                 if not {
                     "signal_session",
@@ -217,16 +251,20 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     .projected_view(("asset_id", "timestamp", "segment_id", "mid"))
                 )
             result = current.loc[:, list(KEY)].copy()
-            groups = (
-                (activity, panel),
-                (tuple(name for name in selected if name not in activity), current),
-            )
-            for columns, observed in groups:
-                if not columns:
-                    continue
+            if activity:
+                value, activity_history = calculate_activity(
+                    current,
+                    columns=activity,
+                    session_days=calendar,
+                    history=activity_history,
+                )
+                result = result.merge(
+                    value, on=list(KEY), how="left", validate="one_to_one"
+                )
+            if ordinary:
                 value = calculate(
-                    observed,
-                    columns=columns,
+                    current,
+                    columns=ordinary,
                     daily_context=daily,
                     trades=trades,
                     linked_panel=linked,
@@ -234,10 +272,7 @@ def produce(spec, *, inputs, time_window, processed_catalog):
                     **json.loads(spec.parameters_json),
                 )
                 result = result.merge(
-                    value.loc[value.timestamp.ge(day)],
-                    on=list(KEY),
-                    how="left",
-                    validate="one_to_one",
+                    value, on=list(KEY), how="left", validate="one_to_one"
                 )
             result = result.loc[:, [*KEY, *selected]]
             mask = result.timestamp.ge(

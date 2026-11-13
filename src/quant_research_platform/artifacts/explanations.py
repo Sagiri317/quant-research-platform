@@ -8,8 +8,6 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.compute.attribution import attribution_relative_tolerance
-from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -19,20 +17,6 @@ from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
     iter_dataset_part_batches,
     parquet_table_writer,
-)
-
-LINEAR_EXPLANATION_ALGORITHMS = frozenset(
-    {"linear_regression", "lasso_regression", "ridge_regression"}
-)
-
-ATTRIBUTION_METHODS = frozenset(
-    {
-        "affine",
-        "linear_shap",
-        "native_tree",
-        "tree_shap_path",
-        "tree_shap_interventional",
-    }
 )
 
 _S = pa.string()
@@ -130,26 +114,12 @@ _KEYS = {
 }
 
 
-def validate_attribution_method(method, algorithm):
-    """Bind the requested attribution to the existing model capability facts."""
-    _model_algorithm_facts(algorithm)
-    linear = algorithm in LINEAR_EXPLANATION_ALGORITHMS
-    if method in {"affine", "linear_shap"} and not linear:
-        raise ValueError("explanation_linear_model_required")
-    if (
-        method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}
-        and algorithm != "xgboost_regressor"
-    ):
-        raise ValueError("explanation_tree_model_required")
-
-
 def _validate(metadata, tables):
     if not isinstance(metadata, dict) or metadata.get("kind") != "MODEL_EXPLANATION":
         raise ValueError("explanation_metadata_invalid")
     for key in ("model", "model_id", "model_algorithm", "target_column", "label_unit"):
         if type(metadata.get(key)) is not str or not metadata[key].strip():
             raise ValueError("explanation_metadata_invalid")
-    _model_algorithm_facts(metadata["model_algorithm"])
     columns = metadata.get("input_columns")
     methods = metadata.get("methods")
     if (
@@ -162,71 +132,21 @@ def _validate(metadata, tables):
         or not methods
         or any(type(value) is not str for value in methods)
         or len(set(methods)) != len(methods)
-        or set(methods) - ATTRIBUTION_METHODS - {"native_importance", "permutation"}
     ):
         raise ValueError("explanation_metadata_invalid")
-    attribution = set(methods) & ATTRIBUTION_METHODS
-    if len(attribution) > 1:
-        raise ValueError("explanation_single_attribution_method_required")
+    attribution = set(methods) - {"native_importance", "permutation"}
     if attribution or "permutation" in methods:
-        space = metadata.get("output_space")
-        unit = (
-            "raw_margin"
-            if space == "raw_margin"
-            else "direction_score"
-            if metadata["model_algorithm"] == "deeplob_classifier"
-            else metadata["label_unit"]
-        )
-        if (
-            space not in {"model_output", "raw_margin"}
-            or metadata.get("unit") != unit
-            or type(metadata.get("sample_role")) is not str
-            or not metadata["sample_role"].strip()
-            or space == "raw_margin"
-            and metadata["model_algorithm"] != "xgboost_regressor"
+        if any(
+            type(metadata.get(key)) is not str or not metadata[key].strip()
+            for key in ("output_space", "unit", "sample_role")
         ):
             raise ValueError("explanation_output_metadata_invalid")
-    if attribution:
-        facts = metadata.get("attribution", {})
-        method = next(iter(attribution))
-        validate_attribution_method(method, metadata["model_algorithm"])
-        baseline, background = {
-            "affine": ("training_scaled_zero", "none"),
-            "linear_shap": ("historical_reference_expectation", "historical_reference"),
-            "tree_shap_interventional": (
-                "historical_reference_expectation",
-                "historical_reference",
-            ),
-            "native_tree": (
-                "model_internal_tree_expectation",
-                "model_internal_tree_statistics",
-            ),
-            "tree_shap_path": (
-                "model_internal_tree_expectation",
-                "model_internal_tree_statistics",
-            ),
-        }[method]
-        tolerance = facts.get("additivity_relative_tolerance")
-        if (
-            facts.get("method") != method
-            or facts.get("baseline")
-            not in (
-                (baseline, "unscaled_input_zero") if method == "affine" else (baseline,)
-            )
-            or type(facts.get("implementation")) is not str
-            or not facts["implementation"]
-            or not isinstance(facts.get("background"), dict)
-            or facts["background"].get("kind") != background
-            or type(tolerance) not in (int, float)
-            or tolerance != attribution_relative_tolerance(method, len(columns))
-        ):
-            raise ValueError("explanation_attribution_metadata_invalid")
     expected = set()
     if "native_importance" in methods:
         expected.add("native_importance")
     if "permutation" in methods:
         expected.update(("permutation_repeats", "permutation_summary"))
-    if set(methods) - {"native_importance", "permutation"}:
+    if attribution:
         expected.update(("predictions", "contributions", "summary"))
     if not expected or set(tables) != expected:
         raise ValueError("explanation_members_invalid")

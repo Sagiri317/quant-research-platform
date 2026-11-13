@@ -7,8 +7,6 @@ import os
 import shutil
 from pathlib import Path
 
-from quant_research_platform.policy.lifecycle import closing_iterator
-
 
 class _DigestingReader:
     def __init__(self, handle) -> None:
@@ -46,14 +44,6 @@ class _DigestingReader:
         return self._digest.hexdigest()
 
 
-def _hash_file_content(path: Path) -> str:
-    digest = hashlib.sha256()
-    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def native_filesystem_path(path: Path) -> str | Path:
     """Return a Windows extended path when native APIs need long-path support."""
     if os.name != "nt":
@@ -80,12 +70,6 @@ def filesystem_is_file(path: Path) -> bool:
 
 def filesystem_is_dir(path: Path) -> bool:
     return os.path.isdir(native_filesystem_path(path))
-
-
-def filesystem_iterdir(path: Path):
-    logical_root = Path(path)
-    for child in Path(native_filesystem_path(logical_root)).iterdir():
-        yield (logical_root / child.name)
 
 
 def filesystem_scandir(path: Path):

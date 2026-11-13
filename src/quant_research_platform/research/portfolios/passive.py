@@ -13,6 +13,9 @@ from quant_research_platform.contracts.portfolios import (
     _portfolio_budget_exceeded,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    continuous_session_end,
+)
 from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
     round_stock_orders,
@@ -50,42 +53,23 @@ class _Order:
     depth: float
     segment: str
     cost: object
+    expires_at: int
     face_value_per_share: float | None = None
     filled_notional: float = 0.0
     paid: np.ndarray = field(default_factory=lambda: np.zeros(5))
     cancel_at: int | None = None
 
 
-def observed_trades(quotes, trades):
-    """Keep trades bracketed by eligible quotes in the same continuous segment."""
-    selected = []
-    groups = dict(tuple(quotes.groupby("asset_id", sort=False)))
-    for asset, events in trades.groupby("asset_id", sort=False):
-        book = groups.get(asset)
-        if book is None or len(book) < 2:
-            continue
-        times = book.timestamp.to_numpy(dtype="datetime64[ns]")
-        positions = times.searchsorted(
-            events.timestamp.to_numpy(dtype="datetime64[ns]")
-        )
-        valid = (positions > 0) & (positions < len(book))
-        rows = np.flatnonzero(valid)
-        right, left = positions[valid], positions[valid] - 1
-        observed = np.isfinite(book.mid.to_numpy()) & (book.mid.to_numpy() > 0)
-        segments = book.segment_id.to_numpy()
-        rows = rows[
-            observed[left] & observed[right] & (segments[left] == segments[right])
-        ]
-        selected.append(events.iloc[rows])
-    result = pd.concat(selected, ignore_index=True) if selected else trades.iloc[:0]
+def trade_events(trades):
+    """Order observed prints; live orders own causal eligibility on the event clock."""
     return (
-        result.loc[
-            result.event_kind.eq("trade")
-            & result.side.isin(("buy", "sell"))
-            & np.isfinite(result.price)
-            & result.price.gt(0)
-            & np.isfinite(result.volume)
-            & result.volume.gt(0)
+        trades.loc[
+            trades.event_kind.eq("trade")
+            & trades.side.isin(("buy", "sell"))
+            & np.isfinite(trades.price)
+            & trades.price.gt(0)
+            & np.isfinite(trades.volume)
+            & trades.volume.gt(0)
         ]
         .sort_values(["timestamp", "asset_id", "source_row"], kind="stable")
         .itertuples(index=False)
@@ -108,10 +92,40 @@ class PassiveOrders:
         assumptions,
         participation,
         *,
+        max_quote_gap_seconds,
         face_value_per_share=None,
         instrument_types=None,
     ):
         self.config = config
+        gap = strict_finite_float(
+            max_quote_gap_seconds, error="passive_quote_gap_invalid"
+        )
+        if gap <= 0:
+            raise ValueError("passive_quote_gap_invalid")
+        self.quote_gap_ns = int(gap * 1_000_000_000)
+        exchanges = market_types.isin((1, 32)).map({True: "SSE", False: "SZSE"})
+        kinds = (
+            pd.Series("stock", index=market_types.index)
+            if instrument_types is None
+            else instrument_types.reindex(market_types.index)
+        )
+        ends = [
+            continuous_session_end(
+                pd.Series(
+                    pd.Timestamp(day) + pd.Timedelta(hours=hour),
+                    index=market_types.index,
+                ),
+                exchanges,
+                kinds,
+                break_at_lunch=True,
+            )
+            .to_numpy(dtype="datetime64[ns]")
+            .view("int64")
+            for hour in (2, 5)
+        ]
+        self.session_ends = dict(
+            zip(market_types.index, zip(*ends, strict=True), strict=True)
+        )
         self.minimum_commission = assumptions.minimum_commission
         self.participation = participation
         markets, minimum, increment, maximum = stock_order_limits(
@@ -205,10 +219,14 @@ class PassiveOrders:
         return rows
 
     def advance(self, at, *, inclusive=True):
-        """Release expired cancellations on the account clock, after tied trades."""
+        """Release stale orders before prints and cancellations after tied prints."""
         diagnostics = []
         for asset, order in list(self.orders.items()):
-            if order.cancel_at is not None and (
+            if order.expires_at <= at.value:
+                diagnostics.extend(self._remove(asset, "observation_gap"))
+                if asset in self.intents and self.intents[asset][3]:
+                    self.intents.pop(asset)
+            elif order.cancel_at is not None and (
                 order.cancel_at <= at.value if inclusive else order.cancel_at < at.value
             ):
                 diagnostics.extend(self._remove(asset, "cancelled"))
@@ -224,6 +242,7 @@ class PassiveOrders:
         if (
             order is None
             or at <= order.submitted_at
+            or at >= order.expires_at
             or (order.cancel_at is not None and at > order.cancel_at)
             or event.side != ("sell" if order.side == 1 else "buy")
         ):
@@ -297,26 +316,39 @@ class PassiveOrders:
         at_ns = int(at.value)
         free = cash - self.frozen_cash()
         for asset, row in current.iterrows():
-            observed = np.isfinite(row.mid) and row.mid > 0
+            crossed = (
+                pd.notna(row.bid_px1)
+                and pd.notna(row.ask_px1)
+                and np.isfinite(row.bid_px1)
+                and np.isfinite(row.ask_px1)
+                and row.bid_px1 > 0
+                and row.ask_px1 > 0
+                and row.ask_px1 <= row.bid_px1
+            )
             order = self.orders.get(asset)
-            if not observed or (
+            if crossed or (
                 asset in self.segments and row.segment_id != self.segments[asset]
             ):
                 if asset in self.intents and self.intents[asset][3]:
                     self.intents.pop(asset)
             self.segments[asset] = row.segment_id
-            if order is not None and (not observed or row.segment_id != order.segment):
+            if order is not None and (crossed or row.segment_id != order.segment):
                 free += self.reservation(order)
                 diagnostics.extend(self._remove(asset, "observation_gap"))
                 order = None
             if order is not None:
+                morning_end, afternoon_end = self.session_ends[asset]
+                order.expires_at = min(
+                    at_ns + self.quote_gap_ns + 1,
+                    morning_end if at_ns < morning_end else afternoon_end,
+                )
                 side = "bid" if order.side == 1 else "ask"
-                prices = np.array(
-                    [row.get(f"{side}_px{i}", np.nan) for i in range(1, 11)]
+                prices = row.reindex([f"{side}_px{i}" for i in range(1, 11)]).to_numpy(
+                    dtype="float64", na_value=np.nan
                 )
-                volumes = np.array(
-                    [row.get(f"{side}_vol{i}", np.nan) for i in range(1, 11)]
-                )
+                volumes = row.reindex(
+                    [f"{side}_vol{i}" for i in range(1, 11)]
+                ).to_numpy(dtype="float64", na_value=np.nan)
                 equal = prices == order.price
                 if equal.any():
                     depth = float(volumes[equal][0])
@@ -335,7 +367,7 @@ class PassiveOrders:
                             - reduction * min(1.0, order.ahead / order.depth),
                         )
                     order.depth = depth
-            if order is not None or asset not in self.intents or not observed:
+            if order is not None or asset not in self.intents or crossed:
                 continue
             target, signal_at, activation_at, _ = self.intents[asset]
             if activation_at is None or at_ns < activation_at or at_ns <= signal_at:
@@ -357,19 +389,16 @@ class PassiveOrders:
                 continue
             book_side = "bid" if side == 1 else "ask"
             level = self.config.get("quote_level", 1)
-            prices = np.array(
-                [
-                    row.get(f"{book_side}_px{index}", np.nan)
-                    for index in range(1, level + 1)
-                ],
-                dtype="float64",
-            )
+            prices = row.reindex(
+                [f"{book_side}_px{index}" for index in range(1, level + 1)]
+            ).to_numpy(dtype="float64", na_value=np.nan)
             price = float(prices[-1])
-            depth = float(row.get(f"{book_side}_vol{level}", np.nan))
+            depth = row.get(f"{book_side}_vol{level}", np.nan)
             if (
                 not np.isfinite(prices).all()
                 or (prices <= 0).any()
                 or (side * np.diff(prices) >= 0).any()
+                or pd.isna(depth)
                 or not np.isfinite(depth)
                 or depth < 0
             ):
@@ -446,6 +475,7 @@ class PassiveOrders:
                 continue
             self.counter += 1
             order_id = f"passive:{at_ns}:{self.counter}:{asset}"
+            morning_end, afternoon_end = self.session_ends[asset]
             self.orders[asset] = _Order(
                 order_id,
                 signal_at,
@@ -458,6 +488,10 @@ class PassiveOrders:
                 depth,
                 row.segment_id,
                 cost,
+                min(
+                    at_ns + self.quote_gap_ns + 1,
+                    morning_end if at_ns < morning_end else afternoon_end,
+                ),
                 face_value_per_share=face,
             )
             free -= required(quantity)

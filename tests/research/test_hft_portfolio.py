@@ -702,6 +702,121 @@ def test_taker_checks_its_own_depth_when_price_eligibility_remains_true(
     )
 
 
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("missing", ["required", "opposite"])
+@pytest.mark.parametrize("empty_price", [0.0, np.nan, pd.NA])
+def test_taker_one_sided_quote_keeps_directional_fills_and_native_valuation(
+    tmp_path, side, missing, empty_price
+):
+    panel = quotes("2024-01-02", assets=("a",))
+    view = daily_view(panel)
+    buying = side == "buy"
+    required = "ask" if buying else "bid"
+    absent = required if missing == "required" else "bid" if buying else "ask"
+    if empty_price is pd.NA:
+        panel[["bid_px1", "ask_px1"]] = panel[["bid_px1", "ask_px1"]].astype("Float64")
+    panel.loc[1, f"{absent}_px1"] = empty_price
+    panel.loc[1, f"{absent}_vol1"] = 0.0
+    panel.loc[1, "mid"] = np.nan
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(
+        prediction_score=1.0 if buying else -1.0
+    )
+    params = parameters(("a",))
+    params["minimum_commission"] = 5.0
+    batches, summary = native_account(
+        tmp_path,
+        [(view, panel, signals)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    quantity = (200 if buying else -100) if missing == "opposite" else 0
+    price = 10.01 if buying else 9.99
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [trade.quantity for trade in trades] == ([quantity] if quantity else [])
+    if trades:
+        assert trades[0].timestamp_ns == panel.timestamp.iloc[1].value
+        assert trades[0].notional == pytest.approx(quantity * price)
+    fee = 5.0 if quantity else 0.0
+    assert summary["net_pnl"] == pytest.approx(-abs(quantity) * 0.01 - fee)
+    assert summary["nav"] == pytest.approx(5000 - abs(quantity) * 0.01 - fee)
+    terminal = {
+        row.asset_id: row for row in batches[-1].valuations if row.phase == "end"
+    }
+    assert terminal["a"].quantity == 100 + quantity
+    assert terminal["__cash__"].value == pytest.approx(4000 - quantity * price - fee)
+    assert all(
+        row.mark_price == 10.0
+        for batch in batches
+        for row in batch.valuations
+        if row.asset_id == "a"
+    )
+    assert pd.isna(panel.loc[1, "mid"])
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+@pytest.mark.parametrize("bid", [10.0, 10.02])
+def test_taker_still_rejects_locked_or_crossed_quotes(tmp_path, side, bid):
+    panel = quotes("2024-01-02", assets=("a",))
+    view = daily_view(panel)
+    panel.loc[1, ["bid_px1", "ask_px1", "mid"]] = [bid, 10.0, np.nan]
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(
+        prediction_score=1.0 if side == "buy" else -1.0
+    )
+    batches, summary = native_account(
+        tmp_path,
+        [(view, panel, signals)],
+        parameters(("a",)),
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    assert not any(batch.trades for batch in batches)
+    assert summary["nav"] == 5000.0
+
+
+def test_taker_one_sided_quote_cannot_buy_without_an_observed_valuation(tmp_path):
+    panel = quotes("2024-01-02", assets=("a",))
+    view = daily_view(panel)
+    view = replace(
+        view,
+        panel=view.panel.assign(open=np.nan),
+        valuation=view.valuation.assign(open=np.nan),
+    )
+    panel.loc[:1, ["bid_px1", "bid_vol1", "mid"]] = np.nan
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    params = parameters(("a",))
+    params["initial_inventory"] = {"a": 0}
+    batches, summary = native_account(
+        tmp_path,
+        [(view, panel, signals)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    assert not any(batch.trades for batch in batches)
+    assert summary["nav"] == 5000.0
+
+
+def test_taker_one_sided_exit_preserves_t1_and_does_not_charge_a_blocked_sale(tmp_path):
+    panel = quotes("2024-01-02", assets=("a",))
+    view = daily_view(panel)
+    panel.loc[2, ["ask_px1", "ask_vol1", "mid"]] = np.nan
+    signals = panel.iloc[:2][["timestamp", "asset_id"]].assign(
+        prediction_score=[1.0, -1.0]
+    )
+    params = parameters(("a",))
+    params.update(initial_inventory={"a": 0}, minimum_commission=5.0)
+    batches, summary = native_account(
+        tmp_path,
+        [(view, panel, signals)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    assert [trade.quantity for batch in batches for trade in batch.trades] == [300]
+    assert any(
+        row.text == "locked_shares" for batch in batches for row in batch.diagnostics
+    )
+    assert summary["nav"] == pytest.approx(5000 - 300 * 0.01 - 5.0)
+    assert summary["fees"] == 5.0
+
+
 @pytest.mark.parametrize(
     "missing", [None, "availability", "holding_mark", "observations", "book_status"]
 )

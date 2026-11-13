@@ -61,6 +61,7 @@ def hft_episode(root, *, day="2024-01-02", task="execution", missing_features=Fa
         roles["signal"] = "factor"
     spec = ProcessedDataSpec(
         data_id="hft_panel",
+        parameters_json='{"max_gap_seconds": 6}',
         market_id="a_share",
         kind="panel",
         frequency="tick",

@@ -75,6 +75,7 @@ def run_stream(panel, signals, params, *, events=None, policy=None):
         prediction_decisions=True,
         quote_visibility_delay_ms=1,
         trade_session=events,
+        max_quote_gap_seconds=6,
     )
     decisions, batches = [], []
     try:

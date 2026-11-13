@@ -156,6 +156,7 @@ def test_passive_fee_obligation_is_known_before_nonzero_order_reservation(side):
             schedule,
             SETTINGS,
             1.0,
+            max_quote_gap_seconds=6,
         )
         orders.request(start, {"a": target}, {"a": at.value})
         return orders
@@ -254,6 +255,7 @@ def test_passive_reservation_uses_the_same_currency_budget(side, budget):
         schedule,
         SETTINGS,
         1.0,
+        max_quote_gap_seconds=6,
     )
     units = pd.Series({"a": 0.0 if side == "buy" else 1.0})
     manager.request(start, {"a": 300 if side == "buy" else 0}, {"a": at.value})

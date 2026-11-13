@@ -680,38 +680,32 @@ def test_permutation_mse_dispersion_matches_repeat_population_sd(tmp_path):
     assert summary.delta_std / scale == pytest.approx((deltas / scale).std(ddof=0))
 
 
-@pytest.mark.parametrize(
-    "mutation", ["unknown_method", "missing_unit", "missing_space", "baseline"]
-)
-def test_publication_rejects_missing_or_relabelled_scientific_metadata(
-    tmp_path, mutation
-):
-    _, _, config = _case(tmp_path)
-    output = explain(config)
+@pytest.mark.parametrize("field", ["unit", "output_space"])
+def test_publication_requires_output_metadata(tmp_path, field):
     from quant_research_platform.artifacts.explanations import write_explanation
 
-    payload, tables = read_explanation(output)
-    if mutation == "unknown_method":
-        payload["methods"] = ["unknown_method"]
-    elif mutation == "missing_unit":
-        payload.pop("unit")
-    elif mutation == "missing_space":
-        payload.pop("output_space")
-    else:
-        payload["attribution"]["baseline"] = "invented"
+    _, _, config = _case(tmp_path)
+    payload, tables = read_explanation(explain(config))
+    payload.pop(field)
     with pytest.raises(ValueError, match="metadata_invalid"):
         write_explanation(tmp_path / "invalid", metadata=payload, tables=tables)
 
 
-def test_publication_binds_explanation_method_to_actual_model_kind(tmp_path):
-    _, _, config = _case(tmp_path)
-    output = explain(config)
-    from quant_research_platform.artifacts.explanations import write_explanation
-
-    metadata, tables = read_explanation(output)
-    metadata["model_algorithm"] = "xgboost_regressor"
-    with pytest.raises(ValueError, match="linear_model_required"):
-        write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
+@pytest.mark.parametrize(
+    "algorithm,method,reason",
+    [
+        ("linear_regression", "native_tree", "tree_model_required"),
+        ("xgboost_regressor", "affine", "linear_model_required"),
+    ],
+)
+def test_explain_binds_requested_method_to_fitted_model(
+    tmp_path, algorithm, method, reason
+):
+    _, _, config = _case(tmp_path, algorithm)
+    config["methods"] = [method]
+    with pytest.raises(ValueError, match=reason):
+        explain(config)
+    assert not Path(config["output"]).exists()
 
 
 @pytest.mark.parametrize(

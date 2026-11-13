@@ -11,11 +11,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.explanations import (
-    ATTRIBUTION_METHODS,
-    LINEAR_EXPLANATION_ALGORITHMS,
-    validate_attribution_method,
-)
 from quant_research_platform.compute.attribution import (
     attribution_additivity,
     attribution_relative_tolerance,
@@ -60,6 +55,20 @@ from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_time_chunks,
     open_dataset_session,
+)
+
+_LINEAR_EXPLANATION_ALGORITHMS = frozenset(
+    {"linear_regression", "lasso_regression", "ridge_regression"}
+)
+
+_ATTRIBUTION_METHODS = frozenset(
+    {
+        "affine",
+        "linear_shap",
+        "native_tree",
+        "tree_shap_path",
+        "tree_shap_interventional",
+    }
 )
 
 
@@ -324,7 +333,16 @@ def _output(result, frame, output_space, *, intervention=False):
 def _attributions(result, context, indices, method, background, output_space):
     predictor = result.prediction_model
     algorithm = result.metadata["model_algorithm"]
-    validate_attribution_method(method, algorithm)
+    if (
+        method in {"affine", "linear_shap"}
+        and algorithm not in _LINEAR_EXPLANATION_ALGORITHMS
+    ):
+        raise ValueError("explanation_linear_model_required")
+    if (
+        method in {"native_tree", "tree_shap_path", "tree_shap_interventional"}
+        and algorithm != "xgboost_regressor"
+    ):
+        raise ValueError("explanation_tree_model_required")
     columns = result.metadata["input_columns"]
     selected = context.iloc[indices]
     raw, explained = _output(result, selected, output_space)
@@ -461,7 +479,7 @@ def _native_importance(result, facts):
         raise ValueError("explanation_native_importance_unavailable")
     signed = {}
     unit = "dimensionless"
-    if algorithm in LINEAR_EXPLANATION_ALGORITHMS:
+    if algorithm in _LINEAR_EXPLANATION_ALGORITHMS:
         coefficients, _ = _linear_parameters(predictor)
         kind, unit = "absolute_standardized_coefficient", facts["label_unit"]
         if not predictor.scaler.scaling:
@@ -481,7 +499,7 @@ def _native_importance(result, facts):
                     unit
                     + "/"
                     + facts["input_units"].get(column, "unspecified_input_unit")
-                    if algorithm in LINEAR_EXPLANATION_ALGORITHMS
+                    if algorithm in _LINEAR_EXPLANATION_ALGORITHMS
                     and not predictor.scaler.scaling
                     else unit
                 ),
@@ -851,10 +869,10 @@ def explain(config: Mapping) -> Path:
         or not methods
         or any(type(value) is not str for value in methods)
         or len(set(methods)) != len(methods)
-        or set(methods) - ATTRIBUTION_METHODS - {"native_importance", "permutation"}
+        or set(methods) - _ATTRIBUTION_METHODS - {"native_importance", "permutation"}
     ):
         raise ValueError("explanation_methods_invalid")
-    attribution = set(methods) & ATTRIBUTION_METHODS
+    attribution = set(methods) & _ATTRIBUTION_METHODS
     if len(attribution) > 1:
         raise ValueError("explanation_single_attribution_method_required")
     needs_data = bool(attribution or "permutation" in methods)

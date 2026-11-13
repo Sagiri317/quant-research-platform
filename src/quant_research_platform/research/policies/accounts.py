@@ -140,7 +140,7 @@ def _stream(episode):
             validate_inventory_prediction,
         )
 
-        sessions, schedule, trade_session = inventory_inputs(
+        sessions, schedule, trade_session, max_quote_gap_seconds = inventory_inputs(
             account,
             window,
             decision_columns=() if prediction is not None else columns,
@@ -167,6 +167,7 @@ def _stream(episode):
                     else 0,
                     execution_order=episode.get("order"),
                     trade_session=trade_session,
+                    max_quote_gap_seconds=max_quote_gap_seconds,
                     stock_status=account.get("stock_status"),
                 )
             ) as stream,

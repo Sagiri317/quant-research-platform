@@ -265,12 +265,16 @@ def continuous_session(timestamps, exchange, instrument_types=None):
     )
 
 
-def continuous_session_end(timestamps, exchange, instrument_types):
-    """Return the historical continuous-session closing instants in UTC."""
+def continuous_session_end(
+    timestamps, exchange, instrument_types, *, break_at_lunch=False
+):
+    """Return daily continuous closes, or current am/pm ends, in UTC."""
     local = (
         pd.to_datetime(timestamps).dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")
     )
     seconds = _continuous_closing_seconds(local, exchange, instrument_types)
+    if break_at_lunch:
+        seconds = np.where(local.dt.hour.lt(12), 11 * 3600 + 30 * 60, seconds)
     return (
         (local.dt.normalize() + pd.to_timedelta(seconds, unit="s"))
         .dt.tz_convert("UTC")

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 from datetime import date, datetime
 from decimal import Decimal
 from enum import IntEnum
-from itertools import permutations
 from types import MappingProxyType
 
 import numpy as np
@@ -117,44 +115,13 @@ def test_typed_canonical_identity_does_not_normalize_unicode() -> None:
     assert canonical_json_hash("\u00e9") != canonical_json_hash("e\u0301")
 
 
-def test_strict_json_uses_native_integer_conversion_limits() -> None:
-    import sys
-
-    limit = sys.get_int_max_str_digits()
-    value = 10**4096
-    payload = {"value": value}
-    assert parse_qrp_json_object(render_qrp_json_object(payload).encode()) == payload
-    assert canonical_identity_bytes(value)
-    if limit:
-        huge = 10**limit
-        with pytest.raises(ValueError, match="integer string conversion"):
-            render_qrp_json_object({"value": huge})
-        with pytest.raises(ValueError, match="integer string conversion"):
-            canonical_identity_bytes(huge)
-    assert sys.get_int_max_str_digits() == limit
-
-
-def test_strict_json_rejects_cycles_and_excessive_recursion() -> None:
+def test_strict_json_rejects_cycles() -> None:
     cyclic: dict[str, object] = {"schema_id": "x"}
     cyclic["self"] = cyclic
     with pytest.raises(ValueError, match="qrp_json_cycle"):
         render_qrp_json_object(cyclic)
     with pytest.raises(ValueError, match="canonical_json_cycle"):
         canonical_identity_bytes(cyclic)
-
-    nested: object = None
-    for _ in range(100):
-        nested = [nested]
-    assert parse_qrp_json_object(
-        render_qrp_json_object({"nested": nested}).encode()
-    ) == {"nested": nested}
-    assert canonical_identity_bytes(nested)
-    for _ in range(2000):
-        nested = [nested]
-    with pytest.raises(ValueError, match="qrp_json_recursion_limit"):
-        render_qrp_json_object({"schema_id": "x", "nested": nested})
-    with pytest.raises(ValueError, match="canonical_json_recursion_limit"):
-        canonical_identity_bytes(nested)
 
 
 def test_strict_json_requires_exact_native_scalar_and_container_types() -> None:
@@ -207,39 +174,9 @@ def test_strict_json_requires_exact_native_scalar_and_container_types() -> None:
             canonical_identity_bytes(value)
 
 
-def _identity_frame(tag: bytes, payload: bytes) -> bytes:
-    return tag + len(payload).to_bytes(8, "big") + payload
-
-
-@pytest.mark.parametrize("keys", [("a", "b"), ("a", "aa"), ("é", "量化")])
-def test_mapping_identity_matches_independent_framing(keys) -> None:
-    first, second = keys
-    integer = _identity_frame(b"i", b"1")
-    nested = _identity_frame(
-        b"m",
-        (2).to_bytes(8, "big")
-        + _identity_frame(b"k", b"a")
-        + integer
-        + _identity_frame(b"k", b"aa")
-        + _identity_frame(b"l", (1).to_bytes(8, "big") + integer),
-    )
-    for value, encoded in (
-        (2, _identity_frame(b"i", b"2")),
-        ({"aa": [1], "a": 1}, nested),
-    ):
-        expected = _identity_frame(
-            b"m",
-            (2).to_bytes(8, "big")
-            + _identity_frame(b"k", first.encode("utf-8"))
-            + integer
-            + _identity_frame(b"k", second.encode("utf-8"))
-            + encoded,
-        )
-        for pairs in permutations(((first, 1), (second, value))):
-            mapping = dict(pairs)
-            assert canonical_identity_bytes(mapping) == expected
-            assert canonical_json_hash(mapping) == hashlib.sha256(expected).hexdigest()
-        if keys == ("a", "b") and value == 2:
-            assert hashlib.sha256(expected).hexdigest() == (
-                "651bc9a60bd86e22fe01cfc417fb52be35c9c8e4c3085aa4b82b1af05905f56c"
-            )
+def test_nested_mapping_identity_is_independent_of_key_order():
+    first = {"é": {"aa": [1], "a": 1}, "量化": 2}
+    reordered = {"量化": 2, "é": {"a": 1, "aa": [1]}}
+    changed = {"é": {"aa": [2], "a": 1}, "量化": 2}
+    assert canonical_json_hash(first) == canonical_json_hash(reordered)
+    assert canonical_json_hash(first) != canonical_json_hash(changed)

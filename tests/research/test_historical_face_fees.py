@@ -137,6 +137,7 @@ def test_hft_face_fees_survive_native_ledger_and_partial_fills(tmp_path, passive
             params,
             window,
             trade_session=trade_session,
+            max_quote_gap_seconds=6,
         ):
             emit(batch)
 

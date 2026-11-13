@@ -56,8 +56,8 @@ from quant_research_platform.research.portfolios.inventory_analysis import (
 )
 from quant_research_platform.research.portfolios.passive import (
     PassiveOrders,
-    observed_trades,
     passive_parameters,
+    trade_events,
 )
 from quant_research_platform.research.portfolios.performance import performance_rows
 from quant_research_platform.research.signals.processing import (
@@ -222,12 +222,15 @@ def inventory_batches(
     stock_status=None,
     execution_order=None,
     trade_session=None,
+    max_quote_gap_seconds=None,
 ):
     """Yield quote-account transitions with shared cash and next-session sellability.
 
     Interactive callers receive PolicyDecision events after current-quote accounting
     and send share targets for strictly subsequent eligible quotes. Execution latency,
     lot sizes, liquidity, fees, and T+1 constraints remain active."""
+    if "passive" in params and max_quote_gap_seconds is None:
+        raise ValueError("passive_quote_gap_required")
     status_state = None
     if stock_status is not None:
         from quant_research_platform.markets.implementations.a_share.stock_pool import (
@@ -558,25 +561,34 @@ def inventory_batches(
         ]
         observed_quotes += len(quotes)
         passive = None
+        event_iterator = iter(())
+        next_trade = None
         if "passive" in params:
             if trade_session is None:
                 raise ValueError("passive_trade_input_required")
             events = materialize_dataset_session(
                 trade_session.filtered_view(TimeWindow(day.date(), day.date()))
             )
-            event_iterator = observed_trades(quotes, events)
+            endpoint = min(closing, upper)
+            if not closed and endpoint == upper:
+                endpoint -= pd.Timedelta(1, "ns")
+            events = events.loc[
+                events.timestamp.ge(start) & events.timestamp.le(endpoint)
+            ]
+            event_iterator = trade_events(events)
             next_trade = next(event_iterator, None)
             passive = PassiveOrders(
                 params["passive"],
                 projected.market_type.reindex(
                     quotes.loc[
-                        np.isfinite(quotes.mid) & quotes.mid.gt(0), "asset_id"
+                        quotes.bid_px1.gt(0) | quotes.ask_px1.gt(0), "asset_id"
                     ].unique()
                 ),
                 day.date(),
                 schedule,
                 assumptions,
                 params["participation_rate"],
+                max_quote_gap_seconds=max_quote_gap_seconds,
                 face_value_per_share=projected.get("face_value_per_share"),
                 instrument_types=instrument_types,
             )
@@ -707,7 +719,7 @@ def inventory_batches(
             if passive is not None:
                 cancellations = passive.advance(at)
                 if cancellations:
-                    yield emit(at, diagnostics=cancellations)
+                    yield emit(at, diagnostics=(*cancellations, *passive.diagnostics()))
             status_diagnostics = []
             for asset, state in status_events.get(stamp, pd.DataFrame()).iterrows():
                 known = state[["is_st", "is_pt", "is_delisting"]].notna().all()
@@ -1004,48 +1016,71 @@ def inventory_batches(
             if diagnostics:
                 yield emit(at, diagnostics=diagnostics)
 
+        def advance_events(
+            until,
+            *,
+            include_requests=False,
+            passive=passive,
+            event_iterator=event_iterator,
+            request_iterator=request_iterator,
+            apply_request=apply_request,
+        ):
+            nonlocal next_trade, next_request, cash
+            # Tied prints precede cancel acknowledgement, not observation expiry.
+            while (
+                passive is not None
+                and next_trade is not None
+                and next_trade.timestamp <= until
+            ) or (
+                next_request is not None
+                and (
+                    next_request[0] <= until.value
+                    if include_requests
+                    else next_request[0] < until.value
+                )
+            ):
+                if (
+                    passive is not None
+                    and next_trade is not None
+                    and next_trade.timestamp <= until
+                    and (
+                        next_request is None
+                        or next_trade.timestamp.value <= next_request[0]
+                    )
+                ):
+                    event = next_trade
+                    next_trade = next(event_iterator, None)
+                    cancellations = passive.advance(event.timestamp, inclusive=False)
+                    fill = passive.trade(event)
+                    if fill is not None:
+                        trade, cashflows, diagnostic = settle(
+                            event.timestamp, event.asset_id, *fill
+                        )
+                        yield emit(
+                            event.timestamp,
+                            trades=(trade,),
+                            flows=cashflows,
+                            diagnostics=(
+                                diagnostic,
+                                *cancellations,
+                                *passive.diagnostics(),
+                            ),
+                        )
+                    elif cancellations:
+                        yield emit(
+                            event.timestamp,
+                            diagnostics=(*cancellations, *passive.diagnostics()),
+                        )
+                else:
+                    request_at, requested = next_request
+                    next_request = next(request_iterator, None)
+                    # Fills update cash; do not freeze the old balance in an argument.
+                    yield from apply_request(request_at, requested, cash)  # noqa: B023
+
         for stamp, group in quotes.groupby("timestamp", sort=False):
             at = pd.Timestamp(stamp)
             if passive is not None or prediction_decisions or status_events:
-                # Tied prints precede target requests and cancellation confirmation.
-                while (
-                    passive is not None
-                    and next_trade is not None
-                    and next_trade.timestamp <= at
-                ) or (next_request is not None and next_request[0] < at.value):
-                    if (
-                        passive is not None
-                        and next_trade is not None
-                        and next_trade.timestamp <= at
-                        and (
-                            next_request is None
-                            or next_trade.timestamp.value <= next_request[0]
-                        )
-                    ):
-                        event = next_trade
-                        next_trade = next(event_iterator, None)
-                        fill = passive.trade(event)
-                        if fill is not None:
-                            cancellations = passive.advance(
-                                event.timestamp, inclusive=False
-                            )
-                            trade, cashflows, diagnostic = settle(
-                                event.timestamp, event.asset_id, *fill
-                            )
-                            yield emit(
-                                event.timestamp,
-                                trades=(trade,),
-                                flows=cashflows,
-                                diagnostics=(
-                                    diagnostic,
-                                    *cancellations,
-                                    *passive.diagnostics(),
-                                ),
-                            )
-                    else:
-                        request_at, requested = next_request
-                        next_request = next(request_iterator, None)
-                        yield from apply_request(request_at, requested, cash)
+                yield from advance_events(at)
             current = group.set_index("asset_id")
             current["can_enter"] = status_can_enter.reindex(current.index).fillna(False)
             valid = np.isfinite(current.mid) & current.mid.gt(0)
@@ -1161,7 +1196,18 @@ def inventory_batches(
                 diagnostics.extend(passive.quote(at, current, units, sellable, cash))
                 diagnostics.extend(passive.diagnostics())
             elif targets.ne(units).any():
-                permissions = valid.reindex(units.index, fill_value=False)
+                # One-sided quotes can execute against the observed side while
+                # valuation retains its last known mid; crossed books cannot.
+                crossed = (
+                    current.bid_px1.gt(0)
+                    & current.ask_px1.gt(0)
+                    & current.bid_px1.ge(current.ask_px1)
+                )
+                permissions = (
+                    (~crossed.fillna(False)).reindex(units.index, fill_value=False)
+                    & np.isfinite(marks)
+                    & marks.gt(0)
+                )
                 orders = pd.DataFrame(
                     {
                         "quantity": units,
@@ -1355,8 +1401,16 @@ def inventory_batches(
                     )
                     if diagnostics:
                         yield emit(at, diagnostics=diagnostics)
+        endpoint = min(closing, upper)
+        if not closed and endpoint == upper:
+            endpoint -= pd.Timedelta(1, "ns")
+        if passive is not None or prediction_decisions or status_events:
+            yield from advance_events(endpoint, include_requests=True)
+        if passive is not None:
+            diagnostics = passive.advance(endpoint)
+            if diagnostics:
+                yield emit(endpoint, diagnostics=(*diagnostics, *passive.diagnostics()))
         if pending_markouts:
-            endpoint = pd.Timestamp(quotes.timestamp.max()) if len(quotes) else start
             for asset, queue in pending_markouts.items():
                 while queue:
                     fill_id, _, _, _, _ = queue.popleft()
@@ -1371,10 +1425,6 @@ def inventory_batches(
                             ),
                         ),
                     )
-        while next_request is not None:
-            request_at, requested = next_request
-            next_request = next(request_iterator, None)
-            yield from apply_request(request_at, requested, cash)
         if closing <= upper if closed else closing < upper:
             marks = projected.close.reindex(units.index).astype("float64")
             rights = entitlements.register(
@@ -1719,7 +1769,11 @@ def inventory_inputs(
     if passive != ("trades" in config):
         raise ValueError("passive_trade_input_required_or_unused")
     trade_session = None
+    max_quote_gap_seconds = None
     if passive:
+        max_quote_gap_seconds = panel.spec.get("parameters", {}).get("max_gap_seconds")
+        if max_quote_gap_seconds is None:
+            raise ValueError("passive_quote_gap_required")
         trade_session = open_dataset_session(
             **{
                 **_dataset_input_options(
@@ -1800,7 +1854,7 @@ def inventory_inputs(
                     predictions = prediction_days.pop(view.timestamp, pd.DataFrame())
                 yield view, quotes, predictions
 
-    return sessions(), schedule, trade_session
+    return sessions(), schedule, trade_session, max_quote_gap_seconds
 
 
 def backtest(config):
@@ -1822,7 +1876,7 @@ def backtest(config):
     window = TimeWindow(**config["window"])
     if not isinstance(config["predictions"], list):
         raise ValueError("hft_prediction_paths_required")
-    sessions, schedule, trade_session = inventory_inputs(
+    sessions, schedule, trade_session, max_quote_gap_seconds = inventory_inputs(
         config, window, prediction_paths=config["predictions"]
     )
 
@@ -1834,6 +1888,7 @@ def backtest(config):
                 params,
                 window,
                 trade_session=trade_session,
+                max_quote_gap_seconds=max_quote_gap_seconds,
                 stock_status=config.get("stock_status"),
             ):
                 emit(batch)
@@ -1856,8 +1911,13 @@ def backtest(config):
             },
             "parameters": params,
             "account_semantics": "shared_cash_continuous_inventory_by_instrument",
+            **(
+                {"passive_quote_max_gap_seconds": max_quote_gap_seconds}
+                if "passive" in params
+                else {}
+            ),
             "execution": (
-                "observed_depth_passive_queue_no_market_feedback_or_receive_clock"
+                "causal_observed_depth_passive_queue_no_market_feedback_or_receive_clock"
                 if "passive" in params
                 else (
                     "strictly_subsequent_observed_depth_no_queue_or_receive_clock"

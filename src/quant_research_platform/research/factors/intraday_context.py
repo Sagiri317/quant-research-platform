@@ -214,6 +214,137 @@ def trade_profiles(quotes, trades, *, columns, session_days=None):
     return output
 
 
+def calculate_activity(panel, *, columns, session_days, history=None):
+    """Calculate activity from daily totals, carrying only the preceding 20 sessions."""
+    work = panel.sort_values(["asset_id", "timestamp"], kind="stable").reset_index(
+        drop=True
+    )
+    result = work.loc[:, list(KEY)].assign(**dict.fromkeys(columns, np.nan))
+    if session_days is None or not len(session_days):
+        return result, ({}, None)
+    activities = {} if history is None else dict(history[0])
+    late_history = None if history is None else history[1]
+    windows = [w for w in (5, 15, 30) if f"opening_relative_activity_{w}m" in columns]
+    samples = []
+    day = work.timestamp.dt.normalize()
+    for (asset, date), at in work.groupby(
+        [work.asset_id, day], sort=False
+    ).indices.items():
+        at = np.asarray(at)
+        block = work.iloc[at]
+        times = pd.DatetimeIndex(block.timestamp)
+        volume = block.observed_trade_volume
+        opening = date + pd.Timedelta(hours=1, minutes=30)
+        complete = 0 <= (times[0] - opening).total_seconds() <= 6
+        for minutes in windows:
+            ends = np.flatnonzero(times >= opening + pd.Timedelta(minutes=minutes))
+            if len(ends):
+                values = volume.iloc[1 : ends[0] + 1]
+                activities[(asset, date, minutes)] = (
+                    values.sum(min_count=len(values)) if complete else np.nan
+                )
+        if "late_session_relative_activity" not in columns:
+            continue
+        close = calendar.continuous_session_end(
+            block.timestamp, block.exchange, block.instrument_type
+        ).iloc[0]
+        start = close - pd.Timedelta(minutes=15)
+        selected = times > start
+        if not selected.any():
+            continue
+        known = volume.notna().where(selected, True).cummin()
+        late = (
+            volume.where(selected, 0)
+            .cumsum()
+            .where(selected & known & bool((times <= start).any()))
+        )
+        samples.append(
+            pd.DataFrame(
+                {
+                    "asset_id": asset,
+                    "day": date,
+                    "slot": np.floor(
+                        (times - times.normalize()).total_seconds() / 3
+                    ).astype(int),
+                    "volume": late.to_numpy(),
+                    "row": at,
+                }
+            ).loc[selected]
+        )
+    if windows:
+        for asset, at in work.groupby("asset_id", sort=False).indices.items():
+            observed = pd.DatetimeIndex(day.iloc[at].unique())
+            earliest = min(
+                (date for owner, date, _ in activities if owner == asset),
+                default=observed.min(),
+            )
+            dates = session_days[
+                (session_days >= min(earliest, observed.min()))
+                & (session_days <= observed.max())
+            ]
+            for window in windows:
+                amounts = pd.Series(
+                    [activities.get((asset, date, window), np.nan) for date in dates],
+                    index=dates,
+                )
+                baseline = amounts.shift().rolling(20, min_periods=20).mean()
+                for date in observed:
+                    if date not in baseline.index or not baseline.loc[date] > 0:
+                        continue
+                    positions = np.asarray(at)[day.iloc[at].eq(date)]
+                    result.loc[positions, f"opening_relative_activity_{window}m"] = (
+                        np.where(
+                            work.timestamp.iloc[positions].ge(
+                                date + pd.Timedelta(hours=1, minutes=30 + window)
+                            ),
+                            amounts.loc[date] / baseline.loc[date],
+                            np.nan,
+                        )
+                    )
+    if samples:
+        samples = pd.concat(samples, ignore_index=True)
+        current = samples.groupby(["asset_id", "slot", "day"], sort=False).volume.last()
+        late_history = (
+            current if late_history is None else pd.concat([late_history, current])
+        )
+        matrix = late_history.unstack("day")
+        matrix = matrix.reindex(
+            columns=session_days[
+                (session_days >= matrix.columns.min())
+                & (session_days <= matrix.columns.max())
+            ]
+        )
+        matrix.columns.name = "day"
+        baseline = (
+            matrix.T.shift()
+            .rolling(20, min_periods=20)
+            .mean()
+            .T.stack()
+            .rename("baseline")
+            .reset_index()
+        )
+        reference = samples.merge(
+            baseline,
+            on=["asset_id", "slot", "day"],
+            how="left",
+            validate="many_to_one",
+        )
+        ratio = reference.volume / reference.baseline.where(reference.baseline > 0)
+        result.loc[reference.row, "late_session_relative_activity"] = ratio.to_numpy()
+    if len(work):
+        end = session_days.searchsorted(day.max(), side="right")
+        if end:
+            first = session_days[max(0, end - 20)]
+            activities = {
+                key: value for key, value in activities.items() if key[1] >= first
+            }
+            if late_history is not None:
+                late_history = late_history.loc[
+                    late_history.index.get_level_values("day") >= first
+                ]
+    return result, (activities, late_history)
+
+
 def calculate(
     panel,
     *,
@@ -224,6 +355,28 @@ def calculate(
     linked_assets=None,
     session_days=None,
 ):
+    activity = tuple(
+        name
+        for name in columns
+        if name.startswith("opening_relative_activity_")
+        or name == "late_session_relative_activity"
+    )
+    if activity:
+        values, _ = calculate_activity(
+            panel, columns=activity, session_days=session_days
+        )
+        ordinary = tuple(name for name in columns if name not in activity)
+        if ordinary:
+            values = calculate(
+                panel,
+                columns=ordinary,
+                daily_context=daily_context,
+                trades=trades,
+                linked_panel=linked_panel,
+                linked_assets=linked_assets,
+                session_days=session_days,
+            ).merge(values, on=list(KEY), validate="one_to_one")
+        return values.loc[:, [*KEY, *columns]]
     work = panel.sort_values(["asset_id", "timestamp"], kind="stable").reset_index(
         drop=True
     )
@@ -236,13 +389,7 @@ def calculate(
         return trade_profiles(work, trades, columns=columns, session_days=session_days)
     requested = set(columns)
     opening_windows = [
-        w
-        for w in (5, 15, 30)
-        if requested
-        & {f"opening_gap_repair_fraction_{w}m", f"opening_relative_activity_{w}m"}
-    ]
-    activity_windows = [
-        w for w in opening_windows if f"opening_relative_activity_{w}m" in requested
+        w for w in (5, 15, 30) if f"opening_gap_repair_fraction_{w}m" in requested
     ]
     peer_windows = [
         w
@@ -293,22 +440,18 @@ def calculate(
     returns = {w: pd.Series(np.nan, index=work.index) for w in (30, 60, 300)}
     flows = {w: pd.Series(np.nan, index=work.index) for w in (30, 60)}
     stress = pd.Series(np.nan, index=work.index)
-    activities = {}
     relative_activity = pd.Series(np.nan, index=work.index)
-    late_samples = []
     opening_groups = (
         work.groupby([work.asset_id, day], sort=False).indices.items()
-        if opening_windows or "late_session_relative_activity" in requested
+        if opening_windows
         else ()
     )
-    for (asset, date), at in opening_groups:
+    for (_asset, date), at in opening_groups:
         at = np.asarray(at)
         block = work.iloc[at]
         times = pd.DatetimeIndex(block.timestamp)
         opening = date + pd.Timedelta(hours=1, minutes=30)
         complete = 0 <= (times[0] - opening).total_seconds() <= 6
-        if activity_windows or "late_session_relative_activity" in requested:
-            volume = block.observed_trade_volume
         for minutes in opening_windows:
             ends = np.flatnonzero(times >= opening + pd.Timedelta(minutes=minutes))
             if not len(ends):
@@ -325,93 +468,7 @@ def calculate(
                 result.loc[at, name] = np.where(
                     visible, -observed / gap if gap != 0 else np.nan, np.nan
                 )
-            if minutes in activity_windows:
-                window = volume.iloc[1 : end + 1]
-                activities[(asset, date, minutes)] = (
-                    window.sum(min_count=len(window)) if complete else np.nan
-                )
-        if "late_session_relative_activity" in columns:
-            close = calendar.continuous_session_end(
-                block.timestamp, block.exchange, block.instrument_type
-            ).iloc[0]
-            start = close - pd.Timedelta(minutes=15)
-            selected = times > start
-            prefix_known = bool((times <= start).any())
-            known = volume.notna().where(selected, True).cummin()
-            late = (
-                volume.where(selected, 0)
-                .cumsum()
-                .where(selected & known & prefix_known)
-            )
-            slots = np.floor((times - times.normalize()).total_seconds() / 3).astype(
-                int
-            )
-            if selected.any():
-                late_samples.append(
-                    pd.DataFrame(
-                        {
-                            "asset_id": asset,
-                            "day": date,
-                            "slot": slots,
-                            "volume": late.to_numpy(),
-                            "row": at,
-                        }
-                    ).loc[selected]
-                )
-    activity_groups = (
-        work.groupby("asset_id", sort=False).indices.items()
-        if activity_windows and session_days is not None
-        else ()
-    )
-    for asset, at in activity_groups:
-        observed = pd.DatetimeIndex(day.iloc[at].unique())
-        dates = session_days[
-            (session_days >= observed.min()) & (session_days <= observed.max())
-        ]
-        for window in activity_windows:
-            amounts = pd.Series(
-                [activities.get((asset, date, window), np.nan) for date in dates],
-                index=dates,
-            )
-            baseline = amounts.shift().rolling(20, min_periods=20).mean()
-            name = f"opening_relative_activity_{window}m"
-            for date in dates:
-                positions = np.asarray(at)[day.iloc[at].eq(date)]
-                start = date + pd.Timedelta(hours=1, minutes=30 + window)
-                if baseline.loc[date] > 0:
-                    result.loc[positions, name] = np.where(
-                        work.timestamp.iloc[positions].ge(start),
-                        amounts.loc[date] / baseline.loc[date],
-                        np.nan,
-                    )
-    if late_samples and session_days is not None:
-        samples = pd.concat(late_samples, ignore_index=True)
-        history = samples.groupby(["asset_id", "slot", "day"], sort=False).volume.last()
-        matrix = history.unstack("day")
-        matrix = matrix.reindex(
-            columns=session_days[
-                (session_days >= matrix.columns.min())
-                & (session_days <= matrix.columns.max())
-            ]
-        )
-        matrix.columns.name = "day"
-        baseline = (
-            matrix.T.shift()
-            .rolling(20, min_periods=20)
-            .mean()
-            .T.stack()
-            .rename("baseline")
-            .reset_index()
-        )
-        reference = samples.merge(
-            baseline, on=["asset_id", "slot", "day"], how="left", validate="many_to_one"
-        )
-        ratio = reference.volume / reference.baseline.where(reference.baseline > 0)
-        result.loc[reference.row, "late_session_relative_activity"] = ratio.to_numpy()
-    if all(
-        name.startswith("opening_") or name == "late_session_relative_activity"
-        for name in columns
-    ):
+    if all(name.startswith("opening_") for name in columns):
         return result
     stress_windows = {w: pd.Series(np.nan, index=work.index) for w in (30, 60)}
     segments = (

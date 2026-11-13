@@ -7,6 +7,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.asof import observation_versions
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -233,6 +234,12 @@ def daily_decisions(prices, calendar, *, actions=None):
     # ETF/index quotes use Shanghai/Shenzhen calendars, not other boards' histories.
     calendar = calendar.loc[calendar.source_market_type.isin((1, 4))]
     sessions = unified_trading_sessions(calendar)
+    if actions is not None and not actions.empty:
+        actions = observation_versions(
+            actions,
+            keys=("asset_id", "timestamp"),
+            columns=("event_type", "amount", "numerator", "denominator"),
+        )
     blocks = []
     for asset, group in prices.groupby("asset_id", sort=False):
         group = group.sort_values("timestamp").set_index("timestamp")
@@ -272,8 +279,10 @@ def daily_decisions(prices, calendar, *, actions=None):
                     continue
                 decision = out.loc[date, "timestamp"]
                 visible = events.available_at.notna() & events.available_at.le(decision)
-                splits = events.loc[events.event_type.eq("splits")]
-                dividends = events.loc[events.event_type.eq("dividends")]
+                known = events.loc[visible].drop_duplicates("asset_id", keep="last")
+                complete = known.asset_id.nunique() == events.asset_id.nunique()
+                splits = known.loc[known.event_type.eq("splits")]
+                dividends = known.loc[known.event_type.eq("dividends")]
                 q = (
                     (splits.numerator / splits.denominator).prod(min_count=len(splits))
                     if len(splits)
@@ -285,13 +294,25 @@ def daily_decisions(prices, calendar, *, actions=None):
                     else 0.0
                 )
                 multiplier.loc[date] = (
-                    q + cash / data.close.loc[date] if visible.all() else np.nan
+                    q + cash / data.close.loc[date] if complete else np.nan
                 )
+                if complete:
+                    # Both closes are known by the current session's close.
+                    # A later action version must not inherit that earlier clock.
+                    out.loc[date, "return_available_at"] = max(
+                        out.loc[date, "return_available_at"], known.available_at.max()
+                    )
             out["adj_close"] = data.close * multiplier.groupby(segments).cumprod(
                 skipna=False
             )
-            previous = out.adj_close.groupby(segments).shift()
-            out["period_return"] = out.adj_close / previous.where(previous > 0) - 1
+            # A one-session return needs only this session's action, not an
+            # unknown cumulative adjustment from an earlier session.
+            out["period_return"] = (
+                data.close * multiplier / previous.where(previous > 0) - 1
+            )
+        out["return_available_at"] = out.return_available_at.where(
+            out.period_return.notna()
+        )
         out["eligible"] = data.close.gt(0)
         for width in (20, 60):
             out[f"volatility_{width}d"] = (

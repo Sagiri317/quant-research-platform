@@ -83,6 +83,7 @@ def replay(panel, signals, params, source, *, events=None):
             ),
             stock_status=source,
             trade_session=events,
+            max_quote_gap_seconds=6,
         )
     )
 

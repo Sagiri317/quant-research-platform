@@ -200,7 +200,7 @@ def test_selected_prediction_chunks_preserve_unsorted_days_and_relationships(tmp
             )
         )
     validated = []
-    sessions, _, _ = inventory_inputs(
+    sessions, _, _, _ = inventory_inputs(
         episode["account"],
         TimeWindow("2024-01-02", "2024-01-03"),
         prediction_paths=paths,

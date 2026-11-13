@@ -33,19 +33,12 @@ def test_explicit_output_path_is_atomic_and_non_overwriting(tmp_path):
     assert not list(tmp_path.glob(".a-*"))
 
 
-def test_window_does_not_open_unselected_footer_or_hash_bytes(tmp_path, monkeypatch):
+def test_window_does_not_open_unselected_footer(tmp_path):
     root = tmp_path / "chosen-result"
     frame = make_default_dataset_frame()
     write_dataset(root, frame, spec=make_processed_dataset_spec())
     excluded = root / "data" / "year=2014" / "part-000.parquet"
     excluded.write_bytes(b"not parquet")
-    import quant_research_platform.storage.identity as identity
-
-    monkeypatch.setattr(
-        identity,
-        "_hash_file_content",
-        lambda *a, **k: pytest.fail("default full-file hash"),
-    )
     actual = read_dataset(
         root, columns=("value",), time_window=TimeWindow("2015-01-01", "2015-12-31")
     )

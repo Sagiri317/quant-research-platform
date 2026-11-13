@@ -31,41 +31,6 @@ _PRIMARY_EXCEPTION_TYPES = (
 )
 
 
-@pytest.mark.parametrize("primary_type", (*_PRIMARY_EXCEPTION_TYPES, OSError))
-def test_content_hash_close_preserves_primary_and_closes_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
-) -> None:
-    path = tmp_path / "hash.bin"
-    filesystem_write_bytes(path, b"synthetic")
-    raw = identity.open_filesystem_file(path, "rb")
-    primary = primary_type("hash_primary")
-    closed = []
-
-    class Handle:
-        def fileno(self):
-            return raw.fileno()
-
-        def read(self, _size):
-            raise primary
-
-        def close(self):
-            closed.append(True)
-            raw.close()
-            raise OSError("close_secondary")
-
-    monkeypatch.setattr(
-        identity, "open_filesystem_file", lambda *_args, **_kwargs: Handle()
-    )
-    try:
-        with pytest.raises(primary_type) as raised:
-            identity._hash_file_content(path)
-        assert raised.value is primary
-        assert raw.closed and closed == [True]
-        assert raised.value.__notes__ == ["iterator close also failed: OSError"]
-    finally:
-        raw.close()
-
-
 @pytest.mark.parametrize("long_path", (False, True))
 def test_shared_path_move_is_fail_if_destination_exists(
     tmp_path: Path, long_path
@@ -393,30 +358,6 @@ def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     scratch_owner.remove_owned_scratch(owned_directory)
     assert not identity.filesystem_exists(owned_file)
     assert not identity.filesystem_exists(owned_directory)
-
-
-@pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
-def test_content_hash_preserves_open_errors(tmp_path, monkeypatch, failure):
-    import errno
-
-    path = tmp_path / "member"
-    filesystem_write_bytes(path, b"synthetic")
-    primary = {
-        "missing": FileNotFoundError(errno.ENOENT, "missing"),
-        "memory": MemoryError("primary"),
-        "io": OSError(errno.EIO, "primary"),
-        "interrupt": KeyboardInterrupt("primary"),
-    }[failure]
-
-    def fail(*args, **kwargs):
-        raise primary
-
-    with monkeypatch.context() as patch:
-        patch.setattr(identity, "open_filesystem_file", fail)
-        with pytest.raises(type(primary)) as caught:
-            identity._hash_file_content(path)
-        if failure != "missing":
-            assert caught.value is primary
 
 
 @pytest.mark.parametrize("source", ["csmar", "reference"])

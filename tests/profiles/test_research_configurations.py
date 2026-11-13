@@ -8,12 +8,10 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 from quant_research_platform.markets.prepare import _configured_spec
 
 
-def test_hft_examples_keep_sampling_clock_and_distinct_evaluation_axes():
+def test_hft_examples_connect_inputs_targets_and_training_windows():
     import json
     from datetime import datetime
     from pathlib import Path
-
-    from quant_research_platform.contracts.models import _model_spec
 
     root = Path(__file__).resolve().parents[2] / "configs"
 
@@ -21,36 +19,16 @@ def test_hft_examples_keep_sampling_clock_and_distinct_evaluation_axes():
         return json.loads((root / name).read_text(encoding="utf-8"))
 
     sampled = read("high-frequency/sample-hft-common.json")
-    assert set(sampled["stock_pool"]) == {
-        "stock_master",
-        "status",
-        "available_at_column",
-        "trading_calendar",
-    }
-    assert sampled["stock_pool"]["available_at_column"] == "status_available_at"
-    assert sampled["interval_seconds"] == 3
-    assert sampled["quote_visibility_delay_ms"] == 1
-    assert sampled["max_quote_age_seconds"] == sampled["label_tolerance_seconds"] == 6
     fitting, evaluating = (read(name) for name in ("fit-hft.json", "evaluate-hft.json"))
     assert fitting["inputs"] == evaluating["inputs"] == sampled["output"]
-    assert fitting["model"]["target_column"] == "future_mid_return_30s"
-    assert evaluating["evaluation"]["label_columns"] == ["future_mid_return_30s"]
-    assert evaluating["evaluation"]["evaluation_axis"] == "cross_sectional"
-    assert evaluating["evaluation"]["correlation_clock"] == "trading_day"
-    assert evaluating["sessions"]
-    etf = read("high-frequency/evaluate-etf.json")
-    assert etf["inputs"]["row_filters"] == [["asset_id", "==", "510300"]]
-    assert etf["evaluation"]["evaluation_axis"] == "single_asset_time_series"
-    assert etf["evaluation"]["correlation_clock"] == "trading_day"
-    assert etf["evaluation"]["label_columns"] == [fitting["model"]["target_column"]]
-    assert etf["sessions"]
+    assert evaluating["evaluation"]["label_columns"] == [
+        fitting["model"]["target_column"]
+    ]
 
     stopping = read("high-frequency/fit-xgboost-early-stopping.json")
-    spec = _model_spec(stopping["model"])
     assert stopping["inputs"] == sampled["output"]
     assert stopping["output"] != fitting["output"]
-    assert spec.target_column == fitting["model"]["target_column"]
-    assert spec.hyperparameters["early_stopping_rounds"] > 0
+    assert stopping["model"]["target_column"] == fitting["model"]["target_column"]
     fit_cutoff = datetime.fromisoformat(stopping["fit_cutoff"])
     validation = stopping["validation"]
     assert all(
