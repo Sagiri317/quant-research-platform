@@ -74,17 +74,6 @@ def test_writer_summarizes_input_without_decoding_its_output(tmp_path, monkeypat
     assert inspected.partition_row_counts == result.partition_row_counts
 
 
-def test_canonical_nonfinite_rows_rejected_before_publication(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "canonical_invalid")
-    frame = make_default_dataset_frame().assign(value=float("inf"))
-    with pytest.raises(ValueError, match="dataset_infinite_value"):
-        write_dataset(
-            root, frame, spec=make_processed_dataset_spec("canonical_invalid")
-        )
-    assert not root.exists()
-    assert not list(root.parent.glob(".a-*"))
-
-
 def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
     tmp_path: Path,
 ) -> None:

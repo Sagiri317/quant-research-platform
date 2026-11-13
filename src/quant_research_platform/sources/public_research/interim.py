@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.sources.tabular import read_csv as _read_csv
 from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 from .normalization import DATASETS, _numbers, normalize, normalize_selected_facts
 
@@ -116,6 +118,8 @@ def materialize_interim_data(
             complete_archives=complete_archives,
             numeric_counts=numeric_counts,
         ):
+            key_columns = catalog.get(data_id).primary_key
+            source_keys = ExactPrimaryKeyIndex(primary_key=key_columns)
             for record in records:
                 # Dispatch before reading: a different source's multi-GB ZIP is
                 # not an input to a small margin/ETF import.
@@ -311,6 +315,13 @@ def materialize_interim_data(
                             else:
                                 frame[field] = frame[field].astype("Float64")
                         if not frame.empty:
+                            if source_keys.add_table(
+                                pa.Table.from_pandas(
+                                    frame.loc[:, list(key_columns)],
+                                    preserve_index=False,
+                                )
+                            ):
+                                raise ValueError("public_source_primary_key_duplicate")
                             yield frame.loc[
                                 :, list(catalog.get(data_id).required_columns)
                             ]

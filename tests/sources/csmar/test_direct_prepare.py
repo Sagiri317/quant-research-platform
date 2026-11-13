@@ -38,6 +38,37 @@ def test_source_reads_linked_raw_directory_or_csv(tmp_path, linked_member):
     assert frame.is_trading_day.tolist() == [True]
 
 
+@pytest.mark.parametrize("forecast_end", ["2024-12-31", ""])
+def test_analyst_source_establishes_forecast_coordinate_before_writing(
+    tmp_path, forecast_end
+):
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    contract = RAW_TABLE_CONTRACTS["analyst_forecast"]
+    with (raw / f"{contract.table_code}.csv").open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(contract.required_columns)
+        writer.writerow(
+            ["600001", "report", "analyst", "2024-01-02", forecast_end, "bank", 2, 10]
+        )
+    output = tmp_path / "analyst"
+    prepare_source(
+        {
+            "source_id": "csmar",
+            "raw_root": str(raw),
+            "outputs": {"analyst_forecast": str(output)},
+        }
+    )
+    frame = read_dataset(output)
+    assert frame.empty == (not forecast_end)
+    assert str(frame.forecast_end_date.dtype) == "datetime64[ns]"
+    if forecast_end:
+        assert frame.source_asset_id.tolist() == ["600001"]
+        assert frame.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+        assert frame.forecast_end_date.tolist() == [pd.Timestamp(forecast_end)]
+        assert frame.forecast_eps.tolist() == [2.0]
+
+
 def test_empty_declared_source_preserves_native_schema(tmp_path):
     raw = tmp_path / "raw"
     raw.mkdir()

@@ -268,6 +268,8 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                 or snapshot
                 and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
             }
+            if not targets:
+                continue
             source_hash = root["manifest"]["sha256"]
             for data_id in targets:
                 hashes[data_id].extend(
@@ -289,6 +291,8 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                         diagnostics.get("excluded_invalid_asset_rows", 0) + 1
                     )
                     continue
+                # Financial outputs identify assets by six-digit code.
+                code = code[:6]
                 values = dict(zip(response["Indicators"], cells, strict=True))
                 pair = (code, period)
                 coordinate = (
@@ -485,14 +489,14 @@ def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]
             )
             continue
         if data_id == FIRST_DISCLOSURE_DATA_ID:
-            _yield_value = (pair[0][:6], pair[1], first.isoformat())
+            _yield_value = (pair[0], pair[1], first.isoformat())
             yield _yield_value
             continue
         for public_date, revised, values in _report_versions(
             index, pair, first, end, tuple(FINANCIAL_FIELDS[data_id])
         ):
             _yield_value = (
-                pair[0][:6],
+                pair[0],
                 pair[1],
                 pair[1],
                 "A",

@@ -1092,7 +1092,6 @@ def _iter_normalized_interim_frames(
     source_evidence: dict[str, object] | None = None,
 ) -> Iterator[object]:
     primary_key = interim_catalog().get(data_id).primary_key
-    duplicate_index = ExactPrimaryKeyIndex(primary_key=primary_key)
     if source_row_counts is None:
         source_row_counts = {}
     exact_duplicate_count = 0
@@ -1120,6 +1119,9 @@ def _iter_normalized_interim_frames(
         "equity_changes",
         "analyst_forecast",
     }
+    duplicate_index = (
+        None if coalesce else ExactPrimaryKeyIndex(primary_key=primary_key)
+    )
     pending = []
     for input_file in input_files:
         chunks = iter_private_export_chunks(

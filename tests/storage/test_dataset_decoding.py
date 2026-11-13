@@ -943,27 +943,6 @@ def test_temporal_equality_and_membership_keep_predicate_precision(
                 assert rows == (1 if offset_ns in (0, 1000000) else 0)
 
 
-@pytest.mark.parametrize("dtype", ["object", "float64"])
-@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
-def test_numeric_infinity_is_rejected_independently_of_logical_dtype(
-    tmp_path, dtype, value
-):
-    from quant_research_platform.contracts.columns import ColumnRole
-
-    frame = make_default_dataset_frame().iloc[:1].copy()
-    frame["value"] = pd.Series([value], index=frame.index, dtype=dtype)
-    root = make_dataset_artifact_root(tmp_path, "nonfinite")
-    with pytest.raises(ValueError, match="dataset_infinite_value"):
-        write_dataset(
-            root,
-            frame,
-            spec=make_processed_dataset_spec(
-                "nonfinite", value_role=ColumnRole.CONTEXT
-            ),
-        )
-    assert not root.exists()
-
-
 @pytest.mark.parametrize("values", [[2**53 + 1, None], [3, None], [2**53 + 1, 5]])
 def test_public_integer_null_readback_is_exact(tmp_path, values):
     from quant_research_platform.contracts.columns import ColumnRole

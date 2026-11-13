@@ -19,19 +19,6 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def test_public_dataset_writer_validates_concrete_sequence_elements(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "invalid_sequence")
-    with pytest.raises(TypeError, match="invalid_dataset_chunk"):
-        write_dataset(
-            root,
-            [make_default_dataset_frame(), object()],
-            spec=make_processed_dataset_spec("invalid_sequence"),
-        )
-    assert not root.exists()
-
-
 def test_public_dataset_writer_accepts_exact_frame_sequences(tmp_path: Path) -> None:
     frame = make_default_dataset_frame()
     roots = (

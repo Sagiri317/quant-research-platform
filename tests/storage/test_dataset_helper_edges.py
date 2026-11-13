@@ -29,7 +29,6 @@ from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
     physical_schema_from_schema,
 )
-from quant_research_platform.storage.datasets.writing import _WriteStats
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import native_filesystem_path
 from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -260,21 +259,6 @@ def test_low_level_fixture_requires_explicit_primary_key(tmp_path: Path) -> None
         )
 
 
-def test_exact_key_index_stores_primary_keys_once_and_category_values_only() -> None:
-    index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
-    index.add_table(pa.table({"asset_id": ["a", "b"]}))
-    dataset_rows = sorted(index._namespaces["dataset"].items())
-    assert len(dataset_rows) == 2
-    assert all((payload and value is None for payload, value in dataset_rows))
-    index.add_identity_payloads(
-        namespace="logical-category:asset_id",
-        payloads=((b"b", b"value-b"), (b"a", b"value-a")),
-    )
-    assert list(
-        index.identity_payload_values(namespace="logical-category:asset_id")
-    ) == [b"value-a", b"value-b"]
-
-
 def test_exact_key_index_compares_persisted_row_values() -> None:
     left = pa.table(
         {
@@ -327,7 +311,7 @@ def test_scalar_primary_key_nonfinite_rejects_but_scalar_value_allows(
     )
 
 
-def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
+def test_exact_comparison_accepts_primary_key_only_projection() -> None:
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     assert (
         index.add_comparison_table(
@@ -337,7 +321,12 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
         )
         == 0
     )
-    assert tuple(index.identity_payload_values(namespace="primary-key-only")) == (b"",)
+    assert index._compare_table(
+        pa.table({"asset_id": ["a"]}),
+        expected_namespace="primary-key-only",
+        actual_namespace="actual",
+        value_columns=(),
+    ) == (0, 0)
 
 
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(
@@ -364,19 +353,6 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision() -> None
     index = ExactPrimaryKeyIndex(primary_key=("key",), key_schema=schema)
     assert index.add_table(pa.table({"key": [first]})) == 0
     assert index.add_table(pa.table({"key": [second]})) == 0
-
-
-def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
-    spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    tracker = ExactPrimaryKeyIndex(primary_key=spec.primary_key)
-    with pytest.raises(ValueError, match="invalid_dataset_timestamp_value"):
-        _WriteStats(
-            spec=spec, data_root=Path("data"), key_tracker=tracker
-        ).prepare_frame(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                timestamp=["2024-01-02", "bad-date"]
-            )
-        )
 
 
 def test_dataset_compare_reports_missing_sides(tmp_path: Path) -> None:
@@ -516,8 +492,9 @@ def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
             actual_namespace="right",
             value_columns=("value",),
         )
-    assert index.identity_payload_count(namespace="right") == 0
-    assert index.identity_payload_count(namespace="left") == 1
+    assert index.difference_counts(
+        expected_namespace="left", actual_namespace="right"
+    ) == (1, 0)
 
 
 def test_resolved_feature_options_are_the_persisted_transform_configuration():

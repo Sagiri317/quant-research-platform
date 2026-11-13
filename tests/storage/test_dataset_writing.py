@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
-from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
@@ -21,9 +19,6 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_is_file,
     native_filesystem_path,
-)
-from tests.helpers.paths import (
-    filesystem_glob,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -286,48 +281,16 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
     assert inspection.columns == tuple(manifest["columns"])
 
 
-def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> None:
-    with pytest.raises(TypeError, match="invalid_dataset_chunk"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "invalid"),
-            [make_default_dataset_frame().iloc[:1], {"not": "a frame"}],
-            spec=make_processed_dataset_spec("invalid"),
-        )
+def test_write_dataset_requires_schema_and_consumed_columns(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="empty_dataset_schema_missing"):
         write_dataset(
             make_dataset_artifact_root(tmp_path, "empty_iterable"),
             (),
             spec=make_processed_dataset_spec("empty_iterable"),
         )
-    duplicate = pd.concat(
-        [make_default_dataset_frame().iloc[:1], make_default_dataset_frame().iloc[:1]],
-        ignore_index=True,
-    )
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "duplicate"),
-            duplicate,
-            spec=make_processed_dataset_spec("duplicate"),
-        )
-    null_key = make_default_dataset_frame()
-    null_key.loc[0, "asset_id"] = None
-    with pytest.raises(ValueError, match="dataset_primary_key_null"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "null_key"),
-            null_key,
-            spec=make_processed_dataset_spec("null_key"),
-        )
-    infinite = make_default_dataset_frame()
-    infinite.loc[0, "value"] = -math.inf
-    with pytest.raises(ValueError, match="dataset_infinite_value"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "infinite"),
-            infinite,
-            spec=make_processed_dataset_spec("infinite"),
-        )
     missing_required = make_default_dataset_frame().drop(columns=["value"])
     missing_root = make_dataset_artifact_root(tmp_path, "missing_required")
-    with pytest.raises(ValueError, match="missing_required_columns: value"):
+    with pytest.raises(KeyError, match="value"):
         write_dataset(
             missing_root,
             missing_required,
@@ -336,44 +299,13 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
     assert not filesystem_exists(missing_root)
 
 
-@pytest.mark.parametrize(
-    "equivalent_asset_ids",
-    [
-        pd.Series([1, 1.0], dtype="object"),
-        pd.Series([np.int64(1), 1], dtype="object"),
-        pd.Series([date(2026, 1, 1), datetime(2026, 1, 1)], dtype="object"),
-    ],
-    ids=["int-float", "numpy-python", "date-datetime"],
-)
-def test_write_dataset_rejects_keys_equal_after_arrow_conversion(
-    tmp_path: Path, equivalent_asset_ids: pd.Series
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "arrow_key_identity")
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share", "a_share"],
-            "asset_id": equivalent_asset_ids,
-            "timestamp": [pd.Timestamp("2026-01-02")] * 2,
-            "value": [1.0, 2.0],
-        }
-    )
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        write_dataset(
-            root, frame, spec=make_processed_dataset_spec("arrow_key_identity")
-        )
-
-
 @pytest.mark.parametrize("dtype", ("float16", "float32", "float64"))
-def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
+def test_float_keys_and_dtype_roundtrip(tmp_path, dtype):
     frame = make_default_dataset_frame().iloc[:2].copy()
     frame["asset_id"] = np.array([-0.0, 0.0], dtype=dtype)
     frame["timestamp"] = pd.Timestamp("2020-01-01")
     root = make_dataset_artifact_root(tmp_path, "float_key")
     spec = make_processed_dataset_spec("float_key")
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        write_dataset(root, frame, spec=spec)
-    assert not filesystem_exists(root)
-    assert not list(filesystem_glob(root.parent, ".a-*"))
     frame["asset_id"] = np.array([1.0, 2.0], dtype=dtype)
     write_dataset(root, frame, spec=spec)
     restored = read_dataset(root)

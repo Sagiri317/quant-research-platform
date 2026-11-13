@@ -17,7 +17,6 @@ def test_bulk_comparison_conflict_rolls_back_then_accepts_valid_rows() -> None:
         index.classify_comparison_table(
             conflicting, namespace="conflict", value_columns=("value",)
         )
-    assert index.identity_payload_count(namespace="conflict") == 2
     kept, duplicate_count = index.classify_comparison_table(
         pa.table({"asset_id": ["c"], "value": [3]}),
         namespace="conflict",

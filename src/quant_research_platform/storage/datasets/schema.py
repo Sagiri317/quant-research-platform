@@ -68,16 +68,6 @@ def logical_dtype_metadata_bytes(payload: Mapping[str, Any]) -> bytes:
     return (render_qrp_json_object(payload) + "\n").encode("utf-8")
 
 
-def encode_logical_category_value(value: Mapping[str, Any]) -> tuple[bytes, bytes]:
-    return (
-        canonical_identity_bytes(value),
-        (
-            render_qrp_json_object({"schema_id": "qrp-category-value", "value": value})
-            + "\n"
-        ).encode("utf-8"),
-    )
-
-
 def parse_logical_dtype_metadata(raw: bytes) -> dict[str, Any]:
     try:
         payload = parse_qrp_json_object(raw)

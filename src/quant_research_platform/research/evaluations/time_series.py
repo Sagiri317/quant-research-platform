@@ -798,18 +798,25 @@ def evaluate_time_series(config):
     )
     summary = daily_metric_summary(daily)
     comparisons = []
+    comparison_keys = set()
     for comparison in config.get("comparisons", []):
         comparison = _strict_config(
             comparison, {"comparison_id", "left", "right", "sample_scope"}, set()
         )
         scope = comparison["sample_scope"]
+        comparison_id = comparison["comparison_id"]
+        key = (scope, comparison_id)
         if (
             scope == "own"
             or scope not in scopes
             or not {comparison["left"], comparison["right"]} <= set(scopes[scope])
-            or comparison["comparison_id"] in names
+            or type(comparison_id) is not str
+            or not comparison_id
+            or comparison_id in names
+            or key in comparison_keys
         ):
             raise ValueError("evaluation_paired_comparison_invalid")
+        comparison_keys.add(key)
         selected = daily.loc[daily.sample_scope.eq(scope)]
         keys = ["timestamp", "asset_id", "metric"]
         left = selected.loc[selected.candidate_id.eq(comparison["left"])].set_index(

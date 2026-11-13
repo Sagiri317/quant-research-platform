@@ -80,6 +80,49 @@ def _read(result):
     }
 
 
+@pytest.mark.parametrize("conflicting", [False, True])
+def test_financial_source_reconciles_the_output_asset_coordinate(tmp_path, conflicting):
+    layout = StorageLayout(tmp_path)
+    fields = tuple(FINANCIAL_FIELDS["financial_balance"])[:2]
+    with choice_session(response()) as session:
+        write_css(
+            session,
+            layout,
+            period="2019-12-31",
+            end_date="2025-12-31",
+            indicators=DATE_FIELDS,
+            data={
+                "000001.SZ": ["2020/1/30", None, None],
+                "000001.SH": ["2020/1/30", None, None],
+            },
+        )
+        write_css(
+            session,
+            layout,
+            period="2019-12-31",
+            end_date="2020-01-30",
+            indicators=fields,
+            data={
+                "000001.SZ": [10.0, 20.0],
+                "000001.SH": [11.0 if conflicting else 10.0, 20.0],
+            },
+        )
+    output = layout.interim_data_root("choice", "financial_balance")
+    interim.materialize_interim_data(
+        raw_root=layout.raw_source_root("choice"),
+        output_roots={"financial_balance": output},
+        data_ids=("financial_balance",),
+    )
+    frame = read_dataset(output)
+    assert frame.source_asset_id.tolist() == ["000001"]
+    first, second = (FINANCIAL_FIELDS["financial_balance"][field] for field in fields)
+    if conflicting:
+        assert frame[first].isna().all()
+    else:
+        assert frame[first].tolist() == [10.0]
+    assert frame[second].tolist() == [20.0]
+
+
 @pytest.mark.parametrize("extra", ["ReportType=3", "Type=1,ReportType=2"])
 def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra):
     from datetime import date

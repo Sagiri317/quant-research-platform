@@ -317,6 +317,52 @@ def _factor_evaluation_config(tmp_path, frame):
     }
 
 
+def test_paired_comparison_config_establishes_its_output_identity(tmp_path):
+    times = pd.to_datetime(["2020-01-04 09:30", "2020-01-04 09:31"])
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "asset_id": "a",
+            "x": [1.0, 2.0],
+            "peer": [2.0, 1.0],
+            "label": [1.0, 2.0],
+            "eligible": True,
+            "label_available_at": times,
+        }
+    )
+    config = _factor_evaluation_config(tmp_path, frame)
+    comparison = {
+        "comparison_id": "delta",
+        "left": "x",
+        "right": "peer",
+        "sample_scope": "factors",
+    }
+    config["evaluation_axis"] = "single_asset_time_series"
+    for comparisons in (
+        [comparison, comparison],
+        [{**comparison, "comparison_id": None}],
+    ):
+        config["comparisons"] = comparisons
+        with pytest.raises(ValueError, match="evaluation_paired_comparison_invalid"):
+            evaluate_time_series(config)
+        assert not (tmp_path / "evaluation").exists()
+
+    # Identity is scoped: two declared sample domains may use the same contrast.
+    config.update(
+        comparison_groups={"first": ["x", "peer"], "second": ["x", "peer"]},
+        comparisons=[
+            {**comparison, "sample_scope": scope} for scope in ("first", "second")
+        ],
+        inference_groups={"contrast": ["delta"]},
+    )
+    daily = read_dataset(evaluate_time_series(config) / "daily")
+    contrasts = daily.loc[
+        daily.candidate_id.eq("delta") & daily.metric.eq("ic") & daily.value.notna()
+    ]
+    assert sorted(contrasts.sample_scope) == ["first", "second"]
+    np.testing.assert_allclose(contrasts.value, [2.0, 2.0])
+
+
 def test_native_prediction_segments_validate_only_selected_assets(tmp_path):
     from quant_research_platform.artifacts.outputs.prediction import (
         write_prediction_outputs,

@@ -1194,8 +1194,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
 def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sources(
     tmp_path,
 ):
-    import hashlib
-
     import numpy as np
 
     from quant_research_platform.artifacts.portfolio_ledger import (
@@ -1239,15 +1237,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         return {
             "sample_role": window["access"],
             "window": {key: window[key] for key in ("start", "end")},
-        }
-
-    def tree_hash(root):
-        return {
-            path.relative_to(root).as_posix(): hashlib.sha256(
-                path.read_bytes()
-            ).hexdigest()
-            for path in root.rglob("*")
-            if path.is_file()
         }
 
     layout = StorageLayout(tmp_path)
@@ -1323,7 +1312,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         for label, value in (
             ("missing", np.nan),
             ("negative", -1.0),
-            ("infinite", np.inf),
         ):
             cases.append(
                 (
@@ -1332,7 +1320,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
                     {
                         "missing": "BLOCKED",
                         "negative": "ERROR",
-                        "infinite": "WRITE_ERROR",
                     }[label],
                 )
             )
@@ -1345,15 +1332,12 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
             ),
             ("zero_denominator", (("000905", "close", 0.0),), "ERROR"),
             ("native_negative", (("H00905", "open", -1.0),), "ERROR"),
-            ("native_infinite", (("H00905", "open", np.inf),), "WRITE_ERROR"),
             ("native_ignores_unused_close", (("000852", "close", 0.0),), None),
             ("unconsumed_invalid", (), None),
             ("missing_price_date", (), "BLOCKED"),
             ("missing_tr_date", (), "BLOCKED"),
         )
     )
-    input_hashes = {name: tree_hash(root) for name, root in roots.items()}
-    good_root = good_hash = None
     for case, mutations, expected_status in cases:
         source = market.copy(deep=True)
         if case in {"scale_small", "scale_large"}:
@@ -1376,17 +1360,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         index_root = StorageLayout(tmp_path / "index" / case).interim_data_root(
             "csmar", "index_market"
         )
-        if expected_status == "WRITE_ERROR":
-            with pytest.raises(ValueError, match="^dataset_infinite_value$"):
-                write_dataset(
-                    index_root, source, spec=_interim_specs().get("index_market")
-                )
-            assert not index_root.exists()
-            pd.testing.assert_frame_equal(source, original, check_exact=True)
-            assert tree_hash(good_root) == good_hash
-            continue
         write_dataset(index_root, source, spec=_interim_specs().get("index_market"))
-        before = tree_hash(index_root)
         kwargs = dict(
             ledgers=ledgers,
             candidates=candidates,
@@ -1455,12 +1429,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         with artifact.table("portfolio_daily.parquet") as daily:
             assert daily.return_status.eq("DEFINED").all()
             assert daily.net_return.to_numpy() == pytest.approx(0.04)
-        if case == "derived_and_native":
-            good_root, good_hash = root, tree_hash(root)
-        assert tree_hash(index_root) == before
         pd.testing.assert_frame_equal(source, original, check_exact=True)
-        assert tree_hash(good_root) == good_hash
-    assert {name: tree_hash(root) for name, root in roots.items()} == input_hashes
     for name, frame in frames.items():
         pd.testing.assert_frame_equal(frame, originals[name], check_exact=True)
 

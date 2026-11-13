@@ -62,11 +62,6 @@ class ExactPrimaryKeyIndex:
             namespace, ((key, None) for key in self._payload_rows(keys))
         )
 
-    def add_identity_payloads(
-        self, *, namespace: str, payloads: Iterable[tuple[bytes, bytes]]
-    ) -> int:
-        return self._insert_rows(namespace, payloads)
-
     def add_float_value_table(
         self,
         table: pa.Table,
@@ -198,20 +193,6 @@ class ExactPrimaryKeyIndex:
         )
         keys = self._key_table(table)
         return self._comparison_payload_rows(keys, table.select(selected))
-
-    def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
-        values = self._namespace(namespace)
-        for key in sorted(values):
-            value = values[key]
-            if value is None:
-                raise ValueError("exact_key_identity_payload_missing")
-            yield value
-
-    def identity_payload_count(self, *, namespace: str) -> int:
-        return len(self._namespace(namespace))
-
-    def identity_payload_value(self, *, namespace: str, payload: bytes) -> bytes | None:
-        return self._namespace(namespace).get(bytes(payload))
 
     def difference_counts(
         self,

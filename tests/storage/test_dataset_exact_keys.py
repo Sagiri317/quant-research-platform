@@ -97,7 +97,6 @@ def test_float_lookup_bad_late_key_keeps_match_batch_atomic():
             mark_matched=True,
         )
     assert index.float_value_count(namespace="source") == 2
-    assert index.identity_payload_count(namespace="matched") == 0
 
 
 def test_writer_rejects_inconsistent_ordered_categorical_domains(
@@ -291,17 +290,8 @@ def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range() -> None:
 
 
 def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    key_tracking = importlib.import_module("quant_research_platform.storage.exact_keys")
-    tracked_schemas: list[pa.Schema] = []
-    original_add_table = key_tracking.ExactPrimaryKeyIndex.add_table
-
-    def record_schema(index, table, **kwargs):
-        tracked_schemas.append(table.schema.remove_metadata())
-        return original_add_table(index, table, **kwargs)
-
-    monkeypatch.setattr(key_tracking.ExactPrimaryKeyIndex, "add_table", record_schema)
     root = make_dataset_artifact_root(tmp_path, "categorical_keys")
     frame = make_default_dataset_frame()
     frame["asset_id"] = frame["asset_id"].astype("category")
@@ -312,11 +302,7 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
     with pq.ParquetFile(native_filesystem_path(part)) as parquet:
         persisted_key_schema = pa.schema([parquet.schema_arrow.field("asset_id")])
-    assert tracked_schemas
-    assert all(
-        pa.schema([schema.field("asset_id")]) == persisted_key_schema
-        for schema in tracked_schemas
-    )
+    assert pa.types.is_dictionary(persisted_key_schema.field("asset_id").type)
 
 
 @pytest.mark.parametrize(
@@ -362,23 +348,18 @@ def test_scalar_signed_zero_key_identity_preserves_exact_value_payloads(
 
 
 @pytest.mark.parametrize("split", (False, True))
-def test_scalar_signed_zero_keys_reject_publication_without_changing_values(
-    tmp_path, split
-):
+def test_scalar_keys_and_payload_zero_values_roundtrip(tmp_path, split):
     frame = make_default_dataset_frame().iloc[:2].copy().reset_index(drop=True)
     frame["asset_id"] = [-0.0, 0.0]
     frame["timestamp"] = frame.timestamp.iloc[0]
     root = make_dataset_artifact_root(tmp_path, "scalar_zero")
-    with pytest.raises(ValueError, match="^duplicate_dataset_primary_key$"):
-        write_dataset(
-            root,
-            (frame.iloc[:1], frame.iloc[1:]) if split else frame,
-            spec=make_processed_dataset_spec("scalar_zero"),
-        )
-    assert not filesystem_exists(root)
     frame.loc[1, "timestamp"] += pd.Timedelta(days=1)
     frame["value"] = [-0.0, 0.0]
-    write_dataset(root, frame, spec=make_processed_dataset_spec("scalar_zero"))
+    write_dataset(
+        root,
+        (frame.iloc[:1], frame.iloc[1:]) if split else frame,
+        spec=make_processed_dataset_spec("scalar_zero"),
+    )
     restored = read_dataset(root).sort_values("timestamp")
     for actual, expected in zip(restored.asset_id, frame.asset_id, strict=True):
         assert struct.pack(">d", actual) == struct.pack(">d", expected)

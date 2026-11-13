@@ -992,6 +992,44 @@ def test_structured_fund_reports_preserve_scope_shares_and_china_clock(
     assert frame.available_at.iloc[0] == pd.Timestamp("2024-03-29T16:00:00Z")
 
 
+@pytest.mark.parametrize("repeated_record", [False, True])
+def test_public_source_rejects_duplicate_output_coordinates(tmp_path, repeated_record):
+    source = tmp_path / "raw"
+    source.mkdir()
+    row = {
+        "opDate": "20240102",
+        "stockCode": "600001",
+        "rzye": 100,
+        "rzmre": 10,
+        "rzche": 3,
+        "rqylje": 20,
+        "rqyl": 2,
+        "rqmcl": 1,
+    }
+    rows = [row] if repeated_record else [row, {**row, "rzye": 200}]
+    payload = json.dumps({"result": rows}).encode()
+    (source / "margin.json").write_bytes(payload)
+    record = {
+        "path": "margin.json",
+        "source": "sse_margin",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "retrieved_at": "2026-11-09T00:00:00Z",
+    }
+    write_source_manifest(
+        source, {"records": [record, record] if repeated_record else [record]}
+    )
+    output = tmp_path / "interim"
+    with pytest.raises(ValueError, match="public_source_primary_key_duplicate"):
+        prepare_source(
+            {
+                "source_id": "public_research",
+                "raw_root": str(source),
+                "outputs": {"public_margin_balances": str(output)},
+            }
+        )
+    assert not output.exists()
+
+
 def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_path):
     from quant_research_platform.storage.datasets.reading import open_dataset_session
 

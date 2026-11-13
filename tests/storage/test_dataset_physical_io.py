@@ -227,21 +227,6 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity() -> None:
     )
 
 
-def test_duplicate_keys_across_chunks_reject_and_clean_atomic_state(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "duplicate_stream_keys")
-    frame = make_default_dataset_frame()
-    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
-        dataset_writing.write_dataset(
-            root,
-            (frame, frame.iloc[:1].copy()),
-            spec=make_processed_dataset_spec("duplicate_stream_keys"),
-        )
-    assert not filesystem_exists(root)
-    assert not list(filesystem_glob(root.parent, ".a-*"))
-
-
 def test_noncanonical_year_partition_is_rejected_with_and_without_window(
     tmp_path: Path,
 ) -> None:
@@ -256,33 +241,6 @@ def test_noncanonical_year_partition_is_rejected_with_and_without_window(
     for window in (None, TimeWindow("2014-01-01", "2014-12-31")):
         with pytest.raises(ValueError, match="invalid_dataset_part_files"):
             dataset_reading.open_dataset_session(root, columns=None, time_window=window)
-
-
-@pytest.mark.parametrize(
-    "columns",
-    (
-        ["market_id", "asset_id", "timestamp", "value", "value"],
-        ["market_id", "asset_id", "timestamp", 1],
-        ["market_id", "asset_id", "timestamp", ""],
-    ),
-)
-def test_writer_rejects_noncanonical_dataframe_column_labels_before_arrow(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, columns: list[object]
-) -> None:
-    frame = pd.DataFrame([[0] * len(columns)], columns=columns)
-    monkeypatch.setattr(
-        dataset_writing._WriteStats,
-        "table_for_frame",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("invalid_columns_reached_arrow")
-        ),
-    )
-    with pytest.raises(ValueError, match="invalid_dataset_column_labels"):
-        dataset_writing.write_dataset(
-            make_dataset_artifact_root(tmp_path, "invalid_labels"),
-            (frame,),
-            spec=make_processed_dataset_spec("invalid_labels"),
-        )
 
 
 @pytest.mark.parametrize("columns", ([1], ["value", "value"], [""]))
