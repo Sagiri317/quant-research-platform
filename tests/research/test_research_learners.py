@@ -266,7 +266,7 @@ def test_formula_windows_reset_at_known_and_unknown_listing_boundaries(
 
 
 def test_native_formula_application_retains_listing_context(tmp_path):
-    from quant_research_platform.storage.atomic import atomic_write_json
+    from quant_research_platform.storage.manifests import write_qrp_json_file
 
     frame, spec = learning_panel(tmp_path / "base")
     frame["listing_date"] = pd.Timestamp("2010-01-01")
@@ -282,7 +282,7 @@ def test_native_formula_application_retains_listing_context(tmp_path):
         ),
     )
     selected = tmp_path / "selection.json"
-    atomic_write_json(
+    write_qrp_json_file(
         selected,
         dict(
             selected_expression="delay(x,1)",

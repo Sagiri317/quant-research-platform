@@ -340,7 +340,7 @@ def daily_decisions(prices, calendar, *, actions=None):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     if spec.data_id == "etf_price_volume_factors":
         start, end, closed = time_window_timestamp_interval(time_window)
         source = open_dataset_session(

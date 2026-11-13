@@ -592,35 +592,20 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
                 assert rows.benchmark_return.tolist() == pytest.approx(expected_returns)
     with artifact.table("portfolio_robustness.parquet") as rows:
         assert set(rows.candidate_id) == ids | {"joint"}
-    for analysis, settings in (
-        ("attribution", {"risk": {}, "benchmark_total_return_indices": {}}),
-        (
-            "group_comparison",
-            {
-                "statistics": {
-                    "hac_lag": 0,
-                    "bootstrap_block": 1,
-                    "bootstrap_repetitions": 10,
-                    "group_comparison": {
-                        "portfolio_ids": ["policy"],
-                        "primary_portfolio_id": "policy",
-                        "fdr_method": "BY",
-                        "alpha": 0.05,
-                        "seed": 1,
-                        "confidence": 0.95,
-                    },
-                }
-            },
-        ),
+    rejected = tmp_path / "attribution"
+    with pytest.raises(
+        ValueError, match="portfolio_statistics_candidate_metadata_required"
     ):
-        rejected = tmp_path / analysis
-        with pytest.raises(
-            ValueError, match="portfolio_statistics_candidate_metadata_required"
-        ):
-            portfolio_statistics(
-                {**config, **settings, "analyses": [analysis], "output": str(rejected)}
-            )
-        assert not rejected.exists()
+        portfolio_statistics(
+            {
+                **config,
+                "risk": {},
+                "benchmark_total_return_indices": {},
+                "analyses": ["attribution"],
+                "output": str(rejected),
+            }
+        )
+    assert not rejected.exists()
     data = read_dataset(inputs["dataset"]).rename(columns={"signal": "feature_signal"})
     data.loc[data.asset_id.eq("a0"), "feature_signal"] = np.nan
     observed_spec = make_demo_research_dataset_spec(

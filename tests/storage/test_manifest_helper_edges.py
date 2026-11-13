@@ -1,104 +1,40 @@
-from __future__ import annotations
+"""Manifest members preserve research facts and reject credentials before writing."""
 
-from pathlib import Path
+from __future__ import annotations
 
 import pytest
 
 from quant_research_platform.storage import manifests
 
 
-@pytest.mark.parametrize(
-    ("payload", "reason"),
-    [
-        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "absolute_path"),
-        ({"api_key": "SYNTHETIC_SECRET"}, "credential"),
-        ({"nested": {"Authorization": "Bearer SYNTHETIC_SECRET"}}, "credential"),
-        ({"message": '{"password": "SYNTHETIC_SECRET"}'}, "credential"),
-        ({"message": "{'auth': 'Basic SYNTHETIC_SECRET'}"}, "credential"),
-        ({"/srv/synthetic/report": 1}, "absolute_path"),
-        ({r"C:\synthetic\report": None}, "absolute_path"),
-        ({r"\\synthetic\share\report": {}}, "absolute_path"),
-        ({"nested": [{"/srv/synthetic/report": []}]}, "absolute_path"),
-        ({"//synthetic/share/report": 1}, "absolute_path"),
-        ({"prefix /srv/synthetic/report": 1}, "absolute_path"),
-        ({"/": None}, "absolute_path"),
-        ({"C:\\": {}}, "absolute_path"),
-        ({"nested": [{"//synthetic/share/report": []}]}, "absolute_path"),
-        ({"nested": {"/": [{"value": 1}]}}, "absolute_path"),
-        ({"nested": [{"C:\\": {"value": 1}}]}, "absolute_path"),
-    ],
-)
-def test_internal_manifest_rejects_credentials_and_keeps_private_paths(
-    payload: dict[str, object], reason: str, tmp_path: Path
-) -> None:
-    path = tmp_path / "private.json"
-    if reason == "absolute_path":
-        manifests.write_internal_artifact_manifest(
-            path, {"schema_id": "qrp-dataset-manifest", **payload}
-        )
-        assert manifests.read_manifest(path) == {
-            "schema_id": "qrp-dataset-manifest",
-            **payload,
-        }
-        return
-    assert not path.exists()
-    with pytest.raises(
-        ValueError, match=f"unsafe_internal_artifact_metadata: {reason}"
-    ):
-        manifests.write_internal_artifact_manifest(
-            tmp_path / "manifest.json", {"schema_id": "qrp-dataset-manifest", **payload}
-        )
-    path = tmp_path / "manifest.json"
-    safe = {
-        "schema_id": "qrp-dataset-manifest",
-        "source_id": "choice",
-        "data_id": "dataset_600000",
-        "manifest_path": "data/research/demo/_manifest/manifest.json",
-        "relative_keys": {
-            "synthetic/share/report": 1,
-            r"synthetic\share\report": 2,
-            "C:relative": 3,
-        },
-    }
-    manifests.write_internal_artifact_manifest(path, safe)
-    before = path.read_bytes()
-    with pytest.raises(
-        ValueError, match=f"unsafe_internal_artifact_metadata: {reason}"
-    ):
-        manifests.write_internal_artifact_manifest(
-            path, {"schema_id": "qrp-dataset-manifest", **payload}
-        )
-    assert path.read_bytes() == before
-    assert manifests.read_manifest(path) == safe
-
-
-def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> None:
+def test_manifest_preserves_input_paths_schema_names_and_unicode(tmp_path):
     payload = {
         "schema_id": "provider-schema",
         "source_id": "choice",
+        "path": "/workspace/qrp/data/research/a_share/demo",
         "fields": [{"name": "api_key", "dtype": "string"}],
         "key_columns": ["source_asset_id"],
+        "label": "分类😀",
     }
-    path = tmp_path / "schema.json"
-    manifests.write_internal_artifact_manifest(path, payload)
-    assert manifests.read_manifest(path) == payload
+    path = tmp_path / "nested/schema.json"
+    manifests.write_qrp_json_file(path, payload)
+    assert manifests.read_qrp_json_file(path)[1] == payload
+    assert "分类😀".encode() in path.read_bytes()
+    assert path.read_bytes().endswith(b"\n")
 
 
 @pytest.mark.parametrize(
-    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
+    "payload",
+    [
+        {"api_key": "SYNTHETIC_SECRET"},
+        {"nested": [{"Authorization": "Bearer SYNTHETIC_SECRET"}]},
+        {"message": '{"password": "SYNTHETIC_SECRET"}'},
+    ],
 )
-def test_manifest_single_text_keeps_utf8_newline_and_invalid_schema(
-    tmp_path, writer_name
-):
-    from quant_research_platform.contracts.json_codec import render_qrp_json_object
-
-    writer = getattr(manifests, writer_name)
-    payload = {"schema_id": "qrp-test", "label": "分类😀"}
-    expected = (render_qrp_json_object(payload) + "\n").encode("utf-8")
-    path = tmp_path / "exact.json"
-    writer(path, payload)
-    assert path.read_bytes() == expected
-    assert manifests.read_manifest(path) == payload
-    with pytest.raises(ValueError, match="^manifest_json_identity_invalid$"):
-        writer(tmp_path / "invalid-schema.json", {"schema_id": "invalid/schema"})
-    assert not (tmp_path / "invalid-schema.json").exists()
+def test_manifest_rejects_credentials_before_creating_a_file(payload, tmp_path):
+    path = tmp_path / "manifest.json"
+    with pytest.raises(
+        ValueError, match="unsafe_internal_artifact_metadata: credential"
+    ):
+        manifests.write_qrp_json_file(path, {"schema_id": "qrp-test", **payload})
+    assert not path.exists()

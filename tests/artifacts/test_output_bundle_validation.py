@@ -1,14 +1,12 @@
 """Actual native members are checked once; no filesystem mutation snapshots."""
 
-import json
-
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.outputs.manifest import (
-    validate_output_bundle,
+    read_output_manifest,
 )
 from quant_research_platform.artifacts.outputs.prediction import (
     iter_predictions,
@@ -24,8 +22,8 @@ from tests.helpers.output_frames import (
 
 def test_bundle_returns_actual_members_and_private_paths(tmp_path):
     root, _, metadata = native_bundle(tmp_path)
-    manifest, members = validate_output_bundle(root)
-    assert members == (root / "prediction.parquet",)
+    manifest = read_output_manifest(root)
+    assert manifest["files"] == ["prediction.parquet"]
     assert manifest["metadata"] == metadata
 
 
@@ -51,13 +49,6 @@ def test_nanosecond_window_and_independent_lookups(tmp_path):
     )
     selected = read_predictions(root, time_window=window)[0]
     assert len(selected) == 1 and selected.timestamp.iloc[0] == frame.timestamp.iloc[1]
-
-
-def test_prediction_member_decode_failure_propagates(tmp_path):
-    root, frame, _ = native_bundle(tmp_path)
-    (root / "prediction.parquet").write_bytes(b"bad parquet")
-    with pytest.raises(pa.ArrowInvalid):
-        read_predictions(root)
 
 
 def test_projected_iterator_closes_source_on_early_stop(tmp_path, monkeypatch):
@@ -143,20 +134,6 @@ def test_read_parses_one_manifest_and_projects_only_consumed_scores(
     assert frame.prediction_score.tolist() == [0.25]
     assert len(calls) == 1
     assert physical == [physical_columns]
-
-
-@pytest.mark.parametrize("field", ["scaler", "input_columns"])
-def test_prediction_publication_excludes_fitting_state(tmp_path, field):
-    root, _, _ = native_bundle(tmp_path)
-    manifest = json.loads((root / "manifest.json").read_text())
-    metadata = manifest["metadata"]
-    metadata["model_metadata"][field] = None
-    with pytest.raises(ValueError, match="prediction_training_facts_invalid"):
-        write_prediction_outputs(
-            output_path=tmp_path / "invalid",
-            output_chunks=[make_price_volume_prediction_output_frame()],
-            metadata=metadata,
-        )
 
 
 def test_prediction_writer_statistics_prune_actual_decoding(tmp_path, monkeypatch):

@@ -190,13 +190,8 @@ def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_p
     spec = inspect_dataset(root).spec
     assert spec["target_transform"] == "risk_residual"
     from quant_research_platform.contracts.risk import FactorRiskModel
-    from quant_research_platform.storage.datasets.schema import (
-        validate_dataset_spec_payload,
-    )
 
     assert spec["risk_model"] == FactorRiskModel().to_dict()
-    legacy = {key: value for key, value in spec.items() if key != "risk_model"}
-    validate_dataset_spec_payload(legacy)
     assert spec["column_units"]["model_target"] == "decimal_return"
     assert "earnings_yield" not in RISK_STYLE_COLUMNS
 

@@ -131,15 +131,14 @@ def build_panel(quotes, orders, trades, *, max_gap_seconds):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
+def produce(spec, *, inputs, time_window, source_catalog):
     sessions = {
         name: open_dataset_session(**_dataset_input_options(path))
         for name, path in inputs.items()
     }
-    for name, session in sessions.items():
-        if session.spec["data_id"] != name:
-            raise ValueError("hft_input_identity_mismatch")
+    for session in sessions.values():
         validate_input_market(session.spec, "a_share")
+    parameters = json.loads(spec.parameters_json)
     missing = set(spec.optional_source_input_data_ids) - sessions.keys()
     absent = {
         name: pd.DataFrame(
@@ -176,7 +175,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
     if spec.data_id == "hft_hawkes_factors":
         from quant_research_platform.research.models.hawkes import load_hawkes
 
-        hawkes_model = load_hawkes(json.loads(spec.parameters_json)["model"])
+        hawkes_model = load_hawkes(parameters["model"])
         if pd.Timestamp(lower) <= hawkes_model[1]:
             raise ValueError("hawkes_prediction_not_out_of_sample")
 
@@ -220,9 +219,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
             projections.update(
                 protocol.event_input_columns(
                     factor_columns,
-                    order_link_field=json.loads(spec.parameters_json)[
-                        "order_link_field"
-                    ],
+                    order_link_field=parameters["order_link_field"],
                 )
             )
             used_inputs = set(projections)
@@ -257,7 +254,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                     data["hft_quotes"],
                     data["hft_orders"],
                     data["hft_trades"],
-                    **json.loads(spec.parameters_json),
+                    **parameters,
                 )
             elif data["hft_panel"].empty:
                 continue
@@ -265,7 +262,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                 frame = compute_factors(
                     data["hft_panel"],
                     columns=factor_columns,
-                    **json.loads(spec.parameters_json),
+                    **parameters,
                 )
             elif spec.data_id == "hft_event_factors":
                 frame = compute_event_factors(
@@ -273,7 +270,7 @@ def produce(spec, *, inputs, time_window, processed_catalog, source_catalog):
                     data.get("hft_orders"),
                     data.get("hft_trades"),
                     columns=factor_columns,
-                    config=json.loads(spec.parameters_json),
+                    config=parameters,
                     missing_streams=missing,
                 )
             elif spec.data_id == "hft_hawkes_factors":

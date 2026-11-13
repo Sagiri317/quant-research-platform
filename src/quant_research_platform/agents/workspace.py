@@ -1,10 +1,12 @@
 """Local file inspection and host commands for the interactive research assistant."""
 
+import json
 import os
 import re
 import shutil
 import sys
 from fnmatch import fnmatchcase
+from itertools import islice
 from pathlib import Path
 from xml.etree import ElementTree
 from zipfile import ZipFile
@@ -17,9 +19,10 @@ TOOLS = {
     "read": (
         "Inspect a local file or directory: {path: workspace-relative path, "
         "offset?: character offset or directory entry offset, limit?: page size "
-        "(default 30000 characters / 100 entries), pages?: 1-based PDF pages "
+        "(default 30000 characters / 100 entries or table rows), "
+        "pages?: 1-based PDF pages "
         "(default [1]), encoding?: text encoding}. Images and PDF page previews "
-        "are sent as images. CSV/Parquet/Excel return schema, not private rows. "
+        "are sent as images. Parquet/Excel use row offsets and return paged rows. "
         "DOCX returns paragraphs and tables. input:alias/member addresses bound "
         "data; output:e0001/member addresses saved tool files; session:session.json "
         "retrieves this turn's evidence. document:alias/member reads a declared "
@@ -33,7 +36,7 @@ TOOLS = {
         "Workspace search uses a literal substring (one term at a time), not "
         "natural-language relevance; files=true searches names, including data. "
         "Returned paths can be passed directly to read; keep their full prefix. "
-        "Content search excludes raw data, generated results and secrets. Web "
+        "Content search excludes credentials and process logs. Web "
         "search sends only the query to the configured provider, costing one request."
     ),
     "terminal": (
@@ -42,8 +45,8 @@ TOOLS = {
         "30000)}. Uses the project working directory. QRP_PYTHON is this project's "
         "Python; QRP_OUTPUT is a fresh output directory; QRP_WORKSPACE is the "
         "workspace. Call existing Python APIs/CLI, do not reimplement algorithms. "
-        "Return schemas, counts and aggregate metrics, never private data rows, "
-        "credentials or tracebacks. Write results under QRP_OUTPUT. This is a real "
+        "Keep credentials, local absolute paths and tracebacks out of output. "
+        "Write results under QRP_OUTPUT. This is a real "
         "host shell with the user's permissions, not a container."
     ),
 }
@@ -118,6 +121,31 @@ def _page(text, arguments):
     }
 
 
+def _row_page(rows, arguments):
+    offset, limit = arguments.get("offset", 0), arguments.get("limit", 100)
+    _page("", {"offset": offset, "limit": limit})
+    selected = list(islice(rows, offset, offset + limit + 1))
+    return {
+        "text": sanitize_shared_text(
+            "\n".join(
+                json.dumps(row, ensure_ascii=False, default=str)
+                for row in selected[:limit]
+            )
+        ),
+        "rows_returned": min(len(selected), limit),
+        "next_offset": offset + limit if len(selected) > limit else None,
+    }
+
+
+def _text_page(path, arguments):
+    _page("", arguments)
+    with path.open(encoding=arguments.get("encoding", "utf-8-sig")) as handle:
+        text = handle.read(
+            arguments.get("offset", 0) + arguments.get("limit", 30000) + 1
+        )
+    return _page(text, arguments)
+
+
 def read_local(arguments, state, root):
     arguments = _strict_config(
         arguments, {"path"}, {"offset", "limit", "pages", "encoding"}
@@ -173,31 +201,23 @@ def read_local(arguments, state, root):
                 "images": images,
                 **_page("\n".join(text), arguments),
             }
-    if suffix in {".csv", ".tsv"}:
-        import pandas as pd
-
-        frame = pd.read_csv(
-            path,
-            nrows=0,
-            sep="\t" if suffix == ".tsv" else ",",
-            encoding=arguments.get("encoding", "utf-8-sig"),
-        )
-        return {
-            **result,
-            "columns": list(frame.columns),
-            "bytes": path.stat().st_size,
-            "rows_returned": 0,
-        }
     if suffix == ".parquet":
         import pyarrow.parquet as pq
 
-        metadata = pq.read_metadata(path)
-        return {
-            **result,
-            "schema": str(metadata.schema.to_arrow_schema()),
-            "rows": metadata.num_rows,
-            "rows_returned": 0,
-        }
+        with pq.ParquetFile(path) as parquet:
+            return {
+                **result,
+                "schema": str(parquet.schema_arrow),
+                "rows": parquet.metadata.num_rows,
+                **_row_page(
+                    (
+                        row
+                        for batch in parquet.iter_batches(batch_size=1000)
+                        for row in batch.to_pylist()
+                    ),
+                    arguments,
+                ),
+            }
     if suffix in {".xlsx", ".xlsm"}:
         from openpyxl import load_workbook
 
@@ -214,10 +234,10 @@ def read_local(arguments, state, root):
                             sanitize_shared_text(str(cell))
                             for cell in next(sheet.iter_rows(values_only=True), ())
                         ],
+                        **_row_page(sheet.iter_rows(values_only=True), arguments),
                     }
                     for sheet in workbook
                 ],
-                "rows_returned": 0,
             }
         finally:
             workbook.close()
@@ -234,6 +254,8 @@ def read_local(arguments, state, root):
     else:
         if suffix not in {
             ".py",
+            ".csv",
+            ".tsv",
             ".md",
             ".txt",
             ".json",
@@ -253,13 +275,7 @@ def read_local(arguments, state, root):
             "",
         }:
             raise ValueError("agent_file_format_requires_terminal")
-        workspace = Path(state["config"]["workspace"])
-        if path.is_relative_to((workspace / "data").resolve()) and suffix not in {
-            ".md",
-            ".txt",
-        }:
-            raise ValueError("agent_raw_payload_use_local_summary")
-        text = path.read_text(encoding=arguments.get("encoding", "utf-8-sig"))
+        return {**result, **_text_page(path, arguments)}
     return {**result, **_page(text, arguments)}
 
 
@@ -268,25 +284,16 @@ def search_local(arguments, state, root, *, timeout):
         arguments, {"query"}, {"scope", "path", "files", "offset", "limit"}
     )
     path = local_path(arguments.get("path", "."), state)
-    args = ["rg", "--hidden", "--path-separator", "/"]
+    args = ["rg", "--hidden", "--no-ignore", "--path-separator", "/"]
     for pattern in _SECRET_PATH_PATTERNS:
         args.extend(("--iglob", f"!{pattern}"))
     if arguments.get("files", False):
-        args += ["--files", "--no-ignore", "."]
+        args += ["--files", "."]
     else:
-        workspace = Path(state["config"]["workspace"])
-        if path.is_relative_to((workspace / "data").resolve()):
-            raise ValueError("agent_raw_data_search_filenames_only")
         args += [
             "-n",
             "-i",
             "-F",
-            "-g",
-            "!data/**",
-            "-g",
-            "!.run/**",
-            "-g",
-            "!results/**",
             "--",
             arguments["query"],
             ".",

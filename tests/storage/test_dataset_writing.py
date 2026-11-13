@@ -24,7 +24,6 @@ from quant_research_platform.storage.identity import (
 )
 from tests.helpers.paths import (
     filesystem_glob,
-    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -36,7 +35,10 @@ from tests.storage.low_level_fixtures import (
 def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
     result = write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec(),
+        metadata={"description": {"market": "A股"}, "row_count": 999},
     )
     manifest = json.loads(
         Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
@@ -57,6 +59,7 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
     assert manifest["file_count"] == 2
     assert manifest["row_count"] == 3
+    assert manifest["description"] == {"market": "A股"}
     assert spec_payload["data_id"] == "x"
     assert spec_payload["schema_id"] == "qrp-dataset-spec"
     assert spec_payload["kind"] == "factor"
@@ -71,58 +74,6 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
         read_dataset(root).sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     )
     pd.testing.assert_frame_equal(actual, expected, check_dtype=True, check_exact=True)
-
-
-def test_write_dataset_rejects_parallel_input_fingerprint_lineage(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(
-        ValueError,
-        match="unsupported_dataset_metadata_key",
-    ):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path),
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec(),
-            metadata={"input_fingerprints": {}},
-        )
-
-
-def test_inspect_dataset_ignores_unconsumed_metadata(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "parallel_fingerprint_lineage")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("parallel_fingerprint_lineage"),
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["input_fingerprints"] = {}
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    assert inspect_dataset(root).row_count == len(make_default_dataset_frame())
-
-
-def test_write_dataset_rejects_unsupported_reserved_and_unsafe_instance_metadata(
-    tmp_path: Path,
-) -> None:
-    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "unsupported_metadata"),
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("unsupported_metadata"),
-            metadata={"other_metadata": {}},
-        )
-    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
-        write_dataset(
-            make_dataset_artifact_root(tmp_path, "reserved_metadata"),
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("reserved_metadata"),
-            metadata={"row_count": 999},
-        )
 
 
 def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) -> None:

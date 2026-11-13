@@ -15,10 +15,7 @@ from quant_research_platform.artifacts.statistics import (
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
-    PortfolioDiagnostic,
-    PortfolioLedgerBatch,
     PortfolioTargetBlocked,
-    PortfolioValuation,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share import portfolio_sessions
@@ -291,9 +288,6 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
         TimeWindow(window["start"], window["end"]),
         sample_role="validation",
         candidate_ids=[c.candidate_id for c in candidates],
-        comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
     )
     root = write_statistics_artifact(
         tmp_path / "statistics",
@@ -304,64 +298,3 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
     artifact = read_statistics_artifact(root)
     with artifact.table("portfolio_daily.parquet") as daily:
         assert daily.groupby("candidate_id").nav_end.last().eq(final_nav).all()
-
-
-def test_native_writer_rejects_negative_zero_valued_long_only_rights(tmp_path):
-    start, end = pd.Timestamp("2023-01-04").value, pd.Timestamp("2023-01-05").value
-    values = []
-    for phase in ("before", "after", "end"):
-        stamp = end if phase == "end" else start
-        values.extend(
-            (
-                PortfolioValuation(
-                    stamp,
-                    "asset",
-                    phase,
-                    float(-1),
-                    0.0,
-                    0.0,
-                    lifecycle_id="2000-01-01",
-                ),
-                PortfolioValuation(stamp, "__cash__", phase, 100.0, 100.0),
-            )
-        )
-    batch = PortfolioLedgerBatch(
-        0,
-        (),
-        (),
-        tuple(values),
-        (
-            PortfolioDiagnostic("asset", None, "target_notional", 0.0),
-            PortfolioDiagnostic("__cash__", None, "target_notional", 100.0),
-            PortfolioDiagnostic(
-                "__cash__", None, "decision_reason", text="simple_rule"
-            ),
-        ),
-    )
-    capital_spec = PortfolioCapital(
-        **{
-            "candidate_id": "invalid_negative_rights",
-            "initial_capital": 100.0,
-            "valuation_currency": "CNY",
-            "valuation_method": "cash_equity",
-        }
-    )
-    metadata = {
-        "window": {
-            key: value
-            for key, value in {
-                "start": "2023-01-03",
-                "end": "2023-01-06",
-                "access": "validation",
-            }.items()
-            if key != "access"
-        },
-        "sample_role": "validation",
-    }
-    with pytest.raises(ValueError, match="portfolio_ledger_notional_invalid"):
-        write_portfolio_ledger_artifact(
-            tmp_path / "ledger",
-            capital=capital_spec,
-            metadata=metadata,
-            produce=lambda emit: emit(batch),
-        )

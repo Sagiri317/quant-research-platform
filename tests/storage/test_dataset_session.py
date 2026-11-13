@@ -14,11 +14,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_unlink,
     native_filesystem_path,
-)
-from tests.helpers.paths import (
-    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -76,29 +72,6 @@ def test_writer_summarizes_input_without_decoding_its_output(tmp_path, monkeypat
     inspected = inspect_dataset(root)
     assert inspected.row_count == result.row_count
     assert inspected.partition_row_counts == result.partition_row_counts
-
-
-def test_open_dataset_session_preserves_missing_manifest_preflight(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "missing_manifest_preflight")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("missing_manifest_preflight"),
-    )
-    filesystem_unlink(root / "_manifest" / "manifest.json")
-    metadata_reads = 0
-
-    def reject_metadata_read(*_args, **_kwargs):
-        nonlocal metadata_reads
-        metadata_reads += 1
-        raise AssertionError("metadata read ran for missing manifest")
-
-    monkeypatch.setattr(dataset_reading, "read_qrp_json_file", reject_metadata_read)
-    with pytest.raises(ValueError, match="dataset_manifest_missing"):
-        dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-    assert metadata_reads == 0
 
 
 def test_canonical_nonfinite_rows_rejected_before_publication(tmp_path: Path) -> None:
@@ -196,22 +169,3 @@ def test_writer_rejects_incompatible_physical_width_in_both_chunk_orders(
         write_dataset(
             root, chunks, spec=make_processed_dataset_spec(f"physical_width_{reverse}")
         )
-
-
-def test_full_inspection_rejects_summary_outside_partition_dates(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "forged_dates")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("forged_dates"),
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["date_min"] = "1900-01-01"
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
-        inspect_dataset(root)

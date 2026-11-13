@@ -49,7 +49,8 @@ def test_native_prediction_preserves_raw_units_rank_and_family(tmp_path: Path) -
     assert prediction.timestamp.eq(pd.Timestamp("2014-01-03")).all()
     np.testing.assert_allclose(prediction.prediction_score, [0.02, 0.01])
     assert prediction.prediction_rank_score.tolist() == [0.25, -0.25]
-    assert metadata["model_id"] == metadata["family_id"] == model_spec.model_id
+    facts = metadata["model_facts"]
+    assert facts["model"]["model_id"] == facts["family_id"] == model_spec.model_id
     assert output == tmp_path / "future" / "prediction"
 
 

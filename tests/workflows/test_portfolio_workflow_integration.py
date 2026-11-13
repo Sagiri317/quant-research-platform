@@ -136,7 +136,7 @@ def native_comparison(tmp_path_factory):
     )
 
 
-def _statistics_request(case, output, *, group, end, global_predictions=None):
+def _statistics_request(case, output, *, group, end):
     window = {"start": "2019-01-02", "end": end}
     config = statistics_config(factors=(case.factor,), selection_group=group)
     config["evaluation"] = {"primary_label": config["evaluation"]["primary_label"]}
@@ -144,8 +144,6 @@ def _statistics_request(case, output, *, group, end, global_predictions=None):
         key: value
         for key, value in config["statistics"].items()
         if key in {"hac_lag", "bootstrap_block", "bootstrap_repetitions"}
-        or key == "group_comparison"
-        and group == "quarterly"
     }
     config["statistics"]["bootstrap_repetitions"] = 32
     config.update(
@@ -165,10 +163,6 @@ def _statistics_request(case, output, *, group, end, global_predictions=None):
             }
         ],
     )
-    if group == "quarterly":
-        config["global_predictions"] = global_predictions or [
-            str(case.predictions["global", model]) for model in case.models
-        ]
     return config
 
 
@@ -201,9 +195,6 @@ def test_native_statistics_short_and_zero_maturity_windows(
                 tmp_path / group,
                 group=group,
                 end=end,
-                global_predictions=[
-                    str(case.predictions["global", model]) for model in case.models
-                ],
             )
         )
         artifact = read_statistics_artifact(output)
@@ -226,16 +217,6 @@ def test_native_statistics_short_and_zero_maturity_windows(
                 if group == "global"
                 else "incomplete_session_clock"
             ).all()
-        if group == "quarterly":
-            with artifact.table("model_group_comparison.parquet") as paired:
-                assert set(paired.family_id) == set(case.models)
-                if zero:
-                    assert paired.observation_count.eq(0).all()
-                    assert paired.status.eq("UNDEFINED").all()
-                    assert paired.reason.eq("no_common_observations").all()
-                    assert paired.bootstrap_reason.eq("no_common_observations").all()
-                else:
-                    assert paired.observation_count.between(1, 19).all()
 
 
 def test_native_prediction_missing_family_is_rejected(native_comparison, tmp_path):

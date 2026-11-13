@@ -70,15 +70,11 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
             or value.is_absolute()
             or PureWindowsPath(relative).drive
             or ".." in value.parts
-            or "raw" in value.parts
             or not value.parts
         ):
             raise ApiError("artifact_path_invalid", status_code=422, field="path")
         selected = root.joinpath(*value.parts).resolve()
-        if (
-            not selected.is_relative_to(root)
-            or "raw" in selected.relative_to(root).parts
-        ):
+        if not selected.is_relative_to(root):
             raise ApiError("artifact_path_invalid", status_code=422, field="path")
         return selected
 
@@ -121,7 +117,7 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
 
     @app.get("/api/inspect", operation_id="inspect_published_artifact")
     def inspect(path: str) -> dict[str, object]:
-        return evidence(queries.inspect_native, path)
+        return evidence(queries.inspect, path)
 
     @app.get("/api/portfolio-curve", operation_id="read_portfolio_curve")
     def portfolio_curve(path: str, stride: int = Query(1, ge=1)) -> dict[str, object]:

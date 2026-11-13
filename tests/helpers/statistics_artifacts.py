@@ -53,15 +53,9 @@ def statistics_config(
             "fama_macbeth_core_factors": evaluation["factors"],
             "hac_lag": 19,
             "bootstrap_block": 20,
-            "bootstrap_repetitions": 10_000,
+            "bootstrap_repetitions": 199,
             "fdr_primary": "BY_5pct",
             "fdr_robustness": "BH_5pct",
-            "group_comparison": {
-                "fdr_method": "BY",
-                "alpha": 0.05,
-                "seed": 42,
-                "confidence": 0.95,
-            },
         },
     }
 
@@ -145,14 +139,7 @@ def model_statistics_inputs(
                     data_spec_payload(spec), config["evaluation"]["primary_label"]
                 ),
             },
-            "model_metadata": {
-                "target_column": config["evaluation"]["primary_label"],
-                "input_columns": [spec.factor_columns[0]],
-                "sample_filter_mode": "eligible",
-                "model_algorithm": A_SHARE_MODEL_ALGORITHMS[
-                    index % len(A_SHARE_MODEL_ALGORITHMS)
-                ],
-            },
+            "model_metadata": {},
         }
         for index, family in enumerate(selection["families"])
     }
@@ -161,7 +148,7 @@ def model_statistics_inputs(
         "selections": {period: selection},
         "period_windows": {period: window},
         "trial_rows": _selection_trial_rows(
-            {"final" if config["selection_group"] == "global" else period: selection},
+            {period: selection},
             config["selection_group"],
         ),
     }
@@ -201,17 +188,12 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
             "capacity",
             "sharpe_inference",
             "cscv",
-            "group_comparison",
         ],
         execution_assumptions=asdict(EXECUTION_ASSUMPTIONS),
         risk=asdict(FactorRiskConfig()),
         benchmark_total_return_indices={"csi500": "H00905", "csi1000": "H00852"},
     )
     config["statistics"]["cscv_blocks"] = 10
-    config["statistics"]["group_comparison"].update(
-        portfolio_ids=[c["candidate_id"] for c in configuration["portfolios"]],
-        primary_portfolio_id=configuration["primary_portfolio_id"],
-    )
     return candidates, config
 
 

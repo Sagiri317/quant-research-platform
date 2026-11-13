@@ -53,7 +53,7 @@ def processed_spec():
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     source = open_dataset_session(**_dataset_input_options(inputs["decision_panel"]))
     if not {"signal_session", "execution_session", "return_available_at"} <= set(
         source.logical_columns

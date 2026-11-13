@@ -8,7 +8,6 @@ from dataclasses import asdict, dataclass, fields
 from itertools import groupby
 from pathlib import Path
 
-import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
@@ -21,21 +20,15 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioRightsAdjustment,
     PortfolioValuation,
-    validate_portfolio_transition,
-)
-from quant_research_platform.contracts.time import (
-    TimeWindow,
-    time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 from quant_research_platform.storage.manifests import (
     read_qrp_json_file,
-    write_manifest,
+    write_qrp_json_file,
 )
 from quant_research_platform.storage.parquet import (
     DEFAULT_BATCH_ROWS,
@@ -117,12 +110,8 @@ def write_portfolio_ledger_artifact(
     produce: Callable[[Callable[[PortfolioLedgerBatch], None]], object],
     final_calibration: Callable[[], dict[str, object]] | None = None,
 ) -> Path:
-    """Validate canonical economic batches once, then atomically publish tables."""
-    if not isinstance(capital, PortfolioCapital):
-        raise ValueError("portfolio_ledger_capital_invalid")
+    """Save the account engine's economic batches and publish the completed tables."""
     metadata = dict(metadata)
-    if "window" not in metadata:
-        raise ValueError("portfolio_ledger_window_missing")
 
     def write(staging: Path) -> None:
         with closing_iterator(ExitStack()) as stack:
@@ -138,7 +127,6 @@ def write_portfolio_ledger_artifact(
                 )
             buffers = {name: [] for name in _TABLE_TYPES}
             sequence = 0
-            validation = _LedgerValidation(capital, metadata["window"])
 
             def flush(name: str) -> None:
                 records = buffers[name]
@@ -150,7 +138,6 @@ def write_portfolio_ledger_artifact(
 
             def emit(batch: PortfolioLedgerBatch) -> None:
                 nonlocal sequence
-                validation.observe(batch)
                 for name in _TABLE_TYPES:
                     for row in getattr(batch, name):
                         buffers[name].append({"sequence": sequence, **asdict(row)})
@@ -167,8 +154,8 @@ def write_portfolio_ledger_artifact(
             dict(final_calibration()) if final_calibration is not None else None
         )
         if calibration is not None:
-            write_manifest(staging / "final_alpha_calibration.json", calibration)
-        write_manifest(
+            write_qrp_json_file(staging / "final_alpha_calibration.json", calibration)
+        write_qrp_json_file(
             staging / "manifest.json",
             {
                 "schema_id": "qrp-portfolio-ledger",
@@ -196,8 +183,6 @@ def read_portfolio_ledger_artifact(
     """Read native metadata; consume requested economics once without pre-scans."""
     root = Path(instance_root)
     _, manifest = read_qrp_json_file(root / "manifest.json")
-    if manifest["schema_id"] != "qrp-portfolio-ledger":
-        raise ValueError("portfolio_ledger_manifest_invalid")
     artifact = PortfolioLedgerArtifact(
         manifest["metadata"],
         root,
@@ -251,97 +236,6 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
         for chunk in chunks:
             records = chunk.to_pylist()
             yield from records
-
-
-class _LedgerValidation:
-    """Validate the canonical stream at atomic publication."""
-
-    def __init__(self, capital, research_window):
-        self.capital = capital
-        start, end, closed = time_window_timestamp_interval(
-            TimeWindow(research_window["start"], research_window["end"])
-        )
-        self.bounds = (
-            pd.Timestamp(start).value,
-            pd.Timestamp(end).value - (0 if closed else 1),
-        )
-        self.key_index = ExactPrimaryKeyIndex(primary_key=("fill_id",))
-        self.sequence = 0
-        self.previous = None
-
-    def observe(self, batch):
-        if type(batch) is not PortfolioLedgerBatch or batch.sequence != self.sequence:
-            raise ValueError("portfolio_ledger_sequence_invalid")
-        self.previous = validate_portfolio_transition(
-            batch, self.capital, self.previous
-        )
-        if any(
-            not self.bounds[0] <= row.timestamp_ns <= self.bounds[1]
-            for row in batch.valuations
-        ):
-            raise ValueError("portfolio_ledger_valuation_window_invalid")
-        inserted = self.key_index.add_identity_payloads(
-            namespace="fills",
-            payloads=(
-                (row.fill_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                for row in batch.trades
-            ),
-        )
-        if inserted != len(batch.trades):
-            raise ValueError("portfolio_ledger_duplicate_fill")
-        for diagnostic in batch.diagnostics:
-            if diagnostic.fill_id is not None and self.key_index.identity_payload_value(
-                namespace="fills", payload=diagnostic.fill_id.encode("utf-8")
-            ) != diagnostic.asset_id.encode("utf-8"):
-                raise ValueError("portfolio_ledger_diagnostic_fill_mismatch")
-        for event in batch.rights_adjustments:
-            if event.kind == "recovery":
-                continue
-            identity = event.event_id.rsplit(":", 1)[0].encode("utf-8")
-            payload = "|".join(
-                (
-                    event.asset_id,
-                    event.lifecycle_id,
-                    event.evidence_identity,
-                    str(float(event.entitlement_quantity)),
-                    str(event.entitlement_record_at_ns),
-                )
-            ).encode("utf-8")
-            if event.kind == "registration":
-                if (
-                    self.key_index.add_identity_payloads(
-                        namespace="entitlement_registration",
-                        payloads=((identity, payload),),
-                    )
-                    != 1
-                ):
-                    raise ValueError("portfolio_registration_duplicate")
-            elif (
-                self.key_index.identity_payload_value(
-                    namespace="entitlement_registration", payload=identity
-                )
-                != payload
-            ):
-                raise ValueError("portfolio_registration_entitlement_invalid")
-        inserted = self.key_index.add_identity_payloads(
-            namespace="rights_adjustments",
-            payloads=(
-                (row.event_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                for row in batch.rights_adjustments
-            ),
-        )
-        if inserted != len(batch.rights_adjustments):
-            raise ValueError("portfolio_ledger_duplicate_rights_adjustment")
-        inserted = self.key_index.add_identity_payloads(
-            namespace="cashflows",
-            payloads=(
-                (row.flow_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                for row in batch.cashflows
-            ),
-        )
-        if inserted != len(batch.cashflows):
-            raise ValueError("portfolio_ledger_duplicate_cashflow")
-        self.sequence += 1
 
 
 def _iter_batches(root: Path) -> Iterator[PortfolioLedgerBatch]:

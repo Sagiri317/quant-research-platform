@@ -642,7 +642,10 @@ def evaluate_time_series(config):
             model = metadata["model_facts"]["model"]
             if model["target_column"] != label:
                 raise ValueError("evaluation_prediction_target_mismatch")
-            current_identity = (model["model_algorithm"], metadata["label_unit"])
+            current_identity = (
+                model["model_algorithm"],
+                metadata["model_facts"]["label_unit"],
+            )
             if identity is not None and current_identity != identity:
                 raise ValueError("evaluation_candidate_signal_mismatch")
             identity = current_identity

@@ -6,6 +6,7 @@ import warnings
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import cached_property
+from itertools import count
 
 import numpy as np
 import pandas as pd
@@ -13,7 +14,7 @@ import pandas as pd
 import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
 from quant_research_platform.contracts.experiments import (
-    legal_training_mask,
+    label_maturity_mask,
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
@@ -275,11 +276,10 @@ def _legal_training_rows(
         strict_finite_numeric_series(
             frame[column], error=f"invalid_training_value: {column}", allow_null=True
         )
-    keep = legal_training_mask(
+    keep = label_maturity_mask(
         frame,
         fitting_cutoff=fitting_cutoff,
         availability_column=availability_column,
-        feature_columns=(),
         target_column=spec.target_column,
     )
     keep &= frame.loc[:, spec.input_columns].notna().any(axis=1)
@@ -301,7 +301,7 @@ def _collect_training_frame(
     required = set(spec.input_columns)
     required.add(spec.target_column)
     required.add("timestamp")
-    required.add("eligible")
+    required.update(required_filter_columns(spec.sample_filter_mode))
     availability_columns = (
         (availability_column,)
         if availability_column is not None
@@ -325,7 +325,6 @@ def _collect_training_frame(
                 *spec.input_columns,
                 *context_columns,
                 spec.target_column,
-                "eligible",
                 *availability_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
@@ -523,24 +522,99 @@ def _fit_predictor(
             ],
             "verbose": False,
         }
+    callback = None
     if patience is not None:
         from xgboost.callback import EarlyStopping
 
         # Native save_best discards later trees for prediction and explanations.
+        callback = EarlyStopping(rounds=patience, save_best=True)
         estimator.set_params(
             early_stopping_rounds=None,
-            callbacks=[EarlyStopping(rounds=patience, save_best=True)],
+            callbacks=[callback],
         )
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", ConvergenceWarning)
-            estimator.fit(scaled_matrix, y, sample_weight=weights, **fit_options)
+        if spec.model_algorithm == "lasso_regression" and estimator.max_iter is None:
+            _fit_lasso_until_converged(estimator, scaled_matrix, y, weights)
+        elif (
+            spec.model_algorithm == "xgboost_regressor"
+            and "n_estimators" in spec.hyperparameters
+            and spec.hyperparameters["n_estimators"] is None
+        ):
+            _fit_booster_until_stopped(
+                estimator,
+                scaled_matrix,
+                y,
+                weights,
+                fit_options["eval_set"][0],
+                callback,
+            )
+        else:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ConvergenceWarning)
+                estimator.fit(scaled_matrix, y, sample_weight=weights, **fit_options)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
     finally:
         if patience is not None:
             estimator.set_params(early_stopping_rounds=patience, callbacks=None)
     return ScaledPredictor(estimator, scaler)
+
+
+def _fit_lasso_until_converged(estimator, matrix, target, weights):
+    from sklearn.exceptions import ConvergenceWarning
+
+    center = np.average(target, weights=weights) if estimator.fit_intercept else 0.0
+    tolerance = estimator.tol * np.average((target - center) ** 2, weights=weights)
+    warm_start = estimator.warm_start
+    block, iterations = 1000, 0
+    estimator.set_params(warm_start=True)
+    try:
+        while True:
+            estimator.set_params(max_iter=block)
+            with warnings.catch_warnings():
+                # A block warning means continue the same coordinate-descent solve.
+                warnings.simplefilter("ignore", ConvergenceWarning)
+                estimator.fit(matrix, target, sample_weight=weights)
+            iterations += estimator.n_iter_
+            if estimator.dual_gap_ <= tolerance:
+                break
+            block *= 2
+    finally:
+        estimator.set_params(max_iter=None, warm_start=warm_start)
+    estimator.n_iter_ = iterations
+
+
+def _fit_booster_until_stopped(
+    estimator, matrix, target, weights, validation, callback
+):
+    from xgboost import Booster
+
+    options = {
+        "missing": estimator.missing,
+        "enable_categorical": estimator.enable_categorical,
+        "feature_types": estimator.feature_types,
+    }
+    training = estimator._create_dmatrix(
+        ref=None, data=matrix, label=target, weight=weights, **options
+    )
+    held = estimator._create_dmatrix(
+        ref=training, data=validation[0], label=validation[1], **options
+    )
+    booster = Booster(estimator.get_xgb_params(), cache=[training, held])
+    booster = callback.before_training(booster)
+    history = {"validation_0": {}}
+    for iteration in count():
+        booster.update(training, iteration)
+        for measurement in booster.eval_set(
+            [(held, "validation_0")], iteration
+        ).split()[1:]:
+            name, value = measurement.split(":", 1)
+            metric = name.removeprefix("validation_0-")
+            history["validation_0"].setdefault(metric, []).append(float(value))
+        if callback.after_iteration(booster, iteration, history):
+            break
+    estimator._Booster = callback.after_training(booster)
+    estimator.evals_result_ = history
 
 
 def iter_model_work_frames(
@@ -570,7 +644,6 @@ def model_training_read_columns(
                 *primary_key,
                 *input_columns,
                 label_column,
-                "eligible",
                 *(
                     training_availability_columns(label_column)
                     if availability_column is None

@@ -49,9 +49,9 @@ from quant_research_platform.research.policies.portfolio_policy import (
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
-    atomic_write_json,
     reject_if_exists,
 )
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def train_policy(config):
@@ -187,7 +187,7 @@ def train_policy(config):
                 (staging / "feature_scaler.pkl").write_bytes(
                     pickle.dumps(feature_scaler)
                 )
-                atomic_write_json(staging / "policy.json", facts)
+                write_qrp_json_file(staging / "policy.json", facts)
 
             atomic_write_directory(output, write)
         trial.finish(result={"actual_timesteps": model.num_timesteps})
@@ -564,7 +564,7 @@ def backtest_policy(config, *, portfolio_context=None):
             },
             produce=produce,
         )
-        atomic_write_json(staging / "summary.json", result)
+        write_qrp_json_file(staging / "summary.json", result)
 
     atomic_write_directory(output, write)
     return output

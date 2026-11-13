@@ -9,7 +9,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
-    validate_portfolio_transition,
 )
 from quant_research_platform.research.portfolios.accounting import (
     portfolio_interval_economics,
@@ -129,10 +128,8 @@ def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind
     capital = PortfolioCapital(
         "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
     )
-    previous = None
     economics = _LedgerEconomics(capital)
     for batch in batches:
-        previous = validate_portfolio_transition(batch, capital, previous)
         economics.consume(batch)
         portfolio_interval_economics(batch)
     initial = next(
@@ -319,9 +316,6 @@ def test_available_replacement_is_atomic_in_every_wealth_snapshot(
     capital = PortfolioCapital(
         "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
     )
-    previous = None
-    for batch in batches:
-        previous = validate_portfolio_transition(batch, capital, previous)
     root = write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=capital,
@@ -582,9 +576,7 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
     capital = PortfolioCapital(
         "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
     )
-    previous = None
     for batch in batches:
-        previous = validate_portfolio_transition(batch, capital, previous)
         assert portfolio_interval_economics(batch)["gross_return"] == pytest.approx(
             0.0, abs=1e-14
         )

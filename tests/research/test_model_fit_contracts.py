@@ -1,7 +1,5 @@
 """Model fitting, legal sample retention and owned preprocessing buffers."""
 
-import warnings
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -46,24 +44,22 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
 
 
 def test_convergence_warning_is_a_model_fit_failure() -> None:
-    from sklearn.exceptions import ConvergenceWarning
-
-    class WarningEstimator:
-        def fit(self, _matrix, _target, **_kwargs):
-            warnings.warn("not converged", ConvergenceWarning, stacklevel=2)
-
+    phase = np.arange(40) * (2 * np.pi / 40)
+    common = np.sqrt(2) * np.sin(phase)
+    difference = 0.01 * np.sqrt(2) * np.cos(phase)
     spec = ModelSpec(
         model_id="linear_warning",
         model_algorithm="lasso_regression",
-        input_factor_columns=("x",),
+        input_factor_columns=("x", "z"),
         target_column="label",
-        hyperparameters={"alpha": 1.0},
+        hyperparameters={"alpha": 0.01, "tol": 1e-12, "max_iter": 1},
     )
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2018-01-01", "2018-01-02"]),
-            "x": [1.0, 2.0],
-            "label": [1.0, 2.0],
+            "timestamp": pd.date_range("2018-01-01", periods=40, freq="s"),
+            "x": common + difference,
+            "z": common - difference,
+            "label": 2 * common,
         }
     )
     with pytest.raises(ValueError, match="model_fit_non_converged"):
@@ -74,7 +70,7 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
                 spec,
                 fitting_cutoff="2018-01-02",
             ),
-            estimator=WarningEstimator(),
+            estimator=build_estimator_from_model_spec(spec),
         )
 
 
@@ -171,7 +167,7 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
     np.testing.assert_array_equal(weights, original_weights)
 
 
-def test_training_raw_validation_runs_once_with_duplicate_dataframe_index(monkeypatch):
+def test_training_filter_handles_duplicate_dataframe_index():
 
     frame = pd.DataFrame(
         {
@@ -190,18 +186,9 @@ def test_training_raw_validation_runs_once_with_duplicate_dataframe_index(monkey
         input_factor_columns=("x",),
         target_column="label",
     )
-    calls = []
-    original = fitting.legal_training_mask
-
-    def validate(raw, **kwargs):
-        calls.append(len(raw))
-        return original(raw, **kwargs)
-
-    monkeypatch.setattr(fitting, "legal_training_mask", validate)
     prepared = fitting._collect_training_frame(
         [frame], spec, fitting_cutoff="2020-01-02"
     )
-    assert calls == [2]
     assert prepared.training.asset_id.tolist() == ["b"]
     assert prepared.row_counts["rows_input"] == 2
     assert prepared.row_counts["rows_after_filter_mode"] == 1

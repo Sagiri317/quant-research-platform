@@ -117,7 +117,6 @@ def test_scoring_reports_missing_keys_for_valid_published_predictions(
         "missing_candidate",
         "duplicate_candidate",
         "missing_fold",
-        "global_partial",
         "test_metric",
     ],
 )
@@ -129,11 +128,6 @@ def test_selection_requires_full_declared_validation_science(tmp_path, mutation)
         config["candidate_ids"] = [config["candidate_ids"][0]] * 2
     elif mutation == "missing_fold":
         config["predictions"][0] = []
-    elif mutation == "global_partial":
-        config.update(
-            selection_group="global",
-            scoring_window={"start": "2020-01-05", "end": "2020-01-06"},
-        )
     else:
         path = score(config)
         with pytest.raises(ValueError, match="selection_metric_direction_invalid"):
@@ -533,7 +527,7 @@ def test_score_retains_only_predictions_and_matches_full_join(tmp_path, monkeypa
         selected = predictions.set_index(["timestamp", "asset_id"]).loc[expected_keys]
         target = labels.set_index(["timestamp", "asset_id"]).loc[expected_keys, "label"]
         loss = (selected.prediction_score - target) ** 2
-        expected_losses[metadata["model_id"]] = (
+        expected_losses[metadata["model_facts"]["model"]["model_id"]] = (
             loss.groupby(level="timestamp").mean().mean()
         )
 

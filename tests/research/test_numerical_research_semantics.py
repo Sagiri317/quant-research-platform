@@ -389,59 +389,6 @@ def test_ordinary_fit_preserves_zero_coefficient(weighted):
     np.testing.assert_allclose(actual.coefficients, [2, 1, 0], rtol=1e-14, atol=1e-14)
 
 
-def test_test_set_keeps_rankic_by_and_explicit_exploratory_exclusion():
-    from copy import deepcopy
-
-    from quant_research_platform.research.models.statistics import _paired_group_rankic
-    from quant_research_platform.research.protocols import a_share
-    from tests.helpers.research_configuration import A_SHARE_MODEL_ALGORITHMS
-    from tests.helpers.statistics_artifacts import statistics_config
-
-    manifest = statistics_config(sample_role="test", selection_group="quarterly")
-    manifest["statistics"]["bootstrap_repetitions"] = 199
-    families = tuple(A_SHARE_MODEL_ALGORITHMS)
-    dates = pd.bdate_range("2024-01-02", periods=64)
-    rng = np.random.default_rng(918)
-    global_losses = pd.DataFrame(
-        [
-            dict(
-                timestamp=date,
-                family_id=family,
-                observation_count=100,
-                sample_role="test",
-                status="DEFINED",
-                loss=rng.normal(0, 0.1),
-            )
-            for family in families
-            for date in dates
-        ]
-    )
-    quarterly = global_losses.copy()
-    quarterly["loss"] += rng.normal(-0.01, 0.04, len(quarterly))
-
-    def compare(value):
-        return _paired_group_rankic(
-            quarterly.assign(
-                **{"global": -global_losses.loss, "quarterly": -quarterly.loss}
-            ),
-            selection_group="quarterly",
-            family_ids=families,
-            config=value,
-        )
-
-    actual = compare(manifest)
-    assert actual.fdr_method.eq("BY").all()
-    assert actual.fdr_adjusted_p_value.notna().all()
-    selected = deepcopy(manifest)
-    selected["sample_role"] = "validation"
-    selected["selection_is_exploratory"] = True
-    assert a_share._inference_blocker(selected) == "exploratory_selection_excluded"
-    selected["selection_is_exploratory"] = False
-    selected["sample_role"] = "test"
-    selected["feature_recipe"] = {"role": "robustness"}
-    assert a_share._inference_blocker(selected) == "feature_recipe_robustness_excluded"
-
-
 def test_white_constant_squared_residual_is_undefined():
     from quant_research_platform.research import statistics
 

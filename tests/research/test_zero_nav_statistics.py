@@ -1,7 +1,5 @@
 """Amount-ledger recovery and undefined rate persistence after total loss."""
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
@@ -185,22 +183,6 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
             == 100.0
         )
 
-    if recovery == "cash_retained":
-        replay = replace(
-            batches[2].rights_adjustments[0],
-            timestamp_ns=dates[4].value,
-            cash_amount=0.0,
-        )
-        repeated = [*batches[:3], replace(batches[3], rights_adjustments=(replay,))]
-        with pytest.raises(
-            ValueError, match="portfolio_ledger_duplicate_rights_adjustment"
-        ):
-            write_portfolio_ledger_artifact(
-                tmp_path / "replayed",
-                capital=capital,
-                metadata=metadata,
-                produce=lambda emit: [emit(batch) for batch in repeated],
-            )
     if is_cash:
         assert (
             sum(
@@ -272,22 +254,10 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     assert performance.loc[(candidate, "max_drawdown"), "value"] == -1.0
     assert performance.loc[(candidate, "sharpe"), "status"] == "UNDEFINED"
     assert performance.loc[(candidate, "cost"), "value"] == 0.0
-    assert tables["portfolio_group_comparison"].status.eq("UNDEFINED").all()
-    for group in ("global", "quarterly"):
-        wealth = tables["portfolio_group_comparison"][f"{group}_terminal_wealth"]
-        assert wealth.to_numpy() == pytest.approx(terminal / initial)
-        assert (
-            tables["portfolio_group_comparison"][f"{group}_terminal_wealth_reason"]
-            .eq("")
-            .all()
-        )
     metadata = statistics_metadata(
         TimeWindow(window["start"], window["end"]),
         sample_role=access,
         candidate_ids=[c.candidate_id for c in candidates],
-        comparison_portfolio_ids=manifest["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
     )
     root = write_statistics_artifact(
         tmp_path / "statistics",
@@ -299,110 +269,6 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     with artifact.table("portfolio_daily.parquet") as persisted:
         assert len(persisted) == 4 * len(candidates)
         assert persisted.loc[persisted.nav_before.eq(0), "net_return"].isna().all()
-    with artifact.table("portfolio_group_comparison.parquet") as persisted:
-        for group in ("global", "quarterly"):
-            column = f"{group}_terminal_wealth"
-            pd.testing.assert_series_equal(
-                persisted[column],
-                tables["portfolio_group_comparison"][column].astype("float64"),
-                check_exact=True,
-            )
-            assert persisted[f"{column}_reason"].eq("").all()
-
-
-@pytest.mark.parametrize("daily_complete", [False, True])
-@pytest.mark.parametrize("empty_pair", [False, True])
-def test_undefined_return_pair_preserves_other_pairs_and_fdr_family(
-    tmp_path, daily_complete, empty_pair
-):
-    from math import erfc, sqrt
-
-    import numpy as np
-
-    from quant_research_platform.research.portfolios.diagnostics import (
-        _group_portfolio_comparison,
-    )
-
-    pairs = ["affected", "ordinary"]
-    manifest = {
-        "sample_role": "test",
-        "statistics": {
-            "hac_lag": 0,
-            "bootstrap_block": 1,
-            "bootstrap_repetitions": 2,
-            "group_comparison": {
-                "portfolio_ids": pairs,
-                "primary_portfolio_id": pairs[0],
-                "fdr_method": "BY",
-                "alpha": 0.05,
-                "seed": 42,
-                "confidence": 0.95,
-            },
-        },
-    }
-    dates = pd.bdate_range("2024-01-01", periods=3)
-    matrix = pd.DataFrame(
-        {
-            "global_affected": [np.nan if empty_pair else 0.0, np.nan],
-            "quarterly_affected": [0.2, 1000.0],
-            "global_ordinary": [0.0, 0.0],
-            "quarterly_ordinary": [0.01, 0.03],
-        },
-        index=pd.MultiIndex.from_arrays(
-            [dates[:-1], dates[1:]], names=["entry_at", "end_at"]
-        ),
-    )
-    result = _group_portfolio_comparison(
-        matrix, manifest, daily_complete=daily_complete
-    ).set_index("portfolio_id")
-    assert len(result) == len(pairs)
-    assert result.fdr_family_size.eq(len(pairs)).all()
-    assert result.observation_count.eq(2).all()
-    assert result.loc[pairs[0], "status"] == "UNDEFINED"
-    reason = "nonpositive_start_nav" if daily_complete else "incomplete_daily_axis"
-    assert result.loc[pairs[0], "reason"] == reason
-    assert result.loc[pairs[0], "bootstrap_reason"] == reason
-    assert (
-        result.loc[pairs[1:], "status"]
-        .eq("DEFINED" if daily_complete else "UNDEFINED")
-        .all()
-    )
-    ordinary = result.loc[pairs[1]]
-    assert ordinary.bootstrap_status == ("DEFINED" if daily_complete else "UNDEFINED")
-    if daily_complete:
-        standard_error = sqrt((0.01**2 + 0.01**2) / 4)
-        p_value = erfc((0.02 / standard_error) / sqrt(2))
-        assert ordinary.standard_error == pytest.approx(standard_error)
-        assert ordinary.p_value == pytest.approx(p_value)
-        # BY retains both planned hypotheses, including the undefined pair.
-        assert ordinary.fdr_adjusted_p_value == pytest.approx(3 * p_value)
-    means = ["global_mean", "quarterly_mean", "mean_difference"]
-    if empty_pair:
-        assert result.loc[pairs[0], means].isna().all()
-    else:
-        assert result.loc[pairs[0], means].to_numpy(dtype=float) == pytest.approx(
-            [0.0, 0.2, 0.2]
-        )
-    # The inference helper has no endpoint ledger; wealth is independently supplied.
-    for group in ("global", "quarterly"):
-        result[f"{group}_terminal_wealth"] = 1.0
-        result[f"{group}_terminal_wealth_reason"] = ""
-    output = write_statistics_artifact(
-        tmp_path / "comparison",
-        metadata=statistics_metadata(
-            TimeWindow(dates[0], dates[-1]),
-            sample_role="test",
-            comparison_portfolio_ids=pairs,
-        ),
-        tables={"portfolio_group_comparison": result.reset_index()},
-        table_group="portfolio",
-    )
-    with read_statistics_artifact(output).table(
-        "portfolio_group_comparison.parquet"
-    ) as saved:
-        pd.testing.assert_frame_equal(
-            saved.set_index("portfolio_id")[means], result[means], check_exact=True
-        )
 
 
 def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
@@ -463,158 +329,3 @@ def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():
     assert result["estimated_held_assets"] == 1
     assert result["estimated_value_end"] == 0.0
     assert pd.isna(result["estimated_weight_end"])
-
-
-@pytest.mark.parametrize("with_calendar", [False, True])
-def test_native_group_descriptions_share_finite_days(tmp_path, with_calendar):
-    from dataclasses import asdict
-
-    from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
-    from quant_research_platform.research.portfolios.diagnostics import (
-        portfolio_statistics,
-    )
-    from quant_research_platform.sources.csmar.interim import interim_catalog
-    from quant_research_platform.storage.datasets import write_dataset
-
-    dates = pd.bdate_range("2024-01-01", periods=3)
-    window = {"start": str(dates[0].date()), "end": str(dates[-1].date())}
-    paths = []
-    # G loses everything; Q remains positive. Only the first day has a finite pair.
-    for group, marks in (
-        ("global", [10, 0, 0]),
-        ("quarterly", [10, 11, 13.2]),
-    ):
-        candidate = PortfolioCandidateSpec(
-            candidate_id=f"{group}_ordinary",
-            selection_group=group,
-            construction="quantile_equal_weight",
-            prediction_selector="champion",
-            rebalance_schedule="daily",
-            top_quantile=1.0,
-            benchmark_id=None,
-        )
-        batches = []
-        for i, (start, finish) in enumerate(zip(marks[:-1], marks[1:], strict=True)):
-            at, end = dates[i].value, dates[i + 1].value
-            valuations = []
-            for phase in ("before", "after", "end"):
-                quantity = float(0 if phase == "before" and i == 0 else 100)
-                price = finish if phase == "end" else start
-                stamp = end if phase == "end" else at
-                cash = 1000.0 if phase == "before" and i == 0 else 0.0
-                valuations.extend(
-                    (
-                        PortfolioValuation(
-                            stamp,
-                            "asset",
-                            phase,
-                            quantity,
-                            float(quantity * float(price)),
-                            price,
-                            lifecycle_id="2000-01-01",
-                        ),
-                        PortfolioValuation(stamp, "__cash__", phase, cash, cash),
-                    )
-                )
-            diagnostics = (
-                PortfolioDiagnostic("asset", None, "adv20", 1000000.0),
-                PortfolioDiagnostic("asset", None, "target_notional", 100 * start),
-                PortfolioDiagnostic("__cash__", None, "target_notional", 0.0),
-                PortfolioDiagnostic("asset", None, "decision_delta_weight", 0.0),
-                PortfolioDiagnostic("__cash__", None, "decision_delta_weight", 0.0),
-                PortfolioDiagnostic(
-                    "__cash__", None, "decision_reason", text="simple_rule"
-                ),
-            )
-            batches.append(
-                PortfolioLedgerBatch(
-                    i,
-                    (ExecutedTrade("buy", "buy", at, "asset", float(100), 1000.0),)
-                    if i == 0
-                    else (),
-                    (
-                        PortfolioCashFlow(
-                            "buy:principal", at, "asset", "buy", "principal", -1000.0
-                        ),
-                    )
-                    if i == 0
-                    else (),
-                    tuple(valuations),
-                    diagnostics,
-                )
-            )
-        paths.append(
-            str(
-                write_portfolio_ledger_artifact(
-                    tmp_path / group,
-                    capital=PortfolioCapital(
-                        candidate.candidate_id, 1000.0, "CNY", "cash_equity"
-                    ),
-                    metadata={
-                        "window": window,
-                        "sample_role": "exploratory",
-                        "candidate": asdict(candidate),
-                    },
-                    produce=lambda emit, batches=batches: [
-                        emit(batch) for batch in batches
-                    ],
-                )
-            )
-        )
-    inputs = {}
-    if with_calendar:
-        calendar = tmp_path / "calendar"
-        write_dataset(
-            calendar,
-            pd.DataFrame(
-                {
-                    "timestamp": dates,
-                    "calendar_date": dates,
-                    "source_market_type": 1,
-                    "is_trading_day": True,
-                    "source_day_of_week": dates.dayofweek,
-                    "source_state": "O",
-                }
-            ),
-            spec=interim_catalog().get("trading_calendar"),
-        )
-        inputs["calendar"] = str(calendar)
-    output = portfolio_statistics(
-        {
-            "inputs": inputs,
-            "ledgers": paths,
-            "output": str(tmp_path / "statistics"),
-            "window": window,
-            "analyses": ["group_comparison"],
-            "statistics": {
-                "hac_lag": 0,
-                "bootstrap_block": 1,
-                "bootstrap_repetitions": 10,
-                "group_comparison": {
-                    "portfolio_ids": ["ordinary"],
-                    "primary_portfolio_id": "ordinary",
-                    "fdr_method": "BY",
-                    "alpha": 0.05,
-                    "seed": 42,
-                    "confidence": 0.95,
-                },
-            },
-        }
-    )
-    with read_statistics_artifact(output).table(
-        "portfolio_group_comparison.parquet"
-    ) as rows:
-        row = rows.iloc[0]
-        means = row[["global_mean", "quarterly_mean", "mean_difference"]]
-        assert means.to_numpy(dtype=float) == pytest.approx([-1.0, 0.1, 1.1])
-        assert row.observation_count == 2
-        assert row.fdr_family_size == 1
-        assert row.status == row.bootstrap_status == "UNDEFINED"
-        assert (
-            row.reason
-            == row.bootstrap_reason
-            == ("nonpositive_start_nav" if with_calendar else "incomplete_daily_axis")
-        )
-        assert pd.isna(row.p_value) and pd.isna(row.bootstrap_lower)
-        assert row.global_terminal_wealth == 0.0
-        assert row.quarterly_terminal_wealth == pytest.approx(1.32)

@@ -88,7 +88,7 @@ def prepare_source(config: Mapping):
     ):
         raise ValueError("source_prepare_release_csv_invalid")
     if "manifests" in config and (
-        source != "public_research"
+        source not in {"macro", "public_research"}
         or type(config["manifests"]) is not list
         or any(type(value) is not str or not value for value in config["manifests"])
     ):

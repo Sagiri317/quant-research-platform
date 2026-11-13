@@ -169,13 +169,10 @@ def predict(config: Mapping) -> Path:
     metadata = {
         "model": str(Path(config["model"])),
         "inputs": config["inputs"],
-        "model_id": facts["model"]["model_id"],
-        "family_id": facts["family_id"],
         "prediction_window": _window_payload(window),
         "effective_prediction_end": None,
         "sample_role": role,
         "prediction_rows": None,
-        "label_unit": facts["label_unit"],
         "model_metadata": {
             key: result.metadata[key]
             for key in (

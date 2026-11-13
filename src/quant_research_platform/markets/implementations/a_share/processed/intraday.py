@@ -89,7 +89,7 @@ def configured_spec(spec, config):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     lower, upper, closed = time_window_timestamp_interval(time_window)
     sessions = {
         name: open_dataset_session(**_dataset_input_options(path))

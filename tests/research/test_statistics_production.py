@@ -6,9 +6,6 @@ import pytest
 
 import quant_research_platform.research.factors.statistics as factor_stats
 import quant_research_platform.research.models.statistics as model_stats
-from quant_research_platform.artifacts.outputs.prediction import (
-    prediction_model_metadata,
-)
 from quant_research_platform.artifacts.statistics import (
     STATISTICS_TABLE_GROUPS,
     read_statistics_artifact,
@@ -166,7 +163,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="prediction",
         prediction_lookup=Lookup(),
-        global_prediction_lookup=None,
         **model,
     )
     statistics_tables.update(
@@ -184,8 +180,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             ),
         )
     )
-    global_tables = {name: table.copy() for name, table in statistics_tables.items()}
-    assert global_tables["model_group_comparison"].empty
     factor_root, root = publish_statistics_pair(
         layout.project_root / "pv_all_global_statistics",
         statistics_tables,
@@ -264,8 +258,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         time_window=TimeWindow(dates[0], cutoff),
         prediction_id="quarterly_prediction",
         prediction_lookup=Lookup(),
-        global_prediction_lookup=Lookup(),
-        global_inference_blocker="selection_reuses_evaluation_window",
         **model,
     )
     paired_tables.update(
@@ -345,13 +337,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             assert row.mean == pytest.approx(
                 float((losses[families[0]] - losses[row.prediction_id]).mean())
             )
-    with paired_artifact.table("model_group_comparison.parquet") as paired:
-        assert set(paired.family_id) == set(families)
-        assert paired.observation_count.eq(64).all()
-        np.testing.assert_allclose(paired.mean_difference, 0.0, rtol=0, atol=1e-14)
-        assert paired.status.eq("UNDEFINED").all()
-        assert paired.reason.eq("selection_reuses_evaluation_window").all()
-        assert paired.bootstrap_reason.eq(blocked_reason).all()
     if not full_factor_history:
         robustness_config = {
             **quarterly_config,
@@ -366,8 +351,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="quarterly_prediction",
             prediction_lookup=Lookup(),
-            global_prediction_lookup=Lookup(),
-            global_inference_blocker="selection_reuses_evaluation_window",
             **model,
         )
         robustness_tables.update(
@@ -392,11 +375,6 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         assert robustness_tables["factor_diagnostics"].status.eq("DEFINED").all()
         assert (
             robustness_tables["factor_diagnostics"]
-            .fdr_method.eq("NOT_APPLICABLE")
-            .all()
-        )
-        assert (
-            robustness_tables["model_group_comparison"]
             .fdr_method.eq("NOT_APPLICABLE")
             .all()
         )
@@ -607,8 +585,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             TimeWindow(dates[0], cutoff),
             selected="stats_demo_linear_regression",
         )
-        for entry in model["model_entries"].values():
-            entry["model_metadata"]["input_columns"] = [CORE6_FACTORS[0]]
         for selection in model["selections"].values():
             selection["cutoff"] = str(cutoff)
         statistics_tables = build_a_share_statistics_tables(
@@ -620,7 +596,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="prediction",
             prediction_lookup=_PredictionLookup(),
-            global_prediction_lookup=None,
             **model,
         )
         statistics_tables.update(
@@ -668,7 +643,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert {0, 20}.issubset(set(fmb["period_count"]))
     trials = outputs[0]["model_trials"]
     assert trials.selection_group.eq("global").all()
-    assert trials.decision_id.eq("final").all()
+    assert trials.decision_id.eq("explicit_period").all()
     assert set(trials.family_id) == {
         f"stats_demo_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
     }
@@ -709,8 +684,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         "model_comparison.parquet",
         "model_reality_checks.parquet",
     }
-    with artifact.table("model_group_comparison.parquet") as table:
-        assert table.empty
     with factor_artifact.table("factor_diagnostics.parquet") as table:
         pd.testing.assert_frame_equal(
             table,
@@ -951,53 +924,6 @@ def test_model_inference_uses_selection_information_before_calling_backends(
         assert checks.status.eq("DEFINED").all()
 
 
-@pytest.mark.parametrize("has_observations", (False, True))
-def test_paired_model_rankic_consumes_explicit_comparison_config(has_observations):
-    comparison_config = statistics_config()
-    families = ("baseline", "challenger")
-    columns = (
-        "timestamp",
-        "family_id",
-        "observation_count",
-        "sample_role",
-        "loss",
-        "status",
-    )
-    losses = pd.DataFrame.from_records(
-        [
-            (
-                pd.Timestamp("2023-01-03"),
-                family,
-                2,
-                "validation",
-                -0.5,
-                "DEFINED",
-            )
-            for family in families
-        ]
-        if has_observations
-        else [],
-        columns=columns,
-    )
-
-    paired = model_stats._paired_group_rankic(
-        losses.assign(**{"global": -losses.loss, "quarterly": -losses.loss}),
-        selection_group="quarterly",
-        family_ids=families,
-        config=comparison_config,
-    )
-    assert set(paired.family_id) == set(families)
-    assert paired.observation_count.eq(int(has_observations)).all()
-    assert paired.status.eq("UNDEFINED").all()
-    assert paired.reason.eq(
-        "hac_lag_exceeds_observations" if has_observations else "no_common_observations"
-    ).all()
-    if has_observations:
-        assert paired.mean_difference.eq(0.0).all()
-    else:
-        assert paired.mean_difference.isna().all()
-
-
 @pytest.mark.parametrize("access", ("validation", "test"))
 @pytest.mark.parametrize(
     "family_id", ("reversal_20d", "__prediction_alpha__", "timestamp")
@@ -1125,7 +1051,6 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
             time_window=TimeWindow(dates[0], cutoff),
             prediction_id="selected_prediction",
             prediction_lookup=Lookup(),
-            global_prediction_lookup=None,
             **model_statistics_inputs(
                 spec,
                 config,
@@ -1187,49 +1112,6 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
         assert tables["model_comparison"]["mean"].iloc[0] == pytest.approx(-2.0)
         assert tables["model_comparison"].prediction_id.tolist() == [selected_family]
         assert set(tables["model_trials"].family_id) == set(families)
-        quarterly_losses = losses.copy()
-        quarterly_losses["loss"] *= np.repeat([0.7, 0.8, 0.9], len(families))
-        paired = model_stats._paired_group_rankic(
-            quarterly_losses.assign(
-                **{"global": -losses.loss, "quarterly": -quarterly_losses.loss}
-            ),
-            selection_group="quarterly",
-            family_ids=families,
-            config={**config, "selection_group": "quarterly"},
-        )
-        assert paired.family_id.tolist() == list(families)
-        assert paired.observation_count.eq(len(dates)).all()
-        assert paired.calendar_count.eq(len(dates)).all()
-        assert paired.fdr_family_size.eq(len(families)).all()
-        assert paired.mean_difference.tolist() == pytest.approx([-0.2, 0.2])
-        assert paired.status.eq("DEFINED").all()
-        assert paired.bootstrap_status.eq("DEFINED").all()
-        assert paired.standard_error.notna().all()
-        assert paired.fdr_adjusted_p_value.notna().all()
-        assert paired.bootstrap_lower.notna().all()
-        paired_tables = {
-            **tables,
-            "model_losses": quarterly_losses,
-            "model_group_comparison": paired,
-        }
-        factor_paired_root, paired_root = publish_statistics_pair(
-            tmp_path / f"paired_statistics_{position}",
-            paired_tables,
-            research_metadata=metadata,
-            factor_metadata=factor_metadata,
-        )
-        paired_artifact = read_statistics_artifact(paired_root)
-        read_statistics_artifact(factor_paired_root)
-        with paired_artifact.table("model_group_comparison.parquet") as persisted:
-            pd.testing.assert_frame_equal(
-                persisted,
-                paired.assign(
-                    reason=paired.reason.fillna("").astype(str),
-                    bootstrap_reason=paired.bootstrap_reason.fillna("").astype(str),
-                ),
-                check_exact=True,
-            )
-            tables["model_group_comparison"] = persisted.copy()
         for table in tables.values():
             assert all(isinstance(column, str) for column in table.columns)
             for column in ("family_id", "prediction_id", "config_id"):
@@ -1460,7 +1342,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
             }
         )
         selection = read_selection(selection_path)
-        family = prediction_meta["family_id"]
+        family = prediction_meta["model_facts"]["family_id"]
         assert selection["selected_family_id"] == family
         config = statistics_config(factors=(factor,))
         config["evaluation"]["primary_label"] = primary
@@ -1494,7 +1376,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                     ("explicit_horizon", family): {
                         "family_id": family,
                         "model_id": model_id,
-                        "model_metadata": prediction_model_metadata(prediction_meta),
+                        "model_metadata": prediction_meta["model_metadata"],
                         "model_facts": prediction_meta["model_facts"],
                     }
                 },
@@ -1506,7 +1388,6 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 config=config,
                 time_window=window,
                 prediction_lookup=lookup,
-                global_prediction_lookup=None,
             )
             assert lookup.coverage_counts() == (0, 0)
         finally:

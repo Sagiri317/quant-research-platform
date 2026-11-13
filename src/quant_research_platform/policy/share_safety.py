@@ -94,7 +94,7 @@ def sanitize_shared_text(text: object) -> str:
 
 
 def assert_internal_artifact_metadata_safe(value: object) -> None:
-    """Private native artifacts may name real inputs, but never store credentials."""
+    """Native metadata may name real inputs, but never store credentials."""
     if isinstance(value, Mapping):
         for key, item in value.items():
             if _CREDENTIAL_KEY_RE.fullmatch(str(key)):

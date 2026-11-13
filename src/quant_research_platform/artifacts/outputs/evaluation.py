@@ -37,7 +37,7 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
-from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.manifests import write_qrp_json_file
 from quant_research_platform.storage.parquet import parquet_table_writer
 
 _EVALUATION_PENDING_TABLE_LIMIT = 64
@@ -77,7 +77,7 @@ def write_evaluation_outputs_from_chunks(
             science["classification_metrics"] = classification_summary()
         write_parquet(ic_summary, staging / "ic_summary.parquet")
         write_parquet(group_spread_summary, staging / "group_spread_summary.parquet")
-        write_manifest(
+        write_qrp_json_file(
             staging / "manifest.json",
             output_manifest_payload(
                 definition_id="evaluation_outputs",
@@ -241,7 +241,7 @@ def read_evaluation_outputs(
 ):
     """Read selected members, optionally slicing persisted daily rows."""
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
 
     if (
@@ -250,11 +250,7 @@ def read_evaluation_outputs(
         or any(name not in _EVALUATION_COLUMNS for name in tables)
     ):
         raise ValueError("evaluation_tables_invalid")
-    manifest, _ = validate_output_bundle(
-        root,
-        expected_definition_id="evaluation_outputs",
-        selected_files=tuple(f"{name}.parquet" for name in tables),
-    )
+    manifest = read_output_manifest(root)
     metadata = manifest["metadata"]
     result = {}
     for name in tables:

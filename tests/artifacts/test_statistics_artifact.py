@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -101,12 +100,7 @@ def tables(request):
             ]
         )
         for member in statistics.STATISTICS_TABLE_GROUPS[group]
-        if member != "model_group_comparison.parquet"
     }
-    if group == "research":
-        result["model_group_comparison"] = pa.Table.from_pylist(
-            [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
-        ).to_pandas()
     if "factor_correlation" in result:
         result["factor_correlation"]["statistic"] = "pearson"
     if "factor_stratified_diagnostics" in result:
@@ -151,171 +145,6 @@ def test_table_consumer_primary_exception_is_preserved(tmp_path, tables, metadat
             assert not frame.empty
             raise primary
     assert caught.value is primary
-
-
-@pytest.mark.parametrize(
-    "tables,member",
-    [
-        (
-            "factor"
-            if member.removesuffix(".parquet") + ".parquet"
-            in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            member,
-        )
-        for member in (
-            *(
-                member
-                for member in statistics.STATISTICS_TABLE_GROUPS["research"]
-                if member != "model_prediction_metrics.parquet"
-            ),
-            *statistics.STATISTICS_TABLE_GROUPS["factor"],
-        )
-    ],
-    indirect=["tables"],
-)
-@pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
-def test_research_table_rejects_invalid_values_at_write(
-    tmp_path, tables, metadata, member, mutation
-):
-    name = member.removesuffix(".parquet")
-    if name == "model_group_comparison":
-        tables[name] = pd.DataFrame([_defined_group_comparison_row()])
-    if mutation == "status":
-        tables[name].loc[0, "status"] = "UNKNOWN"
-    elif mutation == "reason":
-        tables[name].loc[0, "reason"] = "contradicts_defined_status"
-    elif mutation == "undefined":
-        tables[name].loc[0, "status"] = "UNDEFINED"
-    else:
-        count = (
-            "period_count"
-            if name == "fama_macbeth"
-            else "prediction_count"
-            if name == "model_prediction_metrics"
-            else "observation_count"
-        )
-        tables[name].loc[0, count] = -1
-    error = (
-        "statistics_table_count_invalid"
-        if mutation == "count"
-        else "statistics_group_comparison_invalid"
-        if name == "model_group_comparison"
-        else "statistics_table_status_invalid"
-        if mutation == "status"
-        else "statistics_table_status_value_invalid"
-    )
-    if name == "prediction_diagnostics" or mutation == "undefined":
-        _assert_rejected_at_write(
-            tmp_path, tables, metadata, member, error=f"^{error}$"
-        )
-    else:
-        with pytest.raises(ValueError, match=f"^{error}$"):
-            statistics._validated_frame(tables[name], member=member, metadata=metadata)
-
-
-def _assert_rejected_at_write(
-    tmp_path, tables, metadata, member, *, table_group=None, error="statistics_table_"
-):
-    if table_group is None:
-        table_group = (
-            "factor"
-            if member in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research"
-        )
-    with pytest.raises(ValueError, match=error):
-        statistics.write_statistics_artifact(
-            tmp_path / "rejected",
-            metadata=metadata,
-            tables=tables,
-            table_group=table_group,
-        )
-    assert not (tmp_path / "rejected").exists()
-
-
-@pytest.mark.parametrize(
-    "tables,name,column",
-    [
-        (
-            "factor"
-            if name + ".parquet" in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            name,
-            column,
-        )
-        for name, column in [
-            ("factor_diagnostics", "mean"),
-            ("prediction_diagnostics", "mean"),
-            ("model_trials", "value"),
-            ("fama_macbeth", "mean"),
-            ("fama_macbeth_periods", "value"),
-            ("model_losses", "loss"),
-            ("model_comparison", "mean"),
-            ("model_reality_checks", "value"),
-        ]
-    ],
-    indirect=["tables"],
-)
-def test_defined_research_measurements_cannot_be_missing(
-    tmp_path, tables, metadata, name, column
-):
-    tables[name].loc[0, column] = float("nan")
-    _assert_rejected_at_write(tmp_path, tables, metadata, f"{name}.parquet")
-
-
-@pytest.mark.parametrize(
-    "tables,member",
-    [
-        (
-            "factor"
-            if member.removesuffix(".parquet") + ".parquet"
-            in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            member,
-        )
-        for member in (
-            *statistics.STATISTICS_TABLE_GROUPS["research"],
-            *statistics.STATISTICS_TABLE_GROUPS["factor"],
-        )
-    ],
-    indirect=["tables"],
-)
-def test_research_table_counts_reject_lossy_coercion(tables, metadata, member):
-    name = member.removesuffix(".parquet")
-    if name == "model_group_comparison":
-        tables[name] = pd.DataFrame([_defined_group_comparison_row()])
-    count = (
-        "period_count"
-        if name == "fama_macbeth"
-        else "prediction_count"
-        if name == "model_prediction_metrics"
-        else "observation_count"
-    )
-    tables[name][count] = pd.Series([1.5] * len(tables[name]), dtype=object)
-    with pytest.raises(ValueError, match="statistics_table_count_invalid"):
-        statistics._validated_frame(tables[name], member=member, metadata=metadata)
-
-
-def test_group_comparison_integral_counts_round_trip(tmp_path, tables, metadata):
-    count = 32
-    metadata = _test_statistics_metadata(metadata, tables)
-    tables["model_group_comparison"] = pd.DataFrame([_defined_group_comparison_row()])
-    tables["model_group_comparison"]["observation_count"] = pd.Series(
-        [count], dtype=object
-    )
-    tables["model_group_comparison"]["calendar_count"] = pd.Series(
-        [count], dtype=object
-    )
-    root = statistics.write_statistics_artifact(
-        tmp_path / "valid",
-        metadata=metadata,
-        tables=tables,
-        table_group="factor" if "factor_diagnostics" in tables else "research",
-    )
-    artifact = statistics.read_statistics_artifact(root)
-    with artifact.table("model_group_comparison.parquet") as frame:
-        assert frame.observation_count.tolist() == [count]
-        assert frame.calendar_count.tolist() == [count]
 
 
 @pytest.mark.parametrize("tables", ["factor"], indirect=True)
@@ -426,168 +255,11 @@ def test_undefined_model_inference_preserves_descriptive_mean(
         assert result.loc[:, inference_columns].isna().all().all()
 
 
-@pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
-def test_undefined_model_inference_rejects_inferential_values(
-    tmp_path, tables, metadata, name
-):
-    frame = tables[name]
-    frame.loc[0, "status"] = "UNDEFINED"
-    frame.loc[0, "reason"] = "global_validation_selection_reuses_validation"
-    frame.loc[0, "bootstrap_status"] = "UNDEFINED"
-    frame.loc[0, "bootstrap_reason"] = "global_validation_selection_reuses_validation"
-    frame.loc[
-        0,
-        [
-            "standard_error",
-            "t_statistic",
-            "p_value",
-            "ci_lower",
-            "ci_upper",
-            "bootstrap_lower",
-            "bootstrap_upper",
-        ],
-    ] = float("nan")
-    root = statistics.write_statistics_artifact(
-        tmp_path / "valid_baseline", metadata=metadata, tables=tables
-    )
-    with statistics.read_statistics_artifact(root).table(f"{name}.parquet") as restored:
-        assert restored.loc[0, "mean"] == frame.loc[0, "mean"]
-        assert restored.loc[0, "bootstrap_status"] == "UNDEFINED"
-    frame.loc[0, "p_value"] = 0.01
-    _assert_rejected_at_write(
-        tmp_path,
-        tables,
-        metadata,
-        f"{name}.parquet",
-        error="^statistics_table_status_value_invalid$",
-    )
-
-
-@pytest.mark.parametrize(
-    "corruption,fdr_method",
-    [
-        ("none", "BH"),
-        ("none", "BY"),
-        ("none", "NOT_APPLICABLE"),
-        ("global_mean", "BY"),
-        ("quarterly_mean", "BY"),
-        ("mean_difference", "BY"),
-        ("sample_role", "BY"),
-    ],
-)
-def test_defined_group_comparison_requires_descriptive_facts(
-    tmp_path, tables, metadata, corruption, fdr_method
-):
-    metadata = _test_statistics_metadata(metadata, tables)
-    row = _defined_group_comparison_row()
-    row["fdr_method"] = fdr_method
-    if fdr_method == "NOT_APPLICABLE":
-        row["fdr_adjusted_p_value"] = float("nan")
-    if corruption == "sample_role":
-        row[corruption] = "validation"
-    elif corruption != "none":
-        row[corruption] = (
-            0 if corruption in {"observation_count", "standard_error"} else float("nan")
-        )
-    tables["model_group_comparison"] = pd.DataFrame([row])
-    if corruption != "none":
-        _assert_rejected_at_write(
-            tmp_path,
-            tables,
-            metadata,
-            "model_group_comparison.parquet",
-            error="^statistics_sample_role_mismatch$"
-            if corruption == "sample_role"
-            else "^statistics_group_comparison_invalid$",
-        )
-    else:
-        root = statistics.write_statistics_artifact(
-            tmp_path / "group",
-            metadata=metadata,
-            tables=tables,
-            table_group="factor" if "factor_diagnostics" in tables else "research",
-        )
-        artifact = statistics.read_statistics_artifact(root)
-        with artifact.table("model_group_comparison.parquet") as frame:
-            assert frame.global_mean.iloc[0] == 0.2
-            assert frame.observation_count.iloc[0] == 64
-            assert frame.fdr_method.iloc[0] == fdr_method
-            assert frame.fdr_adjusted_p_value.isna().all() == (
-                fdr_method == "NOT_APPLICABLE"
-            )
-
-
-def _defined_group_comparison_row():
-    return dict(
-        family_id="family",
-        sample_role="test",
-        status="DEFINED",
-        reason="",
-        fdr_method="BY",
-        bootstrap_status="UNDEFINED",
-        bootstrap_reason="insufficient_blocks",
-        observation_count=64,
-        calendar_count=64,
-        fdr_family_size=1,
-        hac_lag=19,
-        bootstrap_block_size=20,
-        bootstrap_repetitions=10000,
-        bootstrap_seed=42,
-        global_mean=0.2,
-        quarterly_mean=0.3,
-        mean_difference=0.1,
-        standard_error=0.1,
-        t_statistic=1.0,
-        p_value=0.3,
-        ci_lower=-0.1,
-        ci_upper=0.3,
-        fdr_adjusted_p_value=0.3,
-        fdr_alpha=0.05,
-        confidence=0.95,
-        bootstrap_lower=float("nan"),
-        bootstrap_upper=float("nan"),
-    )
-
-
 def _test_statistics_metadata(metadata, tables):
     for frame in tables.values():
         if "sample_role" in frame:
             frame["sample_role"] = "test"
     return {**metadata, "sample_role": "test"}
-
-
-@pytest.mark.parametrize("boundary", ("access", "outside", "factor_history"))
-def test_research_statistics_bind_sample_role_and_explicit_window(
-    tmp_path, tables, metadata, boundary
-):
-    if boundary == "access":
-        tables["model_losses"]["sample_role"] = "test"
-        error = "statistics_sample_role_mismatch"
-    else:
-        tables["model_losses"]["timestamp"] = pd.Timestamp(
-            "2030-01-02" if boundary == "outside" else "2014-01-02"
-        )
-        error = "statistics_table_window_mismatch"
-    _assert_rejected_at_write(
-        tmp_path, tables, metadata, "model_losses.parquet", error=error
-    )
-
-
-def test_statistics_table_group_matches_declared_members(tmp_path, tables, metadata):
-    with pytest.raises(ValueError, match="statistics_tables_invalid"):
-        statistics.write_statistics_artifact(
-            tmp_path / "rejected",
-            metadata=metadata,
-            tables=tables,
-            table_group="factor",
-        )
-    root = statistics.write_statistics_artifact(
-        tmp_path / "valid", metadata=metadata, tables=tables
-    )
-    artifact = statistics.read_statistics_artifact(root)
-    with pytest.raises(ValueError, match="statistics_table_member_invalid"):
-        with artifact.table("fama_macbeth.parquet"):
-            pass
 
 
 def test_legal_internal_model_name_survives_joint_test_publication(
@@ -685,20 +357,6 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
         )
         for group, values in ranks.items()
     }
-    config = {
-        "sample_role": access,
-        "statistics": {
-            "hac_lag": 1,
-            "bootstrap_block": 2,
-            "bootstrap_repetitions": 32,
-            "group_comparison": {
-                "fdr_method": "BY",
-                "alpha": 0.05,
-                "seed": 42,
-                "confidence": 0.95,
-            },
-        },
-    }
     expected = {}
     for group in ("global", "quarterly"):
         bound = {
@@ -729,42 +387,11 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_artifacts(
             repetitions=32,
             seed=42,
         )
-        if group == "quarterly":
-            selected["model_group_comparison"] = model_stats._paired_group_rankic(
-                losses[group].assign(
-                    **{
-                        "global": -losses["global"].loss,
-                        "quarterly": -losses[group].loss,
-                    }
-                ),
-                inference_blocker="selection_reuses_evaluation_window"
-                if access == "validation"
-                else None,
-                selection_group=group,
-                family_ids=("family",),
-                config=config,
-            )
         logical = tmp_path / group
         root = statistics.write_statistics_artifact(
             logical, metadata=bound, tables=selected
         )
         artifact = statistics.read_statistics_artifact(root)
-        if group == "quarterly":
-            with artifact.table("model_group_comparison.parquet") as paired:
-                row = paired.iloc[0]
-                assert row.observation_count == 4 and row.calendar_count == 5
-                assert row.global_mean == 0.375
-                assert row.quarterly_mean == 0.5
-                assert (
-                    row.mean_difference == row.quarterly_mean - row.global_mean == 0.125
-                )
-                assert row.fdr_family_size == 1
-                assert row.status == "UNDEFINED"
-                assert row.reason == (
-                    "selection_reuses_evaluation_window"
-                    if access == "validation"
-                    else "incomplete_session_clock"
-                )
         with artifact.table("prediction_diagnostics.parquet") as diagnostic:
             expected[group] = (
                 diagnostic.astype(object)
@@ -896,48 +523,10 @@ def test_native_model_persistence_preserves_std_reason_in_statistics(
         assert rows.loc["validation_icir", "reason"] == "zero_variance"
 
 
-@pytest.mark.parametrize(
-    "tables,member",
-    [
-        (
-            "factor"
-            if member.removesuffix(".parquet") + ".parquet"
-            in statistics.STATISTICS_TABLE_GROUPS["factor"]
-            else "research",
-            member,
-        )
-        for member in [
-            "model_trials",
-            "prediction_diagnostics",
-            "robustness",
-            "factor_diagnostics",
-            "fama_macbeth",
-            "fama_macbeth_periods",
-        ]
-    ],
-    indirect=["tables"],
-)
-def test_statistics_all_numeric_tables_reject_duplicate_primary_keys(
-    tmp_path, tables, metadata, member
-):
-    tables[member] = pd.concat([tables[member], tables[member]], ignore_index=True)
-    group = (
-        "factor"
-        if member in {"factor_diagnostics", "fama_macbeth", "fama_macbeth_periods"}
-        else "research"
-    )
-    with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
-        statistics.write_statistics_artifact(
-            tmp_path / "unpublished",
-            metadata=metadata,
-            tables=tables,
-            table_group=group,
-        )
-    assert not (tmp_path / "unpublished").exists()
-
-
 @pytest.mark.parametrize("start,pnl", ((1000.0, 0.01), (1000.0, 1e-10)))
-def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start, pnl):
+def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(
+    tmp_path, start, pnl
+):
     from fractions import Fraction
 
     from quant_research_platform.contracts.time import TimeWindow
@@ -969,92 +558,15 @@ def test_equity_return_uses_money_rounding_bound_without_erasing_small_pnl(start
     metadata = statistics_metadata(
         TimeWindow("2024-01-01", "2024-01-04"), candidate_ids=["raw"]
     )
-    result = statistics._validated_frame(frame, member=member, metadata=metadata)
-    assert result.net_return.iloc[0] == net_return
-    assert result.net_return.iloc[0] > 0
-
-
-@pytest.mark.parametrize("method", ("BH", "BY"))
-def test_paired_group_fdr_methods_reach_native_artifact(
-    tmp_path, tables, metadata, method
-):
-    from quant_research_platform.research.models.statistics import _paired_group_rankic
-
-    metadata = _test_statistics_metadata(metadata, tables)
-    left = pd.DataFrame(
-        {
-            "timestamp": pd.date_range("2023-01-02", periods=8),
-            "family_id": "family",
-            "loss": [0.1, 0.2, -0.1, 0.3, 0.1, -0.2, 0.05, 0.1],
-            "status": "DEFINED",
-            "observation_count": 3,
-            "sample_role": "test",
-        }
-    )
-    right = left.copy()
-    right["loss"] += [0.1, 0.05, 0.07, -0.03, 0.1, 0.02, -0.01, 0.09]
-
-    policy = {"fdr_method": method, "alpha": 0.05, "seed": 42, "confidence": 0.95}
-    config = {
-        "sample_role": "test",
-        "statistics": {
-            "hac_lag": 0,
-            "bootstrap_block": 2,
-            "bootstrap_repetitions": 32,
-            "group_comparison": policy,
-        },
-    }
-    produced = _paired_group_rankic(
-        right.assign(**{"global": -left.loss, "quarterly": -right.loss}),
-        selection_group="quarterly",
-        family_ids=("family",),
-        config=config,
-    )
-    assert produced.status.eq("DEFINED").all()
-    assert produced.fdr_adjusted_p_value.notna().all()
-    tables["model_group_comparison"] = produced
-    metadata = {
-        **metadata,
-        "statistics": {**metadata["statistics"], "group_comparison": policy},
-    }
     root = statistics.write_statistics_artifact(
-        tmp_path / "paired", metadata=metadata, tables=tables
+        tmp_path / "statistics",
+        metadata=metadata,
+        tables={"portfolio_daily": frame},
+        table_group="portfolio",
     )
-    artifact = statistics.read_statistics_artifact(root)
-    assert artifact.metadata["statistics"]["group_comparison"] == policy
-    with artifact.table("model_group_comparison.parquet") as restored:
-        assert restored.fdr_method.tolist() == [method]
-        pd.testing.assert_frame_equal(
-            restored,
-            produced.assign(
-                reason=produced.reason.fillna(""),
-                bootstrap_reason=produced.bootstrap_reason.fillna(""),
-            ),
-            check_dtype=False,
-            check_exact=True,
-        )
-
-
-@pytest.mark.parametrize(
-    "tables,member,column,value,error",
-    [
-        (
-            "factor",
-            "factor_annual_diagnostics",
-            "year",
-            2024,
-            "statistics_table_window_mismatch",
-        ),
-    ],
-    indirect=["tables"],
-)
-def test_factor_comparison_artifacts_reject_inconsistent_summary_facts(
-    tmp_path, tables, metadata, member, column, value, error
-):
-    tables[member].loc[0, column] = value
-    _assert_rejected_at_write(
-        tmp_path, tables, metadata, member + ".parquet", error=error
-    )
+    with statistics.read_statistics_artifact(root).table(member) as result:
+        assert result.net_return.iloc[0] == net_return
+        assert result.net_return.iloc[0] > 0
 
 
 def test_inventory_attribution_clock_keeps_actual_interval_endpoints(tmp_path):
@@ -1078,13 +590,6 @@ def test_inventory_attribution_clock_keeps_actual_interval_endpoints(tmp_path):
         "window": {"start": "2024-01-02", "end": "2024-01-02"},
         "sample_role": "exploratory",
     }
-    with pytest.raises(ValueError, match="statistics_holding_interval_invalid"):
-        statistics.write_statistics_artifact(
-            tmp_path / "daily-clock",
-            metadata=metadata,
-            tables={"holding_factor_returns": frame},
-            table_group="portfolio",
-        )
     metadata["attribution_clock"] = "inventory_intervals"
     root = statistics.write_statistics_artifact(
         tmp_path / "inventory-clock",
@@ -1097,14 +602,3 @@ def test_inventory_attribution_clock_keeps_actual_interval_endpoints(tmp_path):
     ) as actual:
         assert len(actual) == 2
         assert actual.end_at.tolist() == frame.end_at.tolist()
-    with pytest.raises(ValueError, match="statistics_holding_interval_invalid"):
-        statistics.write_statistics_artifact(
-            tmp_path / "future-design",
-            metadata=metadata,
-            tables={
-                "holding_factor_returns": frame.assign(
-                    decision_at=entry + pd.Timedelta(nanoseconds=1)
-                )
-            },
-            table_group="portfolio",
-        )

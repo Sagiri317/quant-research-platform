@@ -713,7 +713,7 @@ def _factor_statistics_from_evaluations(config):
         _iter_evaluation_member_batches,
     )
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
     from quant_research_platform.artifacts.statistics import (
         STATISTICS_TABLE_COLUMNS,
@@ -765,11 +765,7 @@ def _factor_statistics_from_evaluations(config):
     scopes = set()
     binding = None
     for path in paths:
-        manifest, _ = validate_output_bundle(
-            Path(path),
-            expected_definition_id="evaluation_outputs",
-            selected_files=("metrics.parquet",),
-        )
+        manifest = read_output_manifest(Path(path))
         metadata = manifest["metadata"]
         if (
             "input_facts" not in metadata
@@ -853,11 +849,7 @@ def _factor_statistics_from_evaluations(config):
                         }
             if metadata["strata"] or "daily_strata" in metadata["optional_member_rows"]:
                 members += ["daily_coverage", "daily_strata"]
-        validate_output_bundle(
-            path,
-            expected_definition_id="evaluation_outputs",
-            selected_files=tuple(name + ".parquet" for name in members),
-        )
+
         with closing_iterator(ExitStack()) as stack:
             streams = {
                 name: stack.enter_context(

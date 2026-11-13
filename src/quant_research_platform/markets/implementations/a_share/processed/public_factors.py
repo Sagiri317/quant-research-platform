@@ -156,7 +156,7 @@ def configured_spec(spec, config):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     start, end, closed = time_window_timestamp_interval(time_window)
     prefix = TimeWindow(
         pd.Timestamp.min, end if closed else end - pd.Timedelta(1, "ns")

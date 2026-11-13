@@ -11,10 +11,8 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.research.models.fitting import (
     ModelFitResult,
 )
-from quant_research_platform.storage.atomic import (
-    atomic_write_directory,
-    atomic_write_json,
-)
+from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def save_model(
@@ -29,7 +27,7 @@ def save_model(
             pickle.dump(
                 result.prediction_model, handle, protocol=pickle.HIGHEST_PROTOCOL
             )
-        atomic_write_json(
+        write_qrp_json_file(
             staging / "model.json",
             {"model_metadata": metadata, "facts": facts, "trial_id": trial_id},
         )

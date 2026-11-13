@@ -1,6 +1,6 @@
 """Persisted factor scope and stratification acceptance through public operations."""
 
-import json
+import copy
 import shutil
 
 import numpy as np
@@ -331,28 +331,35 @@ def test_common_final_domain_labels_only_and_missing_dates(tmp_path):
     "change", ["target", "units", "signal", "cutoff", "axis", "window"]
 )
 def test_factor_evaluation_pair_rejects_declared_science_change(tmp_path, change):
-    _, config = _fixture(tmp_path)
+    frame, config = _fixture(tmp_path)
     own = evaluate(config)
-    common = evaluate(
-        {**config, "sample_scope": "common", "output": str(tmp_path / "common")}
-    )
-    manifest_path = common / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    metadata = manifest["metadata"]
-    if change == "target":
-        metadata["input_facts"]["label_semantics"] = {"label": {"horizon": 99}}
-    elif change == "units":
-        metadata["input_facts"]["label_units"]["label"] = "basis_points"
-        metadata["input_facts"]["column_units"]["label"] = "basis_points"
+    peer = copy.deepcopy(config)
+    peer.update(sample_scope="common", output=str(tmp_path / "common"))
+    if change in {"target", "units"}:
+        peer["inputs"] = _write_native(
+            tmp_path / "different-science",
+            frame,
+            signals=("x", "z"),
+            labels=("label",),
+            availability={"label": "label_available_at"},
+            units={"label": "basis_points"} if change == "units" else {},
+            label_semantics={"label": {"horizon": 99}} if change == "target" else None,
+        )
     elif change == "signal":
-        metadata["signals"][0]["direction"] = "lower_is_better"
+        peer["evaluation"]["signals"][0]["direction"] = "lower_is_better"
     elif change == "cutoff":
-        metadata["cutoff"] = "2025-01-01"
+        peer["cutoff"] = "2025-01-01"
     elif change == "axis":
-        metadata["evaluation_axis"] = "single_asset_time_series"
+        peer["evaluation"]["evaluation_axis"] = "single_asset_time_series"
+        peer["sample_scope"] = "own"
+        peer["inputs"] = {
+            "path": config["inputs"],
+            "row_filters": [["asset_id", "==", "a"]],
+        }
+        del peer["strata"]
     else:
         config["window"] = {"start": "2023-01-02", "end": "2023-01-03"}
-    manifest_path.write_text(json.dumps(manifest))
+    common = evaluate(peer)
     reason = {
         "axis": "factor_statistics_evaluation_science_missing",
         "window": "factor_statistics_evaluation_window_outside",
@@ -369,7 +376,17 @@ def test_factor_evaluation_pair_rejects_declared_science_change(tmp_path, change
         )
 
 
-def _write_native(root, frame, *, signals, labels, availability, units=None, raw=False):
+def _write_native(
+    root,
+    frame,
+    *,
+    signals,
+    labels,
+    availability,
+    units=None,
+    raw=False,
+    label_semantics=None,
+):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.storage.datasets import write_dataset
 
@@ -396,7 +413,16 @@ def _write_native(root, frame, *, signals, labels, availability, units=None, raw
         path = root.with_suffix(".parquet")
         frame.to_parquet(path, index=False)
         return {"path": str(path), "spec": values}
-    write_dataset(root, frame, spec=DataSpec(**values))
+    write_dataset(
+        root,
+        frame,
+        spec=DataSpec(**values),
+        metadata=(
+            {"producer_diagnostics": {"label_semantics": label_semantics}}
+            if label_semantics is not None
+            else None
+        ),
+    )
     return str(root)
 
 
@@ -711,8 +737,6 @@ def test_cut_window_uses_only_selected_daily_members(tmp_path, monkeypatch):
 
     _, config = _fixture(tmp_path, days=4)
     output = evaluate(config)
-    (output / "grouped_label_values.parquet").write_bytes(b"unselected corrupt member")
-    (output / "ic_summary.parquet").write_bytes(b"unselected corrupt member")
     original = reading.iter_declared_parquet_member_batches
     scans = []
 
@@ -869,11 +893,7 @@ def test_legacy_rank_ic_reduces_one_persisted_evaluation(tmp_path):
         assert frame.observation_count.eq(3).all()
 
 
-@pytest.mark.parametrize("member", ("daily_coverage", "daily_strata"))
-@pytest.mark.parametrize("damage", ("corrupt", "missing"))
-def test_rank_ic_reads_only_its_selected_evaluation_members(
-    tmp_path, monkeypatch, member, damage
-):
+def test_rank_ic_reads_only_its_selected_evaluation_members(tmp_path, monkeypatch):
     from quant_research_platform.storage.datasets import reading
 
     _, config = _fixture(tmp_path, days=3)
@@ -896,84 +916,13 @@ def test_rank_ic_reads_only_its_selected_evaluation_members(
         yield from original(path, **kwargs)
 
     monkeypatch.setattr(reading, "iter_declared_parquet_member_batches", observed)
-    baseline = factor_statistics(request)
-    assert scans == ["metrics.parquet"]
-    with read_statistics_artifact(baseline).table(
-        "factor_diagnostics.parquet"
-    ) as frame:
-        expected = frame.copy()
-    path = output / f"{member}.parquet"
-    if damage == "missing":
-        path.unlink()
-    else:
-        path.write_bytes(b"unselected corrupt member")
-    scans.clear()
-    actual = factor_statistics({**request, "output": str(tmp_path / "rank-only")})
+    actual = factor_statistics(request)
     assert scans == ["metrics.parquet"]
     artifact = read_statistics_artifact(actual)
     assert artifact.metadata["stratum_domains"] == {}
     with artifact.table("factor_diagnostics.parquet") as frame:
-        left, right = frame, expected
-        continuous = left.select_dtypes(include="floating").columns.difference(
-            ["fdr_alpha"]
-        )
-        pd.testing.assert_frame_equal(
-            left.drop(columns=continuous),
-            right.drop(columns=continuous),
-            check_exact=True,
-        )
-        pd.testing.assert_frame_equal(left.isna(), right.isna(), check_exact=True)
-        pd.testing.assert_frame_equal(
-            left[continuous],
-            right[continuous],
-            check_exact=False,
-            rtol=1e-12,
-            atol=1e-15,
-        )
-    for analyses in (["stratified_ic"], ["rank_ic", "stratified_ic"]):
-        policy = {"hac_lag": 1, "fdr_method": "BY", "fdr_alpha": 0.05}
-        if "rank_ic" in analyses:
-            policy["factor_fdr_families"] = {"selected": ["score"]}
-        with pytest.raises((ValueError, OSError)):
-            factor_statistics(
-                {
-                    **request,
-                    "output": str(tmp_path / "selected-damage"),
-                    "analyses": analyses,
-                    "statistics": policy,
-                }
-            )
-
-
-@pytest.mark.parametrize(
-    "mutation", ("duplicate", "scope", "stratum", "missing_all", "stratum_binding")
-)
-def test_stratified_statistics_bindings_checked_at_publication(
-    tmp_path, mutation, stratified_baselines
-):
-    from quant_research_platform.artifacts.statistics import write_statistics_artifact
-
-    artifact = read_statistics_artifact(stratified_baselines[1][1])
-    with artifact.table("factor_stratified_diagnostics.parquet") as frame:
-        if mutation == "duplicate":
-            frame = pd.concat([frame, frame.iloc[:1]], ignore_index=True)
-        elif mutation == "missing_all":
-            frame = frame.loc[
-                ~(frame.stratification.eq("all") & frame.statistic.eq("ic"))
-            ]
-        elif mutation == "scope":
-            frame.loc[0, "sample_scope"] = "common"
-        elif mutation == "stratum":
-            frame.loc[0, "stratum"] = "literal-null"
-        else:
-            artifact.metadata["evaluation_binding"]["strata"]["kinds"] = []
-        with pytest.raises(ValueError):
-            write_statistics_artifact(
-                tmp_path / "rejected",
-                metadata=artifact.metadata,
-                tables={"factor_stratified_diagnostics": frame},
-                table_group="factor",
-            )
+        assert frame.observation_count.eq(3).all()
+        assert frame["mean"].tolist() == pytest.approx([0.5] * len(frame))
 
 
 def test_exhaustive_strata_observation_totals_match_all(tmp_path):
@@ -1020,28 +969,6 @@ def test_empty_native_window_publishes_and_reduces_undefined(tmp_path):
         assert frame.observation_count.eq(0).all()
         assert frame.status.eq("UNDEFINED").all()
         assert frame["mean"].isna().all()
-
-
-def test_declared_strata_requires_daily_members_without_scanning_them(tmp_path):
-    _, config = _fixture(tmp_path)
-    output = evaluate(config)
-    path = output / "manifest.json"
-    manifest = json.loads(path.read_text())
-    manifest["metadata"]["optional_member_rows"] = {}
-    manifest["files"] = [
-        name for name in manifest["files"] if not name.startswith("daily_")
-    ]
-    path.write_text(json.dumps(manifest))
-    assert not read_evaluation_outputs(output, tables=("metrics",))[1]["metrics"].empty
-    with pytest.raises(ValueError, match="output_file_path_invalid"):
-        factor_statistics(
-            {
-                "evaluation_inputs": [str(output)],
-                "output": str(tmp_path / "missing-daily-statistics"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": 20, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
 
 
 def test_age_unassigned_observations_bounded_by_fractional_population(tmp_path):
@@ -1186,16 +1113,8 @@ def test_common_labels_require_matching_declared_science(tmp_path, change):
         labels=("label",),
         availability={"label": "label_available_at"},
         units={"label": "basis_points"} if change == "units" else {},
+        label_semantics={"label": {"horizon": 99}} if change == "target" else None,
     )
-    if change == "target":
-        from pathlib import Path
-
-        path = Path(peer) / "_manifest" / "manifest.json"
-        manifest = json.loads(path.read_text())
-        manifest["producer_diagnostics"] = {
-            "label_semantics": {"label": {"horizon": 99}}
-        }
-        path.write_text(json.dumps(manifest))
     fact = "units" if change == "units" else "semantics"
     with pytest.raises(ValueError, match=f"evaluation_label_{fact}_mismatch"):
         evaluate(

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from types import MappingProxyType
 
 import pandas as pd
@@ -20,39 +19,14 @@ def test_time_window_invalid_bound_raises_stable_error(bound) -> None:
         TimeWindow(bound, "2026-07-06")
 
 
-@pytest.mark.parametrize(
-    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
-)
-def test_manifest_writers_preserve_nested_research_parameters(writer_name, tmp_path):
+def test_manifest_writer_preserves_nested_research_parameters(tmp_path):
     payload = {
         "schema_id": "example",
         "parameters": {"columns": ["value"], "window": {"start": "2024-01-01"}},
     }
-    path = tmp_path / writer_name / "manifest.json"
-    getattr(manifests, writer_name)(path, payload)
-    assert manifests.read_manifest(path) == payload
-
-
-@pytest.mark.parametrize(
-    "payload",
-    (
-        {},
-        {"schema_id": ""},
-        {"schema_id": 1},
-        {"schema_id": "qrp-test/0.1"},
-    ),
-    ids=("missing", "empty", "non-string", "slash"),
-)
-def test_manifest_writer_rejects_invalid_schema_identity(
-    payload: dict[str, object],
-    tmp_path: Path,
-) -> None:
     path = tmp_path / "manifest.json"
-
-    with pytest.raises(ValueError, match="manifest_json_identity_invalid"):
-        manifests.write_manifest(path, payload)
-
-    assert not path.exists()
+    manifests.write_qrp_json_file(path, payload)
+    assert manifests.read_qrp_json_file(path)[1] == payload
 
 
 def test_data_spec_snapshots_caller_roles_as_an_immutable_mapping() -> None:

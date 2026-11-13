@@ -9,6 +9,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     daily_quotes,
 )
+from tests.helpers.public_sources import write_source_manifest
 
 
 def inputs():
@@ -567,7 +568,6 @@ def test_etf_revised_return_clock_pairs_with_macro_state_at_real_maturity():
 
 def test_native_etf_action_versions_and_local_returns_reach_saved_factors(tmp_path):
     import hashlib
-    import json
     from dataclasses import replace
 
     from quant_research_platform.markets.prepare import prepare
@@ -596,21 +596,20 @@ def test_native_etf_action_versions_and_local_returns_reach_saved_factors(tmp_pa
     raw.mkdir()
     path = raw / "actions.csv"
     actions.to_csv(path, index=False)
-    (raw / "manifest.json").write_text(
-        json.dumps(
-            dict(
-                schema_version=1,
-                records=[
-                    dict(
-                        source="eastmoney_cn_etf_corporate_actions_extracted",
-                        path=path.name,
-                        status="downloaded",
-                        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                        bytes=path.stat().st_size,
-                    )
-                ],
-            )
-        )
+    write_source_manifest(
+        raw,
+        dict(
+            schema_version=1,
+            records=[
+                dict(
+                    source="eastmoney_cn_etf_corporate_actions_extracted",
+                    path=path.name,
+                    status="downloaded",
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    bytes=path.stat().st_size,
+                )
+            ],
+        ),
     )
     action_root = tmp_path / "actions"
     prepare_source(

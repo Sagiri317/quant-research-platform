@@ -30,9 +30,9 @@ from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
-    atomic_write_json,
     reject_if_exists,
 )
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 class CostAwareAllocator(nn.Module):
@@ -221,7 +221,7 @@ def fit_cost_model(config):
         def write(staging):
             torch.save(model.cpu().state_dict(), staging / "weights.pt")
             (staging / "feature_scaler.pkl").write_bytes(pickle.dumps(scaler))
-            atomic_write_json(staging / "model.json", facts)
+            write_qrp_json_file(staging / "model.json", facts)
 
         atomic_write_directory(output, write)
         recorder.finish(

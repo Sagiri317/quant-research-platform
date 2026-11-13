@@ -15,13 +15,14 @@ from quant_research_platform.agents.session import (
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
+    render_qrp_json_object,
 )
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
     research_profile,
 )
-from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
+from quant_research_platform.storage.atomic import atomic_write_text
 
 
 def lookup(arguments, state):
@@ -226,7 +227,7 @@ def remember(arguments, state, identifier):
     if identifier == "report":
         replace_json(target, record)
     else:
-        atomic_write_json(target, record)
+        atomic_write_text(target, render_qrp_json_object(record) + "\n")
     return {"memory": target.stem}
 
 
@@ -247,5 +248,6 @@ def propose_patch(arguments, state, root):
     )
     if not patch:
         raise ValueError("agent_patch_has_no_changes")
-    path = atomic_write_text(root / "proposal.patch", patch)
+    path = root / "proposal.patch"
+    path.write_text(patch, encoding="utf-8")
     return {"status": "completed", "patch": "proposal.patch", "applied": False}, path

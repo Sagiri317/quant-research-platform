@@ -127,6 +127,17 @@ def test_pit_only_factor_selects_business_columns_and_support_keys(tmp_path, nat
         "cash_to_assets",
         "has_legal_fundamental_pit",
     }
+    with_extra = prepare(
+        {
+            **request,
+            "inputs": {
+                **request["inputs"],
+                "market_panel_1d": str(tmp_path / "unused_market_panel"),
+            },
+            "output_root": str(tmp_path / "with_unused_input"),
+        }
+    )
+    pd.testing.assert_frame_equal(read_dataset(with_extra), result)
     request["factor_columns"] = ["book_to_market"]
     with pytest.raises(ValueError, match="data_operation_input_paths_mismatch"):
         prepare(request)

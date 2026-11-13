@@ -109,7 +109,6 @@ class _LedgerEconomics:
             "equity_rounding_pnl_reason": None
             if isfinite(self.totals["equity_rounding_pnl"])
             else "rounding_price_unavailable",
-            "fill_quantity_reason": None,
             "gross_pnl": fsum((net, fees)),
             "nav": fsum((self.capital.initial_capital, net)),
             "capital_return": capital_return if isfinite(capital_return) else None,

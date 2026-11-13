@@ -7,20 +7,14 @@ from pathlib import Path
 from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
-from quant_research_platform.policy.share_safety import (
-    assert_internal_artifact_metadata_safe,
-)
-from quant_research_platform.storage.atomic import atomic_write_json
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def append_trial_record(root: Path, record: dict) -> Path:
     """Never replace a record; persist terminal changes without copying facts."""
-    assert_internal_artifact_metadata_safe(record)
-    status = record.get("status")
-    if status not in {"attempted", "completed", "failed", "abandoned"}:
-        raise ValueError("trial_status_invalid")
+    status = record["status"]
     root = Path(root)
-    return atomic_write_json(
+    return write_qrp_json_file(
         root / ("attempted.json" if status == "attempted" else "terminal.json"), record
     )
 

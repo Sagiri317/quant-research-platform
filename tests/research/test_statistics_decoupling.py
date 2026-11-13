@@ -352,31 +352,6 @@ def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, 
         assert actual["common"] == pytest.approx(-0.5 if change == "labels" else 0.5)
 
 
-def test_paired_group_requires_its_bootstrap_inputs_before_reading(tmp_path):
-    with pytest.raises(ValueError, match="model_statistics_policy_invalid"):
-        model_stats.model_statistics(
-            {
-                "dataset": "missing",
-                "output": str(tmp_path / "statistics"),
-                "window": {"start": "2020-01-01", "end": "2020-01-02"},
-                "evaluation": {"primary_label": "label"},
-                "analyses": ["model_losses"],
-                "statistics": {
-                    "hac_lag": 0,
-                    "group_comparison": {
-                        "fdr_method": "BY",
-                        "alpha": 0.05,
-                        "seed": 1,
-                        "confidence": 0.95,
-                    },
-                },
-                "periods": [],
-                "global_predictions": ["missing"],
-                "selection_group": "quarterly",
-            }
-        )
-
-
 @pytest.mark.parametrize(
     "encoding", ["categories", "missing_categories", "string", "float"]
 )

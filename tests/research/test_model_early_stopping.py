@@ -12,7 +12,7 @@ from quant_research_platform.contracts.models import (
     ModelSpec,
 )
 from quant_research_platform.research.models.persisted import load_model
-from quant_research_platform.research.models.production import fit
+from quant_research_platform.research.models.production import fit, fit_model
 from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config
 
@@ -69,22 +69,31 @@ def stopping_config(tmp_path, algorithm):
 
 
 @pytest.mark.parametrize(
-    "algorithm",
+    "algorithm,limit",
     [
-        "lstm_regressor",
-        "transformer_regressor",
-        "deeplob_regressor",
-        "deeplob_classifier",
-        "xgboost_regressor",
+        ("lstm_regressor", 8),
+        ("transformer_regressor", 8),
+        ("deeplob_regressor", 8),
+        ("deeplob_classifier", 8),
+        ("xgboost_regressor", 8),
+        ("lstm_regressor", None),
+        ("transformer_regressor", None),
+        ("xgboost_regressor", None),
     ],
 )
-def test_best_state_native_roundtrip_and_validation_maturity(tmp_path, algorithm):
+def test_best_state_native_roundtrip_and_validation_maturity(
+    tmp_path, algorithm, limit
+):
     config, frame, late = stopping_config(tmp_path, algorithm)
+    limit_name = "n_estimators" if algorithm == "xgboost_regressor" else "epochs"
+    config["model"]["hyperparameters"][limit_name] = limit
     model = fit(config)
     result, _ = load_model(model)
     stopped = result.metadata["early_stopping"]
     best = stopped["best_iteration"]
-    assert 0 <= best < stopped["iterations"] <= 8
+    assert 0 <= best < stopped["iterations"]
+    if limit is not None:
+        assert stopped["iterations"] <= limit
     assert stopped["validation_rows"] == 8
     assert pd.Timestamp(stopped["validation_start"]) == pd.Timestamp("2020-01-04")
     assert pd.Timestamp(stopped["validation_end"]) == pd.Timestamp("2020-01-06")
@@ -193,3 +202,98 @@ def test_early_stopping_parameter_contract(algorithm, patience):
             target_column="label",
             hyperparameters={"early_stopping_rounds": patience},
         )
+
+
+def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution():
+    phase = np.arange(40) * (2 * np.pi / 40)
+    common = np.sin(phase) * np.sqrt(2)
+    difference = 0.01 * np.cos(phase) * np.sqrt(2)
+    times = pd.date_range("2020-01-01T09:30", periods=40, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "asset_id": "a",
+            "eligible": True,
+            "x1": common + difference,
+            "x2": common - difference,
+            "label": 2 * common + 0.5,
+            "label_available_at": times + pd.Timedelta(seconds=1),
+        }
+    )
+    spec = ModelSpec(
+        model_id="lasso",
+        model_algorithm="lasso_regression",
+        input_feature_columns=("x1", "x2"),
+        target_column="label",
+        sample_filter_mode="unfiltered",
+        training_scaling=False,
+        hyperparameters={
+            "alpha": 0.01,
+            "tol": 1e-12,
+            "max_iter": None,
+            "precompute": True,
+        },
+    )
+    result = fit_model(
+        [frame],
+        spec,
+        fit_windows=[{"start": "2020-01-01", "end": "2020-01-01"}],
+        fit_cutoff="2020-01-02",
+    )
+    estimator = result.prediction_model.estimator
+    # Each Gram row sums to 2 and X'y/n=2, so both positive weights are 1-alpha/2.
+    np.testing.assert_allclose(estimator.coef_, [0.995, 0.995], rtol=1e-5, atol=1e-8)
+    assert estimator.intercept_ == pytest.approx(0.5, abs=1e-12)
+    assert estimator.max_iter is None
+    assert estimator.dual_gap_ <= spec.hyperparameters["tol"] * np.mean(
+        (frame.label - 0.5) ** 2
+    )
+
+
+def test_unbounded_boosting_continues_beyond_default_tree_budget():
+    random = np.random.default_rng(17)
+
+    def observations(day):
+        x = np.linspace(-2 * np.pi, 2 * np.pi, 256)
+        times = pd.date_range(day, periods=len(x), freq="s")
+        return pd.DataFrame(
+            {
+                "timestamp": times,
+                "asset_id": "a",
+                "eligible": True,
+                "x": x,
+                "label": np.sin(x) + random.normal(0, 0.05, len(x)),
+                "label_available_at": times + pd.Timedelta(seconds=1),
+            }
+        )
+
+    training, validation = observations("2020-01-01"), observations("2020-01-03")
+    spec = ModelSpec(
+        model_id="boosting",
+        model_algorithm="xgboost_regressor",
+        input_feature_columns=("x",),
+        target_column="label",
+        sample_filter_mode="unfiltered",
+        hyperparameters={
+            "n_estimators": None,
+            "early_stopping_rounds": 20,
+            "learning_rate": 0.01,
+            "max_depth": 2,
+            "n_jobs": 1,
+            "tree_method": "hist",
+            "device": "cpu",
+        },
+    )
+    result = fit_model(
+        [training],
+        spec,
+        fit_windows=[{"start": "2020-01-01", "end": "2020-01-01"}],
+        fit_cutoff="2020-01-02",
+        validation_frames=[validation],
+        validation_cutoff="2020-01-04",
+    )
+    stopping = result.metadata["early_stopping"]
+    assert stopping["best_iteration"] > 100
+    assert stopping["iterations"] > stopping["best_iteration"] + 1
+    predicted = result.prediction_model.predict(validation.loc[:, ["x"]])
+    assert np.mean((predicted - np.sin(validation.x)) ** 2) < 0.01

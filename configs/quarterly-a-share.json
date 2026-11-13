@@ -23,11 +23,13 @@
     }
   ],
   "training_start": "2014-01-01",
+  "trading_calendar": "data/interim/csmar/trading_calendar",
+  "validation_sessions": 20,
   "rolling_window": {
-    "start": "2018-01-01",
-    "end": "2023-12-31"
+    "start": "2014-01-01",
+    "end": "2026-10-30"
   },
-  "evaluation_cutoff": "2024-03-31",
+  "evaluation_cutoff": "2026-11-01",
   "label_unit": "dimensionless",
   "evaluation": {
     "evaluation_id": "core6-quarterly",

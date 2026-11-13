@@ -1,8 +1,9 @@
 {
   "source_id": "macro",
-  "raw_root": "data/raw/macro_liquidity/new-download",
+  "raw_root": "data/raw/macro_liquidity",
+  "manifests": ["public-20261105/download.json"],
   "outputs": {
-    "macro_observations": "data/interim/macro_liquidity/new-observations"
+    "macro_observations": "data/interim/macro_liquidity/observations"
   },
   "start_date": "2010-01-01",
   "end_date": "2026-10-31"

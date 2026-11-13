@@ -50,7 +50,6 @@ def test_no_selected_family_retains_undefined_statistics(tmp_path):
         },
         time_window=window,
         prediction_lookup=SimpleNamespace(coverage_counts=lambda: (0, 0)),
-        global_prediction_lookup=None,
     )
     assert len(tables["prediction_diagnostics"]) == 1
     assert tables["prediction_diagnostics"].prediction_id.tolist() == ["no_winner"]

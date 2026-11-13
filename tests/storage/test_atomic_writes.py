@@ -8,7 +8,6 @@ import quant_research_platform.storage.atomic as atomic
 from quant_research_platform.storage import atomic as scratch
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
-    atomic_write_json,
     atomic_write_text,
     publish_no_replace,
 )
@@ -64,16 +63,6 @@ def test_atomic_write_text_creates_nested_parent_and_publishes(tmp_path: Path) -
     assert atomic_write_text(final_path, "ok\n") == final_path
     assert final_path.read_text(encoding="utf-8") == "ok\n"
     assert not list(final_path.parent.glob(".f-*"))
-
-
-def test_atomic_json_writer_rejects_existing_target_without_overwrite(
-    tmp_path: Path,
-) -> None:
-    json_path = tmp_path / "manifest.json"
-    json_path.write_text("existing", encoding="utf-8")
-    with pytest.raises(OutputAlreadyExistsError):
-        atomic_write_json(json_path, {"ok": True})
-    assert json_path.read_text(encoding="utf-8") == "existing"
 
 
 @pytest.mark.parametrize("long_path", (False, True))

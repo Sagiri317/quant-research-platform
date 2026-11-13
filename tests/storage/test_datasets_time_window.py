@@ -29,10 +29,6 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_is_file,
-    native_filesystem_path,
-)
-from tests.helpers.paths import (
-    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -202,28 +198,6 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     assert inspection.file_count == 1
     assert inspection.partitions == ("year=2015",)
     assert inspection.partition_row_counts == {"year=2015": 1}
-
-
-def test_selected_operations_reject_structurally_forged_full_history_summary(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "selected_forged_summary")
-    write_dataset(
-        root,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("selected_forged_summary"),
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["date_min"] = "1900-01-01"
-    manifest["date_max"] = "2099-12-31"
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    window = TimeWindow("2015-01-01", "2015-12-31")
-    for operation in (inspect_dataset, fingerprint_dataset):
-        with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
-            operation(root, time_window=window)
 
 
 def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> None:

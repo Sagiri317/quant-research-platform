@@ -4,7 +4,6 @@ import csv
 import gzip
 import hashlib
 import io
-import json
 import zipfile
 
 import pandas as pd
@@ -13,6 +12,7 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.tabular import read_csv
 from quant_research_platform.storage.datasets import read_dataset
+from tests.helpers.public_sources import write_source_manifest
 
 
 def _csv(columns, values, *, separator=","):
@@ -25,22 +25,21 @@ def _csv(columns, values, *, separator=","):
 
 def _public_config(raw, path, source, data_id):
     payload = path.read_bytes()
-    (raw / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "records": [
-                    {
-                        "source": source,
-                        "path": path.name,
-                        "status": "downloaded",
-                        "bytes": len(payload),
-                        "sha256": hashlib.sha256(payload).hexdigest(),
-                        "retrieved_at": "2026-01-01T00:00:00Z",
-                    }
-                ],
-            }
-        )
+    write_source_manifest(
+        raw,
+        {
+            "schema_version": 1,
+            "records": [
+                {
+                    "source": source,
+                    "path": path.name,
+                    "status": "downloaded",
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "retrieved_at": "2026-01-01T00:00:00Z",
+                }
+            ],
+        },
     )
     return {
         "source_id": "public_research",

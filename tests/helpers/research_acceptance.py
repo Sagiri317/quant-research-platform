@@ -199,13 +199,6 @@ def run_a_share_acceptance(project_root: Path):
         )
     case.models, case.validation_predictions = models, predictions
     case.test, case.validation = test, validation
-    case.selections, case.final_models, case.test_predictions, case.ledgers = (
-        {},
-        {},
-        {},
-        {},
-    )
-    case.enhanced_ledgers, case.portfolio_configs, case.enhanced_configs = {}, {}, {}
     refit_window = {"start": train["start"], "end": validation["end"]}
     final_models, test_predictions = {}, {}
     for identifier, original in configurations.items():
@@ -230,166 +223,163 @@ def run_a_share_acceptance(project_root: Path):
         )
         final_models[identifier] = final
         test_predictions[identifier] = predicted
-    for group in ("global", "quarterly"):
-        scored = score(
-            {
-                "predictions": list(map(str, predictions.values())),
-                "labels": str(case.dataset),
-                "candidate_ids": list(models),
-                "validation_windows": [validation],
-                "scoring_window": validation,
-                "cutoff": validation["end"],
-                "selection_group": group,
-                "validation_axis": "cross_sectional",
-                "output": str(case.root / group / "scores.json"),
-            }
-        )
-        selected = select(
-            {
-                "scores": str(scored),
-                "output": str(case.root / group / "selection.json"),
-                "selection_metric": "validation_rankic",
-                "selection_direction": "maximize",
-                "tie_break_order": list(models),
-                "refit_windows": [refit_window],
-                "refit_cutoff": validation["end"],
-            }
-        )
-        case.selections[group] = selected
-        decision = read_selection(selected)
-        assert {row["family_id"] for row in decision["families"]} == set(models)
-        for identifier in configurations:
-            case.final_models[group, identifier] = final_models[identifier]
-            case.test_predictions[group, identifier] = test_predictions[identifier]
-        champion = decision["selected_model_id"]
-        inputs = {
-            "dataset": str(case.dataset),
-            **{
-                role: str(case.paths[name])
-                for role, name in {
-                    "panel": "market_panel_1d",
-                    "execution": "execution_mask",
-                    "calendar": "trading_calendar",
-                    "fees": "a_share_fee_schedule",
-                    "market_bars": "market_bars_1d",
-                    "stock_master": "stock_master",
-                    "corporate_actions": "corporate_actions",
-                }.items()
-            },
+    scored = score(
+        {
+            "predictions": list(map(str, predictions.values())),
+            "labels": str(case.dataset),
+            "candidate_ids": list(models),
+            "validation_windows": [validation],
+            "scoring_window": validation,
+            "cutoff": validation["end"],
+            "selection_group": "expanding",
+            "validation_axis": "cross_sectional",
+            "output": str(case.root / "scores.json"),
         }
-        # Keep compared accounts equal and reachable from cash at the 5% ADV cap.
-        config = {
-            "candidate": {
-                "candidate_id": group + "_champion_top20",
-                "selection_group": group,
-                "construction": "quantile_equal_weight",
-                "prediction_selector": "champion",
-                "top_quantile": 0.2,
-                "rebalance_schedule": "weekly-last-trading-day",
-                "benchmark_id": None,
-            },
-            "inputs": inputs,
-            "predictions": [
-                {
-                    "path": str(case.test_predictions[group, champion]),
-                    "window": test,
-                }
+    )
+    selected = select(
+        {
+            "scores": str(scored),
+            "output": str(case.root / "selection.json"),
+            "selection_metric": "validation_rankic",
+            "selection_direction": "maximize",
+            "tie_break_order": list(models),
+            "refit_windows": [refit_window],
+            "refit_cutoff": validation["end"],
+        }
+    )
+    case.selection = selected
+    decision = read_selection(selected)
+    assert {row["family_id"] for row in decision["families"]} == set(models)
+    case.final_models, case.test_predictions = final_models, test_predictions
+    champion = decision["selected_model_id"]
+    inputs = {
+        "dataset": str(case.dataset),
+        **{
+            role: str(case.paths[name])
+            for role, name in {
+                "panel": "market_panel_1d",
+                "execution": "execution_mask",
+                "calendar": "trading_calendar",
+                "fees": "a_share_fee_schedule",
+                "market_bars": "market_bars_1d",
+                "stock_master": "stock_master",
+                "corporate_actions": "corporate_actions",
+            }.items()
+        },
+    }
+    # The initial account is reachable from cash at the 5% ADV cap.
+    config = {
+        "candidate": {
+            "candidate_id": "champion_top20",
+            "selection_group": "expanding",
+            "construction": "quantile_equal_weight",
+            "prediction_selector": "champion",
+            "top_quantile": 0.2,
+            "rebalance_schedule": "weekly-last-trading-day",
+            "benchmark_id": None,
+        },
+        "inputs": inputs,
+        "predictions": [
+            {
+                "path": str(case.test_predictions[champion]),
+                "window": test,
+            }
+        ],
+        "output": str(case.root / "ledger"),
+        "output_window": test,
+        "input_window": {"start": "2019-08-01", "end": "2019-10-31"},
+        "formal_dataset_window": case.formal,
+        "prediction_window": test,
+        "sample_role": "test",
+        "assumptions": {
+            **asdict(EXECUTION_ASSUMPTIONS),
+            "initial_nav": 2e9,
+        },
+    }
+    config["assumptions"]["adv_sensitivities"] = list(
+        config["assumptions"]["adv_sensitivities"]
+    )
+    ledger_root = backtest(config)
+    ledger = read_portfolio_ledger_artifact(ledger_root)
+    summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
+    assert summary["fill_events"] > 0 and summary["fees"] > 0 and summary["nav"] > 0
+    assert ledger.metadata["initial_holding_convention"] == "cash"
+    case.ledger = ledger_root
+    case.portfolio_config = config
+    enhanced = {
+        **config,
+        "input_window": case.history,
+        "candidate": {
+            **config["candidate"],
+            "candidate_id": "champion_enhanced",
+            "construction": "benchmark_enhanced",
+            "benchmark_id": "csi500",
+            "top_quantile": None,
+            "risk_style_columns": list(a_share.RISK_STYLE_COLUMNS),
+        },
+        "inputs": {
+            **inputs,
+            "benchmark": str(case.paths["benchmark_weights"]),
+            "risk_context": [
+                str(case.paths[name])
+                for name in (
+                    "price_volume_facts",
+                    "market_model_factors",
+                )
             ],
-            "output": str(case.root / group / "ledger"),
-            "output_window": test,
-            "input_window": {"start": "2019-08-01", "end": "2019-10-31"},
-            "formal_dataset_window": case.formal,
-            "prediction_window": test,
-            "sample_role": "test",
-            "assumptions": {
-                **asdict(EXECUTION_ASSUMPTIONS),
-                "initial_nav": 2e9,
-            },
-        }
-        config["assumptions"]["adv_sensitivities"] = list(
-            config["assumptions"]["adv_sensitivities"]
-        )
-        ledger_root = backtest(config)
-        ledger = read_portfolio_ledger_artifact(ledger_root)
-        summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
-        assert summary["fill_events"] > 0 and summary["fees"] > 0 and summary["nav"] > 0
-        assert ledger.metadata["initial_holding_convention"] == "cash"
-        case.ledgers[group] = ledger_root
-        case.portfolio_configs[group] = config
-        enhanced = {
-            **config,
-            "input_window": case.history,
-            "candidate": {
-                **config["candidate"],
-                "candidate_id": group + "_champion_enhanced",
-                "construction": "benchmark_enhanced",
-                "benchmark_id": "csi500",
-                "top_quantile": None,
-                "risk_style_columns": list(a_share.RISK_STYLE_COLUMNS),
-            },
-            "inputs": {
-                **inputs,
-                "benchmark": str(case.paths["benchmark_weights"]),
-                "risk_context": [
-                    str(case.paths[name])
-                    for name in (
-                        "price_volume_facts",
-                        "market_model_factors",
-                    )
-                ],
-            },
-        }
-        observations, intervals = source_alpha_observations(
-            case, predictions[champion], "weekly-last-trading-day"
-        )
-        calibration_root = case.root / group / "alpha"
-        calibration_root.mkdir()
-        observations.to_parquet(calibration_root / "observations.parquet", index=False)
-        intervals.to_parquet(calibration_root / "intervals.parquet", index=False)
-        calibration = calibrate(
-            {
-                "observations": str(calibration_root / "observations.parquet"),
-                "scheduled_intervals": str(calibration_root / "intervals.parquet"),
-                "rebalance_schedule": "weekly-last-trading-day",
-                "calendar": {
-                    "path": str(case.paths["trading_calendar"]),
-                    "time_window": {
-                        "start": validation["start"],
-                        "end": case.formal["end"],
-                    },
+        },
+    }
+    observations, intervals = source_alpha_observations(
+        case, predictions[champion], "weekly-last-trading-day"
+    )
+    calibration_root = case.root / "alpha"
+    calibration_root.mkdir()
+    observations.to_parquet(calibration_root / "observations.parquet", index=False)
+    intervals.to_parquet(calibration_root / "intervals.parquet", index=False)
+    calibration = calibrate(
+        {
+            "observations": str(calibration_root / "observations.parquet"),
+            "scheduled_intervals": str(calibration_root / "intervals.parquet"),
+            "rebalance_schedule": "weekly-last-trading-day",
+            "calendar": {
+                "path": str(case.paths["trading_calendar"]),
+                "time_window": {
+                    "start": validation["start"],
+                    "end": case.formal["end"],
                 },
-                "cutoff": validation["end"],
-                "selection_group": group,
-                "output": str(calibration_root / "calibration.json"),
-            }
-        )
-        frozen = json.loads(calibration.read_text())
-        assert frozen["calibration"]["valid_rebalance_dates"] >= 6
-        assert frozen["calibration"]["coverage"] >= 0.8
-        enhanced["calibration"] = str(calibration)
-        enhanced["output"] = str(case.root / group / "enhanced-ledger")
-        case.enhanced_configs[group] = enhanced
-        enhanced_root = backtest(enhanced)
-        account = read_portfolio_ledger_artifact(enhanced_root)
-        diagnostics = [
-            item for batch in account.iter_chunks() for item in batch.diagnostics
-        ]
-        assert any(
-            item.name == "decision_reason" and item.text == "enhanced_optimizer"
-            for item in diagnostics
-        )
-        assert {item.number for item in diagnostics if item.name == "alpha_slope"} == {
-            frozen["calibration"]["slope"]
+            },
+            "cutoff": validation["end"],
+            "selection_group": "expanding",
+            "output": str(calibration_root / "calibration.json"),
         }
-        assert frozen["calibration"]["slope"] > 0
-        assert account.metadata["initial_holding_convention"] == "cash"
-        assert (
-            summarize_portfolio_ledger(account.capital, account.iter_chunks())[
-                "fill_events"
-            ]
-            > 0
-        )
-        case.enhanced_ledgers[group] = enhanced_root
+    )
+    frozen = json.loads(calibration.read_text())
+    assert frozen["calibration"]["valid_rebalance_dates"] >= 6
+    assert frozen["calibration"]["coverage"] >= 0.8
+    enhanced["calibration"] = str(calibration)
+    enhanced["output"] = str(case.root / "enhanced-ledger")
+    case.enhanced_config = enhanced
+    enhanced_root = backtest(enhanced)
+    account = read_portfolio_ledger_artifact(enhanced_root)
+    diagnostics = [
+        item for batch in account.iter_chunks() for item in batch.diagnostics
+    ]
+    assert any(
+        item.name == "decision_reason" and item.text == "enhanced_optimizer"
+        for item in diagnostics
+    )
+    assert {item.number for item in diagnostics if item.name == "alpha_slope"} == {
+        frozen["calibration"]["slope"]
+    }
+    assert frozen["calibration"]["slope"] > 0
+    assert account.metadata["initial_holding_convention"] == "cash"
+    assert (
+        summarize_portfolio_ledger(account.capital, account.iter_chunks())[
+            "fill_events"
+        ]
+        > 0
+    )
+    case.enhanced_ledger = enhanced_root
     return case
 
 

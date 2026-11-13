@@ -1,5 +1,6 @@
 """Normalize explicitly selected A-share Level-2 Parquet exports."""
 
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,9 +15,9 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 STREAM_FILES = {
-    "hft_quotes": "行情.parquet",
-    "hft_orders": "逐笔委托.parquet",
-    "hft_trades": "逐笔成交.parquet",
+    "hft_quotes": "hft_quotes/data.parquet",
+    "hft_orders": "hft_orders/data.parquet",
+    "hft_trades": "hft_trades/data.parquet",
 }
 REPOSITORY = "venvoo/china-a-share-l2-level2-limit-order-book-tick-data"
 
@@ -43,6 +44,9 @@ def instrument_mapping(instruments):
         if item.get("instrument_type", "stock") not in A_SHARE_INSTRUMENT_TYPES:
             raise ValueError("level2_instrument_type_invalid")
         code = item["wind_code"].upper()
+        if item.get("instrument_type", "stock") != "stock":
+            # Vendor ETF suffixes do not consistently identify their exchange.
+            code = code[:6]
         if code in mapping or item["exchange"] not in {"SSE", "SZSE"}:
             raise ValueError("level2_instrument_identity_invalid")
         mapping[code] = item
@@ -116,7 +120,18 @@ def normalize(frame, stream, instruments, *, clock_counts=None):
     required = set(source_columns(stream))
     if not required <= set(frame):
         raise ValueError("level2_source_columns_missing")
+    return _normalize(frame, stream, mapping, clock_counts=clock_counts)
+
+
+def _normalize(frame, stream, mapping, *, clock_counts=None):
+    required = source_columns(stream)
     codes = frame.wind_code.str.upper()
+    etfs = {
+        code
+        for code, item in mapping.items()
+        if item.get("instrument_type", "stock") != "stock"
+    }
+    codes = codes.mask(codes.str[:6].isin(etfs), codes.str[:6])
     selected = codes.isin(mapping)
     work = frame.loc[selected, sorted(required)].copy()
     work["source_row"] = np.flatnonzero(selected)
@@ -224,75 +239,71 @@ def materialize_interim_data(
     from quant_research_platform.contracts.time import TimeWindow
 
     window = TimeWindow(start=start_date, end=end_date)
-    instrument_mapping(instruments)
+    mapping = instrument_mapping(instruments)
     results = {}
     for stream in data_ids:
         if stream not in STREAM_FILES:
             raise ValueError("level2_stream_invalid")
-        files = [
-            path
-            for path in sorted(Path(raw_root).glob(f"*/{STREAM_FILES[stream]}"))
-            if window.start.strftime("%Y%m%d")
-            <= path.parent.name
-            <= window.end.strftime("%Y%m%d")
+        source = ds.parquet_dataset(Path(raw_root) / STREAM_FILES[stream])
+        symbols = [
+            code
+            for code, item in mapping.items()
+            if item.get("instrument_type", "stock") == "stock"
         ]
-        if not files:
-            raise FileNotFoundError("level2_selected_files_missing")
-        symbols = [item["wind_code"].upper() for item in instruments]
+        selected = ds.field("wind_code").isin(
+            pa.array(
+                symbols + [code.lower() for code in symbols],
+                type=source.schema.field("wind_code").type,
+            )
+        )
+        for code in mapping.keys() - set(symbols):
+            selected |= (ds.field("wind_code") >= code) & (
+                ds.field("wind_code") < str(int(code) + 1).zfill(6)
+            )
+        scanner = source.scanner(
+            columns=list(source_columns(stream)),
+            filter=selected
+            & (ds.field("date") >= int(window.start.strftime("%Y%m%d")))
+            & (ds.field("date") <= int(window.end.strftime("%Y%m%d"))),
+            batch_size=DEFAULT_BATCH_ROWS,
+        )
         spec = interim_spec(stream)
         clock_counts = {"HHMMSS": 0, "HHMMSSmmm": 0}
         event_counts = dict.fromkeys(("trade", "order", "cancel", "unknown"), 0)
 
-        def frames(files, stream, symbols, spec, clock_counts, event_counts):
-            for path in files:
-                source = ds.dataset(path, format="parquet")
-                scanner = source.scanner(
-                    columns=list(source_columns(stream)),
-                    filter=ds.field("wind_code").isin(
-                        symbols + [code.lower() for code in symbols]
-                    ),
-                    batch_size=DEFAULT_BATCH_ROWS,
-                )
-                offset = 0
-                for batch in scanner.to_batches():
-                    if not batch.num_rows:
-                        continue
-                    frame = normalize(
-                        batch.to_pandas(
-                            types_mapper={pa.uint64(): pd.UInt64Dtype()}.get
-                        ),
+        def frames(scanner, stream, spec, clock_counts, event_counts):
+            offsets = defaultdict(int)
+            for batch in scanner.to_batches():
+                work = batch.to_pandas(types_mapper={pa.uint64(): pd.UInt64Dtype()}.get)
+                for day, rows in work.groupby("date", sort=False):
+                    frame = _normalize(
+                        rows,
                         stream,
-                        instruments,
+                        mapping,
                         clock_counts=clock_counts,
                     )
-                    if not frame.session_date.eq(pd.Timestamp(path.parent.name)).all():
-                        raise ValueError("level2_source_date_mismatch")
-                    frame["source_row"] += offset
-                    offset += len(frame)
+                    frame["source_row"] += offsets[day]
+                    offsets[day] += len(frame)
                     if stream != "hft_quotes":
                         for kind, count in frame.event_kind.value_counts().items():
                             event_counts[kind] += int(count)
                     yield frame.loc[:, spec.required_columns]
-                if offset == 0:
-                    empty = pa.Table.from_batches(
-                        [], schema=scanner.projected_schema
-                    ).to_pandas(types_mapper={pa.uint64(): pd.UInt64Dtype()}.get)
-                    yield normalize(empty, stream, instruments).loc[
-                        :, spec.required_columns
-                    ]
+            if not offsets:
+                empty = pa.Table.from_batches(
+                    [], schema=scanner.projected_schema
+                ).to_pandas(types_mapper={pa.uint64(): pd.UInt64Dtype()}.get)
+                yield _normalize(empty, stream, mapping).loc[:, spec.required_columns]
 
         output = Path(output_roots[stream])
         write_dataset(
             output,
-            frames(files, stream, symbols, spec, clock_counts, event_counts),
+            frames(scanner, stream, spec, clock_counts, event_counts),
             spec=spec,
             metadata={
                 "source_evidence": {
                     "repository": REPOSITORY,
                     "revision": revision,
-                    "source_members": [
-                        p.relative_to(raw_root).as_posix() for p in files
-                    ],
+                    "source_member": STREAM_FILES[stream],
                     "instruments": instruments,
                     "timestamp_semantics": "vendor_event_time_no_receive_clock",
                     "clock_encoding_counts": clock_counts,

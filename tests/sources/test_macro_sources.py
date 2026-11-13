@@ -21,6 +21,7 @@ from quant_research_platform.sources.macro.publication import (
     estimated_release_at,
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
+from tests.helpers.public_sources import write_source_manifest
 
 
 def _vintage_zip():
@@ -186,27 +187,26 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
         (source / filename).write_bytes(_vintage_zip())
         records.append(
             {
-                "file": filename,
+                "file": "us_fed_assets/" + filename,
                 "retrieved_at": f"2026-11-0{day}T00:00:00Z",
                 "url": "https://alfred.stlouisfed.org/",
                 "sha256": hashlib.sha256((source / filename).read_bytes()).hexdigest(),
                 "bytes": (source / filename).stat().st_size,
             }
         )
-    (raw / "download.json").write_text(
-        json.dumps(
-            {
-                "sources": {
-                    "us_fed_assets": {
-                        "status": "downloaded",
-                        "source": "alfred",
-                        "series_ids": ["us_fed_assets"],
-                        "responses": records,
-                    }
+    write_source_manifest(
+        raw,
+        {
+            "sources": {
+                "us_fed_assets": {
+                    "status": "downloaded",
+                    "source": "alfred",
+                    "series_ids": ["us_fed_assets"],
+                    "responses": records,
                 }
             }
-        ),
-        encoding="utf-8",
+        },
+        name="download.json",
     )
     materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
     frame = read_dataset(output).sort_values(["observation_date", "timestamp"])
@@ -423,27 +423,27 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
             )
         payload = buffer.getvalue()
     (source / filename).write_bytes(payload)
-    (raw / "download.json").write_text(
-        json.dumps(
-            {
-                "sources": {
-                    "observations": {
-                        "status": "downloaded",
-                        "source": provider,
-                        "series_ids": [series],
-                        "responses": [
-                            {
-                                "file": filename,
-                                "retrieved_at": "2026-11-05T00:00:00Z",
-                                "url": "https://example.org/vix",
-                                "bytes": len(payload),
-                                "sha256": hashlib.sha256(payload).hexdigest(),
-                            }
-                        ],
-                    }
+    write_source_manifest(
+        raw,
+        {
+            "sources": {
+                "observations": {
+                    "status": "downloaded",
+                    "source": provider,
+                    "series_ids": [series],
+                    "responses": [
+                        {
+                            "file": "observations/" + filename,
+                            "retrieved_at": "2026-11-05T00:00:00Z",
+                            "url": "https://example.org/vix",
+                            "bytes": len(payload),
+                            "sha256": hashlib.sha256(payload).hexdigest(),
+                        }
+                    ],
                 }
             }
-        )
+        },
+        name="download.json",
     )
     output = tmp_path / "selected"
     materialize_interim_data(

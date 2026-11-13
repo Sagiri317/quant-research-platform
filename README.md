@@ -30,6 +30,7 @@ qrp prepare --config <数据准备配置.json>
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
 qrp run-quarterly --config configs/quarterly-a-share.json
+qrp run-sessions --config <会话扩窗配置.json>
 qrp backtest-hft --config configs/backtest-hft.json
 qrp predict --config configs/predict.json
 qrp explain --config configs/explain-model.json
@@ -43,6 +44,7 @@ qrp statistics-factors --config <因子统计配置.json>
 qrp statistics-portfolio --config <A股组合统计配置.json>
 qrp plot --config configs/plot-risk.json
 qrp inspect <已发布产物目录>
+qrp schema-inventory --project-root . --output <盘点结果.json>
 ```
 
 例如 Python 直接调用：
@@ -59,8 +61,9 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 最终拟合只使用这些窗口中、截至拟合时已成熟的样本；可以加入符合条件的新日期，但不会填平窗口间的空档。
 
 保存的模型可以加载后多次预测。预测不会重新训练，评分不会重新训练，选出模型也不会自动执行最终拟合。
-`run-quarterly` 用 `training_start` 与 `rolling_window` 按季度扩展训练并执行预测、评价，示例为 2014 起训练、2018—2023 滚动。
-若二者同日开始，首季度积累初始训练样本，从第二季度产生样本外预测；2014 年以前的原始数据只用于因子预热。
+`run-quarterly` 用历史成熟验证样本选参，扩窗重拟合后预测下一季度；示例从 2014 年积累训练历史，预测至 2026-10-30。
+`run-sessions` 复用同一实现，默认以 60 个拟合会话、20 个验证会话启动，每次预测并前进 20 个会话。
+两者使用显式 `sessions` 或已有 `trading_calendar`，成熟验证与输入列筛除规则见[研究方法](docs/research.md#滚动选参与重拟合)。首季度预热，初始化成熟历史不足的折记录原因并跳过；2014 年以前的原始数据只用于因子预热。
 同一日期的样本可以先用于评价，待标签成熟后再进入后续训练；窗口用途随本次操作记录。
 计算会检查拟合截止、标签成熟和校准时点。直接使用 Parquet 时，还需声明列角色、单位、主键和信息可用时间。
 

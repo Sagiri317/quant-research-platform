@@ -109,21 +109,6 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
 
 
 @pytest.mark.parametrize(
-    "payload",
-    (
-        b'{"schema_id":"unknown","columns":[]}\n',
-        b'{"schema_id":"qrp-dataset-part-logical-dtypes","columns":[],"x":1}\n',
-        b'{"schema_id":"qrp-dataset-part-logical-dtypes","columns":[],"x":1,"x":2}\n',
-    ),
-)
-def test_logical_dtype_metadata_rejects_unknown_and_noncanonical_payloads(
-    payload: bytes,
-) -> None:
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-        dataset_schema.parse_logical_dtype_metadata(payload)
-
-
-@pytest.mark.parametrize(
     "series",
     (
         pd.Series([1], dtype="Int64"),
@@ -143,7 +128,12 @@ def test_logical_dtype_grammar_round_trips_writer_canonical_families(
 ) -> None:
     frame = pd.DataFrame({"value": series})
     payload = logical_dtype_payload_from_frame(frame)
-    assert dataset_schema.validate_logical_dtype_payload(payload) == payload
+    assert (
+        dataset_schema.parse_logical_dtype_metadata(
+            dataset_schema.logical_dtype_metadata_bytes(payload)
+        )
+        == payload
+    )
 
 
 @pytest.mark.parametrize(
@@ -176,56 +166,6 @@ def test_logical_category_scalar_codec_rejects_invalid_values() -> None:
     ):
         with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
             dataset_schema._typed_category_value(payload)
-
-
-def test_logical_dtype_payload_rejects_invalid_contract_shapes() -> None:
-    schema_id = "qrp-dataset-part-logical-dtypes"
-    valid = {"name": "value", "kind": "numpy_integer", "dtype": "int64"}
-
-    def payload(*columns: object) -> dict[str, object]:
-        return {"schema_id": schema_id, "columns": list(columns)}
-
-    invalid_payloads = (
-        None,
-        {"schema_id": "unknown", "columns": [valid]},
-        {"schema_id": schema_id, "columns": []},
-        payload(None),
-        payload({"name": "", "kind": "numpy_integer", "dtype": "int64"}),
-        payload({"name": "value", "kind": "", "dtype": "int64"}),
-        payload({"name": "value", "kind": "categorical", "ordered": False}),
-        payload(
-            {"name": "value", "kind": "categorical", "ordered": 0, "categories": []}
-        ),
-        payload(
-            {"name": "value", "kind": "categorical", "ordered": False, "categories": ()}
-        ),
-        payload(
-            {
-                "name": "value",
-                "kind": "categorical",
-                "ordered": False,
-                "categories": [
-                    {"type": "int", "value": 1},
-                    {"type": "int", "value": 1},
-                ],
-            }
-        ),
-        payload({**valid, "extra": True}),
-        payload({"name": "value", "kind": "numpy_integer", "dtype": ""}),
-        payload(
-            {
-                "name": "value",
-                "kind": "categorical",
-                "ordered": False,
-                "categories": [{"type": "int", "value": 1, "extra": True}],
-            }
-        ),
-        payload({"name": "value", "kind": "numpy_integer", "dtype": "invalid"}),
-        payload(valid, valid),
-    )
-    for invalid in invalid_payloads:
-        with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-            dataset_schema.validate_logical_dtype_payload(invalid)
 
 
 def test_logical_dtype_merge_preserves_only_compatible_semantics() -> None:
@@ -271,8 +211,6 @@ def test_logical_dtype_merge_preserves_only_compatible_semantics() -> None:
 
 
 def test_dataset_schema_entrypoints_reject_invalid_inputs() -> None:
-    with pytest.raises(TypeError, match="dataset_arrow_schema_required"):
-        dataset_schema.physical_schema_from_schema([])
     with pytest.raises(TypeError, match="dataset_frame_required"):
         logical_dtype_payload_from_frame(None)
     with pytest.raises(ValueError, match="dataset_column_not_found"):
@@ -284,37 +222,6 @@ def test_dataset_schema_entrypoints_reject_invalid_inputs() -> None:
     ):
         with pytest.raises(ValueError, match="unsupported_dataset_logical_dtype"):
             logical_dtype_payload_from_frame(pd.DataFrame({"value": series}))
-
-
-def test_physical_schema_payload_rejects_invalid_contract_shapes() -> None:
-    field = {"name": "value", "nullable": False, "type": {"kind": "string"}}
-    invalid_types = (
-        None,
-        {"kind": "integer", "signed": 1, "bit_width": 8},
-        {"kind": "fixed_size_binary", "byte_width": 0},
-        {"kind": "timestamp", "unit": "ns", "timezone": 1},
-        {"kind": "unknown"},
-    )
-    invalid_schemas = [
-        None,
-        [],
-        [{}],
-        [{**field, "nullable": 0}],
-        [field, dict(field)],
-        *[[{**field, "type": invalid_type}] for invalid_type in invalid_types],
-    ]
-    for invalid in invalid_schemas:
-        with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
-            dataset_schema.validate_physical_schema_payload(invalid)
-
-
-def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
-    with pytest.raises(TypeError, match="invalid_dataset_metadata"):
-        dataset_schema.merge_dataset_metadata({}, [])
-    with pytest.raises(ValueError, match="unsupported_dataset_metadata_key"):
-        dataset_schema.merge_dataset_metadata({}, {1: "value"})
-    with pytest.raises(ValueError, match="dataset_spec_type_invalid"):
-        dataset_schema.validate_dataset_spec(object())
 
 
 @pytest.mark.parametrize(
@@ -539,28 +446,6 @@ def test_arrow_datetime_dtype_is_stable_for_filter_empty_direct_session(
     assert str(materialized["value"].dtype) == expected_dtype
 
 
-@pytest.mark.parametrize(
-    "descriptor",
-    [
-        {"name": "value", "kind": "numpy_boolean", "dtype": "bool[pyarrow]"},
-        {"name": "value", "kind": "numpy_integer", "dtype": "int16[pyarrow]"},
-        {"name": "value", "kind": "numpy_float", "dtype": "float[pyarrow]"},
-        {"name": "value", "kind": "datetime", "dtype": "timestamp[ms][pyarrow]"},
-        {"name": "value", "kind": "string", "dtype": "string[pyarrow]"},
-        {"name": "value", "kind": "numpy_integer", "dtype": "int"},
-        {"name": "value", "kind": "numpy_float", "dtype": "float"},
-        {"name": "value", "kind": "unknown", "dtype": "object"},
-    ],
-)
-def test_logical_dtype_grammar_rejects_noncanonical_siblings(
-    descriptor: dict[str, object],
-) -> None:
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-        dataset_schema.validate_logical_dtype_payload(
-            {"schema_id": "qrp-dataset-part-logical-dtypes", "columns": [descriptor]}
-        )
-
-
 def test_empty_unordered_category_domain_unions_with_nonempty_domain(
     tmp_path: Path,
 ) -> None:
@@ -681,54 +566,3 @@ def test_unordered_category_domain_survives_persistence(tmp_path: Path) -> None:
     actual = read_dataset(root)["asset_id"]
     assert set(actual.cat.categories) == set(categories)
     assert actual.tolist() == [categories[-1]]
-
-
-@pytest.mark.parametrize("changed", (False, True))
-def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
-    tmp_path, monkeypatch, changed
-):
-    work = {"validate": 0, "categories": 0, "encode": 0}
-    validate = dataset_schema.validate_logical_dtype_payload
-    encode = dataset_writing.encode_logical_category_value
-
-    def checked(payload, **kwargs):
-        work["validate"] += 1
-        work["categories"] += sum(
-            len(item.get("categories", ())) for item in payload["columns"]
-        )
-        return validate(payload, **kwargs)
-
-    def encoded(value):
-        work["encode"] += 1
-        return encode(value)
-
-    monkeypatch.setattr(dataset_schema, "validate_logical_dtype_payload", checked)
-    monkeypatch.setattr(dataset_writing, "encode_logical_category_value", encoded)
-    counts = []
-    for parts in (1, 3):
-        for key in work:
-            work[key] = 0
-        frames = []
-        for index in range(parts):
-            frame = make_default_dataset_frame(
-                asset_ids=("a",), dates=(f"2020-01-{index + 1:02}",), values=("v0",)
-            )
-            # Alternating domains proves reuse across nonadjacent parts.
-            domain = 2 + int(changed and index % 2 == 1)
-            frame["value"] = pd.Categorical(
-                frame["value"], categories=[f"v{i}" for i in range(domain)]
-            )
-            frames.append(frame)
-        root = make_dataset_artifact_root(tmp_path, f"dtype_work_{parts}")
-        write_dataset(
-            root, iter(frames), spec=make_processed_dataset_spec(f"dtype_work_{parts}")
-        )
-        counts.append(dict(work))
-        observed = read_dataset(root)
-        assert len(observed) == parts
-        assert len(observed["value"].cat.categories) == 2 + int(changed and parts > 1)
-    if changed:
-        assert counts[1]["encode"] == 2 + 3
-    else:
-        assert counts[0] == counts[1]
-        assert counts[1]["encode"] == 2

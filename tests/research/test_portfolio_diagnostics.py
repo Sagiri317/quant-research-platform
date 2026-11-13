@@ -41,204 +41,6 @@ def _holding_paths(
     return result
 
 
-def test_published_ledgers_preserve_ordinary_group_bootstrap(tmp_path):
-    import numpy as np
-    from arch.bootstrap import StationaryBootstrap
-    from statsmodels.api import OLS
-
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.artifacts.statistics import (
-        read_statistics_artifact,
-        write_statistics_artifact,
-    )
-    from quant_research_platform.contracts.portfolios import (
-        PORTFOLIO_LEDGER_COST_COLUMNS,
-    )
-    from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.research.portfolios.accounting import (
-        portfolio_interval_economics,
-    )
-    from quant_research_platform.research.portfolios.diagnostics import (
-        _portfolio_statistics_tables,
-    )
-    from tests.helpers.portfolio_ledger import (
-        CONTINUOUS_EXECUTION_COLUMNS,
-        write_test_sessions,
-    )
-
-    returns = np.random.default_rng(42).normal(0.0005, 0.008, size=252)
-    gross = 1 + returns
-    dates = pd.bdate_range("2024-01-01", periods=len(gross) + 1)
-    columns = {}
-    ledgers = {}
-    for group in ("global", "quarterly"):
-        candidate = f"{group}_ordinary"
-        capital = PortfolioCapital(
-            **{
-                "candidate_id": candidate,
-                "initial_capital": 1000000.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "cash_equity",
-            }
-        )
-        metadata = {
-            "sample_role": "test",
-            "window": {"start": str(dates[0].date()), "end": str(dates[-1].date())},
-        }
-        frames = []
-        nav = capital.initial_capital
-        for index, factor in enumerate(gross):
-            invested = group == "quarterly"
-            end = nav * factor if invested else nav
-            records = []
-            for asset in ("asset", "__cash__"):
-                cash = asset == "__cash__"
-                before = (
-                    nav
-                    if cash
-                    and (not invested or index == 0)
-                    or (not cash and invested and (index > 0))
-                    else 0.0
-                )
-                after = nav if cash != invested else 0.0
-                row = dict.fromkeys(CONTINUOUS_EXECUTION_COLUMNS, np.nan)
-                row.update(
-                    decision_timestamp=dates[index],
-                    execution_date=dates[index],
-                    asset_id=asset,
-                    adv20=10000000000.0,
-                    pre_trade_notional=before,
-                    target_notional=after,
-                    executed_delta_notional=nav
-                    if invested and index == 0 and (not cash)
-                    else 0.0,
-                    post_trade_notional=after,
-                    holding_return=factor - 1.0 if invested and (not cash) else 0.0,
-                    end_notional=end if cash != invested else 0.0,
-                    decision_delta_weight=(-1.0 if cash else 1.0)
-                    if invested and index == 0
-                    else 0.0,
-                    decision_reason="simple_rule" if cash else np.nan,
-                )
-                row.update(dict.fromkeys(PORTFOLIO_LEDGER_COST_COLUMNS, 0.0))
-                records.append(row)
-            frame = pd.DataFrame.from_records(
-                records, columns=CONTINUOUS_EXECUTION_COLUMNS
-            )
-            frame.attrs["end_timestamp"] = dates[index + 1]
-            frames.append(frame)
-            nav = end
-        assert np.isfinite(nav) and nav > 0
-        root = write_test_sessions(
-            tmp_path / candidate,
-            metadata=metadata,
-            ledger_chunks=iter(frames),
-            capital=capital,
-        )
-        artifact = read_portfolio_ledger_artifact(root)
-        ledgers[candidate] = artifact
-        with closing_iterator(artifact.iter_chunks()) as batches:
-            intervals = pd.DataFrame(
-                [portfolio_interval_economics(batch) for batch in batches]
-            )
-        assert len(intervals) == len(returns)
-        assert intervals.nav_end.gt(0).all() and np.isfinite(intervals.nav_end).all()
-        columns[candidate] = intervals.set_index(["entry_at", "end_at"]).net_return
-    matrix = pd.DataFrame(columns)
-    np.testing.assert_array_equal(matrix.global_ordinary, np.zeros(len(returns)))
-    np.testing.assert_allclose(
-        matrix.quarterly_ordinary, returns, rtol=1e-12, atol=1e-14
-    )
-    expected = OLS(returns, np.ones((len(returns), 1))).fit(
-        cov_type="HAC", cov_kwds={"maxlags": 19}
-    )
-    expected_interval = StationaryBootstrap(20, returns, seed=42).conf_int(
-        lambda sample: np.array([sample.mean()]),
-        reps=199,
-        method="percentile",
-        size=0.95,
-    )
-    from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
-    from quant_research_platform.contracts.time import TimeWindow
-
-    candidates = tuple(
-        PortfolioCandidateSpec(
-            candidate_id=f"{group}_ordinary",
-            selection_group=group,
-            construction="quantile_equal_weight",
-            prediction_selector="champion",
-            rebalance_schedule="daily",
-            top_quantile=1.0,
-            benchmark_id=None,
-        )
-        for group in ("global", "quarterly")
-    )
-    result = _portfolio_statistics_tables(
-        ledgers=ledgers,
-        candidates=candidates,
-        time_window=TimeWindow(dates[0], dates[-1]),
-        benchmark_opens=pd.DataFrame(),
-        calendar=pd.DataFrame({"timestamp": dates}),
-        unified_trading_sessions=lambda _: dates,
-        holding_inputs={},
-        config={
-            "analyses": ["group_comparison"],
-            "sample_role": "test",
-            "statistics": {
-                "hac_lag": 19,
-                "bootstrap_block": 20,
-                "bootstrap_repetitions": 199,
-                "group_comparison": {
-                    "portfolio_ids": ["ordinary"],
-                    "primary_portfolio_id": "ordinary",
-                    "fdr_method": "BY",
-                    "alpha": 0.05,
-                    "seed": 42,
-                    "confidence": 0.95,
-                },
-            },
-        },
-    )["portfolio_group_comparison"]
-    row = result.iloc[0]
-    assert row.status == row.bootstrap_status == "DEFINED"
-    assert row.observation_count == len(returns)
-    assert row.mean_difference == pytest.approx(
-        expected.params[0], rel=1e-12, abs=1e-14
-    )
-    assert row.standard_error == pytest.approx(expected.bse[0], rel=1e-12, abs=1e-14)
-    assert (row.bootstrap_lower, row.bootstrap_upper) == pytest.approx(
-        expected_interval[:, 0], rel=1e-12, abs=1e-14
-    )
-    assert row.global_terminal_wealth == 1.0
-    assert row.quarterly_terminal_wealth == pytest.approx(np.prod(gross), rel=1e-12)
-    output = write_statistics_artifact(
-        tmp_path / "statistics",
-        table_group="portfolio",
-        metadata={
-            **metadata,
-            "candidate_ids": list(columns),
-            "comparison_portfolio_ids": ["ordinary"],
-        },
-        tables={"portfolio_group_comparison": result},
-    )
-    with read_statistics_artifact(output).table(
-        "portfolio_group_comparison.parquet"
-    ) as saved:
-        assert saved.portfolio_id.tolist() == ["ordinary"]
-        assert saved.status.tolist() == saved.bootstrap_status.tolist() == ["DEFINED"]
-        measurements = [
-            "mean_difference",
-            "standard_error",
-            "bootstrap_lower",
-            "bootstrap_upper",
-            "global_terminal_wealth",
-            "quarterly_terminal_wealth",
-        ]
-        np.testing.assert_array_equal(saved[measurements], result[measurements])
-
-
 def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.policy.lifecycle import closing_iterator
@@ -395,9 +197,6 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     metadata = {
         **metadata,
         "candidate_ids": [c.candidate_id for c in candidates],
-        "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
     }
     from quant_research_platform.research.portfolios.attribution import (
         HoldingFactorInputs,
@@ -740,11 +539,6 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ).any()
         assert global_rows.value.isna().all()
         assert rows.candidate_count.eq(len(candidates)).all()
-    with artifact.table("portfolio_group_comparison.parquet") as rows:
-        assert len(rows) == 5
-        assert rows.status.eq("UNDEFINED").all()
-        assert not rows.reason.eq("global_validation_selection_reuses_validation").any()
-        assert rows.observation_count.eq(3).all()
 
 
 @pytest.mark.parametrize("st_holding", (False, True))
@@ -1151,11 +945,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         configuration["primary_portfolio_id"] = candidate_id
     candidates, config = portfolio_statistics_config(configuration=configuration)
     config["statistics"]["bootstrap_repetitions"] = 99
-    if candidate_id is not None:
-        assert (
-            candidate_id
-            in deepcopy(config)["statistics"]["group_comparison"]["portfolio_ids"]
-        )
     qualified = tuple(
         item for item in candidates if item.selection_group == "quarterly"
     )
@@ -1247,9 +1036,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
     metadata = {
         **metadata,
         "candidate_ids": [c.candidate_id for c in candidates],
-        "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
     }
 
     def produce(selected_ledgers, *, robustness=False, sample_role="validation"):
@@ -1282,31 +1068,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         tables=owned,
         table_group="portfolio",
     )
-    corrupt = dict(owned)
-    corrupt["portfolio_daily"] = pd.concat(
-        [corrupt["portfolio_daily"], corrupt["portfolio_daily"].iloc[:1]],
-        ignore_index=True,
-    )
-    rejected = {
-        "sample_role": window["access"],
-        "window": {key: window[key] for key in ("start", "end")},
-    }
-    rejected = {
-        **rejected,
-        "candidate_ids": [c.candidate_id for c in candidates],
-        "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
-    }
-    with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
-        write_statistics_artifact(
-            tmp_path / "rejected_statistics",
-            metadata=rejected,
-            tables=corrupt,
-            table_group="portfolio",
-        )
-    assert not (tmp_path / "rejected_statistics").exists()
-    corrupt = None
     artifact = read_statistics_artifact(root)
     with artifact.table("portfolio_robustness.parquet") as rows:
         assert len(rows) == 2 * len(candidates) + 1
@@ -1316,10 +1077,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
             ("test_excluded", "global_validation_selection_reuses_validation")
         ).any()
         baseline = rows.copy()
-    with artifact.table("portfolio_group_comparison.parquet") as rows:
-        assert len(rows) == 5
-        assert rows.global_mean.notna().all() and rows.quarterly_mean.notna().all()
-        assert rows.observation_count.eq(73).all()
     with artifact.table("portfolio_capacity.parquet") as rows:
         assert rows.empty
     with artifact.table("portfolio_capacity_summary.parquet") as rows:
@@ -1400,20 +1157,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         ("test", "training_weighting"),
     ):
         varied = produce(ledgers, sample_role=role, robustness=robustness)
-        comparison = varied["portfolio_group_comparison"]
-        assert comparison.status.eq("DEFINED").all()
-        assert comparison.bootstrap_status.eq("DEFINED").all()
-        assert comparison.fdr_method.eq("NOT_APPLICABLE" if robustness else "BY").all()
-        assert comparison.fdr_adjusted_p_value.isna().eq(bool(robustness)).all()
-        paired = comparison.set_index("portfolio_id")
-        for portfolio_id in paired.index:
-            expected = (
-                matrix[f"quarterly_{portfolio_id}"].mean()
-                - matrix[f"global_{portfolio_id}"].mean()
-            )
-            assert paired.loc[portfolio_id, "mean_difference"] == pytest.approx(
-                expected, abs=1e-14
-            )
         pd.testing.assert_frame_equal(
             varied["portfolio_robustness"].drop(columns="sample_role"),
             owned["portfolio_robustness"].drop(columns="sample_role"),
@@ -1421,19 +1164,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
             rtol=1e-14,
             atol=1e-15,
         )
-        metadata_variant = {**metadata, "sample_role": role}
-        published = write_statistics_artifact(
-            tmp_path / f"role-{role}-{robustness}",
-            metadata=metadata_variant,
-            tables=varied,
-            table_group="portfolio",
-        )
-        with read_statistics_artifact(published).table(
-            "portfolio_group_comparison.parquet"
-        ) as saved:
-            np.testing.assert_allclose(
-                saved.p_value, comparison.p_value, rtol=1e-14, atol=1e-15
-            )
 
     altered = dict(ledgers)
     for column, candidate in enumerate(blocked):
@@ -1694,9 +1424,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         contract = {
             **metadata("pv_all_portfolio_statistics"),
             "candidate_ids": [c.candidate_id for c in candidates],
-            "comparison_portfolio_ids": config["statistics"]["group_comparison"][
-                "portfolio_ids"
-            ],
         }
         root = write_statistics_artifact(
             tmp_path / "statistics" / case,

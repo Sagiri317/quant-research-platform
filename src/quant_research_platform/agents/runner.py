@@ -48,7 +48,8 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.policy.share_safety import sanitize_shared_text
-from quant_research_platform.storage.atomic import atomic_write_json, reject_if_exists
+from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def run_agent(config, *, client=None, control=None, on_event=None):
@@ -277,7 +278,7 @@ class _Runner:
         identifier = f"e{number:04d}"
         root = self.root / identifier
         root.mkdir()
-        atomic_write_json(root / "action.json", action.model_dump())
+        write_qrp_json_file(root / "action.json", action.model_dump())
         event = {
             "id": identifier,
             "phase": self.state["phase"],
@@ -349,7 +350,7 @@ class _Runner:
                     response = self.request(
                         "web_search", sanitize_shared_text(arguments["query"])
                     )
-                    atomic_write_json(root / "sources.json", response)
+                    write_qrp_json_file(root / "sources.json", response)
                     result = {
                         "status": "completed",
                         **_page(response["text"], arguments),
@@ -505,7 +506,7 @@ class _Runner:
                     raise ValueError("agent_web_search_not_enabled")
                 query = sanitize_shared_text(arguments["query"])
                 response = self.request("web_search", query)
-                atomic_write_json(root / "sources.json", response)
+                write_qrp_json_file(root / "sources.json", response)
                 result = {
                     "status": "completed",
                     "text": response["text"][:30000],

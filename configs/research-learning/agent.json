@@ -419,7 +419,7 @@
       "config": {
         "candidate": {
           "candidate_id": "agent_candidate",
-          "selection_group": "global",
+          "selection_group": "quarterly",
           "construction": "quantile_equal_weight",
           "prediction_selector": "champion",
           "top_quantile": 0.5,
@@ -779,7 +779,7 @@
       "config": {
         "candidate": {
           "candidate_id": "agent_candidate",
-          "selection_group": "global",
+          "selection_group": "quarterly",
           "construction": "quantile_equal_weight",
           "prediction_selector": "champion",
           "top_quantile": 0.5,

@@ -16,8 +16,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.interfaces import private_cli
+from quant_research_platform.interfaces.cli import commands
 from quant_research_platform.storage import schema_inventory
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.identity import (
@@ -81,15 +80,13 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
         frame = frame.drop(columns="timestamp")
     write_dataset(root, frame, spec=spec)
     projections = []
-    from quant_research_platform.storage.datasets import inspection
-
-    original = inspection.iter_dataset_file_batches
+    original = schema_inventory.iter_dataset_chunks
 
     def record(session, **kwargs):
-        projections.append(kwargs["columns"])
+        projections.append(session.logical_columns)
         yield from original(session, **kwargs)
 
-    monkeypatch.setattr(inspection, "iter_dataset_file_batches", record)
+    monkeypatch.setattr(schema_inventory, "iter_dataset_chunks", record)
     (item,) = _collect_inventory(
         tmp_path,
         important_null_count_columns=("asset_id", "value", "note")
@@ -99,7 +96,6 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     assert item["row_count_by_year"] == (
         {"2020": 1, "2021": 2} if layout_kind != "reference" else {}
     )
-    assert item["null_key_counts"] == {key: 0 for key in spec.primary_key}
     expected_nulls = {
         "asset_id": 0,
         "value": 2,
@@ -107,8 +103,7 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     if context:
         expected_nulls["note"] = 2
     assert item["selected_important_column_null_counts"] == expected_nulls
-    assert len(projections) == 1
-    assert set(projections[0]) == set(frame.columns)
+    assert projections == [("note",)] if context else projections == []
 
 
 def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path, monkeypatch):
@@ -183,10 +178,7 @@ def test_schema_inventory_uses_full_posix_path_order_for_prefix_names(tmp_path, 
     assert [item["logical_relative_root"] for item in items] == sorted(
         root.root.relative_to(tmp_path).as_posix() for root in roots
     )
-    assert all(
-        item["row_count"] == 3 and item["duplicate_primary_key_count"] == 0
-        for item in items
-    )
+    assert all(item["row_count"] == 3 for item in items)
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -280,126 +272,23 @@ def test_schema_inventory_keeps_all_explicit_dataset_paths(
             item["kind"],
             item["row_count"],
         ) == (common["data_id"], layer, kind, rows)
-        assert item["duplicate_primary_key_count"] == 0
         assert item["selected_important_column_null_counts"] == {"value": rows - 1}
     cli_output = tmp_path / "cli-inventory.json"
     result = CliRunner().invoke(
-        private_cli.app, ["--project-root", str(tmp_path), "--output", str(cli_output)]
+        commands.app,
+        [
+            "schema-inventory",
+            "--project-root",
+            str(tmp_path),
+            "--output",
+            str(cli_output),
+        ],
     )
     assert result.exit_code == 0, result.output
     cli_items = json.loads(
         Path(native_filesystem_path(cli_output)).read_text(encoding="utf-8")
     )["datasets"]
     assert [item["logical_relative_root"] for item in cli_items] == sorted(expected)
-
-
-def test_schema_inventory_uses_storage_exact_duplicate_fact(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = ProcessedDataSpec(
-        data_id="inventory_factor",
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.FACTOR,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "value": ColumnRole.FACTOR,
-        },
-        primary_key=("market_id", "asset_id", "timestamp"),
-        partition_columns=("year",),
-    )
-    root = tmp_path / "data" / "processed" / "a_share" / "factor" / spec.data_id
-    write_dataset(
-        root,
-        pd.DataFrame(
-            {
-                "market_id": ["a_share"] * 3,
-                "asset_id": ["asset_a", "asset_b", "asset_c"],
-                "timestamp": pd.date_range("2026-01-01", periods=3, freq="D"),
-                "value": [1.0, 2.0, 3.0],
-            }
-        ),
-        spec=spec,
-    )
-
-    monkeypatch.setattr(
-        pd.util,
-        "hash_pandas_object",
-        lambda values, **_kwargs: pd.Series(
-            [0] * len(values),
-            dtype="uint64",
-        ),
-    )
-
-    payload = _collect_inventory(tmp_path)
-
-    assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
-
-
-@pytest.mark.parametrize(
-    ("forged_summary", "error"),
-    (
-        (
-            {"row_count": 3, "partition_row_counts": {"year=2026": 3}},
-            "dataset_manifest_summary_mismatch",
-        ),
-        (
-            {
-                "partitions": ["year=2099"],
-                "partition_row_counts": {"year=2099": 2},
-            },
-            "manifest_partition_date_mismatch",
-        ),
-    ),
-    ids=("row-count", "partition-summary"),
-)
-def test_schema_inventory_rejects_forged_storage_summary(
-    tmp_path: Path,
-    forged_summary: dict[str, object],
-    error: str,
-) -> None:
-    spec = ProcessedDataSpec(
-        data_id="inventory_forged_summary",
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.FACTOR,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles={
-            "market_id": ColumnRole.KEY,
-            "asset_id": ColumnRole.KEY,
-            "timestamp": ColumnRole.TIMESTAMP,
-            "value": ColumnRole.FACTOR,
-        },
-        primary_key=("market_id", "asset_id", "timestamp"),
-        partition_columns=("year",),
-    )
-    root = tmp_path / "data" / "processed" / "a_share" / "factor" / spec.data_id
-    write_dataset(
-        root,
-        pd.DataFrame(
-            {
-                "market_id": ["a_share", "a_share"],
-                "asset_id": ["asset_a", "asset_b"],
-                "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
-                "value": [1.0, 2.0],
-            }
-        ),
-        spec=spec,
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest.update(forged_summary)
-    filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
-
-    with pytest.raises(ValueError, match=error):
-        with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
-            tuple(items)
 
 
 @pytest.mark.parametrize("value", (True, 1, ""))
@@ -465,8 +354,7 @@ def test_inventory_uses_declared_time_and_closes_early_context(
             items.close()
 
 
-@pytest.mark.parametrize("forged", (False, True))
-def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path, forged):
+def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path):
     spec = InterimDataSpec(
         data_id="nullable_time",
         source_id="fixture",
@@ -492,13 +380,6 @@ def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path, forged):
         ),
         spec=spec,
     )
-    if forged:
-        path = root / "_manifest" / "manifest.json"
-        manifest = json.loads(
-            Path(native_filesystem_path(path)).read_text(encoding="utf-8")
-        )
-        manifest["null_count_summary"] = {"asset_id": 1}
-        filesystem_write_text(path, json.dumps(manifest) + "\n", encoding="utf-8")
     (item,) = _collect_inventory(tmp_path, important_null_count_columns=("timestamp",))[
         "datasets"
     ]

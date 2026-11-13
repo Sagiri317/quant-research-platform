@@ -8,7 +8,7 @@ import math
 import struct
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, NoReturn
+from typing import Any
 
 _LENGTH_BYTES = 8
 _JSON_INDENT = 2
@@ -27,7 +27,8 @@ def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
         value = json.loads(
             text,
             object_pairs_hook=_strict_object_from_pairs,
-            parse_constant=_reject_json_constant,
+            parse_constant=_finite_json_float,
+            parse_float=_finite_json_float,
         )
     except json.JSONDecodeError as exc:
         raise ValueError("qrp_json_invalid") from exc
@@ -35,7 +36,7 @@ def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
         raise ValueError("qrp_json_recursion_limit") from exc
     if not isinstance(value, dict):
         raise ValueError("qrp_json_top_level_object_required")
-    return _json_native_object(value)
+    return value
 
 
 def render_qrp_json_object(value: Mapping[str, Any]) -> str:
@@ -136,8 +137,11 @@ def _strict_object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _reject_json_constant(_: str) -> NoReturn:
-    raise ValueError("qrp_json_nonfinite_number")
+def _finite_json_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("qrp_json_nonfinite_number")
+    return value
 
 
 def _json_native_object(

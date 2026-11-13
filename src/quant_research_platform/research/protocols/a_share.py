@@ -388,15 +388,9 @@ def forward_label_available_columns() -> tuple[str, ...]:
 
 
 def validate_model_selection(models):
-    """Validate A-share model family identities and sample eligibility."""
+    """Reject ambiguous A-share champion family names."""
     from quant_research_platform.contracts.models import (
-        ModelSpec,
         _validate_a_share_model_family_ids,
     )
 
-    models = tuple(models)
-    if not models or any(not isinstance(model, ModelSpec) for model in models):
-        raise ValueError("a_share_model_selection_required")
     _validate_a_share_model_family_ids(model.model_id for model in models)
-    if any(model.sample_filter_mode != "eligible" for model in models):
-        raise ValueError("a_share_model_sample_filter_mode_not_supported")

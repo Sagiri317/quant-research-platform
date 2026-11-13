@@ -178,13 +178,10 @@ def _with_keys(
     *,
     output_columns: tuple[str, ...],
 ) -> pd.DataFrame:
-    keys = source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    keys = source.loc[:, ["market_id", "asset_id", "timestamp"]]
     values = calculated.loc[:, ["asset_id", "timestamp", *output_columns]]
-    output = keys.merge(
+    return keys.merge(
         values,
         on=["asset_id", "timestamp"],
         how="left",
-        validate="one_to_one",
-        suffixes=("", "_calculated"),
     )
-    return output.loc[:, ["market_id", "asset_id", "timestamp", *output_columns]]

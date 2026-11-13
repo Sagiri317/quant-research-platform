@@ -150,9 +150,7 @@ def normalize_alfred(payload, name, record, *, start_date=None, end_date=None):
     )
 
 
-def _normalize_response(
-    payload, names, record, *, incomplete=False, start_date=None, end_date=None
-):
+def _normalize_response(payload, names, record, *, start_date=None, end_date=None):
     source = SERIES[names[0]].source
     if source == "alfred":
         return [
@@ -261,10 +259,6 @@ def _normalize_response(
             )
         ]
     if source == "hkma":
-        if not document["header"]["success"]:
-            if incomplete:
-                return []
-            raise ValueError("hkma_response_not_successful")
         data = pd.DataFrame(document["result"]["records"])
         date_column, timezone = "end_of_date", "Asia/Hong_Kong"
     elif source == "cfets_shibor":
@@ -467,51 +461,38 @@ def materialize_interim_data(
     start_date=None,
     end_date=None,
     release_csv=None,
+    manifests=("download.json",),
 ):
     """Prepare source observations only; no factors, fitting, or research are run."""
     if tuple(data_ids) != (DATA_ID,) or set(output_roots) != {DATA_ID}:
         raise ValueError("macro_interim_output_invalid")
     raw_root = Path(raw_root)
-    frames, skipped, sources, incomplete = [], [], {}, []
+    frames, sources = [], {}
     if release_csv is not None:
         frame = read_release_csv(release_csv, start_date=start_date, end_date=end_date)
         sources["release_csv"] = frame.attrs.pop("source_evidence")
     else:
-        manifest = read_qrp_json_file(raw_root / "download.json")[1]
-        for key, metadata in manifest["sources"].items():
-            records = metadata["responses"]
-            if metadata["status"] != "downloaded" and metadata["source"] in {
-                "hkma",
-                "cfets_shibor",
-                "chinabond",
-            }:
-                records = [record for record in records if record["status_code"] == 200]
-                incomplete.extend(metadata["series_ids"])
-            elif metadata["status"] != "downloaded":
-                skipped.extend(metadata["series_ids"])
-                continue
-            chunks = []
-            for record in records:
-                if record["file"] == "form.html":
-                    continue
-                member = raw_root / key / record["file"]
-                if not member.resolve().is_relative_to(raw_root.resolve()):
-                    raise ValueError("macro_source_member_outside_root")
-                payload = member.read_bytes()
-                chunks.extend(
-                    _normalize_response(
-                        payload,
-                        metadata["series_ids"],
-                        record,
-                        incomplete=metadata["status"] != "downloaded",
-                        start_date=start_date,
-                        end_date=end_date,
+        catalog = read_qrp_json_file(raw_root / "manifest.json")[1]
+        source_root = (raw_root / catalog["source_root"]).resolve()
+        for name in manifests:
+            for key, metadata in catalog["collections"][name]["sources"].items():
+                chunks = []
+                for record in metadata["responses"]:
+                    member = source_root / record["file"]
+                    if not member.resolve().is_relative_to(source_root):
+                        raise ValueError("macro_source_member_outside_root")
+                    chunks.extend(
+                        _normalize_response(
+                            member.read_bytes(),
+                            metadata["series_ids"],
+                            record,
+                            start_date=start_date,
+                            end_date=end_date,
+                        )
                     )
-                )
-            if chunks:
-                data = pd.concat(chunks, ignore_index=True)
-                frames.append(data)
-            sources[key] = metadata
+                if chunks:
+                    frames.append(pd.concat(chunks, ignore_index=True))
+                sources[f"{name}:{key}"] = metadata
         if not frames:
             raise ValueError("macro_no_observations")
         frame = validate_observations(pd.concat(frames, ignore_index=True))
@@ -545,8 +526,6 @@ def materialize_interim_data(
             "source_evidence": sources,
             "producer_diagnostics": {
                 "coverage": coverage,
-                "skipped": skipped,
-                "incomplete": incomplete,
             },
             "parameters": {
                 "publication_date_convention": "next_local_midnight",
@@ -556,4 +535,4 @@ def materialize_interim_data(
             "inputs": {"raw_root": str(raw_root)},
         },
     )
-    return MacroImportResult({DATA_ID: output}, tuple(skipped))
+    return MacroImportResult({DATA_ID: output}, ())

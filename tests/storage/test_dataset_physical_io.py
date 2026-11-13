@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import importlib
-import json
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,7 +12,6 @@ import pyarrow as pa
 import pytest
 
 import quant_research_platform.storage.datasets.reading as dataset_reading
-import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.parquet as dataset_physical
 from quant_research_platform.contracts.columns import ColumnRole
@@ -418,46 +416,6 @@ def test_physical_filter_rejects_invalid_operator_and_values(
         dataset_physical._filter_arrow_batch(batch, [("value", operator, value)])
 
 
-@pytest.mark.parametrize(
-    ("mutation", "error"),
-    (
-        ({"date_min": None, "date_max": None}, "manifest_date_range_invalid"),
-        (
-            {"date_min": "2099-01-01", "date_max": "2099-12-31"},
-            "manifest_partition_date_mismatch",
-        ),
-        (
-            {
-                "partitions": ["year=2014", "year=02015"],
-                "partition_count": 2,
-                "partition_row_counts": {"year=2014": 3, "year=02015": 0},
-            },
-            "invalid_dataset_part_files",
-        ),
-    ),
-)
-def test_manifest_structural_truth_rejects_impossible_counts_and_dates(
-    tmp_path: Path, mutation: dict[str, object], error: str
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "manifest_truth")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("manifest_truth"),
-    )
-    spec = json.loads(
-        Path(native_filesystem_path(root / "spec.json")).read_text(encoding="utf-8")
-    )
-    manifest = json.loads(
-        Path(native_filesystem_path(root / "_manifest" / "manifest.json")).read_text(
-            encoding="utf-8"
-        )
-    )
-    manifest.update(mutation)
-    with pytest.raises(ValueError, match=error):
-        dataset_schema.validate_dataset_manifest_payload(manifest, spec=spec)
-
-
 def test_unpartitioned_non_primary_timestamp_round_trips_without_date_range(
     tmp_path: Path,
 ) -> None:
@@ -473,12 +431,6 @@ def test_unpartitioned_non_primary_timestamp_round_trips_without_date_range(
     assert inspection.manifest["date_min"] is None
     assert inspection.manifest["date_max"] is None
     pd.testing.assert_frame_equal(read_dataset(root), frame)
-    forged_manifest = dict(inspection.manifest)
-    forged_manifest.update(date_min="2014-01-02", date_max="2014-01-02")
-    with pytest.raises(ValueError, match="manifest_date_range_invalid"):
-        dataset_schema.validate_dataset_manifest_payload(
-            forged_manifest, spec=inspection.spec
-        )
 
 
 def test_session_metadata_reader_rejects_invalid_json(

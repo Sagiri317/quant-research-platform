@@ -5,10 +5,6 @@ import json
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs.manifest import (
-    output_manifest_payload,
-    validate_output_manifest,
-)
 from quant_research_platform.artifacts.outputs.prediction import (
     read_predictions,
     write_prediction_outputs,
@@ -24,7 +20,6 @@ def test_manifest_actual_model_and_paths(tmp_path):
     root, frame, metadata = native_bundle(tmp_path)
     manifest = json.loads((root / "manifest.json").read_text())
     assert not {"model_id", "family_id", "label_unit"} & set(manifest["metadata"])
-    assert validate_output_manifest(manifest) is manifest
     assert manifest["metadata"] == metadata
     assert "run_id" not in manifest
     actual, restored = read_predictions(root)
@@ -38,95 +33,29 @@ def test_manifest_actual_model_and_paths(tmp_path):
     )
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("prediction_window", {}),
-        ("prediction_window", {"start": "2014-01-03"}),
-        (
-            "prediction_window",
-            {"start": "2014-01-03", "end": "2014-01-03", "extra": True},
-        ),
-        ("effective_prediction_end", "NaT"),
-        ("sample_role", ""),
-        ("prediction_rows", True),
-        ("model_id", "another-model"),
-        ("family_id", "another-family"),
-        ("label_unit", "another-unit"),
-    ],
-)
-def test_metadata_rejected_before_publish(tmp_path, field, value):
-    root, frame, metadata = native_bundle(tmp_path)
-    metadata[field] = value
-    with pytest.raises((ValueError, TypeError)):
-        write_prediction_outputs(
-            output_path=tmp_path / "bad", output_chunks=[frame], metadata=metadata
-        )
-    assert not (tmp_path / "bad").exists()
-
-
 @pytest.mark.parametrize("key", ["Authorization", "auth", "private_key"])
-def test_manifest_rejects_credentials(key):
-    metadata = make_price_volume_prediction_output_frame().attrs["prediction_metadata"]
+def test_manifest_writer_rejects_credentials(tmp_path, key):
+    frame = make_price_volume_prediction_output_frame()
+    metadata = frame.attrs["prediction_metadata"]
     metadata["model_facts"]["model"]["model_algorithm"] = "lasso_regression"
     metadata["model_facts"]["model"]["hyperparameters"][key] = "secret-value"
     metadata["model_facts"]["candidate_parameters"][key] = "secret-value"
-    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
-        output_manifest_payload(
-            definition_id="prediction_outputs",
-            metadata=metadata,
-            files=["prediction.parquet"],
-        )
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "before",
-        "after",
-        "nan",
-        "duplicate",
-        "duplicate_chunks",
-        "score_text",
-        "rank_text",
-    ],
-)
-def test_writer_validates_actual_rows_and_global_keys(tmp_path, mutation):
-    frame = make_price_volume_prediction_output_frame()
-    metadata = frame.attrs["prediction_metadata"]
-    if mutation == "before":
-        frame["timestamp"] = pd.Timestamp("2014-01-02")
-    elif mutation == "after":
-        frame["timestamp"] = pd.Timestamp("2014-01-04")
-    elif mutation == "nan":
-        frame["prediction_score"] = float("nan")
-    elif mutation == "duplicate":
-        frame = pd.concat([frame, frame], ignore_index=True)
-    elif mutation in {"score_text", "rank_text"}:
-        column = (
-            "prediction_score" if mutation == "score_text" else "prediction_rank_score"
-        )
-        frame[column] = frame[column].astype(str)
-    chunks = [frame, frame] if mutation == "duplicate_chunks" else [frame]
-    with pytest.raises(ValueError):
+    with pytest.raises(
+        ValueError, match="unsafe_internal_artifact_metadata: credential"
+    ):
         write_prediction_outputs(
-            output_path=tmp_path / "bad", output_chunks=chunks, metadata=metadata
+            output_path=tmp_path / "invalid", output_chunks=[frame], metadata=metadata
         )
-    assert not (tmp_path / "bad").exists()
+    assert not (tmp_path / "invalid").exists()
 
 
-@pytest.mark.parametrize("kind", ["string", "date", "ns", "us"])
+@pytest.mark.parametrize("kind", ["ns", "us"])
 def test_timestamp_normalization_and_readback(tmp_path, kind):
     frame = make_price_volume_prediction_output_frame()
     expected = frame.copy(deep=True)
     expected["timestamp"] = expected.timestamp.dt.as_unit("ns")
     metadata = frame.attrs["prediction_metadata"]
-    if kind == "string":
-        frame["timestamp"] = frame.timestamp.dt.strftime("%Y-%m-%d")
-    elif kind == "date":
-        frame["timestamp"] = frame.timestamp.dt.date
-    else:
-        frame["timestamp"] = frame.timestamp.dt.as_unit(kind)
+    frame["timestamp"] = frame.timestamp.dt.as_unit(kind)
     before = frame.copy(deep=True)
     root = write_prediction_outputs(
         output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata

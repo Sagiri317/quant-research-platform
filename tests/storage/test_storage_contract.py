@@ -11,7 +11,7 @@ from quant_research_platform.storage.datasets import (
     fingerprint_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.manifests import write_qrp_json_file
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -113,7 +113,7 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{"existing": true}\n', encoding="utf-8")
     with pytest.raises(ValueError, match="output_already_exists"):
-        write_manifest(manifest, {"schema_id": "qrp-output-manifest"})
+        write_qrp_json_file(manifest, {"schema_id": "qrp-output-manifest"})
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
 

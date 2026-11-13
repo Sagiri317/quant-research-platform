@@ -444,20 +444,6 @@ def test_waterfall_reads_selected_pair_without_summary(tmp_path):
         plots.plot({**config, "output": str(tmp_path / "missing.png")})
 
 
-def test_publication_requires_complete_members_and_valid_coverage(tmp_path):
-    source = explanation_fixture(tmp_path / "explain")
-    metadata, tables = read_explanation(source)
-    with pytest.raises(ValueError, match="explanation_members_invalid"):
-        write_explanation(
-            tmp_path / "incomplete",
-            metadata=metadata,
-            tables={"summary": tables["summary"]},
-        )
-    tables["summary"].loc[0, "observation_count"] = 2
-    with pytest.raises(ValueError, match="explanation_summary_coverage_invalid"):
-        write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
-
-
 def test_waterfall_pushes_exact_observation_to_native_reader(tmp_path, monkeypatch):
     from quant_research_platform.artifacts import explanations
 

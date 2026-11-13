@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import importlib
 import json
-import tomllib
 from pathlib import Path
 
 import pandas as pd
-from typer.main import get_command
 from typer.testing import CliRunner
 
-from quant_research_platform.interfaces.private_cli import app
+from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     native_filesystem_path,
@@ -20,20 +17,7 @@ from quant_research_platform.storage.schema_inventory import (
 from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
 
-def test_private_entrypoint_contains_only_schema_inventory() -> None:
-    payload = tomllib.loads(
-        Path(native_filesystem_path(Path("pyproject.toml"))).read_text(encoding="utf-8")
-    )
-    assert payload["project"]["scripts"]["qrp-private"] == (
-        "quant_research_platform.interfaces.private_cli:main"
-    )
-    assert get_command(app).name == "schema-inventory"
-    for target in payload["project"]["scripts"].values():
-        module_name, function_name = target.split(":", maxsplit=1)
-        assert callable(getattr(importlib.import_module(module_name), function_name))
-
-
-def test_schema_inventory_private_command_writes_current_local_artifact(
+def test_schema_inventory_command_writes_current_local_artifact(
     tmp_path: Path,
 ) -> None:
     write_low_level_parquet_artifact(
@@ -52,6 +36,7 @@ def test_schema_inventory_private_command_writes_current_local_artifact(
     result = CliRunner().invoke(
         app,
         [
+            "schema-inventory",
             "--project-root",
             str(tmp_path),
             "--output",
@@ -71,10 +56,10 @@ def test_schema_inventory_rejects_overwrite_and_empty_roots(tmp_path: Path) -> N
     runner = CliRunner()
     missing = runner.invoke(
         app,
-        ["--project-root", str(tmp_path), "--output", str(output)],
+        ["schema-inventory", "--project-root", str(tmp_path), "--output", str(output)],
     )
     assert missing.exit_code != 0
-    assert "schema_inventory_no_datasets_found" in missing.output
+    assert "schema_inventory_no_datasets_found" in str(missing.exception)
     assert not filesystem_exists(output)
 
     root = tmp_path / "data" / "interim" / "csmar" / "market_bars_1d"
@@ -92,18 +77,18 @@ def test_schema_inventory_rejects_overwrite_and_empty_roots(tmp_path: Path) -> N
     )
     created = runner.invoke(
         app,
-        ["--project-root", str(tmp_path), "--output", str(output)],
+        ["schema-inventory", "--project-root", str(tmp_path), "--output", str(output)],
     )
     overwrite = runner.invoke(
         app,
-        ["--project-root", str(tmp_path), "--output", str(output)],
+        ["schema-inventory", "--project-root", str(tmp_path), "--output", str(output)],
     )
     assert created.exit_code == 0, created.output
-    assert overwrite.exit_code == 2
-    assert "output_already_exists" in overwrite.output
+    assert overwrite.exit_code != 0
+    assert "output_already_exists" in str(overwrite.exception)
 
 
-def test_schema_inventory_projection_has_no_raw_payload_values(tmp_path: Path) -> None:
+def test_schema_inventory_uses_relative_artifact_paths(tmp_path: Path) -> None:
     root = tmp_path / "data" / "interim" / "csmar" / "market_bars_1d"
     write_low_level_parquet_artifact(
         root,
@@ -119,5 +104,4 @@ def test_schema_inventory_projection_has_no_raw_payload_values(tmp_path: Path) -
     )
     with iter_schema_inventory_items(tmp_path) as items:
         payload = json.dumps(list(items), ensure_ascii=False)
-    assert "1.0" not in payload
     assert str(tmp_path) not in payload

@@ -73,8 +73,8 @@ def test_default_inventory_needs_no_protocol_or_manual_binding(tmp_path):
     state = read_session(root)
     assert state["status"] == "completed"
     assert all(e["result"]["status"] == "completed" for e in state["events"])
-    assert state["events"][1]["result"]["columns"] == ["asset", "close"]
-    assert "PRIVATE-ASSET" not in "".join(client.messages)
+    assert "asset,close" in state["events"][1]["result"]["text"]
+    assert "PRIVATE-ASSET" in "".join(client.messages)
     pinned = json.JSONDecoder().raw_decode(
         json.loads(client.messages[0])[1]["content"]
     )[0]
@@ -118,9 +118,10 @@ def test_native_dataset_directory_read_exposes_metadata_without_rows(tmp_path):
     }
 
 
-def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
+def test_search_reads_source_and_data_but_excludes_credentials(tmp_path):
     state, root = state_and_event(tmp_path)
     (tmp_path / "factor.py").write_text("momentum = 5\n")
+    (tmp_path / ".gitignore").write_text("data/\n")
     private_marker = "QRP_SYNTHETIC_PROTECTED_CONTENT"
     protected_paths = (
         ".env",
@@ -143,7 +144,7 @@ def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
     (tmp_path / "data/private.csv").write_text("momentum,private-row\n")
     result = search_local({"query": "momentum"}, state, root, timeout=10)
     assert "factor.py" in result["text"]
-    assert "private" not in result["text"]
+    assert "data/private.csv:1:momentum,private-row" in result["text"]
     assert private_marker not in result["text"]
     filename_root = root.with_name("e0003")
     filename_root.mkdir()
@@ -152,8 +153,17 @@ def test_search_reads_source_but_not_raw_data_or_credentials(tmp_path):
     )
     assert "factor.py" in filenames["text"].splitlines()
     assert set(protected_paths).isdisjoint(filenames["text"].splitlines())
-    with pytest.raises(ValueError, match="filenames_only"):
-        search_local({"query": "private", "path": "data"}, state, root, timeout=10)
+    content_root = root.with_name("e0004")
+    content_root.mkdir()
+    result = search_local(
+        {"query": "private", "path": "data"}, state, content_root, timeout=10
+    )
+    assert "data/private.csv:1:momentum,private-row" in result["text"]
+    assert (
+        "private-row" in read_local({"path": "data/private.csv"}, state, root)["text"]
+    )
+    (tmp_path / "data/facts.json").write_text('{"asset_id": "600000.SH"}')
+    assert "600000.SH" in read_local({"path": "data/facts.json"}, state, root)["text"]
     root2 = root.with_name("e0002")
     root2.mkdir()
     result = search_local(
@@ -357,16 +367,30 @@ def test_pdf_workspace_text_and_page_image(tmp_path):
     assert result["page_count"] == 1 and len(result["images"]) == 1
 
 
-def test_workbook_workspace_exposes_headers_without_private_cells(tmp_path):
+@pytest.mark.parametrize("suffix", [".xlsx", ".parquet"])
+def test_tabular_workspace_returns_paged_rows(tmp_path, suffix):
+    import pandas as pd
+
     openpyxl = pytest.importorskip("openpyxl")
     state, root = state_and_event(tmp_path)
-    workbook = openpyxl.Workbook()
-    workbook.active.append(["factor", "score"])
-    workbook.active.append(["PRIVATE-FACTOR", 123])
-    workbook.save(tmp_path / "scores.xlsx")
-    result = read_local({"path": "scores.xlsx"}, state, root)
-    assert result["sheets"][0]["headers"] == ["factor", "score"]
-    assert "PRIVATE-FACTOR" not in json.dumps(result)
+    path = tmp_path / ("scores" + suffix)
+    if suffix == ".xlsx":
+        workbook = openpyxl.Workbook()
+        workbook.active.append(["factor", "score"])
+        workbook.active.append(["REVERSAL", 123])
+        workbook.active.append(["MOMENTUM", 456])
+        workbook.save(path)
+    else:
+        pd.DataFrame(
+            {"factor": ["header", "REVERSAL", "MOMENTUM"], "score": [0, 123, 456]}
+        ).to_parquet(path)
+    result = read_local({"path": path.name, "offset": 1, "limit": 1}, state, root)
+    page = result["sheets"][0] if suffix == ".xlsx" else result
+    assert "REVERSAL" in page["text"] and "MOMENTUM" not in page["text"]
+    assert page["rows_returned"] == 1 and page["next_offset"] == 2
+    result = read_local({"path": path.name, "offset": 2, "limit": 1}, state, root)
+    page = result["sheets"][0] if suffix == ".xlsx" else result
+    assert "MOMENTUM" in page["text"] and page["next_offset"] is None
 
 
 def test_docx_workspace_text(tmp_path):

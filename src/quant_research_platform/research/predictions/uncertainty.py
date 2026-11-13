@@ -25,8 +25,8 @@ from quant_research_platform.research.datasets.learning import (
     mature_rows,
     research_frame,
 )
-from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def conformal_radius(residuals, alpha):
@@ -102,7 +102,7 @@ def calibrate_uncertainty(config):
     else:
         raise ValueError("uncertainty_block_invalid")
     radius = conformal_radius(residuals, alpha)
-    return atomic_write_json(
+    return write_qrp_json_file(
         Path(config["output"]),
         {
             "kind": "frozen_conformal",
@@ -110,7 +110,6 @@ def calibrate_uncertainty(config):
             "radius": radius,
             "calibration_rows": len(paired),
             "calibration_blocks": len(residuals),
-            "model_id": metadata["model_id"],
             "model": metadata["model"],
             "frequency": spec["frequency"],
             "model_facts": metadata["model_facts"],
@@ -173,7 +172,7 @@ def apply_uncertainty(config):
             "eligible": "mask",
             **dict.fromkeys(values, "feature"),
         },
-        column_units=dict.fromkeys(values, metadata["label_unit"]),
+        column_units=dict.fromkeys(values, metadata["model_facts"]["label_unit"]),
     )
     write_dataset(
         Path(config["output"]),
@@ -247,7 +246,7 @@ def evaluate_uncertainty(config):
             .mean()
         )
     )
-    return atomic_write_json(
+    return write_qrp_json_file(
         Path(config["output"]),
         {
             "rows": len(paired),

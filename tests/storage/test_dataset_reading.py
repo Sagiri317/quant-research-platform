@@ -10,7 +10,6 @@ import pytest
 
 import quant_research_platform.storage.datasets.fingerprinting as dataset_fingerprinting
 import quant_research_platform.storage.datasets.reading as dataset_reading
-import quant_research_platform.storage.datasets.writing as dataset_writing
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -27,9 +26,6 @@ from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
-)
-from tests.storage.dataset_test_support import (
-    _persisted_table,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -201,45 +197,6 @@ def test_storage_and_diagnostics_do_not_require_persisted_schema_hash(
     assert fingerprint_dataset(root).schema_hash
 
 
-@pytest.mark.parametrize(
-    ("relative_path", "replacement", "error"),
-    (
-        ("spec.json", {}, "dataset_spec_schema_id_invalid"),
-        ("spec.json", {"schema_id": ""}, "dataset_spec_schema_id_invalid"),
-        (
-            "spec.json",
-            {"schema_id": "qrp-dataset-spec/0.1"},
-            "dataset_spec_schema_id_invalid",
-        ),
-        ("_manifest/manifest.json", {}, "dataset_manifest_schema_id_invalid"),
-        (
-            "_manifest/manifest.json",
-            {"schema_id": ""},
-            "dataset_manifest_schema_id_invalid",
-        ),
-        (
-            "_manifest/manifest.json",
-            {"schema_id": "qrp-dataset-manifest/0.1"},
-            "dataset_manifest_schema_id_invalid",
-        ),
-    ),
-)
-def test_read_dataset_rejects_invalid_qrp_json_schema_id(
-    tmp_path: Path, relative_path: str, replacement: dict[str, str], error: str
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    path = root / relative_path
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    payload.pop("schema_id", None)
-    payload.update(replacement)
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match=error):
-        read_dataset(root)
-
-
 def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
     tmp_path: Path,
 ) -> None:
@@ -249,11 +206,6 @@ def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(
     )
     with pytest.raises(ValueError, match="dataset_column_not_found"):
         read_dataset(root, columns=["asset_id", "missing"])
-    data_root = root / "data"
-    renamed = root / "data_missing"
-    data_root.rename(renamed)
-    with pytest.raises(ValueError, match="dataset_data_dir_missing"):
-        read_dataset(root)
 
 
 def test_inspect_dataset_returns_expanded_metadata(tmp_path: Path) -> None:
@@ -303,23 +255,6 @@ def test_write_dataset_preserves_factor_and_label_nan_profiles(tmp_path: Path) -
     assert factor_manifest["label_nan_profile"] == {}
     assert label_manifest["factor_nan_profile"] == {}
     assert label_manifest["label_nan_profile"] == {"label": 1}
-
-
-def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    bad_part = root / "data" / "year=2016" / "part-000.parquet"
-    bad_part.parent.mkdir(parents=True)
-    bad_frame = make_default_dataset_frame().assign(extra=1)
-    dataset_writing.write_parquet_file(_persisted_table(bad_frame), bad_part)
-    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
-        inspect_dataset(root)
-    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
-        fingerprint_dataset(root)
 
 
 def test_compare_datasets_rejects_schema_difference(

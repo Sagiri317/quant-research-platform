@@ -24,8 +24,9 @@ from quant_research_platform.research.datasets.learning import (
 )
 from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
-from quant_research_platform.storage.atomic import atomic_write_json, reject_if_exists
+from quant_research_platform.storage.atomic import reject_if_exists
 from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def formula_values(frame, expression, columns):
@@ -360,7 +361,7 @@ def search_factors(config):
         }
         if config["method"] == "ppo":
             result["device"] = str(model.device)
-        atomic_write_json(output, result)
+        write_qrp_json_file(output, result)
         recorder.finish(
             result={"candidate_count": len(records), "status": result["status"]}
         )

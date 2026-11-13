@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.identity import (
@@ -42,7 +41,10 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Path
 
 
 def atomic_write_chunks(
-    path: Path, chunks: Iterable[str], *, encoding: str = "utf-8"
+    path: Path,
+    chunks: Iterable[str] | Iterable[bytes],
+    *,
+    encoding: str | None = "utf-8",
 ) -> Path:
     final_path, temp_path = _prepare_file_target(path)
     claimed_temp = False
@@ -52,8 +54,6 @@ def atomic_write_chunks(
         with closing_iterator(handle):
             with closing_iterator(iter(chunks)) as source:
                 for chunk in source:
-                    if not isinstance(chunk, str):
-                        raise TypeError("atomic_text_chunk_required")
                     handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
@@ -66,27 +66,7 @@ def atomic_write_chunks(
 
 def atomic_write_bytes(path: Path, payload: bytes) -> Path:
     """Publish an already-rendered binary file without replacing an earlier result."""
-    if type(payload) is not bytes:
-        raise TypeError("atomic_bytes_required")
-    final_path, temp_path = _prepare_file_target(path)
-    claimed = False
-    try:
-        with closing_iterator(open_owned_scratch_file(temp_path)) as handle:
-            claimed = True
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        publish_no_replace(temp_path, final_path)
-    except BaseException as primary:
-        _cleanup_claimed(temp_path, claimed, primary)
-        raise
-    return final_path
-
-
-def atomic_write_json(path: Path, payload: object) -> Path:
-    return atomic_write_text(
-        path, render_qrp_json_object(payload) + "\n", encoding="utf-8"
-    )
+    return atomic_write_chunks(path, (payload,), encoding=None)
 
 
 def atomic_write_directory[T](root: Path, writer: Callable[[Path], T]) -> T:

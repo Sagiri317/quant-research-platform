@@ -27,7 +27,6 @@ from quant_research_platform.markets.implementations.a_share.level2 import (
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
-    atomic_write_json,
     reject_if_exists,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -35,6 +34,7 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session,
     open_dataset_session,
 )
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def branching_radius(alpha):
@@ -298,7 +298,7 @@ def fit_hawkes(config):
         ),
     }
     atomic_write_directory(
-        output, lambda staging: atomic_write_json(staging / "model.json", facts)
+        output, lambda staging: write_qrp_json_file(staging / "model.json", facts)
     )
     return output
 

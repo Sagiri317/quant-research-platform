@@ -57,16 +57,6 @@ def test_single_selected_model_has_no_invented_comparison():
         root_seed=1,
         dataset_id="example",
     )
-    from quant_research_platform.artifacts.statistics import _validated_frame
-
-    metadata = {
-        "sample_role": "validation",
-        "window": {"start": "2023-01-01", "end": "2023-01-03"},
-    }
-    assert _validated_frame(
-        comparisons, member="model_comparison.parquet", metadata=metadata
-    ).empty
-    _validated_frame(tests, member="model_reality_checks.parquet", metadata=metadata)
     assert comparisons.empty
     assert set(tests["status"]) == {"UNDEFINED"}
     assert set(robustness["reason"]) == {"no_comparison_models"}

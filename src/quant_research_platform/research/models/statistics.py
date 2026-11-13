@@ -41,9 +41,7 @@ from quant_research_platform.research.protocols.a_share import (
 )
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
-    _paired_mean_inference,
     _selected_analyses,
-    _validate_bootstrap_configuration,
     cross_sectional_correlations,
     cross_sectional_rank_ic,
     daily_mean_frame,
@@ -88,13 +86,10 @@ def build_a_share_statistics_tables(
     config: Mapping[str, object],
     time_window: TimeWindow,
     prediction_lookup: object,
-    global_prediction_lookup: object | None = None,
-    global_inference_blocker: Mapping[str, str] | str | None = None,
 ) -> dict[str, pd.DataFrame]:
     declared = dataset_session.spec
     manifest = dataset_session.manifest
     dataset_id = declared["data_id"]
-    selection_group = config.get("selection_group", "explicit")
     retrospective_entries = {
         (period, family)
         for (period, family), entry in model_entries.items()
@@ -203,12 +198,6 @@ def build_a_share_statistics_tables(
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
     predictive_records: list[dict[str, object]] = []
-    group_records: list[dict[str, object]] = []
-    group_blockers = (
-        dict(global_inference_blocker)
-        if isinstance(global_inference_blocker, Mapping)
-        else dict.fromkeys(family_ids, global_inference_blocker)
-    )
     chunks = iter_dataset_time_chunks(
         dataset_session.projected_view(read_columns), one_timestamp=True
     )
@@ -317,7 +306,7 @@ def build_a_share_statistics_tables(
                             primary_label,
                             declared,
                             manifest,
-                            model_target=metadata["target_column"],
+                            model_target=facts["model"]["target_column"],
                         )
                         predictive_records.append(
                             dict(
@@ -341,61 +330,6 @@ def build_a_share_statistics_tables(
                                     ),
                                 ),
                             )
-                        )
-                if global_prediction_lookup is not None:
-                    for family_id in family_ids:
-                        keys = session.loc[:, ["timestamp", "asset_id"]].copy()
-                        keys["family_id"] = family_id
-                        values, _found = global_prediction_lookup.values_for_frame(
-                            keys, mark_matched=True
-                        )
-                        shared = mature.loc[
-                            :, ["timestamp", "asset_id", primary_label]
-                        ].copy()
-                        shared[0] = pd.Series(values, index=keys.index).reindex(
-                            mature.index
-                        )
-                        shared[1] = mature[family_columns[family_id]]
-                        paired_rank, count = (
-                            _common_model_rank_ic(
-                                shared, family_ids=(0, 1), label_column=primary_label
-                            )
-                            if not shared.empty
-                            else (pd.DataFrame([{0: np.nan, 1: np.nan}]), 0)
-                        )
-                        if count:
-                            entry = model_entries[period_id, family_id]
-                            cutoffs = tuple(
-                                value
-                                for value in (
-                                    selection.get("cutoff")
-                                    if selection is not None
-                                    else None,
-                                    (entry.get("model_facts") or {}).get(
-                                        "selection_cutoff"
-                                    ),
-                                )
-                                if value is not None
-                            )
-                            if not cutoffs:
-                                if group_blockers.get(family_id) is None:
-                                    group_blockers[family_id] = (
-                                        "selection_chronology_not_established"
-                                    )
-                            elif any(
-                                pd.Timestamp(value) >= timestamp for value in cutoffs
-                            ):
-                                group_blockers[family_id] = (
-                                    "selection_reuses_evaluation_window"
-                                )
-                        group_records.append(
-                            {
-                                "timestamp": timestamp,
-                                "family_id": family_id,
-                                "global": paired_rank.iloc[0][0],
-                                "quarterly": paired_rank.iloc[0][1],
-                                "observation_count": count,
-                            }
                         )
                 if selection is not None:
                     winner = selection["selected_family_id"]
@@ -571,23 +505,6 @@ def build_a_share_statistics_tables(
             dataset_id=dataset_id,
             analyses=analyses,
         )
-    if "group_comparison" in statistics:
-        group_comparison = _paired_group_rankic(
-            pd.DataFrame.from_records(
-                group_records,
-                columns=[
-                    "timestamp",
-                    "family_id",
-                    "global",
-                    "quarterly",
-                    "observation_count",
-                ],
-            ),
-            selection_group=selection_group,
-            family_ids=family_ids,
-            config=config,
-            inference_blocker=group_blockers,
-        )
 
     tables = {}
     if "model_losses" in analyses:
@@ -605,8 +522,6 @@ def build_a_share_statistics_tables(
         )
     if selections and "analyses" not in config:
         tables["model_trials"] = trial_rows.copy()
-    if "group_comparison" in statistics:
-        tables["model_group_comparison"] = group_comparison
     return tables
 
 
@@ -724,12 +639,6 @@ def _model_target_metadata(config, spec, window):
             ),
         },
         "evaluation_axis": "cross_sectional",
-        **(
-            {"group_comparison_target": "explicit_current_evaluation"}
-            if "group_comparison" in config["statistics"]
-            and config.get("selection_group") == "quarterly"
-            else {}
-        ),
         "column_roles": {label: str(spec["column_roles"][label])},
         "column_units": {
             column: unit
@@ -738,87 +647,6 @@ def _model_target_metadata(config, spec, window):
         },
         "label_cutoff": cutoff.isoformat(),
     }
-
-
-def _paired_group_rankic(
-    paired_rankic,
-    *,
-    selection_group,
-    family_ids,
-    config,
-    inference_blocker=None,
-):
-    columns = STATISTICS_TABLE_COLUMNS["model_group_comparison.parquet"]
-    if (
-        selection_group == "global"
-        or config["statistics"].get("group_comparison") is None
-    ):
-        return pd.DataFrame(columns=columns)
-    statistics = config["statistics"]
-    declaration = statistics["group_comparison"]
-    keys = ["timestamp", "family_id"]
-    if paired_rankic.duplicated(keys).any():
-        raise ValueError("model_group_comparison_coverage_invalid")
-    if paired_rankic.empty:
-        global_values = pd.DataFrame(
-            index=pd.DatetimeIndex([], name="timestamp"),
-            columns=family_ids,
-            dtype="float64",
-        )
-        quarterly_values = global_values.copy()
-    else:
-        paired = paired_rankic.set_index(keys).sort_index()
-        global_values = paired["global"].unstack("family_id")
-        quarterly_values = paired["quarterly"].unstack("family_id")
-    if set(global_values.columns) != set(family_ids):
-        raise ValueError("model_group_comparison_family_incomplete")
-    paired = np.isfinite(global_values) & np.isfinite(quarterly_values)
-    global_values = daily_mean_frame(
-        global_values.where(paired), sessions=config.get("sessions")
-    )
-    quarterly_values = daily_mean_frame(
-        quarterly_values.where(paired), sessions=config.get("sessions")
-    )
-    differences = quarterly_values - global_values
-    paired = np.isfinite(global_values) & np.isfinite(quarterly_values)
-    blockers = (
-        dict(inference_blocker)
-        if isinstance(inference_blocker, Mapping)
-        else dict.fromkeys(family_ids, inference_blocker)
-    )
-    for family in family_ids:
-        if not paired[family].any():
-            blockers[family] = "no_common_observations"
-    inference = _paired_mean_inference(
-        differences,
-        blockers=blockers,
-        max_lags=statistics["hac_lag"],
-        block_size=statistics["bootstrap_block"],
-        repetitions=statistics["bootstrap_repetitions"],
-        seed=declaration["seed"],
-        confidence=declaration["confidence"],
-        fdr_method=None
-        if _inference_blocker(config) is not None
-        else declaration["fdr_method"],
-        fdr_alpha=declaration["alpha"],
-    )
-    rows = []
-    for family in family_ids:
-        valid = paired[family]
-        values = differences.loc[valid, family]
-        rows.append(
-            {
-                **inference[family],
-                "family_id": family,
-                "sample_role": config["sample_role"],
-                "observation_count": len(values),
-                "calendar_count": len(differences),
-                "global_mean": float(global_values.loc[valid, family].mean()),
-                "quarterly_mean": float(quarterly_values.loc[valid, family].mean()),
-                "mean_difference": float(values.mean()) if len(values) else np.nan,
-            }
-        )
-    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 def _prediction_summary(
@@ -1148,12 +976,11 @@ def model_statistics(config):
     import pyarrow as pa
 
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
     from quant_research_platform.artifacts.outputs.prediction import (
         _iter_prediction_member,
         _PredictionLookup,
-        prediction_model_metadata,
     )
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
     from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapshot
@@ -1180,7 +1007,6 @@ def model_statistics(config):
         "selection_group",
         "prediction_id",
         "label_cutoff",
-        "global_predictions",
         "selection_is_exploratory",
         "expectations",
         "feature_recipe",
@@ -1214,13 +1040,8 @@ def model_statistics(config):
     if not isinstance(policy, dict):
         raise ValueError("model_statistics_policy_invalid")
     needed = set()
-    if (
-        set(analyses) & {"prediction_hac", "model_comparison"}
-        or "group_comparison" in policy
-    ):
+    if set(analyses) & {"prediction_hac", "model_comparison"}:
         needed.add("hac_lag")
-    if "group_comparison" in policy:
-        needed |= {"bootstrap_block", "bootstrap_repetitions"}
     if set(analyses) & {
         "prediction_bootstrap",
         "model_comparison",
@@ -1241,8 +1062,7 @@ def model_statistics(config):
         policy.setdefault("bootstrap_repetitions", 2000)
     if (
         not isinstance(policy, dict)
-        or set(policy)
-        - {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
+        or set(policy) - {"hac_lag", "bootstrap_block", "bootstrap_repetitions"}
         or needed - set(policy)
         or any(
             type(policy[key]) is not int
@@ -1252,43 +1072,6 @@ def model_statistics(config):
         )
     ):
         raise ValueError("model_statistics_policy_invalid")
-    paired = "group_comparison" in policy
-    if (
-        paired != ("global_predictions" in config)
-        or paired
-        and config.get("selection_group") != "quarterly"
-    ):
-        raise ValueError("model_statistics_comparison_inputs_invalid")
-    if paired and (
-        not isinstance(policy["group_comparison"], dict)
-        or set(policy["group_comparison"])
-        != {"fdr_method", "alpha", "seed", "confidence"}
-    ):
-        raise ValueError("model_statistics_comparison_policy_invalid")
-    if paired:
-        declaration = policy["group_comparison"]
-        if (
-            type(declaration["confidence"]) is not float
-            or not 0 < declaration["confidence"] < 1
-            or type(declaration["alpha"]) is not float
-            or not 0 < declaration["alpha"] < 1
-            or declaration["fdr_method"] not in ("BH", "BY")
-        ):
-            raise ValueError("model_statistics_comparison_policy_invalid")
-        _validate_bootstrap_configuration(
-            policy["bootstrap_block"],
-            policy["bootstrap_repetitions"],
-            declaration["seed"],
-        )
-    if paired and (
-        not isinstance(config["global_predictions"], list)
-        or not config["global_predictions"]
-        or any(
-            not isinstance(path, str) or not path
-            for path in config["global_predictions"]
-        )
-    ):
-        raise ValueError("model_statistics_comparison_inputs_invalid")
     output = Path(config["output"])
     reject_if_exists(output)
     window = TimeWindow(**config["window"])
@@ -1322,8 +1105,6 @@ def model_statistics(config):
         primary_key=("timestamp", "asset_id", "family_id"),
         prediction_column="prediction_score",
     )
-    reference_lookup = None
-    reference_blocker = {}
     try:
         for item in config["periods"]:
             if not isinstance(item, dict) or set(item) != (
@@ -1355,10 +1136,6 @@ def model_statistics(config):
                 validate_input_market(selection, market)
                 if selection["selection_group"] != config["selection_group"]:
                     raise ValueError("statistics_selection_group_mismatch")
-                if config["selection_group"] == "quarterly" and pd.Timestamp(
-                    selection["cutoff"]
-                ) >= pd.Timestamp(period.start):
-                    raise ValueError("statistics_selection_after_prediction_start")
                 selections[period_id] = selection
                 wanted = {
                     family["family_id"]: family["selected_config_id"]
@@ -1376,21 +1153,17 @@ def model_statistics(config):
                         }
             supplied = set()
             for path in item["predictions"]:
-                metadata = validate_output_bundle(
-                    Path(path), expected_definition_id="prediction_outputs"
-                )[0]["metadata"]
-                family = metadata["family_id"]
+                metadata = read_output_manifest(Path(path))["metadata"]
+                facts = metadata["model_facts"]
+                family = facts["family_id"]
                 if (
                     family in supplied
                     or family not in wanted
-                    or (not direct and wanted[family] != metadata["model_id"])
+                    or (not direct and wanted[family] != facts["model"]["model_id"])
                 ):
                     raise ValueError("statistics_prediction_family_mismatch")
-                facts = metadata["model_facts"]
                 market = facts["market_id"] if market is None else market
                 validate_input_market(facts, market)
-                if facts["family_id"] != family:
-                    raise ValueError("statistics_prediction_family_mismatch")
                 if selection is not None:
                     from quant_research_platform.contracts.models import (
                         compare_model_facts,
@@ -1403,7 +1176,7 @@ def model_statistics(config):
                     )
                     compare_model_facts(facts, selected)
                 supplied.add(family)
-                model_metadata = prediction_model_metadata(metadata)
+                model_metadata = metadata["model_metadata"]
                 if (
                     "model_losses" in analyses
                     and baseline == "training_mean"
@@ -1412,12 +1185,12 @@ def model_statistics(config):
                     raise ValueError("statistics_training_target_mean_missing")
                 if (
                     selection is not None
-                    and model_metadata["target_column"] != selection["target_column"]
+                    and facts["model"]["target_column"] != selection["target_column"]
                 ):
                     raise ValueError("statistics_prediction_target_mismatch")
                 entries[period_id, family] = {
                     "model_metadata": model_metadata,
-                    "model_id": metadata["model_id"],
+                    "model_id": facts["model"]["model_id"],
                     "model_facts": facts,
                     "asset_ids": metadata.get("asset_ids"),
                 }
@@ -1445,58 +1218,6 @@ def model_statistics(config):
                 if direct or winner is not None
             }:
                 raise ValueError("statistics_prediction_family_coverage_missing")
-        if paired:
-            reference_index = ExactPrimaryKeyIndex(
-                primary_key=("timestamp", "asset_id", "family_id")
-            )
-            reference_lookup = _PredictionLookup(
-                index=reference_index,
-                primary_key=("timestamp", "asset_id", "family_id"),
-                prediction_column="prediction_score",
-            )
-            for path in config["global_predictions"]:
-                metadata = validate_output_bundle(
-                    Path(path), expected_definition_id="prediction_outputs"
-                )[0]["metadata"]
-                family = metadata["family_id"]
-                if family not in family_ids:
-                    raise ValueError("statistics_prediction_family_mismatch")
-                facts = metadata["model_facts"]
-                validate_input_market(facts, market)
-                if facts["family_id"] != family:
-                    raise ValueError("statistics_prediction_family_mismatch")
-                cutoff = facts.get("selection_cutoff")
-                with closing_iterator(
-                    _iter_prediction_member(
-                        Path(path),
-                        metadata,
-                        columns=("timestamp", "asset_id", "prediction_score"),
-                        time_window=window,
-                    )
-                ) as frames:
-                    for frame in frames:
-                        if not frame.empty:
-                            if cutoff is None:
-                                reference_blocker.setdefault(
-                                    family, "selection_chronology_not_established"
-                                )
-                            elif pd.Timestamp(cutoff) >= pd.Timestamp(
-                                frame.timestamp.min()
-                            ):
-                                reference_blocker[family] = (
-                                    "selection_reuses_evaluation_window"
-                                )
-                        frame = frame.copy()
-                        frame["family_id"] = family
-                        duplicates = reference_index.add_float_value_table(
-                            pa.Table.from_pandas(frame, preserve_index=False),
-                            namespace="prediction",
-                            value_column="prediction_score",
-                            validation_column="prediction_score",
-                            retain_values=True,
-                        )
-                        if duplicates:
-                            raise ValueError("statistics_prediction_keys_duplicate")
         session = _statistics_input_session(config, window)
         validate_input_market(session.spec, market)
         tables = build_a_share_statistics_tables(
@@ -1513,18 +1234,10 @@ def model_statistics(config):
             config=config,
             time_window=window,
             prediction_lookup=lookup,
-            global_prediction_lookup=reference_lookup,
-            global_inference_blocker=reference_blocker,
         )
         prediction_coverage = {"unmatched_prediction_rows": lookup.coverage_counts()[0]}
-        if reference_lookup is not None:
-            prediction_coverage["unmatched_global_prediction_rows"] = (
-                reference_lookup.coverage_counts()[0]
-            )
     finally:
         lookup.close()
-        if reference_lookup is not None:
-            reference_lookup.close()
     return write_statistics_artifact(
         output,
         metadata={

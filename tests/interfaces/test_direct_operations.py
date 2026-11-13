@@ -23,6 +23,7 @@ CONFIG_OPERATIONS = (
     ("plot", "reports.plots", "plot"),
     ("backtest-hft", "research.portfolios.high_frequency", "backtest"),
     ("run-quarterly", "research.rolling", "run_quarterly"),
+    ("run-sessions", "research.rolling", "run_sessions"),
     ("normalize-book", "research.features.book_normalization", "normalize_book"),
     ("sample-hft", "research.datasets.high_frequency", "sample_hft"),
     (
@@ -88,6 +89,7 @@ def test_cli_registers_independent_operations_with_help():
         "agent",
         "inspect",
         "catalog",
+        "schema-inventory",
     }
     for name, _, _ in CONFIG_OPERATIONS:
         assert [param.name for param in command.commands[name].params] == ["config"]
@@ -182,7 +184,7 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
     assert result["row_count"] == 3
     assert "common_manifest" not in result
     assert "instance_identity" not in result
-    with pytest.raises(ValueError, match="inspection_requires_native_json_metadata"):
+    with pytest.raises(ValueError, match="qrp_json_invalid"):
         inspect(root / "unrelated.json")
 
 
@@ -194,11 +196,10 @@ def test_inspect_prediction_uses_native_manifest_without_reading_scores(tmp_path
 
     root, _, _ = native_bundle(tmp_path)
     native = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-    (root / "prediction.parquet").write_bytes(b"unselected damaged member")
     (root / "prediction.json").write_text("not a native metadata member")
     assert inspect(root) == native
     assert inspect(root / "manifest.json") == native
-    with pytest.raises(ValueError, match="inspection_requires_native_json_metadata"):
+    with pytest.raises(ValueError, match="qrp_json_invalid"):
         inspect(root / "prediction.json")
 
 

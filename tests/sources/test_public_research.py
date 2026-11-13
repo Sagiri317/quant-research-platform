@@ -11,6 +11,7 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.public_research.normalization import normalize
 from quant_research_platform.storage.datasets.reading import read_dataset
+from tests.helpers.public_sources import write_source_manifest
 
 
 def test_public_import_closes_archive_when_output_already_exists(tmp_path, monkeypatch):
@@ -33,9 +34,7 @@ def test_public_import_closes_archive_when_output_already_exists(tmp_path, monke
         "bytes": path.stat().st_size,
         "retrieved_at": "2024-02-01T00:00:00Z",
     }
-    (raw / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
     config = {
         "source_id": "public_research",
@@ -102,9 +101,7 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
         "underlying_security_code": "159915",
         "trading_code_as_reported": trading_code,
     }
-    (raw / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]}), encoding="utf-8"
-    )
+    write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     clocks = raw / "release.csv"
     pd.DataFrame(
         [
@@ -256,24 +253,22 @@ def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
     source.mkdir()
     name = "margin.json.gz" if compressed else "margin.json"
     (source / name).write_bytes(data)
-    (source / "manifest.json").write_text(
-        json.dumps(
-            dict(
-                schema_version=1,
-                records=[
-                    dict(
-                        path=name,
-                        source="eastmoney_margin_detail",
-                        status="downloaded",
-                        sha256=hashlib.sha256(data).hexdigest(),
-                        bytes=len(data),
-                        url="https://example.org/margin",
-                        retrieved_at="2026-11-11T00:00:00Z",
-                    )
-                ],
-            )
+    write_source_manifest(
+        source,
+        dict(
+            schema_version=1,
+            records=[
+                dict(
+                    path=name,
+                    source="eastmoney_margin_detail",
+                    status="downloaded",
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    bytes=len(data),
+                    url="https://example.org/margin",
+                    retrieved_at="2026-11-11T00:00:00Z",
+                )
+            ],
         ),
-        encoding="utf-8",
     )
     output = tmp_path / "interim"
     prepare_source(
@@ -387,9 +382,7 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
                 bytes=path.stat().st_size,
             )
         )
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(dict(schema_version=1, records=records))
-    )
+    write_source_manifest(tmp_path, dict(schema_version=1, records=records))
     outputs = {
         name: str(tmp_path / name)
         for name in ("public_fund_holdings", "public_fund_holdings_reports")
@@ -480,9 +473,7 @@ def test_report_cell_identity_does_not_require_known_economic_portfolio(
         sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
         bytes=path.stat().st_size,
     )
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(dict(schema_version=1, records=[record]))
-    )
+    write_source_manifest(tmp_path, dict(schema_version=1, records=[record]))
     output = tmp_path / "native"
     prepare_source(
         dict(
@@ -570,9 +561,7 @@ def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
             (corrections, "cn_fund_financial_observation_date_corrections_extracted"),
         ]
     ]
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(dict(schema_version=1, records=records))
-    )
+    write_source_manifest(tmp_path, dict(schema_version=1, records=records))
     release = tmp_path / "release.csv"
     pd.DataFrame(
         [
@@ -625,21 +614,20 @@ def test_domestic_etf_actions_can_be_announced_before_the_ex_date(tmp_path):
             )
         ]
     ).to_csv(path, index=False)
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            dict(
-                schema_version=1,
-                records=[
-                    dict(
-                        source="eastmoney_cn_etf_corporate_actions_extracted",
-                        path=path.name,
-                        status="downloaded",
-                        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                        bytes=path.stat().st_size,
-                    )
-                ],
-            )
-        )
+    write_source_manifest(
+        tmp_path,
+        dict(
+            schema_version=1,
+            records=[
+                dict(
+                    source="eastmoney_cn_etf_corporate_actions_extracted",
+                    path=path.name,
+                    status="downloaded",
+                    sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    bytes=path.stat().st_size,
+                )
+            ],
+        ),
     )
     output = tmp_path / "native"
     prepare_source(
@@ -712,9 +700,7 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
                 "retrieved_at": "2026-11-10T00:00:00Z",
             }
         )
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": records})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": records})
     clocks = source / "clocks.csv"
     clocks.write_text(
         "source,observation_date,estimated_available_at,availability_basis,evidence_url\n"
@@ -774,23 +760,22 @@ def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
     )
     file = root / ("weights.csv" if invalid_weight else "weights.csv.gz")
     frame.to_csv(file, index=False)
-    (root / "manifest.json").write_text(
-        json.dumps(
-            dict(
-                schema_version=1,
-                records=[
-                    dict(
-                        path=file.name,
-                        source="public_index_weight_history_extracted",
-                        status="downloaded",
-                        sha256=hashlib.sha256(file.read_bytes()).hexdigest(),
-                        bytes=file.stat().st_size,
-                        url="https://example.org/frozen-index-weights",
-                        retrieved_at="2026-11-11T00:00:00Z",
-                    )
-                ],
-            )
-        )
+    write_source_manifest(
+        root,
+        dict(
+            schema_version=1,
+            records=[
+                dict(
+                    path=file.name,
+                    source="public_index_weight_history_extracted",
+                    status="downloaded",
+                    sha256=hashlib.sha256(file.read_bytes()).hexdigest(),
+                    bytes=file.stat().st_size,
+                    url="https://example.org/frozen-index-weights",
+                    retrieved_at="2026-11-11T00:00:00Z",
+                )
+            ],
+        ),
     )
     clock = root / "clocks.csv"
     clock.write_text(
@@ -837,9 +822,7 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
         "retrieved_at": "2024-01-03T12:00:00Z",
         "historical_published_at": None,
     }
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]}), encoding="utf-8"
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "normalized"
     result = prepare_source(
         {
@@ -929,9 +912,7 @@ def test_nport_public_form_date_is_not_a_private_filing_clock(tmp_path, filing_t
         "bytes": path.stat().st_size,
         "retrieved_at": "2026-11-10T00:00:00Z",
     }
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
     config = {
         "source_id": "public_research",
@@ -993,9 +974,7 @@ def test_structured_fund_reports_preserve_scope_shares_and_china_clock(
         "bytes": path.stat().st_size,
         "retrieved_at": "2026-11-10T00:00:00Z",
     }
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
     prepare_source(
         {
@@ -1049,9 +1028,7 @@ def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_
                 "retrieved_at": "2026-11-09T00:00:00Z",
             }
         )
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": records})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": records})
     output = tmp_path / "interim"
     prepare_source(
         {
@@ -1097,9 +1074,7 @@ def test_manifest_publication_clock_cannot_invent_an_earlier_release(
         "retrieved_at": "2026-11-09T00:00:00Z",
         "historical_published_at": clock,
     }
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": [record]})
     with pytest.raises(ValueError, match=error):
         prepare_source(
             {
@@ -1151,9 +1126,7 @@ def test_extracted_source_release_has_the_same_chronology_boundary(
         "bytes": len(payload),
         "retrieved_at": "2026-11-09T00:00:00Z",
     }
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(source, {"schema_version": 1, "records": [record]})
     with pytest.raises(ValueError, match="precedes_dependency"):
         prepare_source(
             {
@@ -1185,22 +1158,21 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
             "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n",
         )
     payload = path.read_bytes()
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "records": [
-                    {
-                        "source": "sec_13f",
-                        "path": path.name,
-                        "status": "downloaded",
-                        "bytes": len(payload),
-                        "sha256": hashlib.sha256(payload).hexdigest(),
-                        "retrieved_at": "2024-01-01T00:00:00Z",
-                    }
-                ],
-            }
-        )
+    write_source_manifest(
+        tmp_path,
+        {
+            "schema_version": 1,
+            "records": [
+                {
+                    "source": "sec_13f",
+                    "path": path.name,
+                    "status": "downloaded",
+                    "bytes": len(payload),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "retrieved_at": "2024-01-01T00:00:00Z",
+                }
+            ],
+        },
     )
     output = tmp_path / "native"
     prepare_source(
@@ -1258,26 +1230,24 @@ def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
         b"SPY,2024-01-02,2024-01-02T14:30:00Z,100,102,99,101,98,1000,USD,,,https://example.org/chart,original-hash\n"
     )
     (batch / "price.csv").write_bytes(payload)
-    (source / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": []})
-    )
-    (batch / "manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "records": [
-                    {
-                        "path": "supplements/r1/price.csv",
-                        "source": "yahoo_chart_extracted",
-                        "status": "downloaded",
-                        "url": "https://example.org/chart",
-                        "sha256": hashlib.sha256(payload).hexdigest(),
-                        "bytes": len(payload),
-                        "retrieved_at": "2026-11-09T12:00:00Z",
-                    }
-                ],
-            }
-        )
+    write_source_manifest(source, {"schema_version": 1, "records": []})
+    write_source_manifest(
+        source,
+        {
+            "schema_version": 1,
+            "records": [
+                {
+                    "path": "supplements/r1/price.csv",
+                    "source": "yahoo_chart_extracted",
+                    "status": "downloaded",
+                    "url": "https://example.org/chart",
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "bytes": len(payload),
+                    "retrieved_at": "2026-11-09T12:00:00Z",
+                }
+            ],
+        },
+        name="supplements/r1/manifest.json",
     )
     output = tmp_path / "prices"
     prepare_source(
@@ -1419,9 +1389,7 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
         "bytes": len(payload),
         "retrieved_at": "2024-03-01T00:00:00Z",
     }
-    (raw / "manifest.json").write_text(
-        json.dumps({"schema_version": 1, "records": [record]})
-    )
+    write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     data_id = "public_option_put_call"
     output = tmp_path / "selected"
     materialize_interim_data(

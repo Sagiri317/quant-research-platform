@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
 import os
-from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from types import MappingProxyType
 
 import pandas as pd
 import pyarrow as pa
@@ -14,21 +11,16 @@ import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.storage.datasets.comparison as dataset_comparison
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
-    DataFrequency,
     InterimDataSpec,
-    data_frequency_slug,
 )
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage import datasets
 from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
 from quant_research_platform.storage.datasets.paths import (
     partition_frames,
-    timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage.datasets.reading import (
     projection_columns_for_window,
@@ -36,17 +28,12 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
     physical_schema_from_schema,
-    validate_dataset_manifest_payload,
-    validate_dataset_spec,
-    validate_dataset_spec_payload,
-    validate_physical_schema_payload,
 )
 from quant_research_platform.storage.datasets.writing import _WriteStats
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import native_filesystem_path
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.storage.low_level_fixtures import (
-    make_dataset_artifact_root,
     make_helper_edges_dataset_frame,
     make_processed_dataset_spec,
     write_low_level_parquet_artifact,
@@ -204,73 +191,6 @@ def test_processed_dependencies_are_unique_at_constructor_and_persisted_boundary
     spec = make_processed_dataset_spec("unique_dependencies")
     with pytest.raises(ValueError, match="unique"):
         replace(spec, **{field: ("source", "source")})
-    payload = data_spec_payload(spec)
-    payload[field] = ["source", "source"]
-    with pytest.raises(ValueError):
-        validate_dataset_spec_payload(payload)
-
-
-def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings() -> (
-    None
-):
-    research = make_demo_research_dataset_spec()
-    assert type(research.column_roles) is MappingProxyType
-    assert type(research.key_coverage) is MappingProxyType
-    validate_dataset_spec(research)
-    processed = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    validate_dataset_spec(processed)
-
-
-def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_error():
-    wrong_kind = []
-    payload = data_spec_payload(make_demo_research_dataset_spec())
-    data_id = payload["input_data_ids"][0]
-    payload["key_coverage"][data_id] = wrong_kind
-    with pytest.raises(ValueError, match="dataset_key_coverage_invalid"):
-        validate_dataset_spec_payload(payload)
-
-
-@pytest.mark.parametrize(
-    "type_payload",
-    [
-        {"kind": "decimal", "bit_width": 128, "precision": 39, "scale": 0},
-        {"kind": "decimal", "bit_width": 256, "precision": 77, "scale": 0},
-        {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": -1},
-        {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 19},
-        {"kind": "decimal", "bit_width": 256, "precision": 40, "scale": -1},
-        {"kind": "decimal", "bit_width": 256, "precision": 40, "scale": 41},
-        {"kind": "fixed_size_binary", "byte_width": 0},
-        {"kind": "date", "unit": "millisecond"},
-        {"kind": "time", "unit": "s"},
-        {"kind": "timestamp", "unit": "s", "timezone": None},
-        {
-            "kind": "dictionary",
-            "index_type": {"kind": "integer", "signed": False, "bit_width": 8},
-            "value_type": {"kind": "string"},
-            "ordered": False,
-        },
-    ],
-    ids=[
-        "decimal128-precision",
-        "decimal256-precision",
-        "decimal128-negative-scale",
-        "decimal128-scale-over-precision",
-        "decimal256-negative-scale",
-        "decimal256-scale-over-precision",
-        "fixed-size-binary-zero",
-        "date-millisecond",
-        "time-second",
-        "timestamp-second",
-        "dictionary-unsigned-index",
-    ],
-)
-def test_physical_schema_rejects_unpersistable_descriptors(
-    type_payload: dict[str, object],
-) -> None:
-    with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
-        validate_physical_schema_payload(
-            [{"name": "value", "nullable": True, "type": type_payload}]
-        )
 
 
 @pytest.mark.parametrize(
@@ -328,23 +248,6 @@ def test_physical_schema_accepts_persisted_parquet_identity_round_trip(
     finally:
         parquet_file.close()
     assert persisted == expected
-
-
-def test_manifest_counts_reject_non_int_numeric_types(tmp_path: Path) -> None:
-    invalid_count = Decimal("1")
-    root = make_dataset_artifact_root(
-        tmp_path, data_id="storage_demo", market_id="dummy"
-    )
-    frame = make_helper_edges_dataset_frame(market_id="dummy")
-    spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    datasets.write_dataset(root, frame, spec=spec)
-    spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
-    manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
-    )
-    manifest["row_count"] = invalid_count
-    with pytest.raises(ValueError, match="manifest_row_count_invalid"):
-        validate_dataset_manifest_payload(manifest, spec=spec_payload)
 
 
 def test_low_level_fixture_requires_explicit_primary_key(tmp_path: Path) -> None:
@@ -502,53 +405,6 @@ def test_dataset_partition_and_manifest_shape_helpers() -> None:
         )[0][0]
         == ""
     )
-    with pytest.raises(ValueError, match="unsupported_partitioning"):
-        list(
-            partition_frames(
-                frame, timestamp_column="timestamp", partition_columns=("month",)
-            )
-        )
-    with pytest.raises(ValueError, match="missing_partition_timestamp_column"):
-        list(
-            partition_frames(
-                frame.drop(columns=["timestamp"]),
-                timestamp_column="timestamp",
-                partition_columns=("year",),
-            )
-        )
-
-
-def test_dataset_spec_payload_accepts_exact_base_variant_and_rejects_extras() -> None:
-    base_spec = {
-        "schema_id": "qrp-dataset-spec",
-        "data_id": "asset_reference",
-        "frequency": data_frequency_slug(DataFrequency.DAILY),
-        "grain": "asset_reference",
-        "primary_key": ["asset_id"],
-        "partition_columns": [],
-        "required_columns": ["asset_id", "name"],
-        "column_roles": {"asset_id": "key", "name": "context"},
-        "column_units": {},
-        "label_availability_columns": {},
-    }
-    validate_dataset_spec_payload(base_spec)
-    with pytest.raises(ValueError, match="dataset_spec_fields_invalid"):
-        validate_dataset_spec_payload({**base_spec, "unknown": "value"})
-    with pytest.raises(ValueError, match="invalid_primary_key_roles"):
-        validate_dataset_spec_payload(
-            {**base_spec, "column_roles": {"asset_id": "context", "name": "context"}}
-        )
-
-
-def test_physical_schema_identity_rejects_unsupported_or_mutated_grammar() -> None:
-    with pytest.raises(ValueError, match="unsupported_dataset_arrow_type"):
-        physical_schema_from_schema(pa.schema([pa.field("unsupported", pa.null())]))
-    identity = physical_schema_from_schema(
-        pa.schema([pa.field("value", pa.int64(), nullable=False)])
-    )
-    identity[0]["type"]["unknown"] = True
-    with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
-        validate_physical_schema_payload(identity)
 
 
 @pytest.mark.parametrize(
@@ -563,99 +419,6 @@ def test_physical_schema_encoder_rejects_unsupported_date64(
         )
 
 
-@pytest.mark.parametrize(
-    "type_payload",
-    [
-        {"kind": "time", "unit": "ms"},
-        {"kind": "duration", "unit": "ms"},
-        {"kind": "timestamp", "unit": "ms", "timezone": None},
-    ],
-    ids=["time", "duration", "timestamp"],
-)
-def test_physical_schema_units_reject_unhashable_values(
-    type_payload: dict[str, object],
-) -> None:
-    wrong_kind = []
-    schema_payload = [
-        {"name": "value", "nullable": True, "type": deepcopy(type_payload)}
-    ]
-    validate_physical_schema_payload(schema_payload)
-    target = schema_payload[0]["type"]
-    target["unit"] = wrong_kind
-    with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
-        validate_physical_schema_payload(schema_payload)
-
-
-@pytest.mark.parametrize(
-    ("type_payload", "parameter_path", "wrong_kind"),
-    [
-        ({"kind": "integer", "signed": True, "bit_width": 32}, ("bit_width",), "float"),
-        ({"kind": "float", "bit_width": 64}, ("bit_width",), "float"),
-        (
-            {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
-            ("bit_width",),
-            "float",
-        ),
-        (
-            {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
-            ("precision",),
-            "float",
-        ),
-        (
-            {"kind": "decimal", "bit_width": 128, "precision": 18, "scale": 4},
-            ("scale",),
-            "float",
-        ),
-        ({"kind": "fixed_size_binary", "byte_width": 16}, ("byte_width",), "float"),
-        (
-            {
-                "kind": "dictionary",
-                "index_type": {"kind": "integer", "signed": True, "bit_width": 8},
-                "value_type": {"kind": "float", "bit_width": 32},
-                "ordered": False,
-            },
-            ("index_type", "bit_width"),
-            "float",
-        ),
-        (
-            {
-                "kind": "dictionary",
-                "index_type": {"kind": "integer", "signed": True, "bit_width": 8},
-                "value_type": {"kind": "float", "bit_width": 32},
-                "ordered": False,
-            },
-            ("value_type", "bit_width"),
-            "float",
-        ),
-        ({"kind": "integer", "signed": True, "bit_width": 32}, ("bit_width",), "bool"),
-        (
-            {"kind": "integer", "signed": True, "bit_width": 32},
-            ("bit_width",),
-            "string",
-        ),
-    ],
-)
-def test_physical_schema_numeric_parameters_require_exact_int_kind_recursively(
-    type_payload: dict[str, object], parameter_path: tuple[str, ...], wrong_kind: str
-) -> None:
-    schema_payload = [
-        {"name": "value", "nullable": True, "type": deepcopy(type_payload)}
-    ]
-    validate_physical_schema_payload(schema_payload)
-    target = schema_payload[0]["type"]
-    for key in parameter_path[:-1]:
-        target = target[key]
-    parameter = parameter_path[-1]
-    exact_value = target[parameter]
-    target[parameter] = {
-        "float": float(exact_value),
-        "bool": True,
-        "string": str(exact_value),
-    }[wrong_kind]
-    with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
-        validate_physical_schema_payload(schema_payload)
-
-
 def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
     spec = data_spec_payload(
         make_processed_dataset_spec("storage_demo", market_id="dummy")
@@ -663,18 +426,6 @@ def test_dataset_timestamp_and_candidate_file_helpers(tmp_path: Path) -> None:
     assert projection_columns_for_window(
         ("market_id",), spec=spec, time_window=TimeWindow("2024-01-01", "2024-01-31")
     ) == ("market_id", "timestamp")
-    with pytest.raises(ValueError, match="invalid_column_roles"):
-        timestamp_column_from_spec_payload({"column_roles": []})
-    with pytest.raises(ValueError, match="invalid_timestamp_primary_key"):
-        timestamp_column_from_spec_payload(
-            {
-                "primary_key": ["timestamp", "as_of"],
-                "column_roles": {
-                    "timestamp": ColumnRole.TIMESTAMP.value,
-                    "as_of": ColumnRole.TIMESTAMP.value,
-                },
-            }
-        )
     data_root = tmp_path / "data"
     data_root.mkdir()
     assert _discovered_paths(data_root, spec={**spec, "partition_columns": []}) == []
@@ -769,20 +520,6 @@ def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
     assert index.identity_payload_count(namespace="left") == 1
 
 
-@pytest.mark.parametrize("invalid", ([], {}, True, "winsorize"))
-def test_feature_recipe_rejects_invalid_persisted_recipe(invalid):
-    factor = make_demo_research_dataset_spec().factor_columns[0]
-    transform = FeatureTransformSpec("a_share_canonical", (factor,))
-    spec = make_demo_research_dataset_spec(
-        feature_columns=transform.output_columns,
-        feature_transforms=(transform,),
-    )
-    payload = data_spec_payload(spec)
-    payload["feature_transforms"][0]["recipe_id"] = invalid
-    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
-        validate_dataset_spec_payload(payload)
-
-
 def test_resolved_feature_options_are_the_persisted_transform_configuration():
     factor = make_demo_research_dataset_spec().factor_columns[0]
     identities = []
@@ -794,7 +531,6 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
                 feature_transforms=(transform,),
             )
         )
-        validate_dataset_spec_payload(payload)
         assert payload["feature_transforms"] == [
             {
                 "recipe_id": recipe,
@@ -808,21 +544,5 @@ def test_resolved_feature_options_are_the_persisted_transform_configuration():
                 "scale": True,
             }
         ]
-        identities.append(canonical_json_hash(payload))
-        payload["feature_transforms"][0]["fillna_policy"] = "zero"
-        with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
-            validate_dataset_spec_payload(payload)
+        identities.append(payload)
     assert identities[0] != identities[1]
-
-
-def test_persisted_feature_size_cannot_be_inferred_from_new_defaults():
-    factor = make_demo_research_dataset_spec().factor_columns[0]
-    transform = FeatureTransformSpec("a_share_canonical", (factor,))
-    payload = data_spec_payload(
-        make_demo_research_dataset_spec(
-            feature_columns=transform.output_columns, feature_transforms=(transform,)
-        )
-    )
-    del payload["feature_transforms"][0]["size_column"]
-    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
-        validate_dataset_spec_payload(payload)

@@ -184,7 +184,6 @@ def test_prediction_only_skips_unrequested_comparison_and_domain_work(
     for name in (
         "_common_model_rank_ic",
         "_model_comparison",
-        "_paired_group_rankic",
     ):
         monkeypatch.setattr(model_stats, name, unexpected)
     artifact = read_statistics_artifact(model_stats.model_statistics(config))

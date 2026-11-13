@@ -29,7 +29,7 @@
         },
         "candidate": {
           "candidate_id": "learned",
-          "selection_group": "global",
+          "selection_group": "quarterly",
           "construction": "quantile_equal_weight",
           "prediction_selector": "policy",
           "rebalance_schedule": "daily",

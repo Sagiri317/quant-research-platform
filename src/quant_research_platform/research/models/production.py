@@ -188,6 +188,7 @@ def fit(config: Mapping) -> Path:
             "family_id",
             "trading_calendar",
             "validation",
+            "training_selection",
         },
     )
     output = Path(config["output"])
@@ -325,6 +326,8 @@ def fit(config: Mapping) -> Path:
     }
     if validation is not None:
         facts["validation"] = validation
+    if "training_selection" in config:
+        facts["training_selection"] = config["training_selection"]
     validate_model_facts(facts, expected=selected if selection is not None else None)
     recorder = TrialRecorder(output.with_name(output.name + ".trial"), facts)
     recorder.begin()

@@ -13,7 +13,6 @@ from quant_research_platform.contracts.evaluations import (
     EVALUATION_METRICS_COLUMNS,
 )
 from quant_research_platform.contracts.signals import DEFAULT_N_GROUPS
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
 def _mean_squared_error(predictions, labels) -> float | None:
@@ -559,19 +558,11 @@ def _neutralize_cross_section(
     factor_columns,
     industry_column,
     size_column,
-    minimum_observations=100,
     rescale,
     industry_neutralize=True,
     size_neutralize=True,
     time_groups=None,
 ):
-    required = {"timestamp", *factor_columns}
-    if industry_neutralize:
-        required.add(industry_column)
-    if not required.issubset(frame.columns):
-        raise ValueError("neutralization_columns_invalid")
-    if type(minimum_observations) is not int or minimum_observations < 1:
-        raise ValueError("neutralization_minimum_observations_invalid")
     if not industry_neutralize and not size_neutralize:
         return frame
     result = frame.copy()
@@ -591,13 +582,7 @@ def _neutralize_cross_section(
             continue
         size = None
         if size_neutralize and any(factor != size_column for factor in factor_columns):
-            if size_column not in cross:
-                raise ValueError("neutralization_size_column_required")
-            size = strict_finite_numeric_series(
-                cross.loc[valid_industry, size_column],
-                error="invalid_neutralization_size",
-                allow_null=True,
-            )
+            size = cross.loc[valid_industry, size_column]
         designs = {}
         for factor in factor_columns:
             # A size source is never regressed on itself. With no industry step,
@@ -608,18 +593,14 @@ def _neutralize_cross_section(
                     dtype="float64", na_value=np.nan
                 )
                 continue
-            values = strict_finite_numeric_series(
-                cross.loc[valid_industry, factor],
-                error=f"invalid_neutralization_factor: {factor}",
-                allow_null=True,
-            )
+            values = cross.loc[valid_industry, factor]
             valid = values.notna()
             if use_size:
                 valid &= size.notna()
             indices = values.index[valid]
             groups = industry.loc[indices]
             parameters = groups.nunique() + use_size
-            if len(indices) < max(minimum_observations, 5 * parameters):
+            if len(indices) < max(100, 5 * parameters):
                 continue
             target = values.loc[indices].to_numpy(dtype="float64", copy=False)
             sizes = size.loc[indices].to_numpy() if use_size else None

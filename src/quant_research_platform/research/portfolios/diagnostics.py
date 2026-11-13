@@ -40,14 +40,11 @@ from quant_research_platform.research.portfolios.comparison import (
 )
 from quant_research_platform.research.portfolios.performance import performance_rows
 from quant_research_platform.research.portfolios.schedules import holding_intervals
-from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.risk import (
     FactorRiskState,
 )
 from quant_research_platform.research.statistics import (
-    _paired_mean_inference,
     _return_sharpes,
-    _validate_bootstrap_configuration,
     _validate_cscv_slice_count,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
@@ -59,7 +56,6 @@ _PORTFOLIO_ANALYSES = (
     "capacity",
     "sharpe_inference",
     "cscv",
-    "group_comparison",
     *COMPARISON_ANALYSES,
 )
 
@@ -422,44 +418,6 @@ def build_portfolio_statistics_tables(
     )
 
     analyses = selected_portfolio_analyses(config, _PORTFOLIO_ANALYSES)
-    if "group_comparison" in analyses:
-        declaration = config["statistics"].get("group_comparison")
-        if declaration is not None:
-            by_id = {candidate.candidate_id: candidate for candidate in candidates}
-            for portfolio_id in declaration["portfolio_ids"]:
-                pair = [
-                    by_id.get(f"{group}_{portfolio_id}")
-                    for group in ("global", "quarterly")
-                ]
-                if any(
-                    candidate is None or candidate.selection_group != group
-                    for candidate, group in zip(
-                        pair, ("global", "quarterly"), strict=True
-                    )
-                ):
-                    raise ValueError(
-                        "portfolio_group_comparison_selection_group_invalid"
-                    )
-                if any(
-                    getattr(pair[0], field) != getattr(pair[1], field)
-                    for field in (
-                        "construction",
-                        "rebalance_schedule",
-                        "top_quantile",
-                        "benchmark_id",
-                        "neutrality",
-                        "risk_style_columns",
-                    )
-                ) or any(
-                    getattr(pair[0], field) != getattr(pair[1], field)
-                    for field, modes in (
-                        ("size_cap_column", {"size", "industry_size"}),
-                        ("size_neutrality_limit", {"size", "industry_size"}),
-                        ("industry_neutrality_limit", {"industry", "industry_size"}),
-                    )
-                    if pair[0].neutrality in modes
-                ):
-                    raise ValueError("portfolio_group_comparison_strategy_mismatch")
     pieces = []
 
     calendar = (
@@ -474,7 +432,6 @@ def build_portfolio_statistics_tables(
                 "performance",
                 "sharpe_inference",
                 "cscv",
-                "group_comparison",
                 "benchmark_comparison",
                 "control_comparison",
                 "market_exposure",
@@ -1083,34 +1040,6 @@ def _portfolio_statistics_tables(
         "trading_day_open",
         sessions,
     )
-    paired_comparison = (
-        _group_portfolio_comparison(matrix, config, daily_complete=daily_complete)
-        if "group_comparison" in analyses
-        else pd.DataFrame(
-            columns=STATISTICS_TABLE_COLUMNS["portfolio_group_comparison.parquet"]
-        )
-    )
-    for index, pair in paired_comparison.iterrows():
-        if pair.reason == "nonpositive_start_nav":
-            pair_rows = daily.loc[
-                daily.candidate_id.isin(
-                    [f"global_{pair.portfolio_id}", f"quarterly_{pair.portfolio_id}"]
-                )
-            ]
-            if not pair_rows.nav_before.eq(0).any():
-                paired_comparison.loc[index, ["reason", "bootstrap_reason"]] = (
-                    "nonfinite_result"
-                )
-    for group in ("global", "quarterly"):
-        paired_comparison[f"{group}_terminal_wealth"] = [
-            previous[f"{group}_{portfolio_id}"][1]
-            / ledgers[f"{group}_{portfolio_id}"].capital.initial_capital
-            for portfolio_id in paired_comparison.portfolio_id
-        ]
-        column = f"{group}_terminal_wealth"
-        valid = np.isfinite(paired_comparison[column])
-        paired_comparison.loc[~valid, column] = np.nan
-        paired_comparison[f"{column}_reason"] = np.where(valid, "", "nonfinite_result")
     if {"sharpe_inference", "cscv"} & set(analyses):
         inference_ids = ids
         inference_matrix = matrix.loc[:, list(inference_ids)]
@@ -1277,7 +1206,6 @@ def _portfolio_statistics_tables(
         "portfolio_daily": daily.reindex(
             columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
         ),
-        "portfolio_group_comparison": paired_comparison,
         "portfolio_performance": pd.DataFrame.from_records(
             summary_rows,
             columns=STATISTICS_TABLE_COLUMNS["portfolio_performance.parquet"],
@@ -1307,8 +1235,6 @@ def _portfolio_statistics_tables(
         )
     if {"sharpe_inference", "cscv"} & set(analyses):
         requested.add("portfolio_robustness")
-    if "group_comparison" in analyses:
-        requested.add("portfolio_group_comparison")
     result = {name: table for name, table in tables.items() if name in requested}
     if set(analyses).intersection(COMPARISON_ANALYSES):
         axis = daily.rename(
@@ -1337,78 +1263,6 @@ def _portfolio_statistics_tables(
             )
         )
     return result
-
-
-def _group_portfolio_comparison(matrix, config, *, daily_complete):
-    """Keep paired descriptions; infer only on a caller-verified daily grid."""
-    columns = STATISTICS_TABLE_COLUMNS["portfolio_group_comparison.parquet"]
-    statistics = config["statistics"]
-    declaration = statistics.get("group_comparison")
-    if declaration is None:
-        return pd.DataFrame(columns=columns)
-    candidate_ids = declaration["portfolio_ids"]
-    expected = [
-        f"{group}_{candidate}"
-        for candidate in candidate_ids
-        for group in ("global", "quarterly")
-    ]
-    if (
-        set(expected) != set(matrix.columns)
-        or np.isinf(matrix.to_numpy(dtype="float64")).any()
-    ):
-        raise ValueError("portfolio_group_comparison_coverage_invalid")
-    differences = pd.DataFrame(
-        {
-            candidate: (
-                matrix[f"quarterly_{candidate}"] - matrix[f"global_{candidate}"]
-            ).to_numpy()
-            for candidate in candidate_ids
-        },
-        index=matrix.index.get_level_values("end_at"),
-    )
-    inference = _paired_mean_inference(
-        differences,
-        blockers={
-            candidate: "incomplete_daily_axis"
-            if not daily_complete
-            else "nonpositive_start_nav"
-            if differences[candidate].isna().any()
-            else None
-            for candidate in candidate_ids
-        },
-        max_lags=statistics["hac_lag"],
-        block_size=statistics["bootstrap_block"],
-        repetitions=statistics["bootstrap_repetitions"],
-        seed=declaration["seed"],
-        confidence=declaration["confidence"],
-        fdr_method=None
-        if _inference_blocker(config) is not None
-        else declaration["fdr_method"],
-        fdr_alpha=declaration["alpha"],
-    )
-    rows = []
-    for candidate in candidate_ids:
-        pair = matrix[[f"global_{candidate}", f"quarterly_{candidate}"]]
-        paired = np.isfinite(pair).all(axis=1)
-        pair = pair.loc[paired]
-        values = differences[candidate].to_numpy(dtype="float64")
-        rows.append(
-            {
-                **inference[candidate],
-                "portfolio_id": candidate,
-                "comparison_role": "primary"
-                if candidate == declaration["primary_portfolio_id"]
-                else "secondary",
-                "sample_role": config["sample_role"],
-                "observation_count": len(values),
-                "global_mean": float(pair.iloc[:, 0].mean()),
-                "quarterly_mean": float(pair.iloc[:, 1].mean()),
-                "mean_difference": float(values[paired].mean())
-                if paired.any()
-                else np.nan,
-            }
-        )
-    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 def portfolio_statistics(config):
@@ -1471,61 +1325,12 @@ def portfolio_statistics(config):
     if not isinstance(config["ledgers"], list) or not config["ledgers"]:
         raise ValueError("portfolio_statistics_ledgers_required")
     policy = config.get("statistics", {})
-    paired = isinstance(policy, dict) and "group_comparison" in policy
-    if paired and "group_comparison" in analyses:
-        policy.setdefault("bootstrap_repetitions", 2000)
-    expected = ({"cscv_blocks"} if "cscv" in analyses else set()) | (
-        {"hac_lag", "bootstrap_block", "bootstrap_repetitions", "group_comparison"}
-        if paired and "group_comparison" in analyses
-        else set()
-    )
-    known = {
-        "cscv_blocks",
-        "hac_lag",
-        "bootstrap_block",
-        "bootstrap_repetitions",
-        "group_comparison",
-    }
-    if "group_comparison" in analyses and not paired:
-        raise ValueError("portfolio_statistics_comparison_policy_required")
+    expected = {"cscv_blocks"} if "cscv" in analyses else set()
+    known = {"cscv_blocks", "hac_lag", "bootstrap_block", "bootstrap_repetitions"}
     if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
         raise ValueError("portfolio_statistics_policy_invalid")
     if "cscv" in analyses:
         _validate_cscv_slice_count(policy["cscv_blocks"])
-    if (
-        paired
-        and "group_comparison" in analyses
-        and (
-            not isinstance(policy["group_comparison"], dict)
-            or set(policy["group_comparison"])
-            != {
-                "portfolio_ids",
-                "primary_portfolio_id",
-                "fdr_method",
-                "alpha",
-                "seed",
-                "confidence",
-            }
-        )
-    ):
-        raise ValueError("portfolio_statistics_comparison_policy_invalid")
-    if paired and "group_comparison" in analyses:
-        declaration = policy["group_comparison"]
-        if (
-            type(policy["hac_lag"]) is not int
-            or policy["hac_lag"] < 0
-            or type(declaration["confidence"]) is not float
-            or not 0 < declaration["confidence"] < 1
-            or type(declaration["alpha"]) is not float
-            or not 0 < declaration["alpha"] < 1
-            or declaration["fdr_method"] not in ("BH", "BY")
-        ):
-            raise ValueError("portfolio_statistics_comparison_policy_invalid")
-        _validate_bootstrap_configuration(
-            policy["bootstrap_block"],
-            policy["bootstrap_repetitions"],
-            declaration["seed"],
-        )
     participation = config.get("adv_sensitivities", [])
     if "capacity" in analyses and (
         not isinstance(participation, list)
@@ -1553,7 +1358,6 @@ def portfolio_statistics(config):
         ledgers[candidate_id] = ledger
         if ledger.metadata.get("kind") == "a_share_hft" or not {
             "attribution",
-            "group_comparison",
         }.intersection(analyses):
             continue
         if "candidate" not in ledger.metadata:
@@ -1604,7 +1408,7 @@ def portfolio_statistics(config):
             comparison_metadata=comparison_metadata,
         )
     metadata = {key: value for key, value in config.items() if key != "output"}
-    if {"sharpe_inference", "cscv", "group_comparison"}.intersection(analyses):
+    if {"sharpe_inference", "cscv"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"
         metadata["formal_selection_qualification"] = "not_established"
     if "attribution" in analyses and "risk" in config:
@@ -1623,9 +1427,6 @@ def portfolio_statistics(config):
     }
     if industry_domains:
         metadata["industry_neutrality_domains"] = industry_domains
-    metadata["comparison_portfolio_ids"] = policy.get("group_comparison", {}).get(
-        "portfolio_ids", []
-    )
     return write_statistics_artifact(
         output, metadata=metadata, tables=tables, table_group="portfolio"
     )

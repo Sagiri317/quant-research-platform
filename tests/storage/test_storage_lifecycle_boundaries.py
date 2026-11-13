@@ -423,7 +423,7 @@ def test_dataset_inventory_preserves_serious_io(tmp_path, monkeypatch, error_typ
     assert caught.value is primary
 
 
-@pytest.mark.parametrize("operation", ("read", "inspect", "fingerprint"))
+@pytest.mark.parametrize("operation", ("read", "fingerprint"))
 @pytest.mark.parametrize("failure", ("tell", "seek", "read"))
 def test_public_parquet_reader_preserves_system_io(
     tmp_path, monkeypatch, operation, failure

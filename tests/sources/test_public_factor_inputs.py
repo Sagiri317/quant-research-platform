@@ -7,6 +7,7 @@ import zipfile
 import pandas as pd
 
 from quant_research_platform.sources.public_research.normalization import normalize
+from tests.helpers.public_sources import write_source_manifest
 
 
 def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path):
@@ -165,33 +166,36 @@ def test_extracted_13f_values_are_already_usd(tmp_path):
     assert frame._clock_source.tolist() == ["sec_13f:a"]
 
 
-def test_nested_manifest_paths_are_resolved_from_their_declared_base(tmp_path):
+def test_source_collection_reads_archived_contracts_and_ignores_unconsumed_records(
+    tmp_path,
+):
     from quant_research_platform.sources.prepare import prepare_source
     from quant_research_platform.storage.datasets import read_dataset
 
     raw = tmp_path / "raw"
-    nested = raw / "supplement"
+    raw.mkdir()
+    nested = tmp_path / "archive" / "supplement"
     nested.mkdir(parents=True)
     file = nested / "contracts.xml"
     file.write_text(
         "<tradeproperty><INDEX><TRADING_DAY>20240102</TRADING_DAY><PRODUCT_ID>IF</PRODUCT_ID><INSTRUMENT_ID>IF2401</INSTRUMENT_ID><OPEN_DATE>20231023</OPEN_DATE><END_TRADING_DAY>20240119</END_TRADING_DAY></INDEX></tradeproperty>"
     )
     manifest = {
-        "schema_version": 1,
-        "path_base": "manifest_directory",
         "records": [
             {
-                "path": "contracts.xml",
+                "path": "supplement/contracts.xml",
                 "source": "cffex_contract_parameters",
-                "status": "downloaded",
                 "url": "https://example.org/contract",
                 "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
-                "bytes": file.stat().st_size,
                 "retrieved_at": "2026-11-11T00:00:00Z",
             }
         ],
     }
-    (nested / "manifest.json").write_text(json.dumps(manifest))
+    manifest["records"].append({"source": "unconsumed_provider", "path": "missing.csv"})
+    write_source_manifest(raw, manifest, name="supplement/manifest.json")
+    catalog = json.loads((raw / "manifest.json").read_text(encoding="utf-8"))
+    catalog["source_root"] = "../archive"
+    (raw / "manifest.json").write_text(json.dumps(catalog), encoding="utf-8")
     output = tmp_path / "out"
     prepare_source(
         dict(
@@ -240,16 +244,12 @@ def test_derived_manifest_without_aggregate_url_keeps_row_provenance(tmp_path):
     record = dict(
         path="supplement/holdings.csv",
         source="sec_13f_target_holdings_extracted",
-        status="downloaded",
         sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-        bytes=path.stat().st_size,
     )
-    (nested / "manifest.json").write_text(
-        json.dumps(
-            dict(
-                schema_version=1, path_base="public_research_raw_root", records=[record]
-            )
-        )
+    write_source_manifest(
+        raw,
+        {"records": [record]},
+        name="supplement/manifest.json",
     )
     output = tmp_path / "out"
     prepare_source(

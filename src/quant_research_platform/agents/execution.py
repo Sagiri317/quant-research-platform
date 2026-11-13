@@ -31,11 +31,8 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
-from quant_research_platform.storage.atomic import (
-    atomic_write_json,
-    atomic_write_text,
-    reject_if_exists,
-)
+from quant_research_platform.storage.atomic import reject_if_exists
+from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
 def error_feedback(error, *, log=None):
@@ -129,7 +126,7 @@ def run_native(
     arguments["output_root" if operation in {"assemble", "prepare"} else "output"] = (
         str(artifact.resolve())
     )
-    config_file = atomic_write_json(root / "config.json", arguments)
+    config_file = write_qrp_json_file(root / "config.json", arguments)
     exit_code = _run_process(
         [
             sys.executable,
@@ -187,7 +184,7 @@ def run_native(
 
 
 def _facts(output, definitions):
-    """Read caller-declared aggregate metadata, never an arbitrary raw table."""
+    """Read the caller-declared JSON metadata fields."""
     result = {}
     for name, definition in definitions.items():
         definition = _strict_config(definition, {"member", "path"}, set())
@@ -263,7 +260,8 @@ def run_isolated_python(code, config, output, *, timeout):
     output = Path(output).resolve()
     reject_if_exists(output)
     output.mkdir(parents=True)
-    script = atomic_write_text(output / "experiment.py", code)
+    script = output / "experiment.py"
+    script.write_text(code, encoding="utf-8")
     work = output / "results"
     work.mkdir()
     if os.name != "nt":

@@ -84,7 +84,7 @@ def configured_spec(spec, config):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     base = materialize_dataset_session(
         open_dataset_session(**_dataset_input_options(inputs["benchmark_daily_panel"]))
         .filtered_view(time_window)

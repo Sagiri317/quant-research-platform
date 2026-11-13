@@ -83,9 +83,6 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
-    )
 
     times = pd.Timestamp("2020-01-01") + pd.to_timedelta([1, 2], unit="ns")
     frame = pd.DataFrame(
@@ -118,7 +115,7 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
             spec=spec,
             output_path=tmp_path / spec.evaluation_id,
         )
-    validate_output_bundle(root)
+
     diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
         "metadata"
     ]["evaluation_diagnostics"]
@@ -875,11 +872,11 @@ def _write_count_evaluation(tmp_path, count):
 def test_evaluation_writer_preserves_counts_without_text_workarounds(tmp_path):
     count = 303767
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
 
     root, _, _ = _write_count_evaluation(tmp_path, count)
-    manifest, _ = validate_output_bundle(root)
+    manifest = read_output_manifest(root)
     diagnostics = manifest["metadata"]["evaluation_diagnostics"]
     for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
         assert type(diagnostics[field]) is int and diagnostics[field] == count

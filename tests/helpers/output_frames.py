@@ -40,13 +40,10 @@ def _price_volume_prediction_metadata():
     return {
         "model": "model",
         "inputs": "inputs",
-        "model_id": "linear-demo",
-        "family_id": "linear-demo",
         "prediction_window": {"start": "2014-01-03", "end": "2014-01-03"},
         "effective_prediction_end": "2014-01-03",
         "sample_role": "validation",
         "prediction_rows": 1,
-        "label_unit": "decimal_return",
         "model_metadata": {
             "training_asset_ids": ["a", "b"],
             "train_start": "2014-01-02T00:00:00",

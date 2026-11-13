@@ -243,7 +243,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 probabilities[:, 2] - probabilities[:, 0],
                 atol=1e-12,
             )
-            assert metadata["label_unit"] == "decimal_return"
+            assert metadata["model_facts"]["label_unit"] == "decimal_return"
             from quant_research_platform.artifacts.outputs.evaluation import (
                 read_evaluation_outputs,
             )

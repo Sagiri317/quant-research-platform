@@ -53,8 +53,6 @@ type _EvaluationOutputChunk = tuple[pd.DataFrame, pd.DataFrame, dict[str, object
 class _EvaluationStreamingState:
     def __init__(self, *, spec: EvaluationSpec) -> None:
         self._spec = spec
-        self._filter_columns_used = required_filter_columns(spec.filter_mode)
-        self._filter_definition = filter_definition(spec.filter_mode)
         self._rows_input = 0
         self._rows_after_filter_mode = 0
         self._rows_after_signal_label_dropna = 0
@@ -77,10 +75,6 @@ class _EvaluationStreamingState:
     ) -> None:
         self._rows_input += int(metadata["rows_input"])
         self._rows_after_filter_mode += int(metadata["rows_after_filter_mode"])
-        self._filter_columns_used = tuple(
-            str(column) for column in metadata["filter_columns_used"]
-        )
-        self._filter_definition = str(metadata["filter_definition"])
         fact_count = metadata["timestamp_count"]
         if fact_count:
             fact_min = pd.Timestamp(metadata["min_timestamp"])
@@ -289,8 +283,8 @@ class _EvaluationStreamingState:
     def diagnostics(self) -> EvaluationDiagnostics:
         return EvaluationDiagnostics(
             filter_mode=self._spec.filter_mode,
-            filter_columns_used=self._filter_columns_used,
-            filter_definition=self._filter_definition,
+            filter_columns_used=required_filter_columns(self._spec.filter_mode),
+            filter_definition=filter_definition(self._spec.filter_mode),
             rows_input=self._rows_input,
             rows_after_filter_mode=self._rows_after_filter_mode,
             rows_after_signal_label_dropna=self._rows_after_signal_label_dropna,
@@ -641,8 +635,8 @@ def _evaluate_filtered_frame(
     n_groups = spec.n_groups
     timestamps = strict_timestamp_series(
         filter_metadata["timestamps"], error="invalid_evaluation_timestamp_values"
-    )
-    timestamp_count = int(timestamps.nunique())
+    ).drop_duplicates()
+    timestamp_count = len(timestamps)
     skipped_timestamps: set[pd.Timestamp] = set()
     compute_spec = ComputePanelSpec(
         signal_columns=signal_columns,
@@ -656,9 +650,7 @@ def _evaluate_filtered_frame(
         n_groups=n_groups,
         top_quantile=spec.top_quantile if include_sides else None,
     )
-    absent = timestamps.drop_duplicates().loc[
-        ~timestamps.drop_duplicates().isin(metrics.timestamp)
-    ]
+    absent = timestamps.loc[~timestamps.isin(metrics.timestamp)]
     if not absent.empty:
         missing = _correlation_metrics_frame(
             [
@@ -958,7 +950,6 @@ def build_scoped_evaluation_result(
                 "signal_columns": source["signal_columns"],
                 "availability": source["availability"],
                 "classification_targets": source.get("classification_targets", {}),
-                "declared": {"column_roles": dict(source["declared"]["column_roles"])},
             }
             for source in sources
         ],

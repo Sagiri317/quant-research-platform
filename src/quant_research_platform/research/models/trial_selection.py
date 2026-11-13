@@ -424,7 +424,6 @@ def score(config):
     from pathlib import Path
 
     from quant_research_platform.artifacts.outputs.prediction import (
-        prediction_model_metadata,
         read_predictions,
     )
     from quant_research_platform.contracts.models import (
@@ -436,10 +435,8 @@ def score(config):
         TimeWindow,
         prediction_window_mask,
     )
-    from quant_research_platform.storage.atomic import (
-        atomic_write_json,
-        reject_if_exists,
-    )
+    from quant_research_platform.storage.atomic import reject_if_exists
+    from quant_research_platform.storage.manifests import write_qrp_json_file
 
     config = _strict_config(
         config,
@@ -472,7 +469,7 @@ def score(config):
         or len(paths) != len(ids)
     ):
         raise ValueError("complete_ordered_candidates_required")
-    if config["selection_group"] not in {"global", "quarterly"}:
+    if type(config["selection_group"]) is not str or not config["selection_group"]:
         raise ValueError("selection_group_invalid")
     cutoff = strict_timestamp_series(
         pd.Series([config["cutoff"]]), error="invalid_selection_cutoff"
@@ -481,11 +478,6 @@ def score(config):
     validation_windows = _fit_windows(config["validation_windows"], cutoff)
     if window.end is None or pd.Timestamp(window.end) > cutoff:
         raise ValueError("selection_scoring_window_after_cutoff")
-    if config["selection_group"] == "global" and (
-        pd.Timestamp(window.start) != pd.Timestamp(validation_windows[0].start)
-        or pd.Timestamp(window.end) != pd.Timestamp(validation_windows[-1].end)
-    ):
-        raise ValueError("global_selection_requires_complete_validation")
     source = config["labels"]
     options = _dataset_input_options(
         source, time_window=window, discovery_windows=validation_windows
@@ -587,25 +579,24 @@ def score(config):
                 time_window=declared_window,
                 include_available_probabilities=True,
             )
-            if prediction["model_id"] != candidate_id:
+            facts = prediction["model_facts"]
+            if facts["model"]["model_id"] != candidate_id:
                 raise ValueError("selection_candidate_model_mismatch")
             predictions = predictions.loc[
                 prediction_window_mask(predictions.timestamp, window)
             ]
-            facts = prediction["model_facts"]
-            model_metadata = prediction_model_metadata(prediction)
             if pd.Timestamp(facts["fit_cutoff"]) >= pd.Timestamp(declared_window.start):
                 raise ValueError("validation_fit_overlap")
             config.setdefault(
                 "label_unit",
-                declared.get("column_units", {}).get(model_metadata["target_column"]),
+                declared.get("column_units", {}).get(facts["model"]["target_column"]),
             )
             if type(config["label_unit"]) is not str or not config["label_unit"]:
                 raise ValueError("label_unit_required")
             if market is not None and facts["market_id"] != market:
                 raise ValueError("selection_label_units_or_market_mismatch")
             market = facts["market_id"]
-            label = model_metadata["target_column"]
+            label = facts["model"]["target_column"]
             if target is not None and target != label:
                 raise ValueError("model_selection_label_mismatch")
             target = label
@@ -884,11 +875,8 @@ def score(config):
         "label_unit": config["label_unit"],
         "target_column": target,
         "market_id": market,
-        "inference_blocker": "global_validation_selection_reuses_validation"
-        if config["selection_group"] == "global"
-        else None,
     }
-    return atomic_write_json(Path(config["output"]), payload)
+    return write_qrp_json_file(Path(config["output"]), payload)
 
 
 def _selection_choice(value):
@@ -976,7 +964,7 @@ def select(config):
         _strict_config,
         parse_qrp_json_object,
     )
-    from quant_research_platform.storage.atomic import atomic_write_json
+    from quant_research_platform.storage.manifests import write_qrp_json_file
 
     config = _strict_config(
         config,
@@ -1007,7 +995,7 @@ def select(config):
     }
     result.update(_selection_decisions(result))
     result["refit_windows"], result["refit_cutoff"] = _validate_refit_scope(result)
-    return atomic_write_json(Path(config["output"]), result)
+    return write_qrp_json_file(Path(config["output"]), result)
 
 
 def _selection_decisions(value):

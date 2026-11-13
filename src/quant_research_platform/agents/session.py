@@ -49,14 +49,14 @@ project interpreter in QRP_PYTHON. Read APIs/config examples first. It is a host
 shell, not a sandbox. Follow repository authorization; do not delete data, change
 environments, install dependencies or rewrite Git history without user authority.
 Write scripts/configs/results under QRP_OUTPUT, not source or original data unless
-asked. Return only structural information and aggregate metrics; keep private rows,
-provider payloads, credentials and tracebacks local. Never print environment
+asked. Research data and provider payloads may be inspected and discussed; keep
+credentials, local absolute paths and tracebacks local. Never print environment
 variables wholesale or open credential files. Avoid reading private logs. Tools
 can read images and PDF pages as images. Use existing installed libraries for
 PDF/Excel/Word/Parquet processing and writing; inspect rendered outputs for layout.
 Audio/video perception is not provided by these tools. Web search uses the
-configured provider's public search, only the query is sent; do not put private
-data in it. Failures must be reported and diagnosed, not hidden with fake results.
+configured provider's public search, only the query is sent; do not put credentials
+or local absolute paths in it. Report and diagnose failures without fake results.
 
 For a new factor-mining experiment read docs/factor-mining.md, actual factor
 catalog and search-factors/formula sources. Discover local inputs before asking

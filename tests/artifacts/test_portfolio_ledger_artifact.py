@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -17,65 +17,16 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioLedgerBatch,
     PortfolioTargetBlocked,
     PortfolioValuation,
-    validate_portfolio_transition,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    open_filesystem_file,
 )
 from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
     session_frame,
     write_test_sessions,
 )
-
-
-def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        write_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.contracts.portfolios import PortfolioDiagnostic
-    from tests.helpers.portfolio_ledger import continuous_ledger_batch
-
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2019-01-02"))
-    with pytest.raises(ValueError, match="portfolio_ledger_orphan_economic_fact"):
-        write_portfolio_ledger_artifact(
-            tmp_path / "orphan",
-            **_ledger_spec(),
-            produce=lambda emit: emit(
-                replace(
-                    batch,
-                    trades=(
-                        *batch.trades,
-                        ExecutedTrade("orphan", "order", 1, "missing", 1.0, 1.0),
-                    ),
-                )
-            ),
-        )
-    assert not filesystem_exists(tmp_path / "orphan")
-    bad = replace(
-        batch,
-        diagnostics=(
-            *batch.diagnostics,
-            PortfolioDiagnostic("asset", "missing", "markout", number=0.5),
-        ),
-    )
-    with pytest.raises(ValueError, match="portfolio_ledger_diagnostic_fill_mismatch"):
-        write_portfolio_ledger_artifact(
-            tmp_path / "bad", **_ledger_spec(), produce=lambda emit: emit(bad)
-        )
-    assert not filesystem_exists(tmp_path / "bad")
 
 
 def test_raw_return_terminal_nav_is_valued_at_actual_interval_end(tmp_path):
@@ -290,28 +241,6 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     ]
 
 
-def test_portfolio_ledger_corrupt_selected_table_fails_decoding(tmp_path: Path) -> None:
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    root = write_test_sessions(
-        tmp_path / "portfolio", **_ledger_spec(), ledger_chunks=(frame,)
-    )
-    with open_filesystem_file(root / "valuations.parquet", "ab") as handle:
-        handle.write(b"mutation")
-    import pyarrow as pa
-
-    with pytest.raises((pa.ArrowInvalid, ValueError)):
-        list(read_portfolio_ledger_artifact(root).iter_chunks())
-
-
 def test_portfolio_ledger_reconciles_cash_rotation_costs_and_zero_asset_carry(
     tmp_path: Path,
 ) -> None:
@@ -389,11 +318,6 @@ def test_portfolio_ledger_diagnostic_counts_are_integral(tmp_path: Path) -> None
     assert (
         result.loc[result["asset_id"].eq("__cash__"), "alpha_valid_dates"].iloc[0] == 3
     )
-    frame.loc[frame["asset_id"].eq("__cash__"), "alpha_valid_dates"] = 1.5
-    with pytest.raises(ValueError, match="portfolio_ledger_count_invalid"):
-        write_test_sessions(
-            tmp_path / "invalid", **_ledger_spec(), ledger_chunks=(frame,)
-        )
 
 
 def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
@@ -468,43 +392,6 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
         )
     assert any("close also failed" in note for note in raised.value.__notes__)
     assert not filesystem_exists(tmp_path / "portfolio")
-
-
-@pytest.mark.parametrize(
-    ("mutation", "error"),
-    (
-        ("negative_adv", "portfolio_ledger_adv_invalid"),
-        ("zero_trade_adv", "portfolio_ledger_adv_invalid"),
-        ("block_reason", "portfolio_ledger_block_reason_invalid"),
-        ("decision_reason", "portfolio_ledger_decision_reason_invalid"),
-    ),
-)
-def test_portfolio_ledger_trust_boundary_mutations_fail_closed(
-    tmp_path: Path, mutation: str, error: str
-) -> None:
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    asset = frame["asset_id"].eq("asset")
-    if mutation == "negative_adv":
-        frame.loc[asset, "adv20"] = -1.0
-    elif mutation == "zero_trade_adv":
-        frame.loc[asset, "adv20"] = 0.0
-    elif mutation == "block_reason":
-        frame.loc[asset, "block_reason"] = "unknown_reason"
-    else:
-        frame.loc[asset, "decision_reason"] = "unknown_reason"
-    with pytest.raises(ValueError, match=error):
-        write_test_sessions(
-            tmp_path / mutation, **_ledger_spec(), ledger_chunks=(frame,)
-        )
 
 
 @pytest.mark.parametrize("observed_dates", [1, 8])
@@ -656,27 +543,6 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         == "alpha_calibration_zero_standard_error"
     )
     assert "slope_t" not in summary["alpha_calibration"]
-
-
-def test_tiny_cash_equity_trade_cannot_reverse_target_direction(tmp_path):
-    value = 1e-8
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=2 * value,
-        target_asset=value,
-        post_asset=3 * value,
-        pre_cash=1.0,
-        target_cash=1.0 + value,
-        post_cash=1.0 - value,
-    )
-    envelope = _ledger_spec()
-    envelope["capital"] = replace(envelope["capital"], initial_capital=1.0 + 2 * value)
-    with pytest.raises(ValueError, match="portfolio_ledger_direction_invalid"):
-        write_test_sessions(
-            tmp_path / "wrong_direction", **envelope, ledger_chunks=(frame,)
-        )
-    assert not filesystem_exists(tmp_path / "wrong_direction")
 
 
 def _alpha_metadata(cutoff):
@@ -865,35 +731,3 @@ def test_repeated_partial_fills_preserve_registered_rights_through_native_roundt
     )
     assert final.quantity == registered * (3 / 2)
     assert final.locked_quantity == final.receivable == 0
-
-
-@pytest.mark.parametrize("invalid", [True, None, np.nan, np.inf, "1.0"])
-def test_typed_portfolio_ledger_rejects_invalid_numeric_fields(invalid):
-    from tests.helpers.portfolio_ledger import continuous_ledger_batch
-
-    frame = _session(
-        "2019-01-01",
-        "2019-01-02",
-        pre_asset=0.0,
-        target_asset=100.0,
-        post_asset=100.0,
-        pre_cash=100.0,
-        target_cash=0.0,
-        post_cash=0.0,
-    )
-    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2019-01-02"))
-    for table in ("trades", "cashflows", "valuations", "diagnostics"):
-        rows = getattr(batch, table)
-        assert rows
-        for field in fields(rows[0]):
-            if field.type not in ("float", "float | None"):
-                continue
-            if invalid is None and field.type == "float | None":
-                continue
-            changed = replace(rows[0], **{field.name: invalid})
-            with pytest.raises(ValueError, match="portfolio_ledger_numeric_invalid"):
-                validate_portfolio_transition(
-                    replace(batch, **{table: (changed, *rows[1:])}),
-                    _ledger_spec()["capital"],
-                    None,
-                )

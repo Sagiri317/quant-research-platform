@@ -11,20 +11,16 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.json_codec import (
-    canonical_json_hash,
     render_qrp_json_object,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.atomic import (
     atomic_write_chunks,
     is_atomic_directory_staging_name,
 )
-from quant_research_platform.storage.datasets.inspection import (
-    _inspection_runtime_metadata,
-)
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
+    iter_dataset_chunks,
     open_dataset_session,
 )
 from quant_research_platform.storage.datasets.schema import physical_schema_columns
@@ -159,30 +155,38 @@ def _inventory_item_from_session(
         if column not in primary_key
         and spec_payload["column_roles"][column] not in {"factor", "label"}
     }
-    row_count_by_year: dict[str, int] = {}
-    timestamp_null_count = 0
-
-    def observe(frame):
-        nonlocal timestamp_null_count
-        if session.timestamp_column is not None:
-            timestamps = strict_timestamp_series(
-                frame[session.timestamp_column],
-                error="schema_inventory_invalid_timestamp",
-                allow_null=True,
-            ).dropna()
-            timestamp_null_count += len(frame) - len(timestamps)
-            for year, count in timestamps.dt.year.value_counts().items():
-                year = str(year)
-                row_count_by_year[year] = row_count_by_year.get(year, 0) + int(count)
-        for column in scanned_null_counts:
-            scanned_null_counts[column] += int(frame[column].isna().sum())
-
-    inspection = _inspection_runtime_metadata(session, frame_observer=observe)
-    if timestamp_null_count:
-        raise ValueError("schema_inventory_invalid_timestamp")
     manifest = session.manifest
-    verified_null_counts = {
-        **inspection["null_key_counts"],
+    row_count_by_year = {
+        partition.removeprefix("year="): count
+        for partition, count in manifest["partition_row_counts"].items()
+        if partition.startswith("year=") and count
+    }
+    time_column = session.timestamp_column if not partition_columns else None
+    scan_columns = tuple(
+        dict.fromkeys(
+            (
+                *((time_column,) if time_column is not None else ()),
+                *scanned_null_counts,
+            )
+        )
+    )
+    if scan_columns:
+        with closing_iterator(
+            iter_dataset_chunks(session.projected_view(scan_columns))
+        ) as frames:
+            for frame in frames:
+                if time_column is not None:
+                    for year, count in (
+                        frame[time_column].dt.year.value_counts().items()
+                    ):
+                        year = str(year)
+                        row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
+                            count
+                        )
+                for column in scanned_null_counts:
+                    scanned_null_counts[column] += int(frame[column].isna().sum())
+    null_counts = {
+        **dict.fromkeys(primary_key, 0),
         **{
             column: manifest[f"{role}_nan_profile"].get(column, 0)
             for column, role in spec_payload["column_roles"].items()
@@ -215,38 +219,12 @@ def _inventory_item_from_session(
         "dtypes": dtypes,
         "primary_key": list(primary_key),
         "partition_columns": list(partition_columns),
-        "file_count": inspection["file_count"],
-        "row_count": inspection["row_count"],
+        "file_count": manifest["file_count"],
+        "row_count": manifest["row_count"],
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
-        "min_timestamp": inspection["date_min"],
-        "max_timestamp": inspection["date_max"],
-        "duplicate_primary_key_count": inspection["duplicate_primary_key_count"],
-        "null_key_counts": inspection["null_key_counts"],
+        "min_timestamp": manifest["date_min"],
+        "max_timestamp": manifest["date_max"],
         "selected_important_column_null_counts": {
-            column: verified_null_counts[column] for column in sorted(important_columns)
+            column: null_counts[column] for column in sorted(important_columns)
         },
-        "schema_hash": _schema_hash(
-            columns=columns,
-            dtypes=dtypes,
-            primary_key=primary_key,
-            partition_columns=partition_columns,
-        ),
-        "warnings": [],
     }
-
-
-def _schema_hash(
-    *,
-    columns: tuple[str, ...],
-    dtypes: dict[str, str],
-    primary_key: tuple[str, ...],
-    partition_columns: tuple[str, ...],
-) -> str:
-    return canonical_json_hash(
-        {
-            "columns": list(columns),
-            "dtypes": dtypes,
-            "primary_key": list(primary_key),
-            "partition_columns": list(partition_columns),
-        },
-    )

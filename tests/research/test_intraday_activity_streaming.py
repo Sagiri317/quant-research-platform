@@ -120,9 +120,10 @@ def test_native_activity_reads_prefix_once_and_respects_mixed_factor_cutoff(
     monkeypatch.setattr(intraday, "materialize_dataset_session", observe)
     start = days[20] + pd.Timedelta(hours=1, minutes=32)
     end = days[-1] + pd.Timedelta(hours=1, minutes=40, seconds=30)
-    with intraday.produce(
-        spec, inputs=inputs, time_window=TimeWindow(start, end), processed_catalog=None
-    ) as (frames, _):
+    with intraday.produce(spec, inputs=inputs, time_window=TimeWindow(start, end)) as (
+        frames,
+        _,
+    ):
         actual = pd.concat(frames, ignore_index=True)
     consumed = frame.loc[frame.timestamp.le(end)]
     expected = calculate(consumed, columns=columns, session_days=days)

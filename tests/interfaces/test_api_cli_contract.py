@@ -57,7 +57,7 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-async def test_api_cannot_escape_root_or_read_raw(anyio_backend, tmp_path):
+async def test_api_cannot_escape_root(anyio_backend, tmp_path):
     root = tmp_path / "project"
     root.mkdir()
     output, _, _ = native_bundle(root)
@@ -70,12 +70,19 @@ async def test_api_cannot_escape_root_or_read_raw(anyio_backend, tmp_path):
             "../outside",
             "/outside",
             "C:/private",
-            "data/raw/input",
             "..\\private",
         ):
             response = await client.get("/api/inspect", params={"path": path})
             assert response.status_code == 422
         response = await client.get("/api/inspect", params={"path": output.name})
+        assert response.status_code == 200
+        assert response.json()["metadata"] == metadata
+        raw = root / "data/raw"
+        raw.mkdir(parents=True)
+        output.rename(raw / "selected")
+        response = await client.get(
+            "/api/inspect", params={"path": "data/raw/selected"}
+        )
         assert response.status_code == 200
         assert response.json()["metadata"] == metadata
         assert (
@@ -143,7 +150,9 @@ async def test_http_inspection_redacts_private_paths_without_changing_artifact(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-async def test_http_inspection_requires_native_metadata_shape(anyio_backend, tmp_path):
+async def test_http_inspection_reads_selected_native_and_business_metadata(
+    anyio_backend, tmp_path
+):
     import json
 
     from quant_research_platform.storage.datasets import write_dataset
@@ -158,9 +167,6 @@ async def test_http_inspection_requires_native_metadata_shape(anyio_backend, tmp
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("selected"),
     )
-    arbitrary = tmp_path / "arbitrary"
-    arbitrary.mkdir()
-    manifest = arbitrary / "manifest.json"
     async with AsyncClient(
         transport=ASGITransport(app=create_app(project_root=tmp_path)),
         base_url="http://testserver",
@@ -169,23 +175,15 @@ async def test_http_inspection_requires_native_metadata_shape(anyio_backend, tmp
             response = await client.get("/api/inspect", params={"path": path})
             assert response.status_code == 200
             assert response.json()["schema_id"].startswith("qrp-dataset-")
-        for payload in (
-            {"private_value": "not-to-be-returned"},
-            {"schema_id": "qrp-output-manifest"},
-            {"schema_id": "qrp-unknown", "metadata": {}, "files": []},
-            {"schema_id": "qrp-raw-snapshot", "metadata": {}, "columns": []},
-            {
-                "schema_id": "qrp-output-manifest",
-                "output_definition_id": "prediction_outputs",
-                "metadata": "not-to-be-returned",
-                "files": [],
-            },
-        ):
-            manifest.write_text(json.dumps(payload))
-            for path in ("arbitrary", "arbitrary/manifest.json"):
-                response = await client.get("/api/inspect", params={"path": path})
-                assert response.status_code == 422
-                assert "not-to-be-returned" not in response.text
+        business = tmp_path / "data/raw/observations.json"
+        business.parent.mkdir(parents=True)
+        facts = {"asset_id": "600000.SH", "value": 1.2}
+        business.write_text(json.dumps(facts), encoding="utf-8")
+        response = await client.get(
+            "/api/inspect", params={"path": "data/raw/observations.json"}
+        )
+        assert response.status_code == 200
+        assert response.json() == facts
 
 
 @pytest.mark.anyio

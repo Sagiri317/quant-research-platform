@@ -48,7 +48,7 @@ def backtest(config: Mapping) -> Path:
     """Publish an A-share account from explicit JSON market and prediction inputs."""
     config = qrp_json_mapping_snapshot(config)
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
     from quant_research_platform.artifacts.outputs.prediction import (
         _iter_prediction_member,
@@ -193,9 +193,7 @@ def backtest(config: Mapping) -> Path:
         if not isinstance(item, dict) or set(item) != {"path", "window"}:
             raise ValueError("portfolio_prediction_input_invalid")
         path = Path(item["path"])
-        metadata = validate_output_bundle(
-            path, expected_definition_id="prediction_outputs"
-        )[0]["metadata"]
+        metadata = read_output_manifest(path)["metadata"]
         facts = metadata["model_facts"]
         target_definition = facts.get("target_definition") or {}
         if enhanced and target_definition.get("target_transform") == "risk_residual":
@@ -228,7 +226,7 @@ def backtest(config: Mapping) -> Path:
             raise ValueError("portfolio_prediction_window_invalid")
         if facts["market_id"] != "a_share":
             raise ValueError("portfolio_model_market_mismatch")
-        if candidate.prediction_selector not in {"champion", metadata["family_id"]}:
+        if candidate.prediction_selector not in {"champion", facts["family_id"]}:
             raise ValueError("portfolio_prediction_selector_mismatch")
         if selection is not None:
             from quant_research_platform.contracts.models import compare_model_facts
@@ -370,7 +368,7 @@ def backtest(config: Mapping) -> Path:
 def calibrate(config: Mapping) -> Path:
     """Freeze mature A-share alpha observations from an explicit JSON configuration."""
     config = qrp_json_mapping_snapshot(config)
-    from quant_research_platform.storage.atomic import atomic_write_json
+    from quant_research_platform.storage.manifests import write_qrp_json_file
 
     required = {
         "observations",
@@ -383,7 +381,7 @@ def calibrate(config: Mapping) -> Path:
     }
     if not isinstance(config, Mapping) or set(config) != required:
         raise ValueError("alpha_calibration_config_invalid")
-    if config["selection_group"] not in {"global", "quarterly"}:
+    if type(config["selection_group"]) is not str or not config["selection_group"]:
         raise ValueError("portfolio_selection_group_invalid")
     from quant_research_platform.storage.datasets.reading import (
         _selection_filters,
@@ -460,7 +458,7 @@ def calibrate(config: Mapping) -> Path:
         trading_sessions=trading_sessions,
         as_of=pd.Timestamp(config["cutoff"]),
     )
-    return atomic_write_json(
+    return write_qrp_json_file(
         Path(config["output"]),
         {
             "schema_id": "qrp-final-alpha-calibration",

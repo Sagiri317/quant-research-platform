@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.manifest import validate_output_bundle
+from quant_research_platform.artifacts.outputs.manifest import read_output_manifest
 from quant_research_platform.artifacts.outputs.prediction import _iter_prediction_member
 from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
@@ -1811,9 +1811,7 @@ def inventory_inputs(
     daily_sessions = _daily_market_views(daily, window)
     prediction_frames = []
     for path in prediction_paths:
-        manifest, _ = validate_output_bundle(
-            Path(path), expected_definition_id="prediction_outputs"
-        )
+        manifest = read_output_manifest(Path(path))
         facts = manifest["metadata"]
         if facts["model_facts"]["market_id"] != "a_share":
             raise ValueError("hft_prediction_market_mismatch")

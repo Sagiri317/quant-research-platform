@@ -66,7 +66,7 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
     )
     case = fit_frame(
         tmp_path / "fit",
-        frame.iloc[:9],
+        frame.iloc[:9].loc[lambda rows: rows.eligible],
         ModelSpec(
             model_id="linear",
             model_algorithm="linear_regression",
@@ -273,11 +273,6 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
         "prediction_rows": None,
         "effective_prediction_end": None,
     }
-    reference = write_prediction_outputs(
-        output_path=tmp_path / "reference-predictions",
-        output_chunks=[rows],
-        metadata=paired_metadata,
-    )
     for missing_session in (False, True):
         current_rows = rows.loc[~rows.asset_id.eq("c")]
         if missing_session:
@@ -294,16 +289,9 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
                 {
                     **statistics,
                     "selection_group": "quarterly",
-                    "global_predictions": [str(reference)],
                     "analyses": ["model_losses"],
                     "statistics": {
                         **statistics["statistics"],
-                        "group_comparison": {
-                            "fdr_method": "BY",
-                            "alpha": 0.05,
-                            "confidence": 0.95,
-                            "seed": 1,
-                        },
                     },
                     "periods": [
                         {**statistics["periods"][0], "predictions": [str(current)]}
@@ -319,19 +307,3 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
             assert losses.observation_count.tolist() == counts
             assert len(losses) == 3
             assert losses.loss.iloc[0] == pytest.approx(-1.0)
-        with artifact.table("model_group_comparison.parquet") as comparisons:
-            row = comparisons.iloc[0]
-            assert row.calendar_count == 3
-            assert row.observation_count == (
-                1 if partial_labels else 2 if missing_session else 3
-            )
-            assert row.fdr_family_size == 1
-            assert row.global_mean == pytest.approx(1.0)
-            assert row.quarterly_mean == pytest.approx(1.0)
-            assert row.mean_difference == pytest.approx(0.0)
-            if partial_labels or missing_session:
-                assert row.status == row.bootstrap_status == "UNDEFINED"
-                assert row.bootstrap_reason == "incomplete_session_clock"
-            else:
-                assert row.bootstrap_status == "DEFINED"
-                assert row.bootstrap_lower == row.bootstrap_upper == 0.0

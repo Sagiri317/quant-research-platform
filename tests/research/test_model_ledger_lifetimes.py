@@ -74,7 +74,7 @@ def test_native_selected_refit_failure_preserves_prior_selection_and_model(
     )
     real_fit = production.fit_model
     if failure == "publication":
-        real_write = persisted.atomic_write_json
+        real_write = persisted.write_qrp_json_file
 
         def write(path, *args, **kwargs):
             if Path(path).name == "model.json":
@@ -82,7 +82,7 @@ def test_native_selected_refit_failure_preserves_prior_selection_and_model(
                 raise primary
             return real_write(path, *args, **kwargs)
 
-        monkeypatch.setattr(persisted, "atomic_write_json", write)
+        monkeypatch.setattr(persisted, "write_qrp_json_file", write)
     else:
 
         def interrupted(*args, **kwargs):

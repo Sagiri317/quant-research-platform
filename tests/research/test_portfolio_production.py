@@ -494,21 +494,6 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
         )
         assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
     assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
-    first = original_batches[0]
-    assert first.trades
-    damaged = replace(
-        first,
-        trades=tuple(
-            replace(trade, notional=trade.notional * 2) for trade in first.trades
-        ),
-    )
-    with pytest.raises(ValueError, match="^portfolio_ledger_direction_invalid$"):
-        write_portfolio_ledger_artifact(
-            tmp_path / "damaged_artifacts",
-            capital=envelope["capital"],
-            metadata=envelope["metadata"],
-            produce=lambda emit: emit(damaged),
-        )
 
 
 def test_portfolio_stream_count_does_not_scale_with_decision_dates(
@@ -2043,9 +2028,6 @@ def test_multiple_unquoted_sessions_native_roundtrip_and_absolute_nav_stresses(
     stat_metadata = statistics_metadata(
         window,
         candidate_ids=[c.candidate_id for c in candidates],
-        comparison_portfolio_ids=config["statistics"]["group_comparison"][
-            "portfolio_ids"
-        ],
     )
     stat_root = write_statistics_artifact(
         tmp_path / "statistics",
@@ -3591,7 +3573,6 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
     from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
     from quant_research_platform.contracts.portfolios import (
         PortfolioCapital,
-        validate_portfolio_transition,
     )
     from quant_research_platform.research.portfolios.accounting import (
         portfolio_interval_economics,
@@ -3632,11 +3613,9 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
     capital = PortfolioCapital(
         "synthetic_quantile_equal_weight", 100.0, "CNY", "cash_equity"
     )
-    previous = None
     economy = _LedgerEconomics(capital)
     intervals = []
     for batch in batches:
-        previous = validate_portfolio_transition(batch, capital, previous)
         economy.consume(batch)
         intervals.append(portfolio_interval_economics(batch))
     assert intervals[0]["nav_end"] == 0.0
@@ -3687,16 +3666,6 @@ def test_portfolio_delisting_zero_nav_retains_units_and_recovers_amounts(
         for row in list(artifact.iter_chunks())[-1].valuations
         if row.phase == "end"
     ) == pytest.approx(20.0)
-    changed_life = replace(
-        batches[1],
-        valuations=tuple(
-            replace(row, lifecycle_id="2023-01-05") if row.asset_id == "b" else row
-            for row in batches[1].valuations
-        ),
-    )
-    previous = validate_portfolio_transition(batches[0], capital, None)
-    with pytest.raises(ValueError, match="portfolio_held_lifecycle_unproven"):
-        validate_portfolio_transition(changed_life, capital, previous)
 
 
 def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
@@ -3724,79 +3693,6 @@ def test_cancelled_life_stale_quote_cannot_revive_rights_or_execution():
     new_life = marks.project(mark_view("2023-01-07", 20.0, 21.0, life="2023-01-07"))
     assert new_life.open.iloc[0] == 20.0
     assert not daily._unquoted_assets(new_life)
-
-
-@pytest.mark.parametrize("corruption", ("known_adv", "complete_window", "fee", "trade"))
-def test_persisted_adv_evidence_and_ledger_prerequisites_reject_fabrication(
-    tmp_path, monkeypatch, corruption
-):
-
-    from quant_research_platform.contracts.portfolios import (
-        ExecutedTrade,
-        PortfolioCapital,
-        PortfolioCashFlow,
-        PortfolioDiagnostic,
-        validate_portfolio_transition,
-    )
-
-    frames, fee, window = _inputs()
-    frames["panel"].loc[
-        frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq("2022-12-28"),
-        "amount",
-    ] = np.nan
-    producer, _ = _build_producer(
-        tmp_path,
-        monkeypatch,
-        frames=frames,
-        fee_frame=fee,
-        output_window=window,
-        typed_batches=True,
-    )
-    batches = list(producer)
-    batch = batches[0]
-    capital = PortfolioCapital(
-        "synthetic_quantile_equal_weight", 100.0, "CNY", "cash_equity"
-    )
-    validate_portfolio_transition(batch, capital, None)
-    timestamp = next(
-        row.timestamp_ns for row in batch.valuations if row.phase == "after"
-    )
-    if corruption == "known_adv":
-        changes = dict(
-            diagnostics=(
-                *batch.diagnostics,
-                PortfolioDiagnostic("b", None, "adv20", number=1000.0),
-            ),
-        )
-    elif corruption == "complete_window":
-        changes = dict(
-            diagnostics=tuple(
-                replace(row, number=0.0)
-                if row.asset_id == "b" and row.name == "adv20_missing_observations"
-                else row
-                for row in batch.diagnostics
-            ),
-        )
-    elif corruption == "fee":
-        changes = dict(
-            cashflows=(
-                PortfolioCashFlow(
-                    "fake_fee", timestamp, "b", None, "commission_cost", -1.0
-                ),
-            ),
-        )
-    else:
-        changes = dict(
-            trades=(ExecutedTrade("fake", "fake", timestamp, "b", float(1), 1.0),),
-        )
-    expected_error = {
-        "known_adv": "portfolio_ledger_adv_unavailable_invalid",
-        "complete_window": "portfolio_ledger_adv_history_invalid",
-        "fee": "portfolio_ledger_cashflow_invalid",
-        "trade": "portfolio_ledger_position_reconciliation_invalid",
-    }[corruption]
-    with pytest.raises(ValueError, match=f"^{expected_error}$"):
-        validate_portfolio_transition(replace(batch, **changes), capital, None)
 
 
 @pytest.mark.parametrize("cash", (0.0, 1e-15, 10.0))

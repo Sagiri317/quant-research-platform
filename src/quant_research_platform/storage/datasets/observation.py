@@ -9,7 +9,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage.datasets.schema import date_string
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
@@ -54,13 +53,7 @@ class DatasetSummaryObserver:
     def _observe_dates(self, frame: pd.DataFrame) -> None:
         if self.timestamp_column is None or frame.empty:
             return
-        values = strict_timestamp_series(
-            frame[self.timestamp_column],
-            error="invalid_dataset_timestamp_value",
-            allow_null=True,
-        ).dropna()
-        if values.empty:
-            return
+        values = frame[self.timestamp_column]
         current_min = values.min()
         current_max = values.max()
         self.date_min = (

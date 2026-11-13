@@ -52,6 +52,19 @@ def catalog_dataset(dataset_id: str, profile: str = A_SHARE_PROFILE_ID) -> None:
     )
 
 
+@app.command("schema-inventory")
+def schema_inventory(
+    output: Annotated[Path, typer.Option("--output", help="New JSON output path.")],
+    project_root: Annotated[
+        Path, typer.Option("--project-root", help="Project containing local datasets.")
+    ] = Path("."),
+) -> None:
+    """Describe stored dataset schemas, row counts and selected missing values."""
+    from quant_research_platform.storage.schema_inventory import write_schema_inventory
+
+    _echo_result(write_schema_inventory(project_root, output))
+
+
 @app.command("prepare-source")
 def prepare_source(config: Config) -> None:
     """Normalize selected source data into explicitly named new outputs."""
@@ -142,6 +155,14 @@ def run_quarterly(config: Config) -> None:
     from quant_research_platform.research.rolling import run_quarterly
 
     _echo_result(run_quarterly(read_qrp_json_file(config)[1]))
+
+
+@app.command("run-sessions")
+def run_sessions(config: Config) -> None:
+    """Select, refit and predict on explicit expanding trading-session folds."""
+    from quant_research_platform.research.rolling import run_sessions
+
+    _echo_result(run_sessions(read_qrp_json_file(config)[1]))
 
 
 @app.command("predict")

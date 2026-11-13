@@ -111,14 +111,6 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
     capital = PortfolioCapital("candidate", 100.0, "CNY", "cash_equity")
     batch = _account()
     metadata = {"window": {"start": "2023-01-01", "end": "2023-01-02"}}
-    validations = []
-    validate = PortfolioLedgerBatch._validated_phases
-
-    def validate_once(batch):
-        validations.append(batch.sequence)
-        return validate(batch)
-
-    monkeypatch.setattr(PortfolioLedgerBatch, "_validated_phases", validate_once)
     root = artifacts.write_portfolio_ledger_artifact(
         tmp_path / "ledger",
         capital=capital,
@@ -141,7 +133,6 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
     assert summary["fees"] == 1.0
     assert summary["net_pnl"] == -1.0
     assert summary["nav"] == 99.0
-    assert validations == [0]
     from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
     with pytest.raises(OutputAlreadyExistsError):
@@ -315,33 +306,6 @@ def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
     assert result.close.isna().all()
 
 
-def test_ledger_publication_rejects_unsupported_research_valuation_policy(tmp_path):
-    from dataclasses import replace
-
-    batch = _account()
-    batch = replace(
-        batch,
-        diagnostics=(
-            *batch.diagnostics,
-            PortfolioDiagnostic(
-                "__cash__",
-                None,
-                "research_valuation_policy",
-                text="unsupported_scientific_policy",
-            ),
-        ),
-    )
-    root = tmp_path / "policy"
-    with pytest.raises(ValueError, match="portfolio_research_valuation_policy_invalid"):
-        artifacts.write_portfolio_ledger_artifact(
-            root,
-            capital=PortfolioCapital("policy", 100.0, "CNY", "cash_equity"),
-            metadata={"window": {"start": "2023-01-01", "end": "2023-01-02"}},
-            produce=lambda emit: emit(batch),
-        )
-    assert not root.exists()
-
-
 @pytest.mark.parametrize("selected_inputs", [False, True])
 @pytest.mark.parametrize("selection_mode", ["causal", "retrospective"])
 def test_explicit_native_fit_prediction_and_backtest_roundtrip(
@@ -420,7 +384,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
             evaluate_model_trial_metrics_from_chunks,
             select,
         )
-        from quant_research_platform.storage.atomic import atomic_write_json
+        from quant_research_platform.storage.manifests import write_qrp_json_file
 
         predictions, prediction_metadata = read_predictions(predicted)
         metrics = evaluate_model_trial_metrics_from_chunks(
@@ -429,7 +393,7 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
             label_column="label",
             prediction_column="prediction_score",
         )
-        scores = atomic_write_json(
+        scores = write_qrp_json_file(
             tmp_path / "scores.json",
             {
                 "market_id": "a_share",
@@ -462,25 +426,25 @@ def test_explicit_native_fit_prediction_and_backtest_roundtrip(
 
         from quant_research_platform.artifacts.outputs import manifest
 
-        original_validation = manifest.validate_output_bundle
+        original_validation = manifest.read_output_manifest
 
         def future_fit(*args, **kwargs):
             result = deepcopy(original_validation(*args, **kwargs))
-            result[0]["metadata"]["model_facts"]["fit_cutoff"] = window["start"]
+            result["metadata"]["model_facts"]["fit_cutoff"] = window["start"]
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(manifest, "validate_output_bundle", future_fit)
+            patch.setattr(manifest, "read_output_manifest", future_fit)
             with pytest.raises(ValueError, match="portfolio_prediction_not_causal"):
                 backtest(config)
 
         def wrong_recipe(*args, **kwargs):
             result = deepcopy(original_validation(*args, **kwargs))
-            result[0]["metadata"]["model_facts"]["model"]["random_seed"] = 43
+            result["metadata"]["model_facts"]["model"]["random_seed"] = 43
             return result
 
         with monkeypatch.context() as patch:
-            patch.setattr(manifest, "validate_output_bundle", wrong_recipe)
+            patch.setattr(manifest, "read_output_manifest", wrong_recipe)
             with pytest.raises(ValueError, match="model_scientific_facts_mismatch"):
                 backtest(config)
         with pytest.raises(

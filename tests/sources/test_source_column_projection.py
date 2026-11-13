@@ -1,8 +1,6 @@
 """External source extensions must not alter consumed observations."""
 
-import hashlib
 import io
-import json
 import zipfile
 
 import pandas as pd
@@ -10,6 +8,7 @@ import pytest
 
 from quant_research_platform.sources.macro.interim import materialize_interim_data
 from quant_research_platform.storage.datasets.reading import read_dataset
+from tests.helpers.public_sources import write_source_manifest
 
 
 def _publish(tmp_path, provider, columns, values, *, name):
@@ -26,28 +25,24 @@ def _publish(tmp_path, provider, columns, values, *, name):
     else:
         payload, filename = csv, "curve.csv"
     (source / filename).write_bytes(payload)
-    (raw / "download.json").write_text(
-        json.dumps(
-            {
-                "sources": {
-                    "input": {
-                        "source": provider,
-                        "status": "downloaded",
-                        "series_ids": [series],
-                        "responses": [
-                            {
-                                "file": filename,
-                                "bytes": len(payload),
-                                "sha256": hashlib.sha256(payload).hexdigest(),
-                                "retrieved_at": "2026-11-05T00:00Z",
-                                "url": "https://example.org/source",
-                            }
-                        ],
-                    }
+    write_source_manifest(
+        raw,
+        {
+            "sources": {
+                "input": {
+                    "source": provider,
+                    "series_ids": [series],
+                    "responses": [
+                        {
+                            "file": f"input/{filename}",
+                            "retrieved_at": "2026-11-05T00:00Z",
+                            "url": "https://example.org/source",
+                        }
+                    ],
                 }
             }
-        ),
-        encoding="utf-8",
+        },
+        name="download.json",
     )
     output = tmp_path / name / "interim"
     materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})

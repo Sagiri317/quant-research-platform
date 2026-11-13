@@ -1,89 +1,22 @@
-"""Build output manifests and validate explicitly selected bundle members."""
+"""Build output manifests and read their saved scientific metadata."""
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
-from quant_research_platform.artifacts.outputs.prediction_validation import (
-    PREDICTION_FACT_ALIASES,
-    prediction_fact_aliases,
-    validate_prediction_output_metadata_shape,
-)
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
-from quant_research_platform.policy.share_safety import (
-    evidence_json_value_unsafe_reason,
-)
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
-_OUTPUT_MANIFEST_KEYS = frozenset(
-    {
-        "schema_id",
-        "output_definition_id",
-        "metadata",
-        "files",
-    }
-)
 EVALUATION_ARTIFACTS = (
     "metrics.parquet",
     "grouped_label_values.parquet",
     "ic_summary.parquet",
     "group_spread_summary.parquet",
 )
-PREDICTION_ARTIFACTS = ("prediction.parquet",)
-_OUTPUT_DEFINITION_FILES = {
-    "prediction_outputs": PREDICTION_ARTIFACTS,
-    "evaluation_outputs": EVALUATION_ARTIFACTS,
-}
-
-
-def validate_output_manifest(
-    value: object,
-) -> dict[str, object]:
-    """Validate the persisted output-manifest business envelope."""
-
-    if type(value) is not dict or set(value) != _OUTPUT_MANIFEST_KEYS:
-        raise ValueError("output_manifest_fields_invalid")
-    if value["schema_id"] != "qrp-output-manifest":
-        raise ValueError("output_manifest_schema_id_mismatch")
-
-    output_definition_id = value["output_definition_id"]
-    metadata = value["metadata"]
-    if type(metadata) is not dict:
-        raise ValueError("output_manifest_metadata_invalid")
-    if output_definition_id == "prediction_outputs":
-        validate_prediction_output_metadata_shape(metadata)
-    elif output_definition_id != "evaluation_outputs":
-        raise ValueError("output_manifest_definition_id_invalid")
-    evidence_payload: dict[str, object] = {}
-    if output_definition_id == "prediction_outputs":
-        facts = metadata["model_facts"]
-        evidence_payload = {
-            "hyperparameters": facts["model"].get("hyperparameters"),
-            "candidate_parameters": facts["candidate_parameters"],
-        }
-    if evidence_json_value_unsafe_reason(evidence_payload) is not None:
-        raise ValueError("output_manifest_metadata_invalid")
-
-    files = value["files"]
-    expected_files = list(_OUTPUT_DEFINITION_FILES[output_definition_id])
-    if output_definition_id == "evaluation_outputs":
-        expected_files.extend(
-            f"{name}.parquet"
-            for name in (
-                "daily_coverage",
-                "daily_strata",
-                "response_metrics",
-                "response_groups",
-            )
-            if name in metadata.get("optional_member_rows", {})
-        )
-    if files != expected_files:
-        raise ValueError("output_manifest_definition_files_mismatch")
-    return value
 
 
 def output_manifest_payload(
@@ -92,17 +25,12 @@ def output_manifest_payload(
     metadata: Mapping[str, object],
     files: Iterable[str],
 ) -> dict[str, object]:
-    payload: dict[str, object] = {
+    return {
         "schema_id": "qrp-output-manifest",
         "output_definition_id": definition_id,
         "metadata": dict(metadata),
         "files": list(files),
     }
-    validate_output_manifest(payload)
-    if definition_id == "prediction_outputs":
-        for name in PREDICTION_FACT_ALIASES:
-            payload["metadata"].pop(name)
-    return payload
 
 
 def _evaluation_diagnostics_payload(
@@ -173,32 +101,6 @@ def evaluation_output_metadata(
     }
 
 
-def validate_output_bundle(
-    root: Path,
-    *,
-    expected_definition_id: str | None = None,
-    selected_files: tuple[str, ...] | None = None,
-) -> tuple[dict[str, object], tuple[Path, ...]]:
-    """Read shared metadata once and check only the selected declared paths."""
-    root = Path(root)
-    if not root.is_dir():
-        raise ValueError("output_bundle_root_invalid")
-    manifest = read_qrp_json_file(root / "manifest.json")[1]
-    if manifest["output_definition_id"] == "prediction_outputs":
-        manifest["metadata"].update(
-            prediction_fact_aliases(manifest["metadata"]["model_facts"])
-        )
-    if (
-        expected_definition_id is not None
-        and manifest["output_definition_id"] != expected_definition_id
-    ):
-        raise ValueError("output_manifest_definition_id_mismatch")
-    if selected_files is not None and any(
-        name not in manifest["files"] for name in selected_files
-    ):
-        raise ValueError("output_file_path_invalid")
-    members = tuple(
-        root / name
-        for name in (manifest["files"] if selected_files is None else selected_files)
-    )
-    return manifest, members
+def read_output_manifest(root: Path) -> dict[str, object]:
+    """Read the saved output manifest."""
+    return read_qrp_json_file(Path(root) / "manifest.json")[1]

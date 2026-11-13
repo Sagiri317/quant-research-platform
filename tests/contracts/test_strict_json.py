@@ -32,7 +32,7 @@ def test_strict_parser_rejects_duplicate_keys_before_dict_construction(
         parse_qrp_json_object(raw)
 
 
-@pytest.mark.parametrize("constant", (b"NaN", b"Infinity", b"-Infinity"))
+@pytest.mark.parametrize("constant", (b"NaN", b"Infinity", b"-Infinity", b"1e400"))
 def test_strict_parser_rejects_nonfinite_constants(constant: bytes) -> None:
     with pytest.raises(ValueError, match="qrp_json_nonfinite_number"):
         parse_qrp_json_object(b'{"schema_id":"x","value":' + constant + b"}")

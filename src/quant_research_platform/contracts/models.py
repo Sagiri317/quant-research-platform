@@ -138,6 +138,7 @@ def sequence_parameters(algorithm, parameters):
         "batch_size": 256,
         "epochs": 10,
         "learning_rate": 0.001,
+        "weight_decay": 0.0,
         "dropout": 0.0,
         "device": "cuda",
     }
@@ -175,15 +176,24 @@ def sequence_parameters(algorithm, parameters):
         "hidden_size",
         "num_layers",
         "batch_size",
-        "epochs",
     ):
         if type(defaults[name]) is not int or defaults[name] < 1:
             raise ValueError(f"sequence_parameter_invalid: {name}")
-    for name in ("learning_rate", "dropout"):
+    epochs = defaults["epochs"]
+    if epochs is None:
+        if defaults.get("early_stopping_rounds") is None:
+            raise ValueError("unbounded_training_requires_early_stopping")
+    elif type(epochs) is not int or epochs < 1:
+        raise ValueError("sequence_parameter_invalid: epochs")
+    for name in ("learning_rate", "dropout", "weight_decay"):
         value = defaults[name]
         if type(value) not in (int, float) or not np.isfinite(value):
             raise ValueError(f"sequence_parameter_invalid: {name}")
-    if defaults["learning_rate"] <= 0 or not 0 <= defaults["dropout"] < 1:
+    if (
+        defaults["learning_rate"] <= 0
+        or not 0 <= defaults["dropout"] < 1
+        or defaults["weight_decay"] < 0
+    ):
         raise ValueError("sequence_optimizer_parameters_invalid")
     device = defaults["device"]
     if type(device) is not str or not (
@@ -335,6 +345,13 @@ class ModelSpec:
                 )
             ):
                 raise ValueError("early_stopping_booster_or_callbacks_invalid")
+        if (
+            self.model_algorithm == "xgboost_regressor"
+            and "n_estimators" in hyperparameters
+            and hyperparameters["n_estimators"] is None
+            and hyperparameters.get("early_stopping_rounds") is None
+        ):
+            raise ValueError("unbounded_training_requires_early_stopping")
         if (
             self.model_algorithm in _PARALLEL_MODEL_ALGORITHMS
             and "n_jobs" in hyperparameters

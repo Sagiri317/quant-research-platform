@@ -20,7 +20,7 @@ from quant_research_platform.storage.datasets.reading import (
     projection_columns_for_window,
 )
 from quant_research_platform.storage.datasets.schema import (
-    _DATASET_METADATA_ALLOWED_KEYS,
+    _DATASET_RESEARCH_METADATA_KEYS,
 )
 from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -152,7 +152,7 @@ def compare_datasets(
             side: canonical_json_hash(
                 {
                     key: manifest[key]
-                    for key in _DATASET_METADATA_ALLOWED_KEYS
+                    for key in _DATASET_RESEARCH_METADATA_KEYS
                     if key in manifest
                 }
             )

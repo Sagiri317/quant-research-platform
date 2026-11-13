@@ -1,7 +1,5 @@
 """Raw-share registration, receivable and economic ledger regressions."""
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
@@ -17,7 +15,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
     PortfolioValuation,
-    validate_portfolio_transition,
 )
 from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,
@@ -186,28 +183,6 @@ def test_endpoint_dividend_ledger_roundtrip_has_no_double_count(tmp_path):
     assert summary["nav"] == 1000
     assert summary["gross_pnl"] == 0
     assert portfolio_interval_economics(batch)["gross_return"] == 0
-    with pytest.raises(ValueError, match="reconciliation"):
-        validate_portfolio_transition(replace(batch, cashflows=()), capital, None)
-    corrupted = replace(
-        batch,
-        rights_adjustments=tuple(
-            replace(row, entitlement_quantity=101) if row.kind == "dividend" else row
-            for row in batch.rights_adjustments
-        ),
-    )
-    with pytest.raises(ValueError, match="portfolio_registration_entitlement_invalid"):
-        write_portfolio_ledger_artifact(
-            tmp_path / "wrong_entitlement",
-            capital=capital,
-            metadata={
-                "window": {
-                    "start": "2024-01-02",
-                    "end": "2024-01-04",
-                    "access": "validation",
-                }
-            },
-            produce=lambda emit: emit(corrupted),
-        )
 
 
 def test_distribution_without_unlock_date_stays_valued_and_locked():
@@ -352,15 +327,6 @@ def test_fractional_rights_roundtrip_and_pnl_without_double_deduction(
     assert summary["equity_rounding_pnl_reason"] == (
         None if mark else "rounding_price_unavailable"
     )
-    with pytest.raises(ValueError, match="portfolio_rights_adjustment_invalid"):
-        validate_portfolio_transition(
-            replace(
-                batch,
-                rights_adjustments=(replace(changes[0], quantity_rounding_loss=1),),
-            ),
-            capital,
-            None,
-        )
 
 
 def test_small_dividend_claim_survives_a_large_same_asset_claim_settlement():

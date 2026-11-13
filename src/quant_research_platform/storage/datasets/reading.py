@@ -44,12 +44,9 @@ from quant_research_platform.storage.datasets.schema import (
     parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
-    validate_logical_dtype_payload,
-    validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetReadMode
 from quant_research_platform.storage.identity import (
-    filesystem_is_dir,
     filesystem_is_file,
     native_filesystem_path,
 )
@@ -392,9 +389,7 @@ def _bare_dataset_session(
         {b"pandas": metadata.pandas_metadata} if metadata.pandas_metadata else None
     )
     logical = (
-        parse_logical_dtype_metadata(
-            metadata.logical_dtype_payload, selected_columns=()
-        )
+        parse_logical_dtype_metadata(metadata.logical_dtype_payload)
         if metadata.logical_dtype_payload
         else {}
     )
@@ -488,18 +483,8 @@ def open_dataset_session(
         root / "data",
         root / "_manifest" / "manifest.json",
     )
-    if not filesystem_is_file(spec_path):
-        raise ValueError("dataset_spec_missing")
-    if not filesystem_is_dir(data_root):
-        raise ValueError("dataset_data_dir_missing")
-    if not filesystem_is_file(manifest_path):
-        raise ValueError("dataset_manifest_missing")
     _, spec_payload = read_qrp_json_file(spec_path)
-    if spec_payload.get("schema_id") != "qrp-dataset-spec":
-        raise ValueError("dataset_spec_schema_id_invalid")
     _, manifest = read_qrp_json_file(manifest_path)
-    if manifest.get("schema_id") != "qrp-dataset-manifest":
-        raise ValueError("dataset_manifest_schema_id_invalid")
     inventory = DatasetSessionInventory(data_root=data_root)
     if files is None:
         partition_years = _partition_years_for_selection(
@@ -789,14 +774,11 @@ def iter_dataset_file_batches(
     columns: tuple[str, ...],
     batch_rows: int = DEFAULT_BATCH_ROWS,
     batch_observer: Callable[[pa.RecordBatch, pd.DataFrame], None] | None = None,
-    validate_parts: bool = False,
 ) -> Iterator[tuple[Path, pd.DataFrame]]:
     """Yield deterministic file batches after Arrow-level bounded conversion."""
     rows_per_batch = _validated_batch_rows(batch_rows)
     logical = context.logical_dtypes
     declared_logical = _project_logical_dtypes(logical, columns) if logical else {}
-    if declared_logical and (not context.native or validate_parts):
-        validate_logical_dtype_payload(declared_logical)
     dtype_overrides = (
         pandas_dtype_overrides_from_logical_payload(declared_logical, columns=columns)
         if declared_logical
@@ -816,12 +798,9 @@ def iter_dataset_file_batches(
                 raise ValueError("dataset_logical_dtypes_missing")
             return
         current = _project_logical_dtypes(
-            parse_logical_dtype_metadata(
-                metadata.logical_dtype_payload, selected_columns=columns
-            ),
+            parse_logical_dtype_metadata(metadata.logical_dtype_payload),
             columns,
         )
-        validate_persisted_logical_schema(selected, current)
         if not declared_logical:
             raise ValueError("dataset_logical_dtypes_mismatch")
         merged = merge_logical_dtype_payloads([declared_logical, current])
@@ -837,9 +816,7 @@ def iter_dataset_file_batches(
                 batch_rows=rows_per_batch,
                 dtype_overrides=dtype_overrides,
                 fragment=context._fragments.get(path),
-                metadata_observer=validate_metadata
-                if not context.native or validate_parts
-                else None,
+                metadata_observer=validate_metadata if not context.native else None,
                 batch_observer=batch_observer,
             )
         ) as member_batches:
@@ -941,14 +918,10 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
 def _empty_frame(context: DatasetSession, columns: tuple[str, ...]) -> pd.DataFrame:
     logical = context.logical_dtypes
     selected_logical = _project_logical_dtypes(logical, columns) if logical else {}
-    if selected_logical and not context.native:
-        validate_logical_dtype_payload(selected_logical)
     selected = pa.schema(
         [context.arrow_schema.field(column) for column in columns],
         metadata=context.arrow_schema.metadata,
     )
-    if selected_logical and not context.native:
-        validate_persisted_logical_schema(selected, selected_logical)
     overrides = (
         pandas_dtype_overrides_from_logical_payload(selected_logical, columns=columns)
         if selected_logical

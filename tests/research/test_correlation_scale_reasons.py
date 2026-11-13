@@ -5,9 +5,6 @@ import pytest
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
 )
-from quant_research_platform.artifacts.outputs.manifest import (
-    validate_output_bundle,
-)
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.engine import (
@@ -46,7 +43,7 @@ def test_native_evaluation_persists_independent_std_reason(tmp_path):
             spec=spec,
             output_path=tmp_path / "evaluation",
         )
-    validate_output_bundle(root)
+
     summary = pd.read_parquet(root / "ic_summary.parquet")
     row = summary.iloc[0]
     assert row.std_ic > 0

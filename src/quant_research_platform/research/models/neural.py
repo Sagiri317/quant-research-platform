@@ -2,6 +2,7 @@
 
 from collections import deque
 from dataclasses import dataclass, replace
+from itertools import count
 
 import numpy as np
 import pandas as pd
@@ -332,10 +333,15 @@ def fit_sequence(prepared, spec, validation=None):
     with torch.random.fork_rng():
         torch.manual_seed(spec.random_seed)
         network = _network(spec.model_algorithm, matrix.shape[1], parameters).to(device)
-        optimizer = torch.optim.Adam(
-            network.parameters(), lr=parameters["learning_rate"]
+        optimizer = torch.optim.AdamW(
+            network.parameters(),
+            lr=parameters["learning_rate"],
+            weight_decay=parameters["weight_decay"],
         )
-        for epoch in range(parameters["epochs"]):
+        epochs = (
+            count() if parameters["epochs"] is None else range(parameters["epochs"])
+        )
+        for epoch in epochs:
             network.train()
             order = rng.permutation(len(target))
             loss_sum = 0.0

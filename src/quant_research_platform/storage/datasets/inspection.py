@@ -7,21 +7,17 @@ from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.storage.datasets.observation import DatasetSummaryObserver
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
-    dataset_primary_key_schema,
     iter_dataset_file_batches,
     open_dataset_session,
 )
 from quant_research_platform.storage.datasets.schema import (
     date_string,
     physical_schema_columns,
-    validate_dataset_manifest_payload,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
@@ -54,90 +50,65 @@ def _inspection_runtime_metadata(
     context: DatasetSession,
     *,
     batch_rows: int = DEFAULT_BATCH_ROWS,
-    frame_observer=None,
 ) -> dict[str, Any]:
-    if context.native:
-        validate_dataset_manifest_payload(
-            context.manifest, spec=context.spec, logical_columns=()
+    if context.native and context.time_window is None:
+        manifest = context.manifest
+        summary = {
+            name: manifest[name]
+            for name in (
+                "file_count",
+                "row_count",
+                "partitions",
+                "partition_row_counts",
+                "date_min",
+                "date_max",
+            )
+        }
+        summary["partitions"] = tuple(summary["partitions"])
+        return summary
+    timestamp = context.timestamp_column
+    columns = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    (timestamp,)
+                    if timestamp is not None
+                    else context.logical_columns[:1]
+                ),
+                *(name for name, _, _ in context.parquet_filters or ()),
+            )
         )
-    spec = context.spec
-    primary_key = tuple(str(column) for column in spec["primary_key"])
-    column_roles = {
-        str(column): str(role) for column, role in spec["column_roles"].items()
-    }
-    timestamp_column = context.timestamp_column
-    if context.time_window is not None and timestamp_column is None:
-        raise ValueError("time_window_not_supported")
-    del spec
-    partition_row_counts: dict[str, int] = {}
-    selected_file_count = 0
-    last_observed_path: Path | None = None
-    key_index = ExactPrimaryKeyIndex(
-        primary_key=primary_key,
-        key_schema=dataset_primary_key_schema(context, primary_key),
     )
-    observer = DatasetSummaryObserver(
-        primary_key=primary_key,
-        timestamp_column=timestamp_column,
-        column_roles=column_roles,
-        exact_key_index=key_index,
-    )
+    partition_rows = {}
+    files = set()
+    rows = 0
+    minimum = maximum = None
     with closing_iterator(
         iter_dataset_file_batches(
             context,
-            columns=tuple(context.arrow_schema.names),
+            columns=columns,
             batch_rows=batch_rows,
-            validate_parts=True,
-            batch_observer=lambda batch, logical_frame: observer.observe_batch(
-                batch, frame=logical_frame
-            ),
         )
     ) as batches:
         for path, frame in batches:
             if frame.empty:
                 continue
-            if path != last_observed_path:
-                selected_file_count += 1
-                last_observed_path = path
+            files.add(path)
+            rows += len(frame)
             partition = relative_partition_label(context.data_root, path)
-            partition_row_counts[partition] = partition_row_counts.get(
-                partition, 0
-            ) + len(frame)
-            if frame_observer is not None:
-                frame_observer(frame)
-    if context.time_window is None:
-        for path in context.all_paths:
-            partition_row_counts.setdefault(
-                relative_partition_label(context.data_root, path), 0
-            )
-        file_count = len(context.all_paths)
-    else:
-        file_count = selected_file_count
-    if observer.duplicate_primary_key_count:
-        raise ValueError("dataset_primary_key_duplicate")
-    if any(observer.non_finite_count_summary.values()):
-        raise ValueError("dataset_infinite_value")
-    partitions = tuple(sorted(partition_row_counts))
-    runtime_summary = {
-        "file_count": file_count,
-        "row_count": int(observer.row_count),
-        "partitions": partitions,
-        "partition_row_counts": partition_row_counts,
-        "date_min": date_string(observer.date_min),
-        "date_max": date_string(observer.date_max),
-    }
-    if context.time_window is None:
-        persisted_summary = {
-            **runtime_summary,
-            "partitions": list(partitions),
-            **observer.summary_payload(),
-        }
-        manifest = context.manifest
-        for key, value in persisted_summary.items():
-            if manifest.get(key) != value:
-                raise ValueError("dataset_manifest_summary_mismatch")
+            partition_rows[partition] = partition_rows.get(partition, 0) + len(frame)
+            if timestamp is not None:
+                current_min, current_max = (
+                    frame[timestamp].min(),
+                    frame[timestamp].max(),
+                )
+                minimum = current_min if minimum is None else min(minimum, current_min)
+                maximum = current_max if maximum is None else max(maximum, current_max)
     return {
-        **runtime_summary,
-        "duplicate_primary_key_count": observer.duplicate_primary_key_count,
-        "null_key_counts": {column: 0 for column in primary_key},
+        "file_count": len(files),
+        "row_count": rows,
+        "partitions": tuple(sorted(partition_rows)),
+        "partition_row_counts": partition_rows,
+        "date_min": date_string(minimum),
+        "date_max": date_string(maximum),
     }

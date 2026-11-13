@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -26,6 +28,20 @@ from quant_research_platform.storage.datasets.reading import read_dataset
 from tests.helpers.high_frequency import daily_view, write_daily_inputs
 
 INSTRUMENTS = [{"wind_code": "000001.SZ", "asset_id": "000001.SZ", "exchange": "SZSE"}]
+
+
+def write_raw_table(raw_root, stream, frame):
+    source = raw_root.parent / "archive" / f"{stream}.parquet"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pandas(frame, preserve_index=False)
+    pq.write_table(table, source)
+    metadata = pq.ParquetFile(source).metadata
+    destination = raw_root / STREAM_FILES[stream]
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    metadata.set_file_path(
+        os.path.relpath(source, destination.parent).replace("\\", "/")
+    )
+    pq.write_metadata(table.schema, destination, metadata_collector=[metadata])
 
 
 @pytest.mark.parametrize(
@@ -126,18 +142,17 @@ def test_source_mixed_second_and_millisecond_clocks():
 def test_source_preserves_nullable_unsigned_event_identifiers(tmp_path, stream):
     identifiers = [name for name in source_columns(stream) if name.endswith("_id")]
     expected = [7, 8, 9, 10, 2**53 + 1, None, 2**64 - 1, 0]
+    frames = []
     for day, values in (("20180214", expected[:4]), ("20180215", expected[4:])):
-        raw = tmp_path / "raw" / day
-        raw.mkdir(parents=True)
         frame = raw_events(stream).assign(date=int(day))
         for name in identifiers:
             frame[name] = pd.Series(values, dtype="UInt64")
-        pq.write_table(
-            pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
-                None
-            ),
-            raw / STREAM_FILES[stream],
-        )
+        frames.append(frame)
+    write_raw_table(
+        tmp_path / "raw",
+        stream,
+        pd.concat(frames, ignore_index=True),
+    )
     output = tmp_path / "interim"
     prepare_source(
         {
@@ -156,6 +171,77 @@ def test_source_preserves_nullable_unsigned_event_identifiers(tmp_path, stream):
             result[name].reset_index(drop=True),
             pd.Series(expected, dtype="UInt64", name=name),
         )
+    assert result.source_row.tolist() == [0, 1, 2, 3, 0, 1, 2, 3]
+
+
+@pytest.mark.parametrize("day,rows", [("2018-02-15", 4), ("2018-02-16", 0)])
+def test_source_selects_dates_from_columns_and_returns_empty_windows(
+    tmp_path, day, rows
+):
+    write_raw_table(
+        tmp_path / "raw",
+        "hft_quotes",
+        pd.concat(
+            [raw_quotes(), raw_quotes().assign(date=20180215)], ignore_index=True
+        ),
+    )
+    output = tmp_path / "quotes"
+    prepare_source(
+        {
+            "source_id": "venvoo",
+            "raw_root": str(tmp_path / "raw"),
+            "outputs": {"hft_quotes": str(output)},
+            "instruments": INSTRUMENTS,
+            "revision": "a" * 40,
+            "start_date": day,
+            "end_date": day,
+        }
+    )
+    result = read_dataset(output)
+    assert len(result) == rows
+    if rows:
+        assert result.session_date.eq(pd.Timestamp(day)).all()
+        assert result.source_row.tolist() == [0, 1, 2, 3]
+
+
+def test_etf_source_uses_security_identity_across_vendor_exchange_suffixes(tmp_path):
+    frame = raw_quotes(tuple(93000000 + 3000 * i for i in range(5)))
+    frame["wind_code"] = [
+        "510300.SH",
+        "510300.SZ",
+        "159915.sz",
+        "518880.SH",
+        "510500.SH",
+    ]
+    write_raw_table(tmp_path / "raw", "hft_quotes", frame)
+    instruments = [
+        {
+            "wind_code": code,
+            "asset_id": code[:6],
+            "exchange": exchange,
+            "instrument_type": kind,
+        }
+        for code, exchange, kind in [
+            ("510300.SH", "SSE", "equity_etf"),
+            ("159915.SZ", "SZSE", "equity_etf"),
+            ("518880.SH", "SSE", "gold_etf"),
+        ]
+    ]
+    output = tmp_path / "quotes"
+    prepare_source(
+        {
+            "source_id": "venvoo",
+            "raw_root": str(tmp_path / "raw"),
+            "outputs": {"hft_quotes": str(output)},
+            "instruments": instruments,
+            "revision": "a" * 40,
+            "start_date": "2018-02-14",
+            "end_date": "2018-02-14",
+        }
+    )
+    result = read_dataset(output).sort_values("timestamp")
+    assert result.asset_id.tolist() == ["510300", "510300", "159915", "518880"]
+    assert result.exchange.tolist() == ["SSE", "SSE", "SZSE", "SSE"]
 
 
 def test_hft_prepare_rejects_conflicting_declared_market(tmp_path):
@@ -322,18 +408,17 @@ def test_etf_sessions_include_historical_shanghai_fund_close():
 
 @pytest.mark.parametrize("instrument_type", ["stock", "equity_etf"])
 def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrument_type):
-    raw = tmp_path / "raw" / "20180214"
-    raw.mkdir(parents=True)
-    for stream, name in STREAM_FILES.items():
+    raw = tmp_path / "raw"
+    for stream in STREAM_FILES:
         frame = raw_quotes() if stream == "hft_quotes" else raw_events(stream)
         if stream == "hft_quotes":
             frame.loc[1, "bid_vol1"] = np.nan
-        pq.write_table(pa.Table.from_pandas(frame, preserve_index=False), raw / name)
+        write_raw_table(raw, stream, frame)
     outputs = {stream: str(tmp_path / stream) for stream in STREAM_FILES}
     result = prepare_source(
         {
             "source_id": "venvoo",
-            "raw_root": str(raw.parent),
+            "raw_root": str(raw),
             "outputs": outputs,
             "instruments": [dict(INSTRUMENTS[0], instrument_type=instrument_type)],
             "revision": "a" * 40,

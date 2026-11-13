@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
-import pyarrow as pa
 import pytest
 
 import quant_research_platform.storage.datasets.inspection as dataset_inspection
 import quant_research_platform.storage.datasets.reading as dataset_reading
-import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import DatasetReadMode, write_dataset
@@ -80,70 +77,18 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
     assert [path.name for path in session.all_paths[1:]] == expected[1:]
 
 
-def test_inspection_window_file_count_counts_consecutive_file_batches_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    path = tmp_path / "data" / "year=2026" / "part-000.parquet"
-    empty_path = path.with_name("part-001.parquet")
-    frame = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]})
-
-    class KeyIndex:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            return None
-
-    class Observer:
-        duplicate_primary_key_count = 0
-        non_finite_count_summary = {}
-        row_count = 0
-        date_min = None
-        date_max = None
-
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        def observe_batch(self, _batch: pa.RecordBatch, *, frame: pd.DataFrame) -> None:
-            observed = frame
-            self.row_count += len(observed)
-
-    monkeypatch.setattr(dataset_inspection, "ExactPrimaryKeyIndex", KeyIndex)
-    monkeypatch.setattr(dataset_inspection, "DatasetSummaryObserver", Observer)
-    monkeypatch.setattr(
-        dataset_inspection,
-        "dataset_primary_key_schema",
-        lambda *_args, **_kwargs: pa.schema([]),
+def test_inspection_window_file_count_counts_consecutive_file_batches_once(tmp_path):
+    root = tmp_path / "dataset"
+    frame = make_default_dataset_frame()
+    frame["timestamp"] = pd.date_range("2026-01-01", periods=len(frame))
+    write_dataset(root, frame, spec=make_processed_dataset_spec("batches"))
+    context = dataset_reading.open_dataset_session(
+        root,
+        time_window=TimeWindow("2026-01-01", "2026-01-31"),
     )
-
-    def batches(*_args, **kwargs):
-        observer = kwargs["batch_observer"]
-        for _, observed in ((path, frame), (path, frame)):
-            observer(pa.RecordBatch.from_pandas(observed), observed)
-        return iter(((path, frame), (path, frame), (empty_path, frame.iloc[:0])))
-
-    monkeypatch.setattr(dataset_inspection, "iter_dataset_file_batches", batches)
-    context = SimpleNamespace(
-        native=False,
-        timestamp_column="timestamp",
-        time_window=TimeWindow("2026-01-01", "2026-01-02"),
-        spec={"primary_key": ["timestamp"], "column_roles": {"timestamp": "timestamp"}},
-        root=tmp_path,
-        data_root=tmp_path / "data",
-        arrow_schema=SimpleNamespace(names=["timestamp"]),
-        schema=dataset_schema.physical_schema_from_schema(
-            pa.schema((pa.field("timestamp", pa.timestamp("ns")),))
-        ),
-        all_paths=(),
-        manifest={},
-        read_paths=(path, empty_path),
-    )
-    runtime = dataset_inspection._inspection_runtime_metadata(context, batch_rows=2)
+    runtime = dataset_inspection._inspection_runtime_metadata(context, batch_rows=1)
     assert runtime["file_count"] == 1
-    assert runtime["row_count"] == 2
+    assert runtime["row_count"] == 3
 
 
 def test_private_writer_releases_result_when_publish_loses_race(

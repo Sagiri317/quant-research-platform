@@ -11,41 +11,16 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.artifacts.outputs.prediction_validation import (
-    validate_prediction_frame,
-)
-from quant_research_platform.contracts.models import ModelSpec, prediction_columns
+from quant_research_platform.contracts.models import prediction_columns
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.storage.atomic import (
-    atomic_write_directory,
-    atomic_write_json,
-)
+from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
+from quant_research_platform.storage.manifests import write_qrp_json_file
 from quant_research_platform.storage.parquet import parquet_table_writer
-
-
-def prediction_model_metadata(metadata):
-    """Project the single saved recipe into downstream eligibility/calibration facts.
-
-    This is an in-memory view, not a model load or a persisted identity copy.
-    """
-    recipe = metadata["model_facts"]["model"]
-    return {
-        **metadata["model_metadata"],
-        "model_algorithm": recipe["model_algorithm"],
-        "input_columns": [
-            *recipe.get("input_factor_columns", ModelSpec.input_factor_columns),
-            *recipe.get("input_feature_columns", ModelSpec.input_feature_columns),
-        ],
-        "target_column": recipe["target_column"],
-        "sample_filter_mode": recipe.get(
-            "sample_filter_mode", ModelSpec.sample_filter_mode
-        ),
-    }
 
 
 def write_prediction_outputs(
@@ -81,7 +56,6 @@ def write_prediction_outputs(
             summary = write_parquet_chunks(
                 chain((first,), chunks),
                 staging / "prediction.parquet",
-                metadata=metadata,
             )
             final_metadata.update(
                 prediction_rows=summary.row_count,
@@ -89,16 +63,7 @@ def write_prediction_outputs(
                 status="complete",
             )
         resources.close()
-        if (
-            metadata.get("prediction_rows") is not None
-            and metadata["prediction_rows"] != final_metadata["prediction_rows"]
-        ):
-            raise ValueError("prediction_metadata_inconsistent")
-        if metadata.get("effective_prediction_end") is not None and pd.Timestamp(
-            metadata["effective_prediction_end"]
-        ) != pd.Timestamp(final_metadata["effective_prediction_end"]):
-            raise ValueError("prediction_metadata_inconsistent")
-        atomic_write_json(
+        write_qrp_json_file(
             staging / "manifest.json",
             output_manifest_payload(
                 definition_id="prediction_outputs",
@@ -111,11 +76,6 @@ def write_prediction_outputs(
 
     with closing_iterator(ExitStack()) as resources:
         chunks = resources.enter_context(closing_iterator(iter(output_chunks)))
-        if (
-            metadata.get("prediction_rows") is not None
-            and type(metadata["prediction_rows"]) is not int
-        ):
-            raise ValueError("invalid_prediction_row_count")
         atomic_write_directory(destination, write)
     return destination
 
@@ -130,12 +90,10 @@ def read_predictions(
 ):
     """Read selected predictions without fitting or discovery."""
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
 
-    manifest, _members = validate_output_bundle(
-        Path(path), expected_definition_id="prediction_outputs"
-    )
+    manifest = read_output_manifest(Path(path))
     metadata = manifest["metadata"]
     if columns is not None and include_available_probabilities:
         columns = tuple(columns)
@@ -180,12 +138,10 @@ def read_predictions(
 def iter_predictions(path: Path, *, columns=None, time_window=None):
     """Project requested prediction columns/window from the chosen native member."""
     from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
+        read_output_manifest,
     )
 
-    manifest, _members = validate_output_bundle(
-        Path(path), expected_definition_id="prediction_outputs"
-    )
+    manifest = read_output_manifest(Path(path))
     return _iter_prediction_member(
         path, manifest["metadata"], columns=columns, time_window=time_window
     )
@@ -245,8 +201,6 @@ class _PredictionOutputWriteSummary:
 def write_parquet_chunks(
     frames: Iterable[pd.DataFrame],
     path: Path,
-    *,
-    metadata: dict,
 ) -> _PredictionOutputWriteSummary:
     path = Path(path)
     row_count = 0
@@ -257,32 +211,27 @@ def write_parquet_chunks(
             with parquet_table_writer(
                 handle, compression="zstd", statistics=("timestamp",)
             ) as write_table:
-                key_index = ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
                 for frame in active_frames:
-                    if not isinstance(frame, pd.DataFrame):
-                        raise TypeError("invalid_artifact_output_frame")
-                    timestamps = validate_prediction_frame(frame, metadata)
                     if frame.empty:
                         continue
-                    selected = frame.assign(timestamp=timestamps)
-                    current_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
+                    current_end = time_value_isoformat(
+                        pd.Timestamp(frame.timestamp.max())
+                    )
                     if effective_prediction_end is None or pd.Timestamp(
                         current_end
                     ) > pd.Timestamp(effective_prediction_end):
                         effective_prediction_end = current_end
-                    table = pa.Table.from_pandas(selected, preserve_index=False)
-                    try:
-                        duplicates = key_index.add_table(table)
-                    except ValueError as exc:
-                        raise ValueError("invalid_prediction_keys") from exc
-                    if duplicates:
-                        raise ValueError("duplicate_prediction_keys")
-                    write_table(table)
-                    row_count += len(selected)
+                    write_table(
+                        pa.Table.from_pandas(
+                            frame.assign(
+                                timestamp=frame.timestamp.astype("datetime64[ns]")
+                            ),
+                            preserve_index=False,
+                        )
+                    )
+                    row_count += len(frame)
             handle.flush()
             os.fsync(handle.fileno())
-    if row_count == 0 or effective_prediction_end is None:
-        raise ValueError("empty_prediction_window")
     return _PredictionOutputWriteSummary(
         row_count=row_count, effective_prediction_end=effective_prediction_end
     )
@@ -309,9 +258,7 @@ class _PredictionLookup:
         if any(column not in frame for column in self.primary_key):
             raise ValueError("persisted_prediction_join_key_invalid")
         lookup_frame = frame.loc[:, list(self.primary_key)]
-        table = pa.Table.from_pandas(
-            lookup_frame.loc[:, list(self.primary_key)], preserve_index=False
-        )
+        table = pa.Table.from_pandas(lookup_frame, preserve_index=False)
         values, found = self._index.lookup_float_values(
             table,
             source_namespace="prediction",

@@ -310,7 +310,7 @@ def test_training_preparation_failure_closes_borrowed_dataset_source(
     def fail_filter(*args, **kwargs):
         raise primary
 
-    monkeypatch.setattr(fitting, "legal_training_mask", fail_filter)
+    monkeypatch.setattr(fitting, "label_maturity_mask", fail_filter)
     source = read_dataset(
         root,
         columns=tuple(frame.columns),

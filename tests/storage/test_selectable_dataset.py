@@ -265,26 +265,6 @@ def test_categorical_asset_filter_uses_values_not_dictionary_codes(
     assert actual["value"].tolist() == [1.0, 3.0, 5.0, 6.0]
 
 
-def test_unconsumed_logical_dtype_does_not_gate_selected_columns(tmp_path):
-    import json
-
-    root = tmp_path / "native"
-    write_dataset(root, frame(), spec=spec())
-    part = next((root / "data").rglob("*.parquet"))
-    table = pq.read_table(part)
-    metadata = dict(table.schema.metadata)
-    payload = json.loads(metadata[b"qrp.logical-dtypes"])
-    next(item for item in payload["columns"] if item["name"] == "unused")["dtype"] = (
-        "unknown_dtype"
-    )
-    metadata[b"qrp.logical-dtypes"] = json.dumps(payload).encode()
-    pq.write_table(table.replace_schema_metadata(metadata), part)
-    actual = read_dataset(part, columns=["value"], spec=spec())
-    assert actual.value.tolist() == frame().value.tolist()
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
-        read_dataset(part, columns=["unused"], spec=spec())
-
-
 def test_partial_primary_key_projection_rejects_nan_without_reading_other_keys(
     tmp_path,
 ):

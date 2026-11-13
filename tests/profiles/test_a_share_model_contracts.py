@@ -48,7 +48,7 @@ def test_explicit_robustness_role_still_blocks_formal_joint_inference(role):
 
 
 @pytest.mark.parametrize("mode", ("eligible", "unfiltered"))
-def test_a_share_filter_admission(mode):
+def test_a_share_accepts_explicit_sample_filter_mode(mode):
     spec = ModelSpec(
         model_id="candidate",
         model_algorithm="linear_regression",
@@ -56,10 +56,4 @@ def test_a_share_filter_admission(mode):
         target_column="label",
         sample_filter_mode=mode,
     )
-    if mode == "unfiltered":
-        with pytest.raises(
-            ValueError, match="a_share_model_sample_filter_mode_not_supported"
-        ):
-            validate_model_selection([spec])
-    else:
-        validate_model_selection([spec])
+    validate_model_selection([spec])

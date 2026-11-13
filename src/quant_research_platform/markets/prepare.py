@@ -80,7 +80,10 @@ def prepare(config: Mapping) -> Path:
         catalog = processed_catalog()
         spec = catalog.get(config["data_id"])
         producer = produce_a_share_processed_data
-        kwargs = {"source_catalog": InterimDataCatalog(specs.values())}
+        kwargs = {
+            "source_catalog": InterimDataCatalog(specs.values()),
+            "processed_catalog": catalog,
+        }
         from quant_research_platform.research.protocols.a_share_hft import DATA_IDS
 
         if spec.data_id == "market_state_factors":
@@ -156,16 +159,18 @@ def prepare(config: Mapping) -> Path:
         set(spec.source_input_data_ids) - set(spec.optional_source_input_data_ids)
     )
     allowed = set(spec.processed_input_data_ids) | set(spec.source_input_data_ids)
-    if not required <= set(inputs) or not set(inputs) <= allowed:
+    if not required <= set(inputs):
         raise ValueError("data_operation_input_paths_mismatch")
+    inputs = {name: value for name, value in inputs.items() if name in allowed}
     output = Path(config["output_root"])
     metadata = {}
 
     def frames():
-        with producer(
-            spec, inputs=inputs, time_window=window, processed_catalog=catalog, **kwargs
-        ) as (data, producer_metadata):
-            producer_metadata["inputs"] = dict(config["inputs"])
+        with producer(spec, inputs=inputs, time_window=window, **kwargs) as (
+            data,
+            producer_metadata,
+        ):
+            producer_metadata["inputs"] = inputs
             producer_metadata["parameters"] = {
                 "time_window": dict(config["time_window"]),
                 **json.loads(spec.parameters_json),

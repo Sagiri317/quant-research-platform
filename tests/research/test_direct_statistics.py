@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 import pytest
 
 from quant_research_platform.artifacts.statistics import (
@@ -100,48 +99,23 @@ def test_explicit_factor_statistics_native_roundtrip_and_maturity(tmp_path):
     assert (output / "manifest.json").read_bytes() == before
 
 
-def test_statistics_unconsumed_member_not_scanned(tmp_path):
+@pytest.mark.parametrize("role", ["holdout", "development"])
+def test_statistics_preserves_descriptive_roles(tmp_path, role):
     tables, metadata, _ = _factor_tables(tmp_path)
-    root = tmp_path / "statistics"
-    write_statistics_artifact(
-        root, metadata=metadata, tables=tables, table_group="factor"
+    metadata["sample_role"] = role
+    for name, frame in tables.items():
+        if "sample_role" in frame:
+            tables[name] = frame.assign(sample_role=role)
+    root = write_statistics_artifact(
+        tmp_path / "descriptive",
+        metadata=metadata,
+        tables=tables,
+        table_group="factor",
     )
-    (root / "fama_macbeth.parquet").write_bytes(b"not parquet")
     artifact = read_statistics_artifact(root)
+    assert artifact.metadata["sample_role"] == role
     with artifact.table("factor_diagnostics.parquet") as frame:
         assert not frame.empty
-    with pytest.raises((pa.ArrowInvalid, ValueError)):
-        with artifact.table("fama_macbeth.parquet"):
-            pass
-
-
-@pytest.mark.parametrize("role", ["holdout", "development", "", None])
-def test_statistics_preserves_descriptive_roles_and_rejects_empty_roles(tmp_path, role):
-    if role:
-        tables, metadata, _ = _factor_tables(tmp_path)
-        metadata["sample_role"] = role
-        for name, frame in tables.items():
-            if "sample_role" in frame:
-                tables[name] = frame.assign(sample_role=role)
-        root = write_statistics_artifact(
-            tmp_path / "descriptive",
-            metadata=metadata,
-            tables=tables,
-            table_group="factor",
-        )
-        artifact = read_statistics_artifact(root)
-        assert artifact.metadata["sample_role"] == role
-        with artifact.table("factor_diagnostics.parquet") as frame:
-            assert not frame.empty
-        return
-    with pytest.raises(ValueError, match="sample_role"):
-        write_statistics_artifact(
-            tmp_path / "bad",
-            metadata={"sample_role": role},
-            tables={},
-            table_group="factor",
-        )
-    assert not (tmp_path / "bad").exists()
 
 
 @pytest.mark.parametrize(
@@ -240,25 +214,6 @@ def test_public_factor_statistics_projects_custom_native_or_bare_input(
         with pytest.raises(ValueError, match="parquet_semantic_spec_required"):
             factor_statistics(broken)
         assert not (tmp_path / "unpublished").exists()
-
-
-def test_nonstreaming_statistics_reject_callback_before_publishing(tmp_path):
-    metadata = {
-        "sample_role": "validation",
-        "window": {"start": "2020-01-01", "end": "2020-01-02"},
-    }
-
-    def forbidden_callback(on_table):
-        raise AssertionError("callback must not run")
-
-    with pytest.raises(ValueError, match="statistics_tables_invalid"):
-        write_statistics_artifact(
-            tmp_path / "unpublished",
-            metadata=metadata,
-            tables=forbidden_callback,
-            table_group="factor",
-        )
-    assert not (tmp_path / "unpublished").exists()
 
 
 @pytest.mark.parametrize("operation", ["factor", "model", "portfolio"])
@@ -392,7 +347,6 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
         time_window=window,
         prediction_id="predictions",
         prediction_lookup=Lookup(),
-        global_prediction_lookup=None,
         **inputs,
     )
     lost = tables["model_losses"].loc[lambda frame: frame.family_id.eq("failed")]
@@ -619,7 +573,6 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp
     )
     config = statistics_config(factors=["factor"])
     config["analyses"] = ["model_losses"]
-    config["statistics"].pop("group_comparison")
     window = TimeWindow(dates[0].date(), dates[-1].date())
     inputs = model_statistics_inputs(spec, config, window, families=("working",))
 
@@ -638,7 +591,6 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp
         time_window=window,
         prediction_id="saved",
         prediction_lookup=Lookup(),
-        global_prediction_lookup=None,
         **inputs,
     )
     assert len(tables["model_losses"]) == len(dates)

@@ -79,42 +79,16 @@ def materialize_interim_data(
     raw_root = Path(raw_root).resolve()
     if set(data_ids) != set(output_roots) or set(data_ids) - DATASETS.keys():
         raise ValueError("public_interim_outputs_invalid")
+    source = json.loads((raw_root / "manifest.json").read_bytes())
+    source_root = (raw_root / source["source_root"]).resolve()
     records, manifest_evidence = [], []
-    if not manifests or len(set(manifests)) != len(manifests):
-        raise ValueError("public_source_manifests_invalid")
     for name in manifests:
-        path = (raw_root / name).resolve()
-        if not path.is_relative_to(raw_root):
-            raise ValueError("public_source_path_outside_root")
-        payload = path.read_bytes()
-        manifest = json.loads(payload)
-        if manifest["schema_version"] != 1:
-            raise ValueError("public_source_manifest_version_invalid")
-        scope = manifest.get("path_base")
-        if scope not in (
-            None,
-            "manifest_directory",
-            "public_research_raw_root",
-            "data/raw/public_research",
-        ):
-            raise ValueError("public_source_path_base_invalid")
-        directory = path.parent if scope == "manifest_directory" else raw_root
-        for record in manifest["records"]:
-            source_path = (directory / record["path"]).resolve()
-            if not source_path.is_relative_to(raw_root):
-                raise ValueError("public_source_path_outside_root")
-            records.append(
-                {**record, "path": source_path.relative_to(raw_root).as_posix()}
-            )
-        manifest_evidence.append(
-            {"path": name, "sha256": hashlib.sha256(payload).hexdigest()}
-        )
-    if len({r["path"] for r in records}) != len(records):
-        raise ValueError("public_source_path_duplicate")
+        records.extend(source["collections"][name]["records"])
+        manifest_evidence.append({"collection": name})
     catalog = interim_catalog()
     clocks, clock_hash = _release_clocks(release_csv)
     report_dates, cell_dates, correction_evidence = _report_observation_corrections(
-        raw_root, records, data_ids
+        source_root, records, data_ids
     )
     fund_identities = None
     if fund_identity_csv is not None and "public_fund_nav" in data_ids:
@@ -143,17 +117,15 @@ def materialize_interim_data(
             numeric_counts=numeric_counts,
         ):
             for record in records:
-                if record["status"] != "downloaded":
-                    continue
-                path = raw_root / record["path"]
-                if not path.resolve().is_relative_to(raw_root):
-                    raise ValueError("public_source_path_outside_root")
                 # Dispatch before reading: a different source's multi-GB ZIP is
                 # not an input to a small margin/ETF import.
                 from .normalization import accepts
 
                 if not accepts(data_id, record):
                     continue
+                path = source_root / record["path"]
+                if not path.resolve().is_relative_to(source_root):
+                    raise ValueError("public_source_path_outside_root")
                 digest = record["sha256"]
                 evidence.append(
                     {
@@ -399,7 +371,7 @@ def _report_observation_corrections(raw_root, records, data_ids):
     }
     report_dates, cells, evidence = {}, {}, {}
     for record in records:
-        source = record["source"]
+        source = record.get("source")
         targets = (
             dependents
             if source == "cn_fund_report_observation_metadata_extracted"
@@ -407,7 +379,7 @@ def _report_observation_corrections(raw_root, records, data_ids):
             if source == "cn_fund_financial_observation_date_corrections_extracted"
             else set()
         )
-        if not targets or record["status"] != "downloaded":
+        if not targets:
             continue
         path = raw_root / record["path"]
         payload = path.read_bytes()

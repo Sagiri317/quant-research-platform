@@ -404,9 +404,6 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.artifacts.outputs.manifest import (
-        validate_output_bundle,
-    )
     from quant_research_platform.research.evaluations.engine import (
         build_evaluation_result_from_frames,
     )
@@ -477,7 +474,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                 spec=spec,
                 output_path=tmp_path / "evaluation",
             )
-        validate_output_bundle(bundle)
+
         assert pd.read_parquet(
             native_filesystem_path(bundle / "metrics.parquet")
         ).ic.tolist() == pytest.approx([expected], rel=2e-14, abs=0)

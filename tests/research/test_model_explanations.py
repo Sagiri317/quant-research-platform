@@ -558,32 +558,6 @@ def test_explanation_without_labels_and_no_implicit_fit(tmp_path, monkeypatch):
     assert len(tables["predictions"]) == 24
 
 
-def test_publication_rejects_invalid_explanation_tables(tmp_path, subtests):
-    from quant_research_platform.artifacts.explanations import write_explanation
-
-    _, _, config = _case(tmp_path)
-    metadata, tables = read_explanation(explain(config))
-    for member, column, value, error in (
-        (
-            "predictions",
-            "prediction_score",
-            tables["predictions"].prediction_score[0] + 1,
-            "prediction_binding_invalid",
-        ),
-        ("predictions", "additivity_tolerance", -1, "additivity_failed"),
-        ("contributions", "contribution", np.inf, "table_nonfinite"),
-        *(
-            ("contributions", "input_value", value, "input_value_invalid")
-            for value in ("None", "nan", "inf", "not-a-number")
-        ),
-    ):
-        with subtests.test(member=member, column=column, value=str(value)):
-            changed = {name: frame.copy() for name, frame in tables.items()}
-            changed[member].loc[0, column] = value
-            with pytest.raises(ValueError, match=error):
-                write_explanation(tmp_path / member, metadata=metadata, tables=changed)
-
-
 def test_cli_is_same_explain_operation(tmp_path):
     from typer.testing import CliRunner
 
@@ -680,17 +654,6 @@ def test_permutation_mse_dispersion_matches_repeat_population_sd(tmp_path):
     assert summary.delta_std / scale == pytest.approx((deltas / scale).std(ddof=0))
 
 
-@pytest.mark.parametrize("field", ["unit", "output_space"])
-def test_publication_requires_output_metadata(tmp_path, field):
-    from quant_research_platform.artifacts.explanations import write_explanation
-
-    _, _, config = _case(tmp_path)
-    payload, tables = read_explanation(explain(config))
-    payload.pop(field)
-    with pytest.raises(ValueError, match="metadata_invalid"):
-        write_explanation(tmp_path / "invalid", metadata=payload, tables=tables)
-
-
 @pytest.mark.parametrize(
     "algorithm,method,reason",
     [
@@ -706,28 +669,6 @@ def test_explain_binds_requested_method_to_fitted_model(
     with pytest.raises(ValueError, match=reason):
         explain(config)
     assert not Path(config["output"]).exists()
-
-
-@pytest.mark.parametrize(
-    "member,column",
-    [
-        ("native_importance", "unit"),
-        ("native_importance", "kind"),
-        ("native_importance", "reason"),
-        ("permutation_summary", "unit"),
-        ("permutation_repeats", "reason"),
-    ],
-)
-def test_artifact_requires_string_units_and_explicit_reasons(tmp_path, member, column):
-    from quant_research_platform.artifacts.explanations import write_explanation
-
-    _, _, config = _case(tmp_path)
-    if member.startswith("permutation"):
-        _permutation(config)
-    metadata, tables = read_explanation(explain(config))
-    tables[member].loc[0, column] = None
-    with pytest.raises(ValueError, match="table_string_invalid"):
-        write_explanation(tmp_path / "invalid", metadata=metadata, tables=tables)
 
 
 def test_xgboost_squared_log_error_still_has_identity_prediction_output(tmp_path):

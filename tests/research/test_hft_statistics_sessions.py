@@ -12,7 +12,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.evaluations.runner import evaluate
 from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.research.models.statistics import (
-    _paired_group_rankic,
     build_a_share_statistics_tables,
 )
 from quant_research_platform.research.statistics import (
@@ -351,7 +350,10 @@ def test_model_common_reranks_assets_and_pairs_timestamp_blocks_before_daily_mea
         dataset_session=open_dataset_session(source, time_window=window),
         prediction_id="unused",
         model_entries={
-            ("period", family): {"model_metadata": {"target_column": "label"}}
+            ("period", family): {
+                "model_metadata": {},
+                "model_facts": {"model": {"target_column": "label"}},
+            }
             for family in model_config["family_ids"]
         },
         selections={},
@@ -400,7 +402,7 @@ def test_intraday_loss_details_do_not_require_an_inference_session_axis(tmp_path
         model_entries={
             ("period", "model"): {
                 "model_id": "model",
-                "model_metadata": {"target_column": "label"},
+                "model_metadata": {},
                 "model_facts": {
                     "model": {
                         "model_algorithm": "linear_regression",
@@ -421,50 +423,3 @@ def test_intraday_loss_details_do_not_require_an_inference_session_axis(tmp_path
         tables["model_losses"].timestamp.tolist() == frame.timestamp.unique().tolist()
     )
     assert tables["model_losses"].loss.tolist() == pytest.approx([-1, -1, 1, 1])
-
-
-def test_group_comparison_does_not_compress_a_missing_session():
-    points = pd.to_datetime(
-        [
-            "2020-01-02 09:30:00",
-            "2020-01-02 09:30:03",
-            "2020-01-02 09:30:06",
-            "2020-01-06 09:30:00",
-        ]
-    )
-    values = pd.DataFrame(
-        {
-            "timestamp": points,
-            "family_id": "timestamp",
-            "global": [0.1, 0.1, 0.1, 0.2],
-            "quarterly": [0.3, np.nan, 0.5, 0.1],
-        }
-    )
-    result = _paired_group_rankic(
-        values,
-        selection_group="quarterly",
-        family_ids=("timestamp",),
-        config={
-            "sample_role": "exploratory",
-            "sessions": ["2020-01-02", "2020-01-03", "2020-01-06"],
-            "statistics": {
-                "hac_lag": 0,
-                "bootstrap_block": 1,
-                "bootstrap_repetitions": 31,
-                "group_comparison": {
-                    "fdr_method": "BY",
-                    "alpha": 0.05,
-                    "seed": 7,
-                    "confidence": 0.95,
-                },
-            },
-        },
-    ).iloc[0]
-    assert result.observation_count == 2
-    assert result.calendar_count == 3
-    assert result.global_mean == pytest.approx(0.15)
-    assert result.quarterly_mean == pytest.approx(0.25)
-    assert result.mean_difference == pytest.approx(0.1)
-    assert result.reason == "incomplete_session_clock"
-    assert np.isnan(result.p_value)
-    assert np.isnan(result.fdr_adjusted_p_value)

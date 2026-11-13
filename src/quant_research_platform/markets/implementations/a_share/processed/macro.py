@@ -221,7 +221,7 @@ def decision_panel(frame, calendar, config):
 
 
 @contextmanager
-def produce(spec, *, inputs, time_window, processed_catalog):
+def produce(spec, *, inputs, time_window):
     config = json.loads(spec.parameters_json)
     panel_key = (
         "daily_dataset" if spec.data_id == "decision_panel" else "decision_panel"

@@ -49,7 +49,7 @@ from quant_research_platform.storage.identity import (
     filesystem_stat,
     native_filesystem_path,
 )
-from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+from quant_research_platform.storage.manifests import write_qrp_json_file
 from quant_research_platform.storage.parquet import (
     DEFAULT_BATCH_ROWS,
     parquet_table_writer,
@@ -61,13 +61,9 @@ class _WriteStats:
     spec: DataSpec
     data_root: Path
     key_tracker: ExactPrimaryKeyIndex
-    row_count: int = 0
     file_count: int = 0
     file_size_bytes: int = 0
-    partitions: set[str] = field(default_factory=set)
     partition_row_counts: dict[str, int] = field(default_factory=dict)
-    columns: tuple[str, ...] | None = None
-    logical_dtypes: dict[str, Any] | None = None
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
@@ -169,11 +165,9 @@ class _WriteStats:
                 table.schema.remove_metadata()
             )
             self._schema = physical_schema
-            self.columns = physical_schema_columns(physical_schema)
         partition = relative_partition_label(self.data_root, path)
         self.file_count += 1
         self.file_size_bytes += filesystem_stat(path).st_size
-        self.partitions.add(partition)
         self.partition_row_counts[partition] = (
             self.partition_row_counts.get(partition, 0) + table.num_rows
         )
@@ -189,20 +183,15 @@ class _WriteStats:
         category_plan = {"schema_id": logical_payload["schema_id"], "columns": []}
         for descriptor in logical_payload["columns"]:
             current = dict(descriptor)
-            if current["kind"] == "categorical":
-                encoded_values = (
-                    encode_logical_category_value(item)
-                    for item in current["categories"]
-                )
-            if current["kind"] == "categorical" and (not current["ordered"]):
+            if current["kind"] == "categorical" and not current["ordered"]:
                 self.key_tracker.add_identity_payloads(
                     namespace=_category_namespace(current["name"]),
-                    payloads=encoded_values,
+                    payloads=(
+                        encode_logical_category_value(item)
+                        for item in current["categories"]
+                    ),
                 )
                 current["categories"] = []
-            elif current["kind"] == "categorical":
-                for _ in encoded_values:
-                    pass
             category_plan["columns"].append(current)
         self._logical_dtype_plan = (
             category_plan
@@ -211,34 +200,21 @@ class _WriteStats:
         )
 
     def payload(self) -> dict[str, Any]:
-        if self.columns is None or self._schema is None:
-            raise ValueError("dataset_schema_missing")
-        self.logical_dtypes = self.materialized_logical_dtypes()
-        payload = {}
-        summary = self._summary_observer.summary_payload()
-        payload.update(
-            {
-                "row_count": int(self.row_count),
-                "file_count": int(self.file_count),
-                "file_size_bytes": int(self.file_size_bytes),
-                "columns": list(self.columns),
-                "physical_schema": self._schema,
-                "logical_dtypes": self.logical_dtypes,
-                "partition_row_counts": {
-                    key: int(value)
-                    for key, value in sorted(self.partition_row_counts.items())
-                },
-                "partition_count": len(self.partitions),
-                "partitions": sorted(self.partitions),
-                **summary,
-            }
-        )
-        return payload
+        return {
+            "row_count": self._summary_observer.row_count,
+            "file_count": self.file_count,
+            "file_size_bytes": self.file_size_bytes,
+            "columns": list(physical_schema_columns(self._schema)),
+            "physical_schema": self._schema,
+            "logical_dtypes": self.materialized_logical_dtypes(),
+            "partition_row_counts": dict(sorted(self.partition_row_counts.items())),
+            "partition_count": len(self.partition_row_counts),
+            "partitions": sorted(self.partition_row_counts),
+            **self._summary_observer.summary_payload(),
+        }
 
     def materialized_logical_dtypes(self) -> dict[str, Any]:
-        if self._logical_dtype_plan is None:
-            raise ValueError("dataset_logical_dtypes_missing")
-        logical_dtypes = merge_logical_dtype_payloads([self._logical_dtype_plan])
+        logical_dtypes = self._logical_dtype_plan
         for descriptor in logical_dtypes["columns"]:
             if descriptor["kind"] == "categorical" and (not descriptor["ordered"]):
                 descriptor["categories"] = [
@@ -276,13 +252,11 @@ def write_dataset(
                 batch_rows=DEFAULT_BATCH_ROWS,
                 key_tracker=key_tracker,
             )
-            write_internal_artifact_manifest(temp_root / "spec.json", spec_payload)
+            write_qrp_json_file(temp_root / "spec.json", spec_payload)
             payload = accumulator.payload()
             payload["schema_id"] = "qrp-dataset-manifest"
             manifest = merge_dataset_metadata(payload, metadata)
-            write_internal_artifact_manifest(
-                temp_root / "_manifest" / "manifest.json", manifest
-            )
+            write_qrp_json_file(temp_root / "_manifest" / "manifest.json", manifest)
             result = DatasetInspection(
                 root=final_root,
                 data_root=final_root / "data",
@@ -365,7 +339,6 @@ def _write_contents(
                 accumulator._summary_observer.observe_batch(
                     persisted, frame=partition_frame
                 )
-                accumulator.row_count = accumulator._summary_observer.row_count
                 _raise_accumulated_failures(accumulator)
                 part_index = part_indices.get(partition, 0)
                 part_indices[partition] = part_index + 1
@@ -383,9 +356,10 @@ def _write_contents(
         observe_pending()
     if pending_parts:
         raise ValueError("unsupported_dataset_arrow_type")
-    if accumulator.row_count == 0 and (not saw_empty_schema):
+    row_count = accumulator._summary_observer.row_count
+    if row_count == 0 and (not saw_empty_schema):
         raise ValueError("empty_dataset_schema_missing")
-    if accumulator.row_count == 0:
+    if row_count == 0:
         logical_dtypes = accumulator.materialized_logical_dtypes()
         path = partition_part_path(root, "", 0)
         assert accumulator._arrow_schema is not None

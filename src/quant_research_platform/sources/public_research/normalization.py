@@ -337,7 +337,7 @@ SOURCES = {
 
 
 def accepts(data_id, record):
-    if record["source"] not in SOURCES[data_id]:
+    if record.get("source") not in SOURCES[data_id]:
         return False
     path = record["path"]
     if data_id == "public_index_weights":

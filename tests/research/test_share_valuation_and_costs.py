@@ -1,7 +1,5 @@
 """Share valuation, corporate actions, costs and paired inference."""
 
-from dataclasses import replace
-
 import pandas as pd
 import pytest
 
@@ -13,7 +11,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
     PortfolioValuation,
-    validate_portfolio_transition,
 )
 from quant_research_platform.research.portfolios.accounting import (
     ResearchValuationMarks,
@@ -142,21 +139,6 @@ def test_late_disclosed_dividend_uses_actual_record_shares_after_sale(
         == 1000.0
     )
     assert corporate._cash(batches[-1], "end") == 10000.0
-    corrupted = replace(
-        registration, entitlement_record_at_ns=registration.timestamp_ns + 1
-    )
-    with pytest.raises(ValueError, match="portfolio_registration_record_date_invalid"):
-        validate_portfolio_transition(
-            replace(
-                batches[1],
-                rights_adjustments=tuple(
-                    corrupted if event is registration else event
-                    for event in batches[1].rights_adjustments
-                ),
-            ),
-            PortfolioCapital("candidate", 10000, "CNY", "cash_equity"),
-            None,
-        )
 
 
 def test_fractional_raw_price_never_oversells_locked_actual_shares(
@@ -257,53 +239,3 @@ def test_late_historical_quote_replays_known_actions_from_original_basis(action)
     ):
         assert result.open.iloc[0] == expected
         assert result.close.iloc[0] == expected
-
-
-@pytest.mark.parametrize("configured", [None, 19])
-def test_native_paired_statistics_defaults_bootstrap_without_overriding_explicit(
-    tmp_path, monkeypatch, configured
-):
-
-    from quant_research_platform.contracts.portfolios import PortfolioCandidateSpec
-    from quant_research_platform.research.portfolios import diagnostics
-    from tests.research.test_optional_statistics import _cash_ledger
-
-    first = tmp_path / "first"
-    second = tmp_path / "second"
-    window = _cash_ledger(first)
-    candidate = PortfolioCandidateSpec(
-        "second", "global", "quantile_equal_weight", "explicit", "daily", 0.2, None
-    )
-    _cash_ledger(second, candidate=replace(candidate, candidate_id="second"))
-    policy = {
-        "hac_lag": 0,
-        "bootstrap_block": 1,
-        "group_comparison": {
-            "portfolio_ids": ["cash", "second"],
-            "primary_portfolio_id": "cash",
-            "fdr_method": "BY",
-            "alpha": 0.05,
-            "seed": 1,
-            "confidence": 0.95,
-        },
-    }
-    if configured is not None:
-        policy["bootstrap_repetitions"] = configured
-
-    def inspect(**kwargs):
-        assert kwargs["config"]["statistics"]["bootstrap_repetitions"] == (
-            2000 if configured is None else configured
-        )
-        raise RuntimeError("policy_verified")
-
-    monkeypatch.setattr(diagnostics, "build_portfolio_statistics_tables", inspect)
-    with pytest.raises(RuntimeError, match="policy_verified"):
-        diagnostics.portfolio_statistics(
-            {
-                "ledgers": [str(first), str(second)],
-                "window": window,
-                "output": str(tmp_path / "statistics"),
-                "analyses": ["group_comparison"],
-                "statistics": policy,
-            }
-        )

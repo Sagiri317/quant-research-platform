@@ -115,7 +115,7 @@ def test_prediction_writer_defaults_reach_scoring(tmp_path, input_role):
     scored = score(
         {
             "predictions": [str(prediction)],
-            "candidate_ids": [metadata["model_id"]],
+            "candidate_ids": [metadata["model_facts"]["model"]["model_id"]],
             "labels": {
                 "path": str(tmp_path / "labels.parquet"),
                 "spec": {
