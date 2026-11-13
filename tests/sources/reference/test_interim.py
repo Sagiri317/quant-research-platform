@@ -34,7 +34,6 @@ from quant_research_platform.storage.identity import (
 from tests.helpers.paths import (
     StorageLayout,
     filesystem_glob,
-    filesystem_write_bytes,
     filesystem_write_text,
 )
 from tests.helpers.source_preparation import prepared_source_evidence
@@ -245,23 +244,19 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     source = write_industry_reference_fixture(
         raw_root, observations=_industry_observations()
     )
-    candidate_path = source / "snapshot.json"
-    candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+    stream = source / "snapshots.jsonl"
+    records = [
+        json.loads(line) for line in stream.read_text(encoding="utf-8").splitlines()
+    ]
+    candidate = records[0]["candidate"]
     candidate["extraction_note"] = "Unconsumed extraction metadata"
-    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    records[0]["document_title"] = "Unconsumed document metadata"
+    stream.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
     metadata_path = source / "metadata.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    extra_path = source / "unconsumed.json"
-    extra_path.write_text('{"unconsumed": true}', encoding="utf-8")
-    metadata["files"][extra_path.name] = hashlib.sha256(
-        extra_path.read_bytes()
-    ).hexdigest()
     metadata["review_note"] = "Unconsumed review metadata"
-    metadata["snapshots"][0]["document_title"] = "Unconsumed document metadata"
-    metadata["files"]["snapshot.json"] = hashlib.sha256(
-        candidate_path.read_bytes()
-    ).hexdigest()
     metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    (source / "unconsumed.json").write_text('{"unconsumed": true}', encoding="utf-8")
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     root = tmp_path / "industry"
     interim.materialize_interim_data(
@@ -361,68 +356,19 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
     assert frame["industry_standard_id"].tolist() == ["CSRC2012"]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        "missing_member",
-        "bad_hash",
-        "traversal",
-        "non_mapping_record",
-        "publication_before_observation",
-        "bad_document_hash",
-        "unstructured_member",
-        "candidate_provenance_mismatch",
-    ],
-)
-def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
+def test_industry_publication_precedes_its_observation_is_invalid(tmp_path):
     from tests.helpers.a_share_raw import write_industry_reference_fixture
 
-    root = write_industry_reference_fixture(
-        tmp_path / "raw", observations=_industry_observations()
+    observations = (
+        ("bad", "CSRC2012", "2024-01-03", "2024-01-02", [{"code": "000001"}]),
     )
-    metadata = json.loads(
-        Path(native_filesystem_path(root / "metadata.json")).read_text(encoding="utf-8")
-    )
-    if failure == "missing_member":
-        metadata["snapshots"][0]["candidate_file"] = "missing.json"
-    elif failure == "bad_hash":
-        metadata["files"]["snapshot.json"] = "0" * 64
-    elif failure == "traversal":
-        metadata["files"]["../snapshot.json"] = metadata["files"].pop("snapshot.json")
-        metadata["snapshots"][0]["candidate_file"] = "../snapshot.json"
-    elif failure == "publication_before_observation":
-        metadata["snapshots"][0]["publication_date"] = "2019-12-01"
-    elif failure == "bad_document_hash":
-        metadata["snapshots"][0]["document_sha256"] = "invalid"
-    elif failure == "unstructured_member":
-        metadata["files"]["snapshot.pdf"] = "0" * 64
-        metadata["snapshots"][0]["candidate_file"] = "snapshot.pdf"
-    elif failure == "candidate_provenance_mismatch":
-        metadata["snapshots"][0]["document_sha256"] = "0" * 64
-    elif failure == "non_mapping_record":
-        candidate = json.loads(
-            Path(native_filesystem_path(root / "snapshot.json")).read_text(
-                encoding="utf-8"
-            )
-        )
-        candidate["records"].append(42)
-        filesystem_write_text(
-            root / "snapshot.json", json.dumps(candidate), encoding="utf-8"
-        )
-        metadata["files"]["snapshot.json"] = hashlib.sha256(
-            Path(native_filesystem_path(root / "snapshot.json")).read_bytes()
-        ).hexdigest()
-    filesystem_write_text(
-        root / "metadata.json", json.dumps(metadata), encoding="utf-8"
-    )
-    with pytest.raises(ValueError, match="industry_snapshot_"):
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    with pytest.raises(ValueError, match="industry_snapshot_publication_invalid"):
         interim.materialize_interim_data(
-            output_roots={
-                key: StorageLayout(tmp_path).interim_data_root("reference", key)
-                for key in (interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,)
-            },
             raw_root=root.parent,
-            data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+            output_roots={data_id: tmp_path / "industry"},
+            data_ids=(data_id,),
         )
 
 
@@ -432,7 +378,10 @@ def test_industry_reference_preserves_table_row_locator(tmp_path):
     observations = _industry_observations()
     observations[0][4][0]["source_locator"] = "table:2;row:7"
     root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
-    assert {path.suffix for path in root.iterdir()} == {".json"}
+    assert {path.name for path in root.iterdir()} == {
+        "metadata.json",
+        "snapshots.jsonl",
+    }
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     layout = StorageLayout(tmp_path)
     interim.materialize_interim_data(
@@ -555,8 +504,8 @@ def test_industry_future_bad_row_does_not_change_selected_history(
         data_ids=(data_id,),
         end_date="2020-12-31",
     )
-    write_industry_reference_fixture(
-        tmp_path / "raw",
+    root = write_industry_reference_fixture(
+        tmp_path / "extended_raw",
         observations=_industry_observations()
         + (("future", "CSRC2012", "2020-01-01", publication, [{"code": "invalid"}]),),
     )
@@ -702,43 +651,6 @@ def test_industry_no_selected_records_publishes_typed_empty_reference(tmp_path, 
         )
         assert str(frame[column].dtype) == expected
     assert _file_bytes(root) == before
-
-
-def test_industry_unreadable_future_json_remains_a_source_boundary(tmp_path):
-    from tests.helpers.a_share_raw import write_industry_reference_fixture
-
-    observations = _industry_observations() + (
-        ("future", "CSRC2012", "2025-01-01", "2025-01-02", [{"code": "invalid"}]),
-    )
-    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
-    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
-    output = tmp_path / "industry"
-    interim.materialize_interim_data(
-        raw_root=root.parent,
-        output_roots={data_id: output},
-        data_ids=(data_id,),
-        end_date="2020-12-31",
-    )
-    before = _file_bytes(output)
-    malformed = b'{"records": ['
-    filesystem_write_bytes(root / "future.json", malformed)
-    metadata = json.loads(
-        Path(native_filesystem_path(root / "metadata.json")).read_text(encoding="utf-8")
-    )
-    metadata["files"]["future.json"] = hashlib.sha256(malformed).hexdigest()
-    filesystem_write_text(
-        root / "metadata.json", json.dumps(metadata), encoding="utf-8"
-    )
-    raw_before = _file_bytes(root)
-    with pytest.raises(ValueError, match="^qrp_json_invalid$"):
-        interim.materialize_interim_data(
-            raw_root=root.parent,
-            output_roots={data_id: output},
-            data_ids=(data_id,),
-            end_date="2020-12-31",
-        )
-    assert _file_bytes(output) == before
-    assert _file_bytes(root) == raw_before
 
 
 @pytest.mark.parametrize("terminator", ("\n", "\r\n", "\r", "mixed"))

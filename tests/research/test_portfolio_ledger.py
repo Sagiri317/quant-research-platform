@@ -36,7 +36,6 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 from tests.helpers.paths import (
-    filesystem_write_bytes,
     filesystem_write_text,
 )
 
@@ -307,41 +306,6 @@ def test_fee_source_preserves_identity_and_exact_counts(tmp_path: Path) -> None:
         for market in ("shanghai", "shenzhen"):
             for side in ("buy", "sell"):
                 prepare_trade_cost(when, market, side, schedule, _assumptions())
-
-
-@pytest.mark.parametrize("field", ("row_count", "file_bytes"))
-def test_fee_source_rejects_sidecar_count_and_byte_mutations(
-    tmp_path: Path, field: str
-) -> None:
-    _csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    metadata = json.loads(
-        Path(native_filesystem_path(sidecar_path)).read_text(encoding="utf-8")
-    )
-    _rewrite_sidecar(sidecar_path, **{field: metadata[field] + 1})
-    with pytest.raises(ValueError, match="a_share_fee_source_(row_count|metadata)"):
-        load_a_share_fee_source(reference_root=_csv_path.parent.parent)
-
-
-def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> None:
-    csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    filesystem_write_bytes(
-        csv_path, Path(native_filesystem_path(csv_path)).read_bytes() + b"\n"
-    )
-    with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
-        load_a_share_fee_source(reference_root=csv_path.parent.parent)
-    csv_path, sidecar_path = _copy_fee_source(tmp_path / "schema")
-    raw = Path(native_filesystem_path(csv_path)).read_text(encoding="utf-8-sig")
-    filesystem_write_text(
-        csv_path, raw.replace("市场", "市场X", 1), encoding="utf-8-sig"
-    )
-    digest = hashlib.sha256(
-        Path(native_filesystem_path(csv_path)).read_bytes()
-    ).hexdigest()
-    _rewrite_sidecar(
-        sidecar_path, file_sha256=digest, file_bytes=filesystem_stat(csv_path).st_size
-    )
-    with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
-        load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
 
 def test_fee_source_sidecar_change_changes_combined_identity(tmp_path: Path) -> None:

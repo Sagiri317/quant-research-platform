@@ -126,7 +126,53 @@ def test_explicit_snapshot_clock_does_not_claim_publication_or_vintage(tmp_path)
     assert data.value.iloc[0] == 5.3
     row["published_at"] = row["estimated_available_at"]
     pd.DataFrame([row]).to_csv(path, index=False)
-    with pytest.raises(ValueError, match="macro_release_columns_invalid"):
+    actual = read_release_csv(path)
+    assert actual.published_at.iloc[0] == actual.timestamp.iloc[0]
+    assert actual.availability_basis.iloc[0] == "release_timestamp"
+
+
+def test_merged_releases_select_clocks_per_row_without_inventing_publication(tmp_path):
+    row = dict(
+        series_id="cn_dr007",
+        observation_date="2024-01-02",
+        value="1.8",
+        unit="percent",
+        frequency="D",
+        source_id="cfets",
+        source_series="DR007",
+        source_timezone="Asia/Shanghai",
+        source_url="https://www.chinamoney.com.cn/",
+        retrieved_at="2026-11-11T00:00Z",
+    )
+    rows = [
+        dict(
+            row,
+            published_at="2024-01-02T18:00+08:00",
+            estimated_available_at="2024-01-04T00:00+08:00",
+        ),
+        dict(row, release_date="2024-01-03"),
+        dict(row, estimated_available_at="2024-01-05T00:00+08:00"),
+    ]
+    path = tmp_path / "observations.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    actual = read_release_csv(path).reset_index(drop=True)
+    assert actual.timestamp.tolist() == [
+        pd.Timestamp(v)
+        for v in (
+            "2024-01-02T10:00Z",
+            "2024-01-03T16:00Z",
+            "2024-01-04T16:00Z",
+        )
+    ]
+    assert actual.availability_basis.tolist() == [
+        "release_timestamp",
+        "release_date_end",
+        "inferred_snapshot_release",
+    ]
+    assert actual.published_at.notna().tolist() == [True, False, False]
+    assert actual.vintage_date.notna().tolist() == [True, True, False]
+    pd.DataFrame([row]).assign(estimated_available_at=None).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="macro_release_clock_missing"):
         read_release_csv(path)
 
 
@@ -172,46 +218,6 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
         pd.Timestamp("2014-02-07T06:00"),
     ]
     assert frame.retrieved_at.eq(pd.Timestamp("2026-11-05", tz="UTC")).all()
-
-
-def test_parseable_macro_file_tampering_does_not_reuse_old_evidence(tmp_path):
-    raw = tmp_path / "raw"
-    source = raw / "vvix"
-    source.mkdir(parents=True)
-    payload = b"DATE,VVIX\n01/02/2024,20.0\n"
-    member = source / "daily.csv"
-    member.write_bytes(payload)
-    record = {
-        "file": "daily.csv",
-        "retrieved_at": "2026-11-05T00:00:00Z",
-        "url": "https://example.org/vix",
-        "bytes": len(payload),
-        "sha256": hashlib.sha256(payload).hexdigest(),
-    }
-    (raw / "download.json").write_text(
-        json.dumps(
-            {
-                "sources": {
-                    "vvix": {
-                        "status": "downloaded",
-                        "source": "cboe",
-                        "series_ids": ["us_vvix"],
-                        "responses": [record],
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    materialize_interim_data(
-        raw_root=raw, output_roots={"macro_observations": tmp_path / "good"}
-    )
-    member.write_bytes(payload.replace(b"20.0", b"21.0"))
-    with pytest.raises(ValueError, match="macro_source_integrity_mismatch"):
-        materialize_interim_data(
-            raw_root=raw, output_roots={"macro_observations": tmp_path / "changed"}
-        )
-    assert not (tmp_path / "changed").exists()
 
 
 @pytest.mark.parametrize(

@@ -82,7 +82,11 @@ class _CsvRecords:
         try:
             self._content_hashes = content_hashes
             self._exhausted = False
-            self._bytes = _DigestingReader(self._handle)
+            self._bytes = (
+                _DigestingReader(self._handle)
+                if content_hashes is not None
+                else self._handle
+            )
             self._text = io.TextIOWrapper(self._bytes, encoding="utf-8-sig", newline="")
             # The provider format permits fields above Python's default limit.
             csv.field_size_limit(sys.maxsize)

@@ -685,15 +685,10 @@ def iter_dataset_time_chunks(
 ) -> Iterator[pd.DataFrame]:
     """Read complete chronological cross-sections, independent of member order.
 
-    Nonoverlapping bounded row groups use the ordinary streaming path. Otherwise
-    SQLite owns the disk-backed sort; only projected rows are scanned once and
-    converted in bounded batches. The generic dataset reader keeps member order.
+    Ordered row groups stream directly. Overlapping groups use one vectorized
+    sort of the selected columns and rows. The generic reader keeps member order.
     ``one_timestamp`` yields one cross-section without another completion pass.
     """
-    import pickle
-    import sqlite3
-    from contextlib import closing
-
     from quant_research_platform.compute.dataframe.streaming import (
         iter_complete_time_frames,
     )
@@ -734,67 +729,19 @@ def iter_dataset_time_chunks(
             break
 
     def sorted_chunks():
-        # Empty-name SQLite databases are private temporary disk files removed
-        # on close. Payloads are created and consumed here, never external pickle.
-        with closing(sqlite3.connect("")) as database:
-            database.execute(
-                "CREATE TABLE rows "
-                "(time INTEGER, ordinal INTEGER PRIMARY KEY, payload BLOB)"
-            )
-            template = None
-            ordinal = 0
-            with closing_iterator(
-                iter_dataset_chunks(context, batch_rows=rows)
-            ) as source:
-                for frame in source:
-                    if template is None:
-                        template = frame.iloc[:0]
-                    times = (
-                        strict_timestamp_series(
-                            frame[timestamp],
-                            error="invalid_time_chunk_timestamp_values",
-                        )
-                        .astype("datetime64[ns]")
-                        .astype("int64")
-                    )
-                    database.executemany(
-                        "INSERT INTO rows VALUES (?, ?, ?)",
-                        (
-                            (int(t), ordinal + i, pickle.dumps(row, protocol=5))
-                            for i, (t, row) in enumerate(
-                                zip(
-                                    times,
-                                    frame.itertuples(index=False, name=None),
-                                    strict=True,
-                                )
-                            )
-                        ),
-                    )
-                    ordinal += len(frame)
-            if not ordinal:
-                if template is not None:
-                    yield template
-                return
-            cursor = database.execute("SELECT payload FROM rows ORDER BY time, ordinal")
-            while payloads := cursor.fetchmany(rows):
-                values = [pickle.loads(payload) for (payload,) in payloads]
-                columns = {}
-                for i, (name, dtype) in enumerate(template.dtypes.items()):
-                    column = [row[i] for row in values]
-                    if isinstance(dtype, (pd.Float32Dtype, pd.Float64Dtype)):
-                        missing = np.array([value is pd.NA for value in column])
-                        column = pd.arrays.FloatingArray(
-                            np.array(
-                                [
-                                    np.nan if value is pd.NA else value
-                                    for value in column
-                                ],
-                                dtype=dtype.numpy_dtype,
-                            ),
-                            missing,
-                        )
-                    columns[name] = pd.Series(column, dtype=dtype)
-                yield pd.DataFrame(columns)
+        with closing_iterator(iter_dataset_chunks(context, batch_rows=rows)) as source:
+            frames = list(source)
+        if not frames:
+            return
+        frame = pd.concat(frames, ignore_index=True)
+        frame[timestamp] = strict_timestamp_series(
+            frame[timestamp], error="invalid_time_chunk_timestamp_values"
+        )
+        frame = frame.sort_values(timestamp, kind="stable", ignore_index=True)
+        if frame.empty:
+            yield frame
+        else:
+            yield from iter_frame_chunks(frame, batch_rows=rows)
 
     source = (
         iter_dataset_chunks(context, batch_rows=rows) if separated else sorted_chunks()

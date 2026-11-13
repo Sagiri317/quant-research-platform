@@ -147,13 +147,6 @@ def test_explicit_fee_pair_ignores_historical_name_and_checks_content(tmp_path):
     assert saved.end_date.max() == pd.Timestamp("2027-12-31")
     with pytest.raises(ValueError):
         read_dataset(tmp_path / "data" / "data")
-    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
-    metadata["file_sha256"] = "0" * 64
-    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
-    config["outputs"][interim.A_SHARE_FEE_SCHEDULE_DATA_ID] = str(tmp_path / "bad")
-    with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
-        prepare_source(config)
-    assert not (tmp_path / "bad").exists()
 
 
 @pytest.mark.parametrize("field", ["fee_csv", "fee_sidecar"])

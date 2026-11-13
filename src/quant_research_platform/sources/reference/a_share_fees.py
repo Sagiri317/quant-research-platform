@@ -19,10 +19,8 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 
-A_SHARE_FEE_CSV_NAME = "chatgpt_compiled_a_share_fee_schedule_2014_2025.csv"
-A_SHARE_FEE_SIDECAR_NAME = (
-    "chatgpt_compiled_a_share_fee_schedule_2014_2025.metadata.json"
-)
+A_SHARE_FEE_CSV_NAME = "fee_schedule.csv"
+A_SHARE_FEE_SIDECAR_NAME = "fee_schedule.metadata.json"
 FEE_CSV_COLUMNS = (
     "规则类别",
     "费用代码",
@@ -95,11 +93,8 @@ def load_a_share_fee_source(
     sidecar_path = (
         root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
     )
-    metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
+    _metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
     rows, data_row_count, csv_sha256, csv_bytes, columns = _read_rows(csv_path)
-    _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes, columns=columns)
-    if metadata.get("row_count") != data_row_count:
-        raise ValueError("a_share_fee_source_row_count_mismatch")
     digest = hashlib.sha256()
     for name, member_hash in sorted(
         (
@@ -132,24 +127,6 @@ def _read_sidecar(path: Path) -> tuple[dict[str, object], str]:
     if type(value) is not dict:
         raise ValueError("a_share_fee_sidecar_invalid")
     return value, hashlib.sha256(raw).hexdigest()
-
-
-def _validate_sidecar(
-    metadata: dict[str, object],
-    csv_sha256: str,
-    *,
-    csv_bytes: int,
-    columns: tuple[str, ...],
-) -> None:
-    if (
-        metadata.get("file_sha256") != csv_sha256
-        or type(metadata.get("file_bytes")) is not int
-        or metadata.get("file_bytes") != csv_bytes
-        or type(metadata.get("row_count")) is not int
-        or metadata.get("row_count") < 0
-        or metadata.get("fields_raw") != list(columns)
-    ):
-        raise ValueError("a_share_fee_source_metadata_invalid")
 
 
 def _read_rows(

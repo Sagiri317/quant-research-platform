@@ -63,7 +63,7 @@ A 股研究股票池资格由市场适配层 `markets.implementations.a_share.st
 市场模型的 A 股股票池、生命周期、交易状态与流通市值加权状态由 `markets.implementations.a_share.market_model` 负责，`processed.producer` 连接交易日历和输入；滚动回归与残差波动计算位于 `compute.market_model`。
 截面中性化、中心化、缩放及配对样本的均方误差统一由 `compute.dataframe.cross_section` 计算；各消费方决定样本资格、单位可比性、所用变换及信息可用时点。
 账本经济分解及 NAV 收益舍入界由 `compute.portfolio_economics` 统一计算，组合绩效、比较与推断分别消费。
-下载、SDK 取数及网页／图片／PDF 提取在仓库外完成，仓库来源模块仅接收结构化原始数据。
+下载、SDK 取数、响应保存、raw 整理和网页／图片／PDF 提取在仓库外完成。仓库来源模块只接收提前收集的结构化数据，解释研究需要的字段、单位和时间；不包含采集入口或其测试。
 读取模块解码所选文件与列；计算模块检查公式、信息可用时点、标签成熟、采样与配对范围。
 通用数据写入入口检查外部输入的结构和跨批次主键，再原子发布。
 评价产物类型只由 `output_definition_id="evaluation_outputs"` 声明，不再重复保存恒定的 `run_type`。

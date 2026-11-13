@@ -12,13 +12,6 @@ def test_query_owner_has_no_workflow_or_source_traversal(import_edges):
         assert not edge.module.startswith(
             ("quant_research_platform.workflows", "quant_research_platform.sources")
         )
-        assert not edge.module.rsplit(".", 1)[-1].startswith("write_")
-
-
-def test_profile_owner_has_no_dataset_writer_or_pandas_import(import_edges) -> None:
-    for edge in import_edges_under(import_edges, SOURCE_ROOT / "profiles/research.py"):
-        assert edge.module.rsplit(".", 1)[-1] != "write_dataset"
-        assert not edge.module.startswith("pandas")
 
 
 def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(

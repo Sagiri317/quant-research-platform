@@ -88,9 +88,7 @@ def test_chronological_sort_retains_native_dtypes_values_and_selection(
         assert len(chunk) <= batch_rows + 2
 
 
-def test_native_time_sorted_hot_path_needs_no_temporary_sort(tmp_path, monkeypatch):
-    import sqlite3
-
+def test_native_time_sorted_input_preserves_rows(tmp_path):
     frame = pd.DataFrame(
         {
             "timestamp": np.repeat(
@@ -109,10 +107,6 @@ def test_native_time_sorted_hot_path_needs_no_temporary_sort(tmp_path, monkeypat
     )
     write_dataset(tmp_path / "data", [frame.iloc[:4], frame.iloc[4:]], spec=spec)
 
-    def unexpected(*args, **kwargs):
-        pytest.fail("ordered bounded row groups must stay on the streaming path")
-
-    monkeypatch.setattr(sqlite3, "connect", unexpected)
     actual = pd.concat(
         iter_dataset_time_chunks(open_dataset_session(tmp_path / "data")),
         ignore_index=True,
@@ -128,11 +122,7 @@ def test_native_time_sorted_hot_path_needs_no_temporary_sort(tmp_path, monkeypat
         TimeWindow("2024-01-04", "2024-01-04"),
     ],
 )
-def test_window_excluded_unordered_groups_do_not_require_sort(
-    tmp_path, monkeypatch, window
-):
-    import sqlite3
-
+def test_window_excluded_unordered_groups_do_not_require_sort(tmp_path, window):
     from quant_research_platform.contracts.time import prediction_window_mask
 
     times = pd.to_datetime(
@@ -158,10 +148,6 @@ def test_window_excluded_unordered_groups_do_not_require_sort(
     root = tmp_path / "data"
     write_dataset(root, [frame.iloc[:1], frame.iloc[1:2], frame.iloc[2:]], spec=spec)
 
-    def unexpected(*args, **kwargs):
-        pytest.fail("groups outside this selection cannot require a temporary sort")
-
-    monkeypatch.setattr(sqlite3, "connect", unexpected)
     actual = pd.concat(
         iter_dataset_time_chunks(open_dataset_session(root, time_window=window)),
         ignore_index=True,
@@ -174,10 +160,8 @@ def test_window_excluded_unordered_groups_do_not_require_sort(
 
 @pytest.mark.parametrize("statistics", [True, False])
 def test_matching_unordered_or_unknown_statistics_still_require_sort(
-    tmp_path, monkeypatch, statistics
+    tmp_path, statistics
 ):
-    import sqlite3
-
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -196,14 +180,6 @@ def test_matching_unordered_or_unknown_statistics_still_require_sort(
         primary_key=("timestamp", "asset_id"),
         partition_columns=(),
     )
-    calls = []
-    connect = sqlite3.connect
-
-    def observed(*args, **kwargs):
-        calls.append(True)
-        return connect(*args, **kwargs)
-
-    monkeypatch.setattr(sqlite3, "connect", observed)
     actual = pd.concat(
         iter_dataset_time_chunks(
             open_dataset_session(
@@ -212,7 +188,6 @@ def test_matching_unordered_or_unknown_statistics_still_require_sort(
         ),
         ignore_index=True,
     )
-    assert len(calls) == 1
     pd.testing.assert_frame_equal(
         actual, frame.sort_values("timestamp", kind="stable").reset_index(drop=True)
     )

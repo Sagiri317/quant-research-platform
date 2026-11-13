@@ -12,7 +12,7 @@ from tests.helpers.a_share_sources import (
     _synthetic_interim_frames,
     _write_inputs,
 )
-from tests.helpers.choice_raw import SDK, choice_session, response, write_css
+from tests.helpers.choice_raw import choice_session, response, write_css
 from tests.helpers.paths import StorageLayout
 
 
@@ -23,7 +23,7 @@ def test_explicit_financial_windows_keep_choice_history_and_point_in_time_revisi
     previous = year - 1
     raw_layout = StorageLayout(tmp_path / "raw-project")
     fields = tuple(field for mapping in FINANCIAL_FIELDS.values() for field in mapping)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         for period, first, value in (
             (f"{previous}-03-31", f"{previous}-04-20", 1.0),
             (f"{previous}-12-31", f"{year}-04-20", 4.0),

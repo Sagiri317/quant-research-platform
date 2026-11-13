@@ -11,7 +11,6 @@ import pyarrow.dataset as ds
 from quant_research_platform.contracts.data import InterimDataSpec
 from quant_research_platform.contracts.portfolios import A_SHARE_INSTRUMENT_TYPES
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.identity import _hash_file_content
 from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 STREAM_FILES = {
@@ -226,12 +225,6 @@ def materialize_interim_data(
 
     window = TimeWindow(start=start_date, end=end_date)
     instrument_mapping(instruments)
-    if (
-        type(revision) is not str
-        or len(revision) != 40
-        or any(c not in "0123456789abcdef" for c in revision)
-    ):
-        raise ValueError("level2_repository_revision_required")
     results = {}
     for stream in data_ids:
         if stream not in STREAM_FILES:
@@ -245,10 +238,6 @@ def materialize_interim_data(
         ]
         if not files:
             raise FileNotFoundError("level2_selected_files_missing")
-        hashes = {
-            path.relative_to(raw_root).as_posix(): _hash_file_content(path)
-            for path in files
-        }
         symbols = [item["wind_code"].upper() for item in instruments]
         spec = interim_spec(stream)
         clock_counts = {"HHMMSS": 0, "HHMMSSmmm": 0}
@@ -301,7 +290,9 @@ def materialize_interim_data(
                 "source_evidence": {
                     "repository": REPOSITORY,
                     "revision": revision,
-                    "source_hashes": hashes,
+                    "source_members": [
+                        p.relative_to(raw_root).as_posix() for p in files
+                    ],
                     "instruments": instruments,
                     "timestamp_semantics": "vendor_event_time_no_receive_clock",
                     "clock_encoding_counts": clock_counts,

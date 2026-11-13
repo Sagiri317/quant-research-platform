@@ -2180,67 +2180,6 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
         assert pd.api.types.is_integer_dtype(actual.security_type.dtype)
 
 
-@pytest.mark.parametrize(
-    "failure_type", (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
-)
-def test_csmar_parent_failure_keeps_workflow_semantics(
-    tmp_path, monkeypatch, failure_type
-):
-    from tests.helpers.paths import StorageLayout
-
-    raw = tmp_path / "raw/csmar"
-    filesystem_mkdir(raw, parents=True)
-    source = raw / "native-calendar.csv"
-    filesystem_write_text(
-        source, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
-    )
-    arguments = dict(
-        raw_root=raw,
-        start_date="2020-01-01",
-        end_date="2020-01-03",
-        data_ids=("trading_calendar",),
-    )
-    normal_layout = StorageLayout(tmp_path / "normal")
-    failed_layout = StorageLayout(tmp_path / "failed")
-    interim.materialize_interim_data(
-        output_roots={"trading_calendar": normal_layout.project_root / "calendar"},
-        **arguments,
-    )
-    originals = _file_bytes(normal_layout.project_root)
-    primary = failure_type("parent_failure")
-    native_stat = interim.filesystem_stat
-    calls = []
-
-    def failed_stat(path, *args, **kwargs):
-        if path == raw:
-            calls.append(path)
-            raise primary
-        return native_stat(path, *args, **kwargs)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(interim, "filesystem_stat", failed_stat)
-        error_type = (
-            ValueError
-            if failure_type in (FileNotFoundError, NotADirectoryError)
-            else failure_type
-        )
-        with pytest.raises(error_type) as caught:
-            interim.materialize_interim_data(
-                output_roots={
-                    "trading_calendar": failed_layout.project_root / "calendar"
-                },
-                **arguments,
-            )
-        if error_type is ValueError:
-            assert str(caught.value) == "csmar_interim_source_parent_invalid"
-        else:
-            assert caught.value is primary
-    assert calls == [raw]
-    assert _file_bytes(normal_layout.project_root) == originals
-    assert not tuple(filesystem_glob(failed_layout.project_root, "**/.a-*"))
-    assert not tuple(filesystem_glob(failed_layout.project_root, "**/manifest.json"))
-
-
 @pytest.mark.parametrize("price_scale", (0.5, 20.0, 800.0))
 @pytest.mark.parametrize("split", (False, True))
 def test_adjusted_open_preserves_units_through_storage_and_labels(

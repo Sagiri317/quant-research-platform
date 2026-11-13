@@ -351,7 +351,7 @@ def _select_observation_window(frame, *, start_date, end_date):
 def read_release_csv(path, *, start_date=None, end_date=None):
     """Import timestamped original releases or revisions from an explicit local file.
 
-    Each file selects a publication timestamp, release date, or assumed clock.
+    Each row prefers an actual timestamp, then a release date, then an assumed clock.
     Source identity and units stay explicit, including for private vendor exports.
     """
     payload = Path(path).read_bytes()
@@ -375,34 +375,48 @@ def read_release_csv(path, *, start_date=None, end_date=None):
         error="macro_release_columns_invalid",
     )
     clocks = set(data) & clock_columns
-    if len(clocks) != 1:
+    if not clocks:
         raise ValueError("macro_release_columns_invalid")
     data = _select_observation_window(data, start_date=start_date, end_date=end_date)
-    clock = next(iter(clocks))
-    if clock != "release_date":
-        # Explicit offsets prevent machine-local time from becoming economic time.
-        if not data[clock].str.contains(r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True).all():
-            raise ValueError("macro_release_timezone_required")
-        data["timestamp"] = pd.to_datetime(data[clock], utc=True)
-        actual = clock == "published_at"
-        data["published_at"] = data.timestamp if actual else pd.NaT
-        data["availability_basis"] = (
-            "release_timestamp" if actual else "inferred_snapshot_release"
-        )
-        data["vintage_date"] = (
-            data.timestamp.dt.tz_localize(None).dt.normalize() if actual else pd.NaT
-        )
-    else:
-        data["timestamp"] = pd.Series(
-            pd.NaT, index=data.index, dtype="datetime64[ns, UTC]"
-        )
-        for zone, group in data.groupby("source_timezone", sort=False):
-            data.loc[group.index, "timestamp"] = date_end_available(
-                group.release_date, zone
-            )
-        data["vintage_date"] = pd.to_datetime(data.release_date)
-        data["published_at"] = pd.NaT
-        data["availability_basis"] = "release_date_end"
+    source_clocks = data.loc[:, list(clocks)].copy()
+    data["timestamp"] = pd.Series(pd.NaT, index=data.index, dtype="datetime64[ns, UTC]")
+    data["published_at"] = data.timestamp.copy()
+    data["vintage_date"] = pd.Series(pd.NaT, index=data.index, dtype="datetime64[ns]")
+    data["availability_basis"] = pd.Series(pd.NA, index=data.index, dtype="str")
+    missing = pd.Series(True, index=data.index)
+    for clock in ("published_at", "release_date", "estimated_available_at"):
+        if clock not in source_clocks:
+            continue
+        selected = missing & source_clocks[clock].notna()
+        if not selected.any():
+            continue
+        values = source_clocks.loc[selected, clock]
+        if clock == "release_date":
+            for zone, group in data.loc[selected].groupby(
+                "source_timezone", sort=False
+            ):
+                data.loc[group.index, "timestamp"] = date_end_available(
+                    values.loc[group.index], zone
+                )
+            data.loc[selected, "vintage_date"] = pd.to_datetime(values)
+            basis = "release_date_end"
+        else:
+            # Explicit offsets keep machine-local time out of source evidence.
+            if not values.str.contains(r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True).all():
+                raise ValueError("macro_release_timezone_required")
+            times = pd.to_datetime(values, utc=True)
+            data.loc[selected, "timestamp"] = times
+            basis = "inferred_snapshot_release"
+            if clock == "published_at":
+                data.loc[selected, "published_at"] = times
+                data.loc[selected, "vintage_date"] = times.dt.tz_localize(
+                    None
+                ).dt.normalize()
+                basis = "release_timestamp"
+        data.loc[selected, "availability_basis"] = basis
+        missing &= ~selected
+    if missing.any():
+        raise ValueError("macro_release_clock_missing")
     data["realtime_end_date"] = pd.Series(pd.NA, index=data.index, dtype="str")
     result = validate_observations(data)
     result.attrs["source_evidence"] = {
@@ -484,11 +498,6 @@ def materialize_interim_data(
                 if not member.resolve().is_relative_to(raw_root.resolve()):
                     raise ValueError("macro_source_member_outside_root")
                 payload = member.read_bytes()
-                if (
-                    len(payload) != record["bytes"]
-                    or hashlib.sha256(payload).hexdigest() != record["sha256"]
-                ):
-                    raise ValueError("macro_source_integrity_mismatch")
                 chunks.extend(
                     _normalize_response(
                         payload,

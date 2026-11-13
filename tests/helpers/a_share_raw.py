@@ -27,7 +27,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from tests.helpers.choice_raw import SDK, choice_session, response, write_css
+from tests.helpers.choice_raw import choice_session, response, write_css
 from tests.helpers.paths import (
     StorageLayout,
     filesystem_write_text,
@@ -367,7 +367,7 @@ def write_a_share_raw_fixture(
         name for mapping in FINANCIAL_FIELDS.values() for name in mapping.values()
     )
     profitability = np.random.default_rng(563).uniform(0.03, 0.08, len(assets))
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         for period in pd.period_range(
             "2010Q1", pd.Timestamp(history_end).to_period("Q") - 1, freq="Q"
         ):
@@ -427,8 +427,6 @@ def write_a_share_raw_fixture(
 def write_industry_reference_fixture(raw_root, *, observations):
     """Write reviewed-source-shaped snapshots for the real reference reader."""
     root = Path(raw_root) / "reference/a_share_industry_snapshots"
-    filesystem_mkdir(root, parents=True, exist_ok=True)
-    files = {}
     snapshots = []
     for identifier, standard, observed, published, rows in observations:
         candidate_name = identifier + ".json"
@@ -440,22 +438,18 @@ def write_industry_reference_fixture(raw_root, *, observations):
             "source_sha256": document_hash,
             "records": rows,
         }
-        filesystem_write_text(
-            root / candidate_name,
-            json.dumps(candidate, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        files[candidate_name] = hashlib.sha256(
-            Path(native_filesystem_path(root / candidate_name)).read_bytes()
-        ).hexdigest()
+        candidate_json = json.dumps(candidate, ensure_ascii=False)
         snapshots.append(
             {
+                "status": "downloaded",
                 "snapshot_id": identifier,
                 "industry_standard_id": standard,
                 "observation_date": observed,
                 "publication_date": published,
                 "source_url": source_url,
-                "candidate_file": candidate_name,
+                "source_file": candidate_name,
+                "candidate": candidate,
+                "candidate_sha256": hashlib.sha256(candidate_json.encode()).hexdigest(),
                 "document_sha256": document_hash,
                 "publication_evidence_url": "https://" + host + "/synthetic.html",
                 "publication_evidence_sha256": hashlib.sha256(
@@ -463,14 +457,12 @@ def write_industry_reference_fixture(raw_root, *, observations):
                 ).hexdigest(),
             }
         )
-    metadata = {
-        "schema_id": "a_share_industry_snapshots/1",
-        "files": files,
-        "snapshots": snapshots,
-    }
-    filesystem_write_text(
-        root / "metadata.json",
-        json.dumps(metadata, ensure_ascii=False),
+    root.mkdir(parents=True)
+    (root / "metadata.json").write_text(
+        json.dumps({"schema_id": "a_share_industry_snapshots"}), encoding="utf-8"
+    )
+    (root / "snapshots.jsonl").write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in snapshots),
         encoding="utf-8",
     )
     return root

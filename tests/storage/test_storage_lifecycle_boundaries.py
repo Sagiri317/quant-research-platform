@@ -419,35 +419,15 @@ def test_content_hash_preserves_open_errors(tmp_path, monkeypatch, failure):
             assert caught.value is primary
 
 
-@pytest.mark.parametrize(
-    "source,boundary",
-    [("choice", "stat"), ("choice", "open"), ("csmar", "open"), ("reference", "open")],
-)
-def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, boundary):
+@pytest.mark.parametrize("source", ["csmar", "reference"])
+def test_source_reader_preserves_io_failure(tmp_path, monkeypatch, source):
     import errno
 
-    from quant_research_platform.sources.choice import interim as choice
     from quant_research_platform.sources.csmar import interim as csmar
     from quant_research_platform.sources.reference import interim as reference
-    from tests.helpers.choice_raw import SDK, choice_session, response, write_css
-    from tests.helpers.paths import StorageLayout
     from tests.sources.reference.test_interim import _write_reference_root
 
-    layout = StorageLayout(tmp_path)
-    if source == "choice":
-        with choice_session(SDK(response())) as session:
-            write_css(
-                session,
-                layout,
-                period="2019-12-31",
-                end_date="2025-12-31",
-                indicators=("STMTACTDATE",),
-                data={"000001.SZ": ["2020/1/30"]},
-            )
-        root, data_id = (layout.raw_source_root("choice"), "financial_balance")
-        path = next(filesystem_glob(root, "**/response.metadata.json"))
-        owner = choice
-    elif source == "csmar":
+    if source == "csmar":
         root, data_id = (tmp_path, "trading_calendar")
         path = root / "native-calendar.csv"
         filesystem_write_text(
@@ -463,18 +443,8 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
     from quant_research_platform.sources.csmar import raw_schemas
     from quant_research_platform.sources.reference import a_share_fees
 
-    target_owner = (
-        identity
-        if boundary == "stat"
-        else manifests
-        if source == "choice"
-        else raw_schemas
-        if source == "csmar"
-        else a_share_fees
-    )
-    operation = "filesystem_stat" if boundary == "stat" else "open_filesystem_file"
-    if source == "choice" and boundary == "stat":
-        target_owner, operation, path = choice, "filesystem_scandir", root / "css"
+    target_owner = raw_schemas if source == "csmar" else a_share_fees
+    operation = "open_filesystem_file"
     original = getattr(target_owner, operation)
 
     def fail(candidate, *args, **kwargs):

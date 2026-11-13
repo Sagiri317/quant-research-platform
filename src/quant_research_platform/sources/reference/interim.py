@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -180,7 +181,7 @@ def materialize_interim_data(
         if data_id == A_SHARE_EQUITY_EVENTS_DATA_ID:
             equity_frame, identity = _equity_source(root, end_date=end_date)
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            source_metadata, members, identity = _industry_source(root)
+            snapshots, identity = _industry_source(root)
         else:
             source = load_a_share_fee_source(
                 reference_root=root, fee_csv=fee_csv, fee_sidecar=fee_sidecar
@@ -190,7 +191,7 @@ def materialize_interim_data(
             frame = equity_frame
             spec = _equity_events_spec()
         elif data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
-            frame = _industry_frame(source_metadata, members, end_date=end_date)
+            frame = _industry_frame(snapshots, end_date=end_date)
             if end_date is not None:
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _industry_snapshots_spec()
@@ -276,103 +277,24 @@ def _snapshot_date(value):
 
 def _industry_source(reference_root):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
-    path = root / _INDUSTRY_MANIFEST_NAME
-    raw, metadata = read_qrp_json_file(path)
-    if (
-        not {"schema_id", "files", "snapshots"} <= set(metadata)
-        or metadata["schema_id"] != "a_share_industry_snapshots/1"
-        or type(metadata["files"]) is not dict
-        or not metadata["files"]
-        or type(metadata["snapshots"]) is not list
-        or not metadata["snapshots"]
-    ):
+    raw, metadata = read_qrp_json_file(root / _INDUSTRY_MANIFEST_NAME)
+    if metadata.get("schema_id") != "a_share_industry_snapshots":
         raise ValueError("industry_snapshot_metadata_invalid")
-    candidates = {
-        snapshot.get("candidate_file")
-        for snapshot in metadata["snapshots"]
-        if type(snapshot) is dict and type(snapshot.get("candidate_file")) is str
-    }
-    if not candidates <= set(metadata["files"]):
-        raise ValueError("industry_snapshot_member_invalid")
-    members = {}
-    for name in sorted(candidates):
-        expected_hash = metadata["files"][name]
-        if (
-            type(name) is not str
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*\.json", name) is None
-            or name == _INDUSTRY_MANIFEST_NAME
-            or type(expected_hash) is not str
-            or re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None
-        ):
-            raise ValueError("industry_snapshot_member_invalid")
-        member = Path(root / name)
-        candidate_raw, candidate = read_qrp_json_file(member)
-        digest = hashlib.sha256(candidate_raw).hexdigest()
-        members[name] = candidate
-        if digest != expected_hash:
-            raise ValueError("industry_snapshot_member_hash_mismatch")
-    seen = set()
-    for snapshot in metadata["snapshots"]:
-        if type(snapshot) is not dict or not {
-            "snapshot_id",
-            "industry_standard_id",
-            "observation_date",
-            "publication_date",
-            "source_url",
-            "candidate_file",
-            "document_sha256",
-            "publication_evidence_url",
-            "publication_evidence_sha256",
-        } <= set(snapshot):
-            raise ValueError("industry_snapshot_metadata_invalid")
-        standard = snapshot["industry_standard_id"]
-        if type(standard) is not str or standard not in {"CSRC2012", "CAPCO"}:
-            raise ValueError("industry_snapshot_standard_invalid")
-        identifier = snapshot["snapshot_id"]
-        if (
-            type(identifier) is not str
-            or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", identifier) is None
-            or identifier in seen
-        ):
-            raise ValueError("industry_snapshot_id_invalid")
-        seen.add(identifier)
-        observed = _snapshot_date(snapshot["observation_date"])
-        published = _snapshot_date(snapshot["publication_date"])
-        if observed > published:
-            raise ValueError("industry_snapshot_publication_invalid")
-        expected_host = (
-            "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
-        )
-        for key in ("source_url", "publication_evidence_url"):
-            if type(snapshot[key]) is not str:
-                raise ValueError("industry_snapshot_source_invalid")
-            url = urlsplit(snapshot[key])
-            if url.scheme != "https" or url.netloc != expected_host or not url.path:
-                raise ValueError("industry_snapshot_source_invalid")
-        for key in ("document_sha256", "publication_evidence_sha256"):
-            if (
-                type(snapshot[key]) is not str
-                or re.fullmatch(r"[0-9a-f]{64}", snapshot[key]) is None
-            ):
-                raise ValueError("industry_snapshot_member_invalid")
-        if (
-            type(snapshot["candidate_file"]) is not str
-            or snapshot["candidate_file"] not in members
-        ):
-            raise ValueError("industry_snapshot_member_invalid")
-    source_identity = canonical_json_hash(
-        {
-            "metadata_sha256": hashlib.sha256(raw).hexdigest(),
-            "files": metadata["files"],
-        }
-    )
-    return metadata, members, source_identity
+    snapshots = []
+    digest = hashlib.sha256(raw)
+    with (root / "snapshots.jsonl").open("rb") as stream:
+        for line in stream:
+            digest.update(line)
+            record = json.loads(line)
+            if record["status"] == "downloaded":
+                snapshots.append(record)
+    return snapshots, digest.hexdigest()
 
 
-def _industry_frame(metadata, members, *, end_date=None):
+def _industry_frame(snapshots, *, end_date=None):
     rows = []
     counts = {"excluded_missing_required_rows": 0, "invalid_industry_rows": 0}
-    for snapshot in metadata["snapshots"]:
+    for snapshot in snapshots:
         dates = (
             pd.Timestamp(snapshot["publication_date"]) + pd.Timedelta(days=1),
             pd.Timestamp(snapshot["observation_date"]),
@@ -380,18 +302,10 @@ def _industry_frame(metadata, members, *, end_date=None):
         )
         if end_date is not None and dates[0] > pd.Timestamp(end_date):
             continue
-        candidate = members[snapshot["candidate_file"]]
-        if (
-            not {"source", "source_sha256", "records"} <= set(candidate)
-            or candidate["source"] != snapshot["source_url"]
-            or candidate["source_sha256"] != snapshot["document_sha256"]
-            or type(candidate["records"]) is not list
-            or not candidate["records"]
-        ):
-            raise ValueError("industry_snapshot_candidate_invalid")
+        if dates[1] > dates[2]:
+            raise ValueError("industry_snapshot_publication_invalid")
+        candidate = snapshot["candidate"]
         for row in candidate["records"]:
-            if type(row) is not dict:
-                raise ValueError("industry_snapshot_row_invalid")
             code = row.get("code")
             if type(code) is not str or re.fullmatch(r"\d{6}", code) is None:
                 counts["excluded_missing_required_rows"] += 1

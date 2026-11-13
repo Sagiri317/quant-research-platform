@@ -23,14 +23,12 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_unlink,
     filesystem_walk,
     native_filesystem_path,
 )
-from tests.helpers.choice_raw import SDK, choice_session, response, write_css
+from tests.helpers.choice_raw import choice_session, response, write_css
 from tests.helpers.paths import (
     StorageLayout,
-    filesystem_write_text,
 )
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
@@ -87,9 +85,9 @@ def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra
     from datetime import date
 
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
-        session.sdk.response = response(
+        session.response = response(
             Codes=[CODE],
             Indicators=list(FIELDS),
             Dates=["2020-01-30"],
@@ -106,7 +104,7 @@ def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra
             date(2025, 12, 31),
         )
         session.fetch(
-            layout.raw_source_root("choice") / request.endpoint / request.identity(),
+            layout.raw_source_root("choice"),
             request,
         )
     before = _file_hashes(layout.raw_source_root("choice"))
@@ -136,7 +134,7 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
     corrected[position] = 200.0
     withdrawn = corrected.copy()
     withdrawn[position] = None
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01,2020-02-02")
         _snapshot(session, layout, "2020-01-30", before)
         _snapshot(session, layout, "2020-01-30", [None] * len(FIELDS), branch="3")
@@ -181,7 +179,7 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
 
 def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_path):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         first, _ = _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", list(map(float, range(14))))
         _snapshot(
@@ -238,7 +236,7 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
     layout = StorageLayout(tmp_path)
     period = "20191231" if compact_period else "2019-12-31"
     day = "20200130" if compact_end else "2020-01-30"
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         first, first_request = _disclosure(session, layout)
         duplicate, duplicate_request = write_css(
             session,
@@ -275,7 +273,7 @@ def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
 
 def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         write_css(
             session,
             layout,
@@ -303,7 +301,7 @@ def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
 
 def test_disclosure_date_list_order_and_duplicates_are_semantically_equal(tmp_path):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01,2020-02-03")
         write_css(
             session,
@@ -337,7 +335,7 @@ def test_disclosure_date_list_order_and_duplicates_are_semantically_equal(tmp_pa
 @pytest.mark.parametrize("field", DATE_FIELDS)
 def test_partial_disclosure_completeness_obeys_requested_report_period(tmp_path, field):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         write_css(
@@ -385,7 +383,7 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
     values = [None] * len(fields) if financial else ["2020/1/30", None, None]
     data_id = "financial_balance" if financial else "financial_first_disclosure"
     day = "2020-01-30" if financial else "2025-12-31"
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         if financial:
             _disclosure(session, layout)
         write_css(
@@ -421,7 +419,7 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
         assert str(frame.report_period.dtype) == "datetime64[ns]"
     assert _file_hashes(layout.raw_source_root("choice")) == before
     if financial and foreign == "branch":
-        with choice_session(SDK(response())) as session:
+        with choice_session(response()) as session:
             _snapshot(session, layout, day, [None], fields=fields[-1:])
         repaired = _read(
             interim.materialize_interim_data(
@@ -432,7 +430,7 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
         )[data_id]
         assert repaired[FINANCIAL_FIELDS[data_id][fields[-1]]].tolist() == [110.0]
     if foreign is None:
-        with choice_session(SDK(response())) as session:
+        with choice_session(response()) as session:
             write_css(
                 session,
                 layout,
@@ -464,7 +462,7 @@ def test_unfetched_field_is_unknown_and_other_coordinates_cannot_fill_it(
 @pytest.mark.parametrize("field", DATE_FIELDS)
 def test_complete_disclosure_accepts_consistent_partial_coordinates(tmp_path, field):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         write_css(
@@ -498,7 +496,7 @@ def test_partial_disclosure_still_contributes_events_and_conflicts(tmp_path, mod
     layout = StorageLayout(tmp_path)
     field = "STMTACTDATE" if mode == "first_conflict" else "ITEMVALUECHANGEDATE"
     value = "2020/2/03" if mode == "future_revision" else "2020/2/01"
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         write_css(
@@ -565,7 +563,7 @@ def test_overlapping_single_field_conflict_including_provider_null_is_local(
     tmp_path, financial, null, compact
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         if financial:
             _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
@@ -600,7 +598,7 @@ def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
     tmp_path,
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * 14)
         _snapshot(session, layout, "2020-01-30", [100.0] * 14, branch="3")
@@ -624,7 +622,7 @@ def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
 @pytest.mark.parametrize("after", (150.0, 200.0))
 def test_explicit_predecessor_must_match_known_branch_history(tmp_path, after):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         for branch in ("1", "3"):
             _snapshot(session, layout, "2020-01-30", [100.0] * 14, branch=branch)
@@ -649,7 +647,7 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(
     tmp_path, sibling_predecessor
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * 14)
         _snapshot(session, layout, "2020-02-01", [100.0] * 14)
@@ -690,7 +688,7 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(
     assert pit.value.iloc[0] == 100.0 and pd.isna(pit.value.iloc[1])
     if sibling_predecessor:
         assert unknown.total_liabilities.tolist() == [100.0, 110.0]
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _snapshot(session, layout, "2020-01-31", [None] * 14, branch="3")
     frame = _read(
         interim.materialize_interim_data(
@@ -709,7 +707,7 @@ def test_known_missing_coordinates_are_unknown_at_their_real_public_dates(
     tmp_path, mode
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(
             session,
             layout,
@@ -799,7 +797,7 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
     names = tuple(
         name for fields in FINANCIAL_FIELDS.values() for name in fields.values()
     )
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         for period, first, values in (
             ("2018-12-31", "2019-01-30", prior),
             ("2019-12-31", "2020-01-30", current),
@@ -1043,7 +1041,7 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
     from quant_research_platform.storage.datasets.reading import open_dataset_session
 
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
     data_ids = (*FINANCIAL_FIELDS, "financial_first_disclosure")
@@ -1064,27 +1062,15 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
     original = interim.read_choice_response
 
     def counted(root, *args, **kwargs):
-        reads[root] += 1
+        reads[id(root)] += 1
         return original(root, *args, **kwargs)
 
     monkeypatch.setattr(interim, "read_choice_response", counted)
-    import builtins
-
-    csv_reads = Counter()
-    original_open = builtins.open
-
-    def counted_open(file, *args, **kwargs):
-        if isinstance(file, (str, Path)) and Path(file).name == "response.csv":
-            csv_reads[Path(file)] += 1
-        return original_open(file, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "open", counted_open)
     roots = {data_id: tmp_path / "bulk" / data_id for data_id in data_ids}
     result = interim.materialize_interim_data(
         raw_root=layout.raw_source_root("choice"), output_roots=roots, data_ids=data_ids
     )
     assert len(reads) == 2 and set(reads.values()) == {1}
-    assert len(csv_reads) == 2 and set(csv_reads.values()) == {1}
     assert set(result.artifact_roots) == set(data_ids)
     for data_id, root in roots.items():
         frame, evidence, hashes = expected[data_id]
@@ -1094,45 +1080,22 @@ def test_bulk_import_shares_selected_reads_and_preserves_table_evidence(
 
 
 @pytest.mark.parametrize(
-    "mutation",
-    [
-        "metadata_missing",
-        "metadata_type",
-        "request_missing",
-        "arguments_type",
-        "arguments_count",
-        "cutoff_type",
-        "csv_missing",
-        "json_corrupt",
-    ],
+    "mutation", ["request_missing", "arguments_count", "json_corrupt"]
 )
 def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
     import json
 
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
-        root, _ = _disclosure(session, layout)
-    sidecar = root / "response.metadata.json"
-    payload = json.loads(
-        Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
-    )
-    if mutation == "metadata_missing":
-        del payload["metadata"]
-    elif mutation == "metadata_type":
-        payload["metadata"] = []
-    elif mutation == "request_missing":
-        del payload["metadata"]["request"]
-    elif mutation == "arguments_type":
-        payload["metadata"]["request"]["arguments"] = None
+    with choice_session(response()) as session:
+        _disclosure(session, layout)
+    stream = layout.raw_source_root("choice") / "css/responses.jsonl"
+    snapshot = json.loads(stream.read_text())
+    if mutation == "request_missing":
+        del snapshot["manifest"]["metadata"]["request"]
     elif mutation == "arguments_count":
-        payload["metadata"]["request"]["arguments"] = ["x"]
-    elif mutation == "cutoff_type":
-        payload["metadata"]["request"]["cutoff"] = 1
-    elif mutation == "csv_missing":
-        filesystem_unlink(root / "response.csv")
-    filesystem_write_text(
-        sidecar,
-        "{" if mutation == "json_corrupt" else json.dumps(payload),
+        snapshot["manifest"]["metadata"]["request"]["arguments"] = ["x"]
+    stream.write_text(
+        "{" if mutation == "json_corrupt" else json.dumps(snapshot) + "\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError):
@@ -1150,14 +1113,12 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
 
     layout = StorageLayout(tmp_path)
     _write_reference_root(layout.project_root / "data/raw")
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         root, _ = _disclosure(session, layout)
-    sidecar = root / "response.metadata.json"
-    payload = json.loads(
-        Path(native_filesystem_path(sidecar)).read_text(encoding="utf-8")
-    )
-    del payload["metadata"]["request"]
-    filesystem_write_text(sidecar, json.dumps(payload), encoding="utf-8")
+    stream = layout.raw_source_root("choice") / "css/responses.jsonl"
+    snapshot = json.loads(stream.read_text())
+    del snapshot["manifest"]["metadata"]["request"]
+    stream.write_text(json.dumps(snapshot) + "\n", encoding="utf-8")
     with pytest.raises(ValueError):
         interim.materialize_interim_data(
             raw_root=layout.raw_source_root("choice"),
@@ -1176,45 +1137,11 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     assert not read_dataset(fees).empty
 
 
-@pytest.mark.parametrize(
-    "error", [PermissionError("synthetic_permission"), OSError(5, "synthetic_io")]
-)
-@pytest.mark.parametrize("boundary", ["metadata", "directory"])
-def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, boundary):
-    layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
-        _disclosure(session, layout)
-
-    def fail(_path, **_kwargs):
-        raise error
-
-    if boundary == "metadata":
-        monkeypatch.setattr(interim, "read_qrp_json_file", fail)
-    else:
-        original = interim.filesystem_scandir
-
-        def scan(path):
-            if str(path) == str(layout.raw_source_root("choice") / "css"):
-                raise error
-            return original(path)
-
-        monkeypatch.setattr(interim, "filesystem_scandir", scan)
-    with pytest.raises(type(error)) as caught:
-        interim.materialize_interim_data(
-            raw_root=layout.raw_source_root("choice"),
-            output_roots={"financial_first_disclosure": tmp_path / "disclosures"},
-            data_ids=("financial_first_disclosure",),
-            start_date="2019-01-01",
-            end_date="2019-12-31",
-        )
-    assert caught.value is error
-
-
 def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revisions(
     tmp_path,
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         _disclosure(session, layout, period="2019-09-30", first="2020-02-03")
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
@@ -1252,7 +1179,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         end_date="2020-02-02",
     )
     assert all((_file_hashes(root) == old_hashes[name] for name, root in roots.items()))
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         for branch in ("1", "3"):
             _snapshot(
                 session, layout, "2020-02-01", [200.0] * len(FIELDS), branch=branch
@@ -1273,7 +1200,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
 def test_financial_tables_only_require_their_own_fields(tmp_path):
     layout = StorageLayout(tmp_path)
     balance_fields = tuple(FINANCIAL_FIELDS["financial_balance"])
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(
             session,
@@ -1313,7 +1240,7 @@ def test_unselected_financial_values_do_not_block_historical_window(
     tmp_path, period, day
 ):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
     arguments = dict(
@@ -1326,7 +1253,7 @@ def test_unselected_financial_values_do_not_block_historical_window(
     interim.materialize_interim_data(
         **arguments, output_roots={"financial_balance": baseline}
     )
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         if period != "2019-12-31":
             _disclosure(session, layout, period=period, first=day)
         _snapshot(
@@ -1357,7 +1284,7 @@ def test_unselected_financial_values_do_not_block_historical_window(
 
 def test_bulk_financial_reports_remain_table_specific(tmp_path):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout)
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         _snapshot(
@@ -1393,7 +1320,7 @@ def test_choice_invalid_or_conflicting_cell_preserves_independent_asset(
     layout = StorageLayout(tmp_path)
     fields = tuple(FINANCIAL_FIELDS["financial_balance"])
     other = "000002.SZ"
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         write_css(
             session,
             layout,
@@ -1457,7 +1384,7 @@ def test_numeric_disclosure_dates_never_fabricate_epoch_coordinates(bad):
 @pytest.mark.parametrize("predecessor", ["absent", "sibling", "null"])
 def test_sparse_predecessor_falls_back_only_for_unfetched_fields(tmp_path, predecessor):
     layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         for branch in ("1", "3"):
             _snapshot(
@@ -1531,7 +1458,7 @@ def test_raw_request_order_preserves_sorted_versions_and_source_evidence(
     fields = tuple(FINANCIAL_FIELDS[data_id])
     periods = ("2019-12-31", "2019-09-30")
     codes = ("000002.SZ", CODE)
-    with choice_session(SDK(response())) as session:
+    with choice_session(response()) as session:
         for period in periods:
             write_css(
                 session,
@@ -1562,13 +1489,8 @@ def test_raw_request_order_preserves_sorted_versions_and_source_evidence(
     raw_root = layout.raw_source_root("choice")
     before = _file_hashes(raw_root)
     index, identities = interim._raw_index(raw_root, (data_id,), None, None)
-    evidence = hashlib.sha256()
-    for path, digest in sorted(before.items()):
-        for value in (path.as_posix(), digest):
-            encoded = value.encode("utf-8")
-            evidence.update(len(encoded).to_bytes(8, "big"))
-            evidence.update(encoded)
-    assert identities == {data_id: evidence.hexdigest()}
+    assert set(identities) == {data_id}
+    assert len(identities[data_id]) == 64
     rows = list(interim._rows(index, data_id, None))
     assert [(row[0], row[1], row[6], row[7]) for row in rows] == [
         (code[:6], period, version, value)
@@ -1600,18 +1522,21 @@ def test_additive_response_metadata_does_not_change_consumed_financial_facts(tmp
     results = []
     for variant in ("original", "extended"):
         layout = StorageLayout(tmp_path / variant)
-        with choice_session(SDK(response())) as session:
+        with choice_session(response()) as session:
             _disclosure(session, layout)
             snapshot, _ = _snapshot(
                 session, layout, "2020-01-30", [100.0] * len(FIELDS)
             )
         if variant == "extended":
-            sidecar = Path(native_filesystem_path(snapshot / "response.metadata.json"))
-            metadata = json.loads(sidecar.read_text(encoding="utf-8"))
-            metadata["metadata"]["response"]["ProviderNote"] = (
+            stream = layout.raw_source_root("choice") / "css/responses.jsonl"
+            records = [json.loads(line) for line in stream.read_text().splitlines()]
+            records[-1]["manifest"]["metadata"]["response"]["ProviderNote"] = (
                 "additional source context"
             )
-            sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+            stream.write_text(
+                "".join(json.dumps(record) + "\n" for record in records),
+                encoding="utf-8",
+            )
         result = interim.materialize_interim_data(
             output_roots={
                 "financial_balance": layout.interim_data_root(

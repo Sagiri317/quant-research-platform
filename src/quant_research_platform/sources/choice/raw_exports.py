@@ -3,56 +3,50 @@
 from __future__ import annotations
 
 import hashlib
-import re
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.policy.share_safety import evidence_text_unsafe_reason
-from quant_research_platform.storage.manifests import (
-    read_manifest,
-    read_qrp_json_file,
-)
-from quant_research_platform.storage.raw_snapshots import (
-    iter_csv_snapshot,
-)
 
 _PREFIX = ("__choice_key", "__choice_date_index")
-_RESPONSE_FIELDS = (
-    "ErrorCode",
-    "ErrorMsg",
-    "Codes",
-    "Indicators",
-    "Dates",
-    "RequestID",
-    "SerialID",
-)
-_EVENT_FIELDS = frozenset(
-    {
-        "STMTACTDATE",
-        "ACTUALISSUINGDATE",
-        "ITEMVALUECHANGEDATE",
-        "NOTICEDATE",
-        "RPUPDATE",
-        "DELIST_DATE",
-    }
-)
-_OPTIONS = frozenset(
-    {
-        "reportdate",
-        "reporttype",
-        "startdate",
-        "enddate",
-        "type",
-        "secucode",
-        "indexcode",
-        "recvtimeout",
-        "ispandas",
-    }
-)
+
+
+def iter_choice_snapshots(raw_root, endpoint):
+    """Read one interface stream; failed and empty responses retain their records."""
+    root = Path(raw_root)
+    if not root.exists():
+        return
+    if (
+        json.loads((root / "metadata.json").read_bytes())["schema_id"]
+        != "qrp-choice-response-stream"
+    ):
+        raise ValueError("choice_raw_request_metadata_invalid")
+    path = root / endpoint / "responses.jsonl"
+    if not path.exists():
+        return
+    with path.open("rb") as stream:
+        for line in stream:
+            try:
+                snapshot = json.loads(line, object_hook=_decode_bytes)
+                manifest = snapshot["manifest"]
+                if type(manifest["metadata"]["request"]) is not dict:
+                    raise ValueError("choice_raw_request_metadata_invalid")
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise ValueError("choice_raw_request_metadata_invalid") from error
+            yield snapshot
+
+
+def _decode_bytes(value):
+    return bytes.fromhex(value["bytes_hex"]) if set(value) == {"bytes_hex"} else value
+
+
+def _snapshot_rows(snapshot):
+    for row in snapshot["rows"]:
+        yield tuple(row)
 
 
 @dataclass(frozen=True)
@@ -69,7 +63,7 @@ class ChoiceRequest:
 
     def payload(self) -> dict[str, object]:
         if self.endpoint not in {"css", "ctr", "sector"}:
-            raise ValueError("choice_readonly_endpoint_required")
+            raise ValueError("choice_response_endpoint_invalid")
         if (
             type(self.arguments) is not tuple
             or len(self.arguments) != 3
@@ -79,37 +73,6 @@ class ChoiceRequest:
             or not self.sdk_version
         ):
             raise ValueError("choice_request_invalid")
-        for text in (*self.arguments, self.sdk_version):
-            if evidence_text_unsafe_reason(text) is not None:
-                raise ValueError("choice_request_unsafe")
-        if not re.fullmatch(r"[A-Za-z0-9_.,-]+", self.arguments[0]):
-            raise ValueError("choice_request_identifier_invalid")
-        options: dict[str, str] = {}
-        for part in self.arguments[2].split(","):
-            if not part:
-                continue
-            key, separator, value = part.partition("=")
-            key = key.lower()
-            if (
-                separator != "="
-                or key not in _OPTIONS
-                or key in options
-                or not re.fullmatch(r"[A-Za-z0-9_.-]+", value)
-            ):
-                raise ValueError("choice_request_option_invalid")
-            options[key] = value
-        if options.get("ispandas", "0") != "0":
-            raise ValueError("choice_structured_response_required")
-        for key in ("reportdate", "startdate", "enddate"):
-            if key in options and date.fromisoformat(options[key]) > self.cutoff:
-                raise ValueError("choice_request_after_cutoff")
-        if self.endpoint == "css" and "enddate" not in options:
-            raise ValueError("choice_explicit_enddate_required")
-        if self.endpoint == "sector":
-            if date.fromisoformat(self.arguments[1]) > self.cutoff:
-                raise ValueError("choice_request_after_cutoff")
-        elif not re.fullmatch(r"[A-Za-z0-9_,]*", self.arguments[1]):
-            raise ValueError("choice_request_indicator_invalid")
         return {
             "endpoint": self.endpoint,
             "arguments": list(self.arguments),
@@ -120,29 +83,20 @@ class ChoiceRequest:
 
 
 def read_choice_response(
-    root: Path,
+    snapshot,
     request: ChoiceRequest,
-    *,
-    manifest=None,
-    verify_bytes: bool = False,
-    content_hashes: list[str] | None = None,
 ) -> dict[str, object]:
-    """Restore typed provider observations; byte auditing is explicit and optional."""
-    request.payload()
+    """Restore the selected structured response and its typed provider values."""
     metadata = response = header = {}
     data = [] if request.endpoint == "sector" else {}
     row = value = None
-    if manifest is None:
-        manifest = read_qrp_json_file(root / "response.metadata.json")[1]
+    manifest = snapshot["manifest"]
     metadata = manifest["metadata"]
     with closing_iterator(
         _validated_rows(
-            root,
+            snapshot,
             request,
             metadata,
-            manifest=manifest,
-            verify_bytes=verify_bytes,
-            content_hashes=content_hashes,
         )
     ) as rows:
         for count, row in enumerate(rows):
@@ -170,21 +124,12 @@ def read_choice_response(
 
 
 def _validate_response_metadata(value: dict[str, object]) -> None:
-    if not set(_RESPONSE_FIELDS) <= set(value):
+    if not {"ErrorCode", "Codes", "Indicators", "Dates"} <= set(value):
         raise ValueError("choice_response_fields_invalid")
-    for name in ("ErrorCode", "RequestID", "SerialID"):
-        if type(value[name]) is not int:
-            raise ValueError("choice_response_type_invalid")
     for name in ("Codes", "Indicators", "Dates"):
         items = value[name]
         if type(items) is not list or any(type(item) is not str for item in items):
             raise ValueError("choice_response_type_invalid")
-        if any(evidence_text_unsafe_reason(item) is not None for item in items):
-            raise ValueError("choice_response_metadata_unsafe")
-    if type(value["ErrorMsg"]) is not str:
-        raise ValueError("choice_response_type_invalid")
-    if evidence_text_unsafe_reason(value["ErrorMsg"]) is not None:
-        raise ValueError("choice_response_message_unsafe")
     indicators = value["Indicators"]
     if len(indicators) != len(set(indicators)) or any(
         name in _PREFIX for name in indicators
@@ -192,113 +137,25 @@ def _validate_response_metadata(value: dict[str, object]) -> None:
         raise ValueError("choice_response_indicators_invalid")
 
 
-def _empty_scope() -> dict[str, object]:
-    return {
-        "event_date_count": 0,
-        "after_cutoff_count": 0,
-        "unparsed_event_cells": 0,
-        "raw_preserved": True,
-        "research_cutoff_applied": False,
-    }
-
-
-def _observe_scope(
-    scope: dict[str, object],
-    indicators: list[str],
-    values: tuple[object, ...],
-    cutoff: date,
-) -> None:
-    for indicator, value in zip(indicators, values, strict=True):
-        if indicator.upper() not in _EVENT_FIELDS:
-            continue
-        items = value if type(value) is list else [value]
-        for item in items:
-            if item is None or item == "":
-                continue
-            tokens = (
-                re.findall(r"\d{4}[/-]\d{1,2}[/-]\d{1,2}|\d{1,2}/\d{1,2}/\d{4}", item)
-                if type(item) is str
-                else []
-            )
-            if not tokens:
-                scope["unparsed_event_cells"] += 1
-            for token in tokens:
-                parts = token.replace("-", "/").split("/")
-                try:
-                    observed = date(
-                        *map(
-                            int,
-                            parts
-                            if len(parts[0]) == 4
-                            else [parts[2], parts[0], parts[1]],
-                        )
-                    )
-                except ValueError:
-                    scope["unparsed_event_cells"] += 1
-                    continue
-                scope["event_date_count"] += 1
-                scope["after_cutoff_count"] += int(observed > cutoff)
-
-
 def _validated_rows(
-    root: Path,
+    snapshot,
     request: ChoiceRequest,
     metadata: dict[str, object],
-    *,
-    manifest=None,
-    verify_bytes: bool = False,
-    content_hashes: list[str] | None = None,
 ) -> Iterator[tuple[object, ...]]:
-    required = {"request", "response", "data_container", "units", "types"}
-    diagnostics = {"collected_at", "status", "scope"}
-    if (
-        type(metadata) is not dict
-        or not required.issubset(metadata)
-        or (verify_bytes and set(metadata) != required | diagnostics)
-    ):
+    required = {"request", "response"}
+    if type(metadata) is not dict or not required.issubset(metadata):
         raise ValueError("choice_saved_metadata_invalid")
     if metadata.get("request") != request.payload():
         raise ValueError("choice_saved_request_mismatch")
     response = metadata["response"]
     _validate_response_metadata(response)
-    if metadata["data_container"] != (
-        "list"
-        if request.endpoint == "sector" and response["ErrorCode"] == 0
-        else "dict"
-    ):
-        raise ValueError("choice_saved_container_invalid")
-    if (
-        verify_bytes
-        and datetime.fromisoformat(metadata["collected_at"]).utcoffset() is None
-    ):
-        raise ValueError("choice_saved_collection_time_invalid")
-    if (
-        metadata["units"] != "provider_native_no_conversion"
-        or metadata["types"] != "JSON_cell_types; SDK_null=None; bytes_hex_for_char"
-    ):
-        raise ValueError("choice_saved_representation_invalid")
-    if manifest is None:
-        manifest = read_manifest(root / "response.metadata.json")
-    if manifest["metadata"] != metadata:
-        raise ValueError("raw_csv_metadata_invalid")
+    if response["ErrorCode"] != 0:
+        raise RuntimeError(f"choice_query_failed:{response['ErrorCode']}")
+    manifest = snapshot["manifest"]
     if manifest["columns"] != [*_PREFIX, *response["Indicators"]]:
         raise ValueError("choice_saved_columns_invalid")
-    if type(manifest["row_count"]) is not int or manifest["row_count"] < 0:
-        raise ValueError("choice_saved_shape_invalid")
-    if request.endpoint != "ctr" and manifest["row_count"] != len(
-        response["Codes"]
-    ) * len(response["Dates"]):
-        raise ValueError("choice_saved_shape_invalid")
-    scope = _empty_scope()
     count = 0
-    with closing_iterator(
-        iter_csv_snapshot(
-            root,
-            expected_manifest=manifest,
-            verify_bytes=verify_bytes,
-            content_hashes=content_hashes,
-        )
-    ) as rows:
+    with closing_iterator(_snapshot_rows(snapshot)) as rows:
         for row in rows:
             if len(row) != len(response["Indicators"]) + 2 or type(row[0]) is not str:
                 raise ValueError("choice_saved_shape_invalid")
@@ -313,25 +170,9 @@ def _validated_rows(
                     or row[:2] != (response["Codes"][count // dates], count % dates)
                 ):
                     raise ValueError("choice_saved_coordinates_invalid")
-            if verify_bytes:
-                _observe_scope(scope, response["Indicators"], row[2:], request.cutoff)
             count += 1
             yield row
     if request.endpoint != "ctr" and count != len(response["Codes"]) * len(
         response["Dates"]
     ):
         raise ValueError("choice_saved_shape_invalid")
-    if verify_bytes and (
-        metadata["scope"] != scope
-        or any(
-            type(metadata["scope"].get(key)) is not type(value)
-            for key, value in scope.items()
-        )
-    ):
-        raise ValueError("choice_saved_scope_invalid")
-    if verify_bytes and metadata["status"] != (
-        "COMPLETE" if response["ErrorCode"] == 0 else "FAILED"
-    ):
-        raise ValueError("choice_saved_status_invalid")
-    if response["ErrorCode"] != 0:
-        raise RuntimeError(f"choice_query_failed:{response['ErrorCode']}")

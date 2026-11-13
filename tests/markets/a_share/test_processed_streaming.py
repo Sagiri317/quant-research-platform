@@ -865,7 +865,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
         filesystem_mkdir,
         filesystem_walk,
     )
-    from tests.helpers.choice_raw import SDK, choice_session, response, write_css
+    from tests.helpers.choice_raw import choice_session, response, write_css
 
     dates = pd.DatetimeIndex(["2019-01-30", "2019-01-31", "2019-02-01"])
     codes = ("000001.SZ", "000002.SZ", "000003.SZ")
@@ -920,7 +920,7 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                 source[data_id],
                 spec=source_spec,
             )
-        with choice_session(SDK(response())) as session:
+        with choice_session(response()) as session:
             write_css(
                 session,
                 layout,

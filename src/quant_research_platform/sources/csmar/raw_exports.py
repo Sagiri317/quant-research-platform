@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
-import stat
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 import pandas as pd
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.storage.identity import (
-    filesystem_stat,
-    filesystem_walk,
-)
+from quant_research_platform.storage.identity import filesystem_walk
 
 from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
@@ -25,6 +21,8 @@ from .raw_schemas import (
 )
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
+
+
 STRING_CODE_DTYPES = {
     "ReportID": str,
     "AnanmID": str,
@@ -114,21 +112,13 @@ INDEX_INFO_SOURCE_CODE_COLUMNS = (
 
 def _iter_raw_export_paths(root: Path) -> Iterator[Path]:
     root = Path(root)
-    metadata = filesystem_stat(root)
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise ValueError("csmar_raw_export_identity_changed")
 
     def fail_walk(error: OSError) -> None:
-        if isinstance(error, (FileNotFoundError, NotADirectoryError)):
-            raise ValueError("csmar_raw_export_identity_changed") from error
         raise error
 
-    walker = iter(filesystem_walk(root, follow_symlinks=False, on_error=fail_walk))
-    while True:
-        try:
-            parent, dirnames, filenames = next(walker)
-        except StopIteration:
-            return
+    for parent, dirnames, filenames in filesystem_walk(
+        root, follow_symlinks=False, on_error=fail_walk
+    ):
         dirnames[:] = sorted(name for name in dirnames if name.casefold() != "raw_only")
         for name in sorted(filenames):
             path = parent / name
@@ -257,19 +247,12 @@ def dataset_files_by_id(
     """Select source members; validate schema during actual CSV consumption."""
     root = Path(raw_root)
     requested = _requested_raw_datasets(requested_datasets)
-    records, physical_members = [], set()
+    records = []
     with closing_iterator(_iter_raw_export_paths(root)) as paths:
         for path in paths:
-            metadata = filesystem_stat(path)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ValueError("csmar_raw_export_identity_changed")
             dataset = _raw_dataset_candidate(path)
             if dataset is None or requested is not None and dataset not in requested:
                 continue
-            physical_key = (metadata.st_dev, metadata.st_ino)
-            if physical_key in physical_members:
-                raise ValueError("csmar_raw_export_identity_changed")
-            physical_members.add(physical_key)
             records.append((dataset, path))
     yield from sorted(
         records, key=lambda item: (item[0], item[1].relative_to(root).as_posix())

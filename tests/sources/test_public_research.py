@@ -874,15 +874,6 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     assert published.available_at.iloc[0] == pd.Timestamp("2024-01-03T01:30:00Z")
     assert published.availability_basis.tolist() == ["assumed_next_open"]
     assert published.availability_evidence_url.tolist() == ["https://example.org/rule"]
-    (source / "shares.json").write_bytes(payload + b" ")
-    with pytest.raises(ValueError, match="integrity_mismatch"):
-        prepare_source(
-            {
-                "source_id": "public_research",
-                "raw_root": str(source),
-                "outputs": {"public_fund_shares": str(tmp_path / "tampered")},
-            }
-        )
 
 
 def test_sse_missing_lending_amount_is_not_zero(tmp_path):

@@ -51,38 +51,6 @@ def test_requested_dataset_rejects_ambiguous_header(tmp_path: Path) -> None:
         )
 
 
-@pytest.mark.parametrize("error_type", [GeneratorExit, KeyboardInterrupt, MemoryError])
-def test_csv_constructor_preserves_primary_when_close_fails(
-    tmp_path, monkeypatch, error_type
-):
-    from quant_research_platform.sources.csmar import raw_schemas
-
-    primary = error_type("constructor-primary")
-    path = tmp_path / "synthetic.csv"
-    path.write_bytes(b"a,b\n1,2\n")
-    handle = path.open("rb")
-
-    class FailingHandle:
-        def fileno(self):
-            return handle.fileno()
-
-        def readable(self):
-            raise primary
-
-        def close(self):
-            handle.close()
-            raise OSError("close-secondary")
-
-    monkeypatch.setattr(
-        raw_schemas, "open_filesystem_file", lambda *_a: FailingHandle()
-    )
-    with pytest.raises(error_type) as raised:
-        raw_schemas._CsvRecords(path)
-    assert raised.value is primary
-    assert handle.closed
-    assert primary.__notes__ == ["CSMAR source close also failed: OSError"]
-
-
 def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
     import csv
 

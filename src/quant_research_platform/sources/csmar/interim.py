@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import stat
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from itertools import groupby
@@ -45,9 +44,6 @@ from quant_research_platform.sources.csmar.raw_exports import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
-from quant_research_platform.storage.identity import (
-    filesystem_stat,
-)
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -1126,14 +1122,6 @@ def _iter_normalized_interim_frames(
     }
     pending = []
     for input_file in input_files:
-        parent = Path(input_file.parent)
-        try:
-            parent_stat = filesystem_stat(parent)
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            raise ValueError("csmar_interim_source_parent_invalid") from exc
-        if not stat.S_ISDIR(parent_stat.st_mode):
-            raise ValueError("csmar_interim_source_parent_invalid")
-        completed_before = len(content_hashes)
         chunks = iter_private_export_chunks(
             input_file,
             dataset=data_id,
@@ -1207,8 +1195,6 @@ def _iter_normalized_interim_frames(
                     continue
                 emitted_rows += len(pruned)
                 yield pruned
-        if len(content_hashes) != completed_before + 1:
-            raise ValueError("csmar_raw_export_incomplete_read")
     if pending:
         combined = pd.concat(pending, ignore_index=True)
         pending.clear()

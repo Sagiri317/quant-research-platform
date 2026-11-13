@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Iterator, Mapping
@@ -36,13 +37,10 @@ from quant_research_platform.sources.choice.ids import (
 )
 from quant_research_platform.sources.choice.raw_exports import (
     ChoiceRequest,
+    iter_choice_snapshots,
     read_choice_response,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.identity import (
-    filesystem_scandir,
-)
-from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _DISCLOSURE_INDICATORS = {"STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"}
 _CONFLICT = object()
@@ -135,59 +133,54 @@ def _raw_requests(raw_root: Path, *, data_ids):
     indicators = {
         field for data_id in data_ids for field in FINANCIAL_FIELDS.get(data_id, {})
     }
-    root = Path(raw_root)
-    try:
-        entries = filesystem_scandir(root / "css")
-    except NotADirectoryError as error:
-        raise ValueError("choice_raw_identity_changed") from error
-    except FileNotFoundError:
-        return
-    with closing_iterator(entries):
-        for entry in entries:
-            if entry.name == "failed":
-                continue
-            directory = root / "css" / entry.name
-            path = directory / "response.metadata.json"
-            raw_metadata, manifest = read_qrp_json_file(path)
-            try:
-                payload = manifest["metadata"]["request"]
-                if type(payload["arguments"]) is not list:
-                    raise ValueError("choice_raw_request_metadata_invalid")
-                request = ChoiceRequest(
-                    endpoint=payload["endpoint"],
-                    arguments=tuple(payload["arguments"]),
-                    sdk_version=payload["sdk_version"],
-                    cutoff=date.fromisoformat(payload["cutoff"]),
-                )
-                request.payload()
-            except (KeyError, TypeError) as error:
-                raise ValueError("choice_raw_request_metadata_invalid") from error
-            if request.endpoint != "css":
-                raise ValueError("choice_raw_identity_changed")
-            options = dict(
-                (
-                    (name.lower(), value)
-                    for part in request.arguments[2].split(",")
-                    if part
-                    for name, _, value in (part.partition("="),)
-                )
+    for saved_response in iter_choice_snapshots(raw_root, "css"):
+        manifest = saved_response["manifest"]
+        if manifest["metadata"]["response"]["ErrorCode"] != 0:
+            continue
+        raw_metadata = (
+            saved_response.get("source_metadata_sha256")
+            or hashlib.sha256(
+                json.dumps(manifest, ensure_ascii=False).encode()
+            ).hexdigest()
+        )
+        try:
+            payload = manifest["metadata"]["request"]
+            if type(payload["arguments"]) is not list:
+                raise ValueError("choice_raw_request_metadata_invalid")
+            request = ChoiceRequest(
+                endpoint=payload["endpoint"],
+                arguments=tuple(payload["arguments"]),
+                sdk_version=payload["sdk_version"],
+                cutoff=date.fromisoformat(payload["cutoff"]),
             )
-            fields = set(request.arguments[1].upper().split(","))
-            disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
-            financial_fields = bool(set(indicators).intersection(fields))
-            snapshot = financial_fields and (options.get("type", "1") in {"1", "3"})
-            if "reportdate" not in options or not (disclosure or snapshot):
-                continue
-            _yield_value = (
-                directory,
-                request,
-                options,
-                disclosure,
-                snapshot,
-                raw_metadata,
-                manifest,
+            request.payload()
+        except (KeyError, TypeError) as error:
+            raise ValueError("choice_raw_request_metadata_invalid") from error
+        if request.endpoint != "css":
+            raise ValueError("choice_raw_identity_changed")
+        options = dict(
+            (
+                (name.lower(), value)
+                for part in request.arguments[2].split(",")
+                if part
+                for name, _, value in (part.partition("="),)
             )
-            yield _yield_value
+        )
+        fields = set(request.arguments[1].upper().split(","))
+        disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
+        financial_fields = bool(set(indicators).intersection(fields))
+        snapshot = financial_fields and (options.get("type", "1") in {"1", "3"})
+        if "reportdate" not in options or not (disclosure or snapshot):
+            continue
+        _yield_value = (
+            saved_response,
+            request,
+            options,
+            disclosure,
+            snapshot,
+            raw_metadata,
+        )
+        yield _yield_value
 
 
 def _put(index, namespace, key, value):
@@ -253,7 +246,6 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
             disclosure,
             snapshot,
             raw_metadata,
-            manifest,
         ) in requests:
             period = date.fromisoformat(options["reportdate"])
             if (start is not None and period < start) or (
@@ -267,10 +259,7 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                 continue
             if snapshot and "reporttype" in options:
                 raise ValueError("choice_financial_css_reporttype_unsupported")
-            content_hashes = []
-            response = read_choice_response(
-                root, request, manifest=manifest, content_hashes=content_hashes
-            )
+            response = read_choice_response(root, request)
             fields = set(response["Indicators"])
             targets = {
                 data_id
@@ -279,15 +268,15 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                 or snapshot
                 and fields.intersection(FINANCIAL_FIELDS.get(data_id, {}))
             }
-            source_hash = content_hashes[0]
+            source_hash = root["manifest"]["sha256"]
             for data_id in targets:
                 hashes[data_id].extend(
                     (
                         (
-                            f"css/{root.name}/response.metadata.json",
-                            hashlib.sha256(raw_metadata).hexdigest(),
+                            f"css:{request.identity()}:source_metadata",
+                            raw_metadata,
                         ),
-                        (f"css/{root.name}/response.csv", source_hash),
+                        (f"css:{request.identity()}:typed_rows", source_hash),
                     )
                 )
             if not response["Data"]:
