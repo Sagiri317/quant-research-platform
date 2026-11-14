@@ -50,8 +50,10 @@ class ModelFitResult:
     prediction_model: object = field(repr=False, compare=False)
 
 
-@dataclass(frozen=True)
+@dataclass
 class PreparedTraining:
+    """First tabular matrix access consumes raw features, preserving loss rows."""
+
     training: pd.DataFrame
     row_counts: dict[str, object]
     filter_metadata: dict[str, object]
@@ -85,7 +87,12 @@ class PreparedTraining:
 
     @cached_property
     def matrix(self):
-        return self.preprocessing[1].transform(self.training.loc[:, self.input_columns])
+        matrix = self.preprocessing[1].transform(
+            self.training.loc[:, self.input_columns]
+        )
+        if self.sequence_context is None:
+            self.training = self.training.drop(columns=list(self.input_columns)).copy()
+        return matrix
 
 
 def prediction_callable(input_columns: tuple[str, ...], prediction_model: object):
@@ -143,16 +150,15 @@ def _fit_linear_model_result(
     prepared_training,
     spec: ModelSpec,
 ) -> ModelFitResult:
-    training = prepared_training.training
     row_counts = prepared_training.row_counts
     filter_metadata = prepared_training.filter_metadata
-    if training.empty:
+    if prepared_training.training.empty:
         raise ValueError("model_training_sample_empty")
     weights, scaler = prepared_training.preprocessing
     transformed = prepared_training.matrix.to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
-    target = training[spec.target_column].to_numpy(dtype="float64")
+    target = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     design *= weighted[:, None]
     beta = np.linalg.lstsq(
         design,
@@ -227,10 +233,9 @@ def _fit_estimator_model_result(
     estimator: object,
     validation=None,
 ) -> ModelFitResult:
-    training = prepared_training.training
     row_counts = prepared_training.row_counts
     filter_metadata = prepared_training.filter_metadata
-    if training.empty:
+    if prepared_training.training.empty:
         raise ValueError("model_training_sample_empty")
     predictor = _fit_predictor(
         spec,
@@ -505,11 +510,11 @@ def _fit_predictor(
     estimator: object,
     validation=None,
 ) -> object:
-    y = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     weights, scaler = prepared_training.preprocessing
     from sklearn.exceptions import ConvergenceWarning
 
     scaled_matrix = prepared_training.matrix
+    y = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     fit_options = {}
     patience = spec.hyperparameters.get("early_stopping_rounds")
     if validation is not None:

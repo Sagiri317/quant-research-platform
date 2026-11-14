@@ -133,7 +133,7 @@ def _prepare_fit(
 
 
 def _fit_prepared(prepared, spec, *, validation=None, validation_cutoff=None):
-    """Fit a fresh candidate while borrowing an explicitly prepared sample."""
+    """Fit a fresh candidate using a reusable prepared sample."""
     patience = spec.hyperparameters.get("early_stopping_rounds")
     if patience is not None and validation is None:
         raise ValueError("early_stopping_validation_required")

@@ -164,13 +164,18 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
         np.average(training.label, weights=original_weights)
     )
     pd.testing.assert_frame_equal(frame, source)
-    pd.testing.assert_frame_equal(prepared.training, training)
+    pd.testing.assert_frame_equal(
+        prepared.training, training.drop(columns=list(spec.input_columns))
+    )
     pd.testing.assert_frame_equal(prepared.matrix, original_matrix, check_exact=True)
     np.testing.assert_array_equal(weights, original_weights)
 
 
 @pytest.mark.parametrize("algorithm", ["lasso_regression", "ridge_regression"])
-def test_shared_training_keeps_mutating_candidates_on_the_original_scale(algorithm):
+@pytest.mark.parametrize("copy_X", [True, False])
+def test_shared_training_keeps_mutating_candidates_on_the_original_scale(
+    algorithm, copy_X
+):
     from dataclasses import replace
 
     from quant_research_platform.contracts.time import TimeWindow
@@ -197,15 +202,19 @@ def test_shared_training_keeps_mutating_candidates_on_the_original_scale(algorit
         input_factor_columns=("x",),
         target_column="label",
         training_scaling=False,
-        hyperparameters={"alpha": 0.01, "copy_X": False},
+        hyperparameters={"alpha": 0.01, "copy_X": copy_X},
     )
     windows = (TimeWindow("2020-01-01", "2020-01-06"),)
     prepared, _, _ = _prepare_fit(
         [frame], spec, windows=windows, cutoff=pd.Timestamp("2020-01-06")
     )
-    original = prepared.matrix.copy(deep=True)
-    for alpha in (0.01, 0.1):
-        candidate = replace(spec, hyperparameters={"alpha": alpha, "copy_X": False})
+    source = frame.copy(deep=True)
+    loss_rows = prepared.training.drop(columns=list(spec.input_columns)).copy(deep=True)
+    matrix = prepared.matrix
+    original = matrix.copy(deep=True)
+    weights, scaler = prepared.preprocessing
+    for alpha in (0.01, 0.001, 0.0001):
+        candidate = replace(spec, hyperparameters={"alpha": alpha, "copy_X": copy_X})
         actual = _fit_prepared(prepared, candidate)
         fresh = fit_model(
             [frame], candidate, fit_windows=windows, fit_cutoff="2020-01-06"
@@ -223,8 +232,12 @@ def test_shared_training_keeps_mutating_candidates_on_the_original_scale(algorit
             atol=1e-14,
         )
         assert actual.metadata == fresh.metadata
+        assert prepared.matrix is matrix
+        assert prepared.preprocessing[0] is weights
+        assert prepared.preprocessing[1] is scaler
         pd.testing.assert_frame_equal(prepared.matrix, original, check_exact=True)
-    pd.testing.assert_series_equal(prepared.training.x, frame.x)
+        pd.testing.assert_frame_equal(prepared.training, loss_rows, check_exact=True)
+    pd.testing.assert_frame_equal(frame, source, check_exact=True)
 
 
 def test_training_filter_handles_duplicate_dataframe_index():

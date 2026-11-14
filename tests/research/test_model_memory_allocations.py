@@ -193,6 +193,77 @@ def test_nullable_imputation_keeps_one_dense_work_matrix(operation):
     assert peak < frame.size * 8 * 1.6
 
 
+@pytest.mark.parametrize(
+    "algorithm,parameters",
+    [("linear_regression", {})]
+    + [
+        (
+            "lasso_regression",
+            {"alpha": 0.01, "copy_X": copy, "max_iter": None, "precompute": True},
+        )
+        for copy in (True, False)
+    ]
+    + [
+        ("ridge_regression", {"alpha": 0.1, "copy_X": False}),
+        ("xgboost_regressor", {"device": "cpu", "n_estimators": 2, "max_depth": 1}),
+    ],
+)
+def test_tabular_fit_releases_raw_feature_buffers_before_solver(
+    algorithm, parameters, monkeypatch
+):
+    columns = tuple(f"x{index}" for index in range(335))
+    frame = pd.DataFrame(
+        np.random.default_rng(29).normal(size=(4096, len(columns))), columns=columns
+    )
+    for column in columns[-7:]:
+        frame[column] = frame[column].astype("Float64")
+        frame.loc[frame.index % 17 == 0, column] = pd.NA
+    frame["timestamp"] = pd.date_range("2024-01-01", periods=len(frame), freq="s")
+    frame["asset_id"] = "a"
+    frame["label"] = 2 * frame.x0 + 0.5 * frame.x1
+    frame["eligible"] = True
+    frame["label_available_at"] = frame.timestamp + pd.Timedelta(seconds=1)
+    before = frame.copy(deep=True)
+    spec = ModelSpec(
+        model_id="candidate",
+        model_algorithm=algorithm,
+        input_feature_columns=columns,
+        target_column="label",
+        hyperparameters=parameters,
+    )
+    prepared = fitting._collect_training_frame(
+        [frame], spec, fitting_cutoff="2024-01-02"
+    )
+    expected = prepared.training.drop(columns=list(columns)).copy(deep=True)
+    raw_frame = weakref.ref(prepared.training)
+    values = prepared.training.label.to_numpy(copy=False)
+    while isinstance(values.base, np.ndarray):
+        values = values.base
+    assert values.nbytes > len(frame) * 8
+    raw_values = weakref.ref(values)
+    del values
+    raw_nullable = [
+        weakref.ref(prepared.training[column].array) for column in columns[-7:]
+    ]
+    estimator = fitting.estimators.build_estimator_from_model_spec(spec)
+    native_fit = np.linalg.lstsq if estimator is None else estimator.fit
+
+    def fit(*args, **kwargs):
+        assert raw_frame() is None
+        assert raw_values() is None
+        assert all(reference() is None for reference in raw_nullable)
+        return native_fit(*args, **kwargs)
+
+    if estimator is None:
+        monkeypatch.setattr(np.linalg, "lstsq", fit)
+    else:
+        monkeypatch.setattr(estimator, "fit", fit)
+    result = fitting._fit_model_result(prepared, spec, estimator=estimator)
+    pd.testing.assert_frame_equal(prepared.training, expected, check_exact=True)
+    pd.testing.assert_frame_equal(frame, before, check_exact=True)
+    assert result.metadata["rows_after_input_label_dropna"] == len(frame)
+
+
 def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatch):
     frame = _case("ordinary")
     weights = np.arange(1.0, len(frame) + 1.0)
