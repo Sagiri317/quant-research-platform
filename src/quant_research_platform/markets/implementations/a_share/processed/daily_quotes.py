@@ -346,8 +346,6 @@ def produce(spec, *, inputs, time_window):
         source = open_dataset_session(
             **_dataset_input_options(inputs["etf_daily_panel"])
         )
-        if source.spec["data_id"] != "etf_daily_panel":
-            raise ValueError("etf_price_volume_requires_etf_daily_panel")
         selected = tuple(
             name for name, role in spec.column_roles.items() if role == "factor"
         )

@@ -1207,6 +1207,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     from quant_research_platform.contracts.portfolios import (
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
+    from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.portfolios.diagnostics import (
         build_portfolio_statistics_tables,
@@ -1276,6 +1277,10 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     for candidate in candidates:
         capital = PortfolioCapital(candidate.candidate_id, 1000.0, "CNY", "cash_equity")
         contract = metadata(candidate.candidate_id)
+        if candidate.construction == "benchmark_enhanced":
+            contract["risk_model"] = FactorRiskModel(
+                candidate.risk_style_columns
+            ).to_dict()
         root = write_test_sessions(
             tmp_path / "ledgers" / candidate.candidate_id,
             metadata=contract,

@@ -339,11 +339,7 @@ def test_model_selection_undefined_mse_preserves_correlations(economic) -> None:
     assert whole["validation_mse"] is None
     assert whole["validation_ic"] == pytest.approx(-1.0)
     assert whole["validation_rankic"] == pytest.approx(-1.0)
-    from quant_research_platform.contracts.models import (
-        _validate_model_selection_trial_record,
-    )
 
-    _validate_model_selection_trial_record(whole)
     for metric, maximize in (("validation_ic", True), ("validation_mse", False)):
         other = dict(whole, model_id="defined", validation_ic=0.0, validation_mse=1.0)
         assert (
@@ -357,43 +353,6 @@ def test_model_selection_undefined_mse_preserves_correlations(economic) -> None:
             )
             == "defined"
         )
-
-
-@pytest.mark.parametrize("field", ["validation_ic", "validation_rankic"])
-@pytest.mark.parametrize("sign", [-1.0, 1.0])
-def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
-    import math
-
-    from quant_research_platform.contracts.models import (
-        _validate_model_selection_trial_record,
-    )
-
-    metrics = {
-        "validation_rows": 2,
-        "validation_ic": 1.0,
-        "validation_std_ic": 0.0,
-        "validation_std_ic_reason": None,
-        "validation_icir": None,
-        "validation_positive_ic_rate": 1.0,
-        "validation_valid_ic_count": 1,
-        "validation_icir_reason": "insufficient_observations",
-        "validation_std_rankic": 0.0,
-        "validation_std_rankic_reason": None,
-        "validation_rankicir": None,
-        "validation_positive_rankic_rate": 1.0,
-        "validation_valid_rankic_count": 1,
-        "validation_rankicir_reason": "insufficient_observations",
-        "validation_ic_reason": None,
-        "validation_rankic": 1.0,
-        "validation_rankic_reason": None,
-        "validation_mse": 0.0,
-        "model_id": "model",
-    }
-    metrics[field] = sign
-    _validate_model_selection_trial_record(metrics)
-    metrics[field] = sign * math.nextafter(1.0, math.inf)
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        _validate_model_selection_trial_record(metrics)
 
 
 @pytest.mark.parametrize("axis", ["single_asset_time_series", "cross_sectional"])

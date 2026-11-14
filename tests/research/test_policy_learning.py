@@ -599,7 +599,7 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         portfolio_statistics(
             {
                 **config,
-                "risk": {},
+                "risk_model": {},
                 "benchmark_total_return_indices": {},
                 "analyses": ["attribution"],
                 "output": str(rejected),

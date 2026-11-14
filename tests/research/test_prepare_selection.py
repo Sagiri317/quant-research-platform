@@ -16,12 +16,13 @@ from quant_research_platform.storage.datasets.reading import open_dataset_sessio
 from tests.helpers.a_share_sources import _calendar_input
 
 
-def _input(root, name, frame, *, native):
+def _input(root, name, frame, *, native, data_id=None):
     catalog = processed_catalog()
     spec = catalog.get(name)
     roles = {column: spec.column_roles.get(column, "context") for column in frame}
     spec = replace(
         spec,
+        data_id=name if data_id is None else data_id,
         column_roles=roles,
         column_units={
             name: unit for name, unit in spec.column_units.items() if name in roles
@@ -36,7 +37,7 @@ def _input(root, name, frame, *, native):
     return {
         "path": str(path),
         "spec": {
-            "data_id": name,
+            "data_id": spec.data_id,
             "frequency": str(spec.frequency),
             "grain": str(spec.grain),
             "primary_key": list(spec.primary_key),

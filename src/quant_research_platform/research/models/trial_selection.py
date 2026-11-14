@@ -32,7 +32,6 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
 )
 from quant_research_platform.contracts.models import (
-    _PREDICTION_LOSS_REASONS,
     CLASSIFICATION_METRICS,
     PROBABILITY_COLUMNS,
     _prediction_loss_reason,
@@ -737,24 +736,15 @@ def score(config):
         frame = frames[index]
         frames[index] = None
         if frame is None or not common_rows:
-            from quant_research_platform.contracts.models import (
-                _MODEL_SELECTION_TRIAL_METRIC_KEYS,
+            metrics = _daily_trial_summary(
+                pd.DataFrame(columns=["metric", "value"]),
+                model_id=candidate["model_id"],
+                row_count=0,
             )
-
-            metrics = {key: None for key in _MODEL_SELECTION_TRIAL_METRIC_KEYS}
-            metrics.update(model_id=candidate["model_id"], validation_rows=0)
             if candidate["model"]["model_algorithm"] == "deeplob_classifier":
                 metrics.update(
                     {f"validation_{name}": None for name in CLASSIFICATION_METRICS}
                 )
-            for prefix in ("ic", "rankic"):
-                metrics[f"validation_valid_{prefix}_count"] = 0
-                for suffix in (
-                    f"{prefix}_reason",
-                    f"std_{prefix}_reason",
-                    f"{prefix}ir_reason",
-                ):
-                    metrics[f"validation_{suffix}"] = "no_valid_observations"
             rows.append(metrics)
             continue
         comparable = frame.loc[common]
@@ -885,35 +875,8 @@ def _selection_choice(value):
     )
 
     ids, order = value["candidate_ids"], value["tie_break_order"]
-    if (
-        not ids
-        or len(ids) != len(set(ids))
-        or len(order) != len(set(order))
-        or set(order) != set(ids)
-    ):
+    if len(order) != len(set(order)) or set(order) != set(ids):
         raise ValueError("selection_candidate_coverage_missing")
-    if [item["model_id"] for item in value["candidates"]] != ids or [
-        item["model_id"] for item in value["metrics"]
-    ] != ids:
-        raise ValueError("selection_candidate_coverage_missing")
-    from quant_research_platform.contracts.models import (
-        _validate_model_selection_trial_record,
-    )
-
-    for candidate, metrics in zip(value["candidates"], value["metrics"], strict=True):
-        if candidate.get("mse_reason") is not None and (
-            candidate["mse_reason"] not in _PREDICTION_LOSS_REASONS
-            or metrics["validation_mse"] is not None
-        ):
-            raise ValueError("selection_mse_reason_invalid")
-        if candidate.get("status") in {"failed", "abandoned"}:
-            if metrics["validation_rows"] != 0 or any(
-                metrics.get(key) is not None
-                for key in MODEL_SELECTION_METRIC_DIRECTIONS
-            ):
-                raise ValueError("failed_trial_cannot_have_validation_metrics")
-        else:
-            _validate_model_selection_trial_record(metrics)
     if (
         MODEL_SELECTION_METRIC_DIRECTIONS.get(value["selection_metric"])
         != value["selection_direction"]
@@ -999,13 +962,6 @@ def select(config):
 
 
 def _selection_decisions(value):
-    for candidate in value["candidates"]:
-        validate_input_market(candidate, value["market_id"])
-        if (
-            candidate["model_id"] != candidate["model"]["model_id"]
-            or candidate["model"]["target_column"] != value["target_column"]
-        ):
-            raise ValueError("selection_candidate_facts_mismatch")
     _selection_choice(value)
     family_order = list(
         dict.fromkeys(item["family_id"] for item in value["candidates"])

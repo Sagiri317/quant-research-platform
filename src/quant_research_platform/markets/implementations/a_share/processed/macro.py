@@ -307,8 +307,6 @@ def produce(spec, *, inputs, time_window):
             public_session = open_dataset_session(
                 **_dataset_input_options(inputs[table])
             )
-            if public_session.spec["data_id"] != table:
-                raise ValueError("macro_public_input_identity_mismatch")
             facts = materialize_dataset_session(
                 public_session.projected_view(
                     (

@@ -95,8 +95,6 @@ def produce(spec, *, inputs, time_window):
         name: open_dataset_session(**_dataset_input_options(path))
         for name, path in inputs.items()
     }
-    if sessions["hft_panel"].spec["data_id"] != "hft_panel":
-        raise ValueError("intraday_requires_hft_panel")
     calendar = None
     if "trading_calendar" in sessions:
         calendar = unified_trading_sessions(

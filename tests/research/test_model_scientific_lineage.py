@@ -16,7 +16,7 @@ import pytest
 from quant_research_platform.artifacts.outputs.evaluation import read_evaluation_outputs
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.models import validate_model_facts
+from quant_research_platform.contracts.models import compare_model_facts
 from quant_research_platform.research.datasets.assembler import assemble
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.models.trial_selection import score, select
@@ -326,11 +326,11 @@ def test_common_science_owner_allows_new_paths_and_fit_windows(tmp_path):
         fit_cutoff="2020-02-06",
         selection="another/selection",
     )
-    validate_model_facts(alternate, expected=case.facts)
+    compare_model_facts(alternate, expected=case.facts)
     bad = copy.deepcopy(case.facts)
     bad["model"]["input_factor_columns"] = ["z", "x"]
     with pytest.raises(ValueError, match="model_scientific_facts_mismatch"):
-        validate_model_facts(bad, expected=case.facts)
+        compare_model_facts(bad, expected=case.facts)
 
 
 @pytest.mark.parametrize("storage", ["bare", "native"])
@@ -616,7 +616,7 @@ def test_shared_owner_preserves_order_of_two_declared_input_columns(tmp_path):
     second = copy.deepcopy(first)
     second["model"]["input_factor_columns"] = ["y", "x"]
     with pytest.raises(ValueError, match="model_scientific_facts_mismatch"):
-        validate_model_facts(second, expected=first)
+        compare_model_facts(second, expected=first)
 
 
 def test_persisted_affine_explanation_matches_independent_fraction_oracle(tmp_path):

@@ -161,9 +161,6 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
     from quant_research_platform.research.protocols.a_share import (
         RISK_STYLE_COLUMNS,
     )
-    from quant_research_platform.research.risk import (
-        FactorRiskConfig,
-    )
 
     configuration = configuration or research_configuration(factors=PV25_FACTORS)
     candidates = tuple(
@@ -190,7 +187,6 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
             "cscv",
         ],
         execution_assumptions=asdict(EXECUTION_ASSUMPTIONS),
-        risk=asdict(FactorRiskConfig()),
         benchmark_total_return_indices={"csi500": "H00905", "csi1000": "H00852"},
     )
     config["statistics"]["cscv_blocks"] = 10

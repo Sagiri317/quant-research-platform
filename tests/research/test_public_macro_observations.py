@@ -1,5 +1,7 @@
 """Public leverage/sentiment states reuse causal macro history and true scopes."""
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -227,7 +229,11 @@ def test_native_public_macro_inputs_need_no_unrelated_fred_source(tmp_path):
             else:
                 source[column] = "synthetic"
     public = tmp_path / "public"
-    write_dataset(public, source.loc[:, list(spec.required_columns)], spec=spec)
+    write_dataset(
+        public,
+        source.loc[:, list(spec.required_columns)],
+        spec=replace(spec, data_id="cftc_positions"),
+    )
     level = "ml_us_cftc_sp500_leveraged_net_share_level"
     contracts = "ml_us_cftc_sp500_leveraged_net_contracts_level"
     missing = "ml_us_cboe_equity_put_call_level"

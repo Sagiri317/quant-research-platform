@@ -1177,10 +1177,9 @@ def _apply_special_treatment(
         history["asset_id"], error="invalid_special_treatment_asset_id"
     )
     columns = ("is_st", "is_pt", "is_delisting")
-    # Earlier persisted status datasets did not carry consolidation status.
-    right = history.reindex(
-        columns=["asset_id", "announcement_date", "effective_date", *columns]
-    ).copy()
+    right = history.loc[
+        :, ["asset_id", "announcement_date", "effective_date", *columns]
+    ].copy()
     right = right.loc[
         right["announcement_date"].notna() & right["effective_date"].notna()
     ].copy()

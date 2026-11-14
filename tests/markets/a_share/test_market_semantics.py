@@ -1081,11 +1081,6 @@ def test_delisting_consolidation_is_a_source_fact_not_pt_and_respects_known_time
     result = _apply_special_treatment(panel, restored)
     assert pd.isna(result.is_delisting.iloc[0])
     assert result.is_delisting.iloc[1:].all()
-    assert (
-        _apply_special_treatment(panel, restored.drop(columns="is_delisting"))
-        .is_delisting.isna()
-        .all()
-    )
 
 
 @pytest.mark.parametrize("has_earlier_record", [False, True])
@@ -1606,21 +1601,25 @@ def test_listing_age_keeps_unavailable_master_date_unknown():
     assert ages.iloc[1:].tolist() == [2, 0]
 
 
-def test_listing_age_history_accepts_calendar_codes_and_absent_closed_assets():
+def test_listing_age_history_reuses_source_calendar_and_absent_closed_assets():
     from quant_research_platform.markets.implementations.a_share.calendar import (
         compute_listing_session_facts,
     )
+    from quant_research_platform.sources.csmar.interim import normalize_raw_frame
 
     dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
     calendar_dates = pd.date_range(dates[0], dates[-1]).as_unit("ns")
-    calendar = pd.DataFrame(
-        {
-            "calendar_date": calendar_dates.tolist() * 2,
-            "source_market_type": ["1"] * len(calendar_dates)
-            + ["4"] * len(calendar_dates),
-            "is_trading_day": [False] * len(calendar_dates)
-            + calendar_dates.isin(dates).tolist(),
-        }
+    calendar = normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Clddt": calendar_dates.tolist() * 2,
+                "Markettype": ["1"] * len(calendar_dates) + ["4"] * len(calendar_dates),
+                "Daywk": (calendar_dates.dayofweek + 1).tolist() * 2,
+                "State": ["C"] * len(calendar_dates)
+                + ["O" if day in dates else "C" for day in calendar_dates],
+            }
+        ),
+        "trading_calendar",
     )
     observed = pd.DataFrame(
         {

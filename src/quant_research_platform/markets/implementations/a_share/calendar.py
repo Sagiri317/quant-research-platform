@@ -8,15 +8,10 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
-    strict_bool_series,
-    strict_integer_series,
     strict_timestamp_series,
 )
 
 CURRENT_MARKET_TYPES = frozenset({1, 4, 16, 32})
-NORMALIZED_CALENDAR_COLUMNS = frozenset(
-    {"calendar_date", "source_market_type", "is_trading_day"}
-)
 
 
 def unified_trading_sessions(
@@ -26,39 +21,19 @@ def unified_trading_sessions(
 ) -> pd.DatetimeIndex:
     """Return sorted unique current-scope A-share trading sessions."""
 
-    normalized = _require_normalized_calendar(calendar)
-    source_market_types = strict_integer_series(
-        normalized["source_market_type"],
-        error="invalid_source_market_type",
-    )
-    trading = strict_bool_series(
-        normalized["is_trading_day"],
-        error="invalid_is_trading_day",
-    )
+    source_market_types = calendar["source_market_type"]
+    trading = calendar["is_trading_day"]
     mask = source_market_types.isin(set(market_types)) & trading
-    return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
+    return _sorted_unique_sessions(calendar.loc[mask, "calendar_date"])
 
 
 def market_type_calendar_state(calendar: pd.DataFrame, market_type: int) -> pd.Series:
     """Return explicit O/C facts; reindexing an absent date preserves unknown."""
 
-    normalized = _require_normalized_calendar(calendar)
-    source_market_types = strict_integer_series(
-        normalized["source_market_type"],
-        error="invalid_source_market_type",
-    )
-    trading = strict_bool_series(
-        normalized["is_trading_day"],
-        error="invalid_is_trading_day",
-    )
-    requested_market_type = strict_integer_series(
-        pd.Series([market_type]),
-        error="invalid_source_market_type",
-    ).iloc[0]
-    selected = source_market_types.eq(requested_market_type)
-    dates = pd.DatetimeIndex(normalized.loc[selected, "calendar_date"])
-    if dates.has_duplicates:
-        raise ValueError("duplicate_trading_calendar_key")
+    source_market_types = calendar["source_market_type"]
+    trading = calendar["is_trading_day"]
+    selected = source_market_types.eq(market_type)
+    dates = pd.DatetimeIndex(calendar.loc[selected, "calendar_date"])
     return pd.Series(trading.loc[selected].to_numpy(), index=dates, dtype="boolean")
 
 
@@ -66,10 +41,7 @@ def next_trading_sessions(
     calendar: pd.DataFrame, dates: pd.DatetimeIndex
 ) -> pd.DatetimeIndex:
     """Prove next sessions within the supplied A-share calendar market scope."""
-    normalized = _require_normalized_calendar(calendar)
-    selected = normalized.loc[normalized.source_market_type.isin(CURRENT_MARKET_TYPES)]
-    if selected.duplicated(["calendar_date", "source_market_type"]).any():
-        raise ValueError("duplicate_trading_calendar_key")
+    selected = calendar.loc[calendar.source_market_type.isin(CURRENT_MARKET_TYPES)]
     states = selected.pivot(
         index="calendar_date", columns="source_market_type", values="is_trading_day"
     ).astype("boolean")
@@ -98,9 +70,6 @@ def compute_listing_session_facts(
     observed_market_sessions: dict[int, pd.DatetimeIndex] | None = None,
 ) -> pd.DataFrame:
     """Derive exact age and proven eligibility from evidenced market membership."""
-    normalized = _require_normalized_calendar(calendar)
-    if normalized.duplicated(["source_market_type", "calendar_date"]).any():
-        raise ValueError("duplicate_trading_calendar_key")
     observations = strict_timestamp_series(
         frame["timestamp"], error="invalid_listing_age_timestamp"
     ).dt.normalize()
@@ -120,16 +89,12 @@ def compute_listing_session_facts(
     before_listing = observations.lt(listings)
     result.loc[before_listing, "listing_age_trading_days"] = 0
     result.loc[before_listing, "has_252_trading_sessions"] = False
-    trading = strict_bool_series(
-        normalized["is_trading_day"], error="invalid_is_trading_day"
-    )
-    market_types = strict_integer_series(
-        normalized["source_market_type"], error="invalid_source_market_type"
-    )
+    trading = calendar["is_trading_day"]
+    market_types = calendar["source_market_type"]
     sessions_by_market = {
         market: pd.DatetimeIndex(
             sorted(
-                normalized.loc[
+                calendar.loc[
                     trading & market_types.eq(market), "calendar_date"
                 ].unique()
             )
@@ -143,7 +108,7 @@ def compute_listing_session_facts(
         sessions_by_market[market] = original.union(observed)
     dates_by_market = {
         market: pd.DatetimeIndex(
-            sorted(normalized.loc[market_types.eq(market), "calendar_date"].unique())
+            sorted(calendar.loc[market_types.eq(market), "calendar_date"].unique())
         )
         for market in market_types.unique()
     }
@@ -217,19 +182,6 @@ def compute_listing_session_facts(
         )
         proven = counts.ge(252) & ~before_listing.loc[indices]
         result.loc[indices[proven], "has_252_trading_sessions"] = True
-    return result
-
-
-def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
-    missing = sorted(NORMALIZED_CALENDAR_COLUMNS.difference(calendar.columns))
-    if missing:
-        raise ValueError("calendar_missing_normalized_columns: " + ", ".join(missing))
-    result = calendar.copy()
-    result["calendar_date"] = strict_timestamp_series(
-        result["calendar_date"],
-        error="invalid_calendar_date",
-    )
-    result["calendar_date"] = result["calendar_date"].dt.normalize()
     return result
 
 

@@ -270,7 +270,7 @@ def test_public_statistics_rejects_unused_nested_options_before_reading(
             "ledgers": ["missing"],
             "inputs": {},
             "benchmark_total_return_indices": {},
-            "risk": {},
+            "risk_model": {},
             "adv_sensitivities": [0.1],
             "analyses": ["cscv"],
             "statistics": {"cscv_blocks": 10, "unused": True},

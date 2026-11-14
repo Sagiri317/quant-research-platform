@@ -416,7 +416,6 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
     ("column", "declaration"),
     [
         ("total_market_cap", "default"),
-        ("float_market_cap", "legacy"),
         ("float_market_cap", "model"),
     ],
 )
@@ -514,15 +513,12 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
     )
 
     model = FactorRiskModel(("signal",), FactorRiskConfig(weight_column=column))
-    if declaration == "legacy":
-        config["risk_config"] = {"weight_column": column}
-    elif declaration == "model":
+    if declaration == "model":
         config["risk_model"] = model.to_dict()
         config["candidate"].pop("risk_style_columns")
     artifact = read_portfolio_ledger_artifact(backtest(config))
     assert list(artifact.iter_chunks())
     assert artifact.metadata["candidate"]["size_cap_column"] == "total_market_cap"
-    assert "risk_config" not in artifact.metadata
     assert artifact.metadata["risk_model"] == model.to_dict()
     candidate = PortfolioCandidateSpec(
         **{**artifact.metadata["candidate"], "risk_style_columns": ("signal",)}
@@ -530,18 +526,8 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
     assert _portfolio_risk_models({"native": artifact}, (candidate,), {}) == {
         "native": model
     }
-    legacy = SimpleNamespace(metadata={"risk_config": asdict(model.config)})
-    assert _portfolio_risk_models({"native": legacy}, (candidate,), {}) == {
-        "native": model
-    }
-    missing = SimpleNamespace(metadata={})
-    with pytest.raises(ValueError, match="portfolio_attribution_risk_model_required"):
-        _portfolio_risk_models({"native": missing}, (candidate,), {})
     assert _portfolio_risk_models(
-        {"native": missing}, (candidate,), {"risk_model": model.to_dict()}
-    ) == {"native": model}
-    assert _portfolio_risk_models(
-        {"native": missing}, (candidate,), {"risk": asdict(model.config)}
+        {"native": artifact}, (candidate,), {"risk_model": model.to_dict()}
     ) == {"native": model}
     simple = replace(
         candidate,
@@ -549,18 +535,25 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
         top_quantile=0.2,
         benchmark_id=None,
     )
-    assert _portfolio_risk_models({"native": missing}, (simple,), {}) == {
+    simple_ledger = SimpleNamespace(metadata={})
+    assert _portfolio_risk_models({"native": simple_ledger}, (simple,), {}) == {
         "native": FactorRiskModel(candidate.risk_style_columns, FactorRiskConfig())
     }
+    assert _portfolio_risk_models(
+        {"native": simple_ledger}, (simple,), {"risk_model": model.to_dict()}
+    ) == {"native": model}
     with pytest.raises(ValueError, match="portfolio_attribution_risk_model_conflict"):
         _portfolio_risk_models(
             {"native": artifact},
             (candidate,),
             {
-                "risk": {
-                    "weight_column": "float_market_cap"
-                    if column == "total_market_cap"
-                    else "total_market_cap"
+                "risk_model": {
+                    "style_columns": ["signal"],
+                    "config": {
+                        "weight_column": "float_market_cap"
+                        if column == "total_market_cap"
+                        else "total_market_cap"
+                    },
                 }
             },
         )

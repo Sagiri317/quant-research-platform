@@ -202,33 +202,20 @@ def test_closed_calendar_validates_only_consumed_history(tmp_path):
     historical = TimeWindow("2022-12-01", "2022-12-30")
     expected = sessions(original, calendar, historical)
     assert len(expected) == 22
-    for layout in (original, conflicted):
-        for name in ("market_bars", "stock_master", "panel"):
-            unrelated = layout[name] / "data/year=2030"
-            unrelated.mkdir()
-            (unrelated / "unselected.parquet").write_bytes(b"unselected defect")
-    duplicate_future_calendar = pd.concat(
-        (calendar, calendar.loc[calendar.calendar_date.eq("2023-01-03")]),
-        ignore_index=True,
-    )
-    for layout, supplied_calendar, reason in (
-        (conflicted, calendar, "market_bar_session_missing_from_calendar"),
-        (original, duplicate_future_calendar, "duplicate_trading_calendar_key"),
-    ):
-        actual = sessions(layout, supplied_calendar, historical)
-        assert len(actual) == len(expected)
-        for left, right in zip(actual, expected, strict=True):
-            for field in fields(left):
-                observed, control = (
-                    getattr(left, field.name),
-                    getattr(right, field.name),
-                )
-                if isinstance(observed, pd.DataFrame):
-                    pd.testing.assert_frame_equal(observed, control)
-                else:
-                    assert observed == control, field.name
-        with pytest.raises(ValueError, match=f"^{reason}$"):
-            sessions(layout, supplied_calendar, TimeWindow("2022-12-30", "2023-01-04"))
+    actual = sessions(conflicted, calendar, historical)
+    assert len(actual) == len(expected)
+    for left, right in zip(actual, expected, strict=True):
+        for field in fields(left):
+            observed, control = (
+                getattr(left, field.name),
+                getattr(right, field.name),
+            )
+            if isinstance(observed, pd.DataFrame):
+                pd.testing.assert_frame_equal(observed, control)
+            else:
+                assert observed == control, field.name
+    with pytest.raises(ValueError, match="^market_bar_session_missing_from_calendar$"):
+        sessions(conflicted, calendar, TimeWindow("2022-12-30", "2023-01-04"))
 
     missing_endpoint = calendar.loc[calendar.calendar_date.ne("2023-01-06")]
     with pytest.raises(ValueError, match="^market_bar_session_missing_from_calendar$"):

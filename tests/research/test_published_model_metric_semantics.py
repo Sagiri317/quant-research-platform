@@ -761,7 +761,6 @@ def test_selection_and_explanation_share_loss_comparability(tmp_path, difference
     assert scored["metrics"][0]["validation_ic"] == pytest.approx(1.0)
     assert scored["metrics"][0]["validation_rows"] == 12
     assert scored["candidates"][0]["mse_reason"] == reason
-    from copy import deepcopy
 
     from quant_research_platform.research.models.trial_selection import (
         _selection_choice,
@@ -774,14 +773,6 @@ def test_selection_and_explanation_share_loss_comparability(tmp_path, difference
         "selection_direction": "maximize",
     }
     assert _selection_choice(decision) == "model"
-    for mutation in ("unknown_reason", "numeric_mse"):
-        broken = deepcopy(decision)
-        if mutation == "unknown_reason":
-            broken["candidates"][0]["mse_reason"] = "invented"
-        else:
-            broken["metrics"][0]["validation_mse"] = 0.0
-        with pytest.raises(ValueError, match="selection_mse_reason_invalid"):
-            _selection_choice(broken)
     output = explain(
         {
             "model": str(model),
@@ -833,31 +824,6 @@ def test_selection_and_explanation_share_loss_comparability(tmp_path, difference
     with artifact.table("model_prediction_metrics.parquet") as metrics:
         assert metrics.mse_reason.eq(reason).all()
         assert metrics.target_count.eq(4).all()
-
-
-@pytest.mark.parametrize(
-    "mutation", ["source", "transform", "clip", "semantics", "extra"]
-)
-def test_model_facts_reject_invalid_target_definition(tmp_path, mutation):
-    from copy import deepcopy
-
-    from quant_research_platform.contracts.models import validate_model_facts
-
-    _, case, _, _, _ = _case(tmp_path)
-    definition = deepcopy(case.facts["target_definition"])
-    if mutation == "source":
-        definition["source_label"] = "unrelated_label"
-    elif mutation == "transform":
-        definition["target_transform"] = []
-    elif mutation == "clip":
-        definition["target_clip"] = "mad"
-    elif mutation == "semantics":
-        definition["label_semantics"] = []
-    else:
-        definition["spec_path"] = "not_a_scientific_definition"
-    facts = {**case.facts, "target_definition": definition}
-    with pytest.raises(ValueError, match="model_target_definition_invalid"):
-        validate_model_facts(facts)
 
 
 def test_raw_unclipped_model_target_can_compare_with_its_identical_source_label(

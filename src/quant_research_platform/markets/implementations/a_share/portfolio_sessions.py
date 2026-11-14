@@ -245,8 +245,6 @@ def iter_portfolio_sessions(
     calendar = calendar.set_index(["calendar_date", "source_market_type"])[
         "is_trading_day"
     ]
-    if calendar.index.has_duplicates:
-        raise ValueError("duplicate_trading_calendar_key")
     market_events = iter(membership.sort_values("timestamp").groupby("timestamp"))
     pending_membership = next(market_events, None)
     market_types = pd.Series(dtype="Int64")

@@ -156,15 +156,15 @@ def test_data_spec_payload_rejects_wrong_kind_source_and_market_ids() -> None:
     ("field", "value", "error"),
     (
         ("data_id", 7, "data_id_required"),
-        ("frequency", "invalid", "invalid_data_frequency"),
-        ("grain", "invalid", "invalid_data_grain"),
+        ("frequency", "invalid", None),
+        ("grain", "invalid", None),
         (
             "primary_key",
             ["market_id", "asset_id", "timestamp"],
             "primary_key_must_be_tuple",
         ),
         ("partition_columns", ["year"], "partition_columns_must_be_tuple"),
-        ("kind", "invalid", "invalid_processed_data_kind"),
+        ("kind", "invalid", None),
         (
             "source_input_data_ids",
             ["raw"],

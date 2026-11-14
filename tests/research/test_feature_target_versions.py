@@ -613,7 +613,6 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
     from quant_research_platform.contracts.models import (
         _comparable_target_definition,
         _target_definition,
-        _validate_target_definition,
     )
     from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.research.models.persisted import load_model
@@ -704,7 +703,6 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
     _, facts = load_model(model_root)
     definition = facts["target_definition"]
     assert definition["risk_model"] == model.to_dict()
-    _validate_target_definition(definition, "model_target")
     alternative = _target_definition(
         {
             **declared,
@@ -722,18 +720,15 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
         **alternative,
         "risk_model": {
             **model.to_dict(),
-            "config": {"weight_column": "total_market_cap"},
+            "config": {
+                **model.to_dict()["config"],
+                "weight_column": "total_market_cap",
+            },
         },
     }
     assert _comparable_target_definition(
         changed_weight
     ) != _comparable_target_definition(definition)
-    legacy = {key: value for key, value in definition.items() if key != "risk_model"}
-    _validate_target_definition(legacy, "model_target")
-    default = {**legacy, "risk_model": FactorRiskModel().to_dict()}
-    assert _comparable_target_definition(legacy) == _comparable_target_definition(
-        default
-    )
 
 
 def test_shared_risk_missing_values_only_affect_dependent_outputs(tmp_path):

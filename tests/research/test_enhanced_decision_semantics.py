@@ -173,12 +173,15 @@ def enhanced_config(tmp_path_factory):
             adv_participation=1.0,
             adv_sensitivities=[1.0],
         ),
-        risk_config=dict(
-            factor_window=3,
-            specific_window=3,
-            minimum_factor_dates=2,
-            minimum_specific_dates=2,
-            minimum_cross_section=10,
+        risk_model=dict(
+            style_columns=["signal"],
+            config=dict(
+                factor_window=3,
+                specific_window=3,
+                minimum_factor_dates=2,
+                minimum_specific_dates=2,
+                minimum_cross_section=10,
+            ),
         ),
         calibration=str(calibration),
     )
@@ -840,7 +843,7 @@ def _simple_native_config(enhanced_config, tmp_path, construction):
         top_quantile=1.0,
         benchmark_id=None,
     )
-    for name in ("risk_config", "optimizer_config", "calibration"):
+    for name in ("risk_model", "optimizer_config", "calibration"):
         config.pop(name, None)
     for name in ("benchmark", "risk_context"):
         config["inputs"].pop(name, None)

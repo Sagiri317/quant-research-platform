@@ -408,11 +408,6 @@ def _market_model_frames(
     market_history: pd.DataFrame | None,
     min_fresh_fraction: float = 0.75,
 ) -> Iterator[pd.DataFrame]:
-    from quant_research_platform.contracts.validation import (
-        strict_bool_series,
-        strict_integer_series,
-        strict_timestamp_series,
-    )
     from quant_research_platform.markets.implementations.a_share.market_model import (
         MarketModelRiskState,
     )
@@ -422,22 +417,11 @@ def _market_model_frames(
 
     open_markets = None
     if trading_calendar is not None:
-        calendar = trading_calendar.assign(
-            calendar_date=strict_timestamp_series(
-                trading_calendar.calendar_date, error="invalid_calendar_date"
-            ).dt.normalize(),
-            source_market_type=strict_integer_series(
-                trading_calendar.source_market_type, error="invalid_source_market_type"
-            ),
-            is_trading_day=strict_bool_series(
-                trading_calendar.is_trading_day, error="invalid_is_trading_day"
-            ),
-        )
-        if calendar.duplicated(["calendar_date", "source_market_type"]).any():
-            raise ValueError("duplicate_trading_calendar_key")
         open_markets = {
             timestamp: frozenset(group.loc[group.is_trading_day, "source_market_type"])
-            for timestamp, group in calendar.groupby("calendar_date", sort=False)
+            for timestamp, group in trading_calendar.groupby(
+                "calendar_date", sort=False
+            )
         }
     events = (
         iter(())

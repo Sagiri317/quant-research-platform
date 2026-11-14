@@ -1620,7 +1620,7 @@ def statistics_tables(ledgers, *, window, config, metadata=None):
 
 def _inventory_risk_inputs(config, window):
     """Read one explicit full-market source, never a holdings-filtered risk fit."""
-    from quant_research_platform.contracts.risk import FactorRiskConfig, FactorRiskModel
+    from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.research.datasets.risk import (
         read_asof_risk_facts,
         risk_exposure_columns,
@@ -1645,15 +1645,8 @@ def _inventory_risk_inputs(config, window):
         **_dataset_input_options(inputs["observations"], time_window=window)
     )
     declared = observations.spec.get("risk_model")
-    model = FactorRiskModel.from_mapping(
-        config.get("risk_model", declared or {"config": config.get("risk", {})})
-    )
-    if (
-        declared is not None
-        and model != FactorRiskModel.from_mapping(declared)
-        or "risk" in config
-        and model.config != FactorRiskConfig(**config["risk"])
-    ):
+    model = FactorRiskModel.from_mapping(config.get("risk_model", declared or {}))
+    if declared is not None and model != FactorRiskModel.from_mapping(declared):
         raise ValueError("portfolio_attribution_risk_model_conflict")
     facts = open_dataset_session(**_dataset_input_options(inputs[data_id]))
     if (

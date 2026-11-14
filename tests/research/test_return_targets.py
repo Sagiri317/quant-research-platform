@@ -7,7 +7,6 @@ import pytest
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.models import (
     _target_definition,
-    _validate_target_definition,
 )
 from quant_research_platform.contracts.risk import RISK_STYLE_COLUMNS
 from quant_research_platform.research.datasets.assembler import assemble
@@ -24,7 +23,7 @@ from quant_research_platform.storage.datasets.inspection import inspect_dataset
         "future_mid_return_30s",
     ],
 )
-def test_explicit_risk_target_survives_native_assembly_and_definition_validation(
+def test_explicit_risk_target_survives_native_assembly_and_keeps_label_semantics(
     tmp_path, label
 ):
     signs = 2.0 * ((np.arange(128)[:, None] >> np.arange(6)) & 1) - 1
@@ -102,4 +101,3 @@ def test_explicit_risk_target_survives_native_assembly_and_definition_validation
     assert saved["column_units"]["model_target"] == "decimal_return"
     definition = _target_definition(saved, "model_target")
     assert definition["source_label"] == label
-    _validate_target_definition(definition, "model_target")

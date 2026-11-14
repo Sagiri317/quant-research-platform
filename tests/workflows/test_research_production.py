@@ -1,7 +1,5 @@
 """Provider bytes to frozen models, actual accounts and native inference tables."""
 
-from dataclasses import asdict
-
 import pandas as pd
 import pytest
 
@@ -17,9 +15,6 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
 from quant_research_platform.research.portfolios.production import backtest
-from quant_research_platform.research.risk import (
-    FactorRiskConfig,
-)
 from tests.helpers.research_acceptance import run_a_share_acceptance
 from tests.helpers.statistics_artifacts import (
     portfolio_statistics_config,
@@ -324,7 +319,6 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
             "window": case.test,
             "sample_role": "test",
             "benchmark_total_return_indices": case.indices,
-            "risk": asdict(FactorRiskConfig()),
             "adv_sensitivities": case.portfolio_config["assumptions"][
                 "adv_sensitivities"
             ],

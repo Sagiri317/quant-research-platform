@@ -272,19 +272,15 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
 
 
 def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
-    from dataclasses import asdict
-
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         summarize_portfolio_ledger,
     )
+    from quant_research_platform.contracts.risk import FactorRiskModel
     from quant_research_platform.research.portfolios.diagnostics import (
         portfolio_statistics,
     )
     from quant_research_platform.research.portfolios.production import backtest
-    from quant_research_platform.research.risk import (
-        FactorRiskConfig,
-    )
     from tests.helpers.portfolio_inputs import (
         _dataset_spec,
         _frames,
@@ -413,7 +409,7 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
             "window": window,
             "sample_role": "validation",
             "benchmark_total_return_indices": {},
-            "risk": asdict(FactorRiskConfig()),
+            "risk_model": FactorRiskModel(()).to_dict(),
             "adv_sensitivities": assumptions["adv_sensitivities"],
             "statistics": policy,
             "analyses": [

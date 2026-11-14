@@ -18,9 +18,9 @@ from quant_research_platform.contracts.models import (
     _resolve_candidate_parameters,
     _target_definition,
     _thaw_model_hyperparameters,
+    compare_model_facts,
     model_spec_payload,
     sequence_context_columns,
-    validate_model_facts,
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
@@ -328,7 +328,8 @@ def fit(config: Mapping) -> Path:
         facts["validation"] = validation
     if "training_selection" in config:
         facts["training_selection"] = config["training_selection"]
-    validate_model_facts(facts, expected=selected if selection is not None else None)
+    if selection is not None:
+        compare_model_facts(facts, selected)
     recorder = TrialRecorder(output.with_name(output.name + ".trial"), facts)
     recorder.begin()
     try:

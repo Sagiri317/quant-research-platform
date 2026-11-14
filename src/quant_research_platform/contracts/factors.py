@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from quant_research_platform.contracts.data import DataGrain, normalize_data_grain
+from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
@@ -70,7 +70,7 @@ class FactorDefinition:
         ):
             if type(getattr(self, field_name)) is not str:
                 raise ValueError(f"factor_{field_name}_must_be_string")
-        object.__setattr__(self, "grain", normalize_data_grain(self.grain))
+        object.__setattr__(self, "grain", DataGrain(self.grain))
         if (
             type(self.required_windows) is not tuple
             or any(type(window) is not int for window in self.required_windows)

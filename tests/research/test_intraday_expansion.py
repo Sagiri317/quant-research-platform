@@ -582,7 +582,11 @@ def test_native_intraday_publication_does_not_require_unused_optional_inputs(tmp
         dict(
             market_id="a_share",
             data_id="hft_research_factors",
-            inputs={"hft_panel": _input(tmp_path, "hft_panel", frame, native=True)},
+            inputs={
+                "hft_panel": _input(
+                    tmp_path, "hft_panel", frame, native=True, data_id="stock_quotes"
+                )
+            },
             factor_columns=[name, "opening_relative_activity_5m"],
             time_window=dict(start="2024-01-02", end="2024-01-02"),
             output_root=str(tmp_path / "result"),

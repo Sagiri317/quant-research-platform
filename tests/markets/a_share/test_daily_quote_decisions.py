@@ -63,7 +63,9 @@ def test_native_etf_price_volume_reuses_math_and_keeps_decision_clock(tmp_path):
         market_id="a_share",
         data_id="etf_price_volume_factors",
         inputs={
-            "etf_daily_panel": _input(tmp_path, "etf_daily_panel", frame, native=True)
+            "etf_daily_panel": _input(
+                tmp_path, "etf_daily_panel", frame, native=True, data_id="etf_decisions"
+            )
         },
         factor_columns=[name],
         time_window=dict(start="2024-01-02", end="2024-02-05"),

@@ -11,9 +11,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.columns import _validate_asset_time_key
-from quant_research_platform.contracts.evaluations import (
-    CORRELATION_SUMMARY_REASON_CODES,
-)
 from quant_research_platform.contracts.experiments import (
     DEFAULT_ROOT_SEED,
     training_availability_columns,
@@ -25,10 +22,6 @@ from quant_research_platform.contracts.filtering import (
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.ids import validate_input_market
-from quant_research_platform.contracts.json_codec import (
-    canonical_identity_bytes,
-)
-from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     PredictionWindow,
     TimeWindow,
@@ -424,163 +417,10 @@ class ModelSpec:
         return (*self.input_factor_columns, *self.input_feature_columns)
 
 
-_MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
-    {
-        "model_id",
-        "validation_rows",
-        "validation_ic",
-        "validation_rankic",
-        "validation_ic_reason",
-        "validation_rankic_reason",
-        "validation_mse",
-    }
-) | frozenset(
-    f"validation_{suffix}"
-    for prefix in ("ic", "rankic")
-    for suffix in (
-        f"std_{prefix}",
-        f"std_{prefix}_reason",
-        f"{prefix}ir",
-        f"positive_{prefix}_rate",
-        f"valid_{prefix}_count",
-        f"{prefix}ir_reason",
-    )
-)
-
-
 def _validate_a_share_model_family_ids(family_ids) -> None:
     """Keep the A-share champion selector distinct from named model families."""
     if "champion" in family_ids:
         raise ValueError("a_share_model_id_reserved")
-
-
-def _validate_model_selection_trial_record(trial: object) -> None:
-    classification_keys = {f"validation_{name}" for name in CLASSIFICATION_METRICS}
-    if type(trial) is not dict or set(trial) not in (
-        _MODEL_SELECTION_TRIAL_METRIC_KEYS,
-        _MODEL_SELECTION_TRIAL_METRIC_KEYS | classification_keys,
-    ):
-        raise ValueError("invalid_model_metadata")
-    model_id = trial["model_id"]
-    rows = trial["validation_rows"]
-    if classification_keys <= set(trial):
-        validate_classification_metrics(
-            {name: trial[f"validation_{name}"] for name in CLASSIFICATION_METRICS}, rows
-        )
-    if type(model_id) is not str or not model_id or type(rows) is not int or rows < 0:
-        raise ValueError("invalid_model_metadata")
-    for metric, reason_key in (
-        ("validation_ic", "validation_ic_reason"),
-        ("validation_rankic", "validation_rankic_reason"),
-    ):
-        metric_value = trial[metric]
-        reason = trial[reason_key]
-        if reason is not None and (
-            type(reason) is not str or reason not in CORRELATION_SUMMARY_REASON_CODES
-        ):
-            raise ValueError("invalid_model_metadata")
-        if metric_value is not None and (
-            type(metric_value) not in {int, float}
-            or not np.isfinite(float(metric_value))
-            or abs(float(metric_value)) > 1.0
-        ):
-            raise ValueError("invalid_model_metadata")
-        if metric == "validation_rankic" and reason == "not_applicable":
-            if metric_value is not None:
-                raise ValueError("invalid_model_metadata")
-        elif rows < 2:
-            if metric_value is not None or reason != "no_valid_observations":
-                raise ValueError("invalid_model_metadata")
-        elif metric_value is None:
-            if reason is None:
-                raise ValueError("invalid_model_metadata")
-        elif reason is not None:
-            raise ValueError("invalid_model_metadata")
-    for prefix in ("ic", "rankic"):
-        count = trial[f"validation_valid_{prefix}_count"]
-        std = trial[f"validation_std_{prefix}"]
-        std_reason = trial[f"validation_std_{prefix}_reason"]
-        ratio = trial[f"validation_{prefix}ir"]
-        positive = trial[f"validation_positive_{prefix}_rate"]
-        reason = trial[f"validation_{prefix}ir_reason"]
-        if type(count) is not int or not 0 <= count <= rows:
-            raise ValueError("invalid_model_metadata")
-        for value in (std, ratio, positive):
-            if value is not None and (
-                type(value) not in {int, float} or not np.isfinite(value)
-            ):
-                raise ValueError("invalid_model_metadata")
-        if (
-            ((std is None) != (std_reason is not None))
-            or (
-                std_reason is not None
-                and (
-                    type(std_reason) is not str
-                    or std_reason
-                    not in {
-                        "no_valid_observations",
-                        "nonfinite_result",
-                        "not_applicable",
-                    }
-                )
-            )
-            or (count > 0 and std_reason in {"no_valid_observations", "not_applicable"})
-            or (
-                count == 0
-                and std_reason
-                != (
-                    "not_applicable"
-                    if trial[f"validation_{prefix}_reason"] == "not_applicable"
-                    else "no_valid_observations"
-                )
-            )
-            or (std is not None and std < 0)
-            or (positive is not None and not 0 <= positive <= 1)
-            or (count == 0 and any(v is not None for v in (std, ratio, positive)))
-            or (count > 0 and positive is None)
-            or ((ratio is None) != (reason is not None))
-            or (
-                ratio is not None
-                and (
-                    count < 2
-                    or trial[f"validation_{prefix}"] is None
-                    or std is None
-                    or std == 0
-                )
-            )
-            or (
-                reason is not None
-                and (
-                    type(reason) is not str
-                    or reason not in CORRELATION_SUMMARY_REASON_CODES
-                )
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-    if trial["validation_mse"] is not None and (
-        rows == 0
-        or type(trial["validation_mse"]) not in {int, float}
-        or not np.isfinite(float(trial["validation_mse"]))
-        or trial["validation_mse"] < 0
-    ):
-        raise ValueError("invalid_model_metadata")
-
-
-def validate_classification_metrics(metrics, rows):
-    if set(metrics) != set(CLASSIFICATION_METRICS) or type(rows) is not int or rows < 0:
-        raise ValueError("classification_metrics_invalid")
-    for name, value in metrics.items():
-        if rows == 0:
-            if value is not None:
-                raise ValueError("classification_metrics_invalid")
-        elif (
-            type(value) not in (int, float)
-            or not np.isfinite(value)
-            or value < 0
-            or (name in {"accuracy", "macro_f1"} and value > 1)
-            or (name == "brier" and value > 2 + 1e-6)
-        ):
-            raise ValueError("classification_metrics_invalid")
 
 
 def model_spec_payload(spec: object) -> dict[str, object]:
@@ -649,7 +489,7 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
 
 
 def compare_model_facts(facts, expected):
-    """Compare published recipes; resolve defaults only when representations differ."""
+    """Compare the published recipe with a new refit or portfolio request."""
     for key in (
         "market_id",
         "family_id",
@@ -661,54 +501,8 @@ def compare_model_facts(facts, expected):
     ):
         if facts.get(key) != expected.get(key):
             raise ValueError(f"model_scientific_facts_mismatch: {key}")
-    if facts["model"] != expected["model"] and model_spec_payload(
-        _model_spec(facts["model"])
-    ) != model_spec_payload(_model_spec(expected["model"])):
+    if facts["model"] != expected["model"]:
         raise ValueError("model_scientific_facts_mismatch: model")
-
-
-def validate_model_facts(facts, *, expected=None):
-    """Check new fitting facts against the already-parsed model recipe."""
-    required = {
-        "model",
-        "market_id",
-        "family_id",
-        "candidate_parameters",
-        "label_unit",
-        "input_units",
-    }
-    if not isinstance(facts, Mapping) or not required <= set(facts):
-        raise ValueError("model_facts_invalid")
-    from quant_research_platform.contracts.ids import validate_market_id
-
-    validate_market_id(facts["market_id"])
-    _validate_non_empty_string(facts["family_id"], "model_family_id_invalid")
-    recipe = facts["model"]
-    hyperparameters = recipe.get("hyperparameters", {})
-    parameters = facts["candidate_parameters"]
-    if not isinstance(parameters, Mapping):
-        raise ValueError("model_candidate_parameters_invalid")
-    _freeze_model_hyperparameters(parameters)
-    _resolve_candidate_parameters(recipe["model_algorithm"], parameters, 1)
-    if hyperparameters and canonical_identity_bytes(
-        parameters
-    ) != canonical_identity_bytes(hyperparameters):
-        raise ValueError("model_candidate_parameters_mismatch")
-    if type(facts["label_unit"]) is not str or not facts["label_unit"].strip():
-        raise ValueError("model_label_unit_required")
-    units = facts["input_units"]
-    columns = {
-        *recipe.get("input_factor_columns", ()),
-        *recipe.get("input_feature_columns", ()),
-    }
-    if not isinstance(units, Mapping) or set(units) - columns:
-        raise ValueError("model_input_units_invalid")
-    for unit in units.values():
-        if type(unit) is not str or not unit.strip():
-            raise ValueError("model_input_units_invalid")
-    _validate_target_definition(facts.get("target_definition"), recipe["target_column"])
-    if expected is not None:
-        compare_model_facts(facts, expected)
 
 
 _PREDICTION_LOSS_REASONS = (
@@ -747,11 +541,7 @@ def _target_definition(declared, target, manifest=None):
         "target_clip": clip,
         "label_semantics": None if semantics is None else dict(semantics),
         **(
-            {
-                "risk_model": FactorRiskModel.from_mapping(
-                    declared.get("risk_model", {})
-                ).to_dict()
-            }
+            {"risk_model": declared["risk_model"]}
             if transform == "risk_residual"
             else {}
         ),
@@ -761,14 +551,14 @@ def _target_definition(declared, target, manifest=None):
 def _comparable_target_definition(definition):
     if definition is None or definition.get("target_transform") != "risk_residual":
         return definition
-    model = FactorRiskModel.from_mapping(definition.get("risk_model", {}))
+    model = definition["risk_model"]
     # Covariance windows do not change the cross-sectional label regression.
     return {
         **definition,
         "risk_model": {
-            "style_columns": list(model.style_columns),
+            "style_columns": model["style_columns"],
             "config": {
-                name: getattr(model.config, name)
+                name: model["config"][name]
                 for name in ("weight_column", "weighting", "minimum_cross_section")
             },
         },
@@ -817,46 +607,6 @@ def _prediction_target_reason(
     if trained != evaluated:
         return "prediction_target_definition_mismatch"
     return None
-
-
-def _validate_target_definition(definition, target):
-    if definition is None:
-        return
-    if (
-        type(definition) is not dict
-        or set(definition) - {"risk_model"}
-        != {"source_label", "target_transform", "target_clip", "label_semantics"}
-        or type(definition["source_label"]) is not str
-        or not definition["source_label"]
-        or target != "model_target"
-        and definition["source_label"] != target
-        or type(definition["target_transform"]) is not str
-        or type(definition["target_clip"]) is not str
-        or definition["target_transform"]
-        not in (
-            {
-                "raw",
-                "date_zscore",
-                "percentile",
-                "industry_size_residual",
-                "risk_residual",
-            }
-            if target == "model_target"
-            else {"raw"}
-        )
-        or definition["target_clip"]
-        not in (
-            {"none", "mad", "quantile_1_99"} if target == "model_target" else {"none"}
-        )
-        or definition["label_semantics"] is not None
-        and type(definition["label_semantics"]) is not dict
-    ):
-        raise ValueError("model_target_definition_invalid")
-    if "risk_model" in definition:
-        if definition["target_transform"] != "risk_residual":
-            raise ValueError("model_target_definition_invalid")
-        FactorRiskModel.from_mapping(definition["risk_model"])
-    canonical_identity_bytes(definition)
 
 
 def _validate_model_prediction_window(facts, window):

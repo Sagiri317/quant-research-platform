@@ -1,4 +1,4 @@
-"""Store ordered catalog entries immutably; subclasses validate their identities."""
+"""Store ordered catalog entries; subclasses validate their identities."""
 
 from __future__ import annotations
 
@@ -6,13 +6,8 @@ from collections.abc import Iterable
 
 
 class ImmutableCatalog[CatalogItem]:
-    __slots__ = ("_items",)
-
     def __init__(self, items: Iterable[CatalogItem] = ()) -> None:
-        object.__setattr__(self, "_items", tuple(items))
-
-    def __setattr__(self, _name: str, _value: object) -> None:
-        raise AttributeError("catalog facts are immutable")
+        self._items = tuple(items)
 
     def list(self) -> tuple[CatalogItem, ...]:
         return self._items

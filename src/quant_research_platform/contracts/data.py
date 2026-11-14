@@ -50,43 +50,8 @@ class ProcessedDataKind(StrEnum):
     LABEL = "label"
 
 
-def normalize_data_frequency(value: DataFrequency | str) -> DataFrequency:
-    """Return the platform frequency vocabulary item for a raw value."""
-
-    if isinstance(value, DataFrequency):
-        return value
-    if type(value) is not str:
-        raise ValueError(f"invalid_data_frequency: {value}")
-    try:
-        return DataFrequency(value)
-    except ValueError as exc:
-        raise ValueError(f"invalid_data_frequency: {value}") from exc
-
-
-def normalize_data_grain(value: DataGrain | str) -> DataGrain:
-    if isinstance(value, DataGrain):
-        return value
-    if type(value) is not str:
-        raise ValueError(f"invalid_data_grain: {value}")
-    try:
-        return DataGrain(value)
-    except ValueError as exc:
-        raise ValueError(f"invalid_data_grain: {value}") from exc
-
-
-def normalize_processed_data_kind(value: ProcessedDataKind | str) -> ProcessedDataKind:
-    if isinstance(value, ProcessedDataKind):
-        return value
-    if type(value) is not str:
-        raise ValueError(f"invalid_processed_data_kind: {value}")
-    try:
-        return ProcessedDataKind(value)
-    except ValueError as exc:
-        raise ValueError(f"invalid_processed_data_kind: {value}") from exc
-
-
 def data_frequency_slug(value: DataFrequency | str) -> str:
-    return normalize_data_frequency(value).value
+    return DataFrequency(value).value
 
 
 def require_supported_data_frequency(
@@ -95,7 +60,7 @@ def require_supported_data_frequency(
     supported: tuple[DataFrequency, ...],
     context: str,
 ) -> DataFrequency:
-    frequency = normalize_data_frequency(value)
+    frequency = DataFrequency(value)
     if frequency not in supported:
         raise ValueError(f"unsupported_data_frequency: {context}: {frequency.value}")
     return frequency
@@ -115,8 +80,8 @@ class DataSpec:
 
     def __post_init__(self) -> None:
         _validate_non_empty_string(self.data_id, "data_id_required")
-        frequency = normalize_data_frequency(self.frequency)
-        grain = normalize_data_grain(self.grain)
+        frequency = DataFrequency(self.frequency)
+        grain = DataGrain(self.grain)
         if not isinstance(self.column_roles, Mapping):
             raise ValueError("column_roles_required")
         column_roles: dict[str, ColumnRole] = {}
@@ -207,7 +172,7 @@ class ProcessedDataSpec(DataSpec):
     def __post_init__(self) -> None:
         super().__post_init__()
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
-        object.__setattr__(self, "kind", normalize_processed_data_kind(self.kind))
+        object.__setattr__(self, "kind", ProcessedDataKind(self.kind))
         if type(self.parameters_json) is not str:
             raise ValueError("processed_parameters_invalid")
         object.__setattr__(

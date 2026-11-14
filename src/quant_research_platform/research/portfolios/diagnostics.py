@@ -5,7 +5,7 @@ comparisons.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -368,33 +368,18 @@ def _portfolio_risk_models(ledgers, candidates, config):
         if "risk_model" in config
         else None
     )
-    legacy = FactorRiskConfig(**config["risk"]) if "risk" in config else None
     result = {}
     for candidate in candidates:
-        metadata = ledgers[candidate.candidate_id].metadata
-        if "risk_model" in metadata:
-            model = FactorRiskModel.from_mapping(metadata["risk_model"])
-        elif "risk_config" in metadata:
-            model = FactorRiskModel(
-                candidate.risk_style_columns,
-                FactorRiskConfig(**metadata["risk_config"]),
+        if candidate.construction == "benchmark_enhanced":
+            model = FactorRiskModel.from_mapping(
+                ledgers[candidate.candidate_id].metadata["risk_model"]
             )
         else:
-            if (
-                candidate.construction == "benchmark_enhanced"
-                and declared is None
-                and legacy is None
-            ):
-                raise ValueError("portfolio_attribution_risk_model_required")
-            model = declared or FactorRiskModel(
-                candidate.risk_style_columns, legacy or FactorRiskConfig()
-            )
+            model = declared or FactorRiskModel(candidate.risk_style_columns)
         if (
             model.style_columns != candidate.risk_style_columns
             or declared is not None
             and model != declared
-            or legacy is not None
-            and model.config != legacy
         ):
             raise ValueError("portfolio_attribution_risk_model_conflict")
         result[candidate.candidate_id] = model
@@ -1294,7 +1279,6 @@ def portfolio_statistics(config):
         "sample_role",
         "inputs",
         "benchmark_total_return_indices",
-        "risk",
         "risk_model",
         "risk_exposure_input",
         "adv_sensitivities",
@@ -1411,8 +1395,6 @@ def portfolio_statistics(config):
     if {"sharpe_inference", "cscv"}.intersection(analyses):
         metadata["inference_scope"] = "exploratory"
         metadata["formal_selection_qualification"] = "not_established"
-    if "attribution" in analyses and "risk" in config:
-        metadata["risk"] = asdict(FactorRiskConfig(**config["risk"]))
     metadata.update(comparison_metadata)
     metadata["analyses"] = list(analyses)
     metadata["candidate_ids"] = list(ledgers)
