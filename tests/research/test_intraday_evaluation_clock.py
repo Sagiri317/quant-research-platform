@@ -123,6 +123,20 @@ def test_etf_day_rankic_roundtrip_matches_validation_weighting(tmp_path):
     assert metrics["validation_mse"] == pytest.approx(4 / 3)
 
 
+def test_empty_etf_day_window_publishes_without_inventing_observations(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Series(dtype="datetime64[ns]"),
+            "asset_id": pd.Series(dtype="string"),
+            "x": pd.Series(dtype="float64"),
+            "label": pd.Series(dtype="float64"),
+            "eligible": pd.Series(dtype="bool"),
+        }
+    )
+    _, tables = _saved_metrics(tmp_path, frame, _spec("single_asset_time_series"))
+    assert all(table.empty for table in tables.values())
+
+
 def test_saved_predictions_common_intersection_reranks_and_preserves_own(tmp_path):
     inputs = data(tmp_path)
     frame = pd.read_parquet(inputs)

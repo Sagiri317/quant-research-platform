@@ -501,7 +501,9 @@ def _iter_single_asset_time_series_output_chunks(
     frame = (
         pd.concat(selected_frames, ignore_index=True)
         if selected_frames
-        else pd.DataFrame(columns=["timestamp", *numeric_columns])
+        else pd.DataFrame(columns=["timestamp", *numeric_columns]).astype(
+            {"timestamp": "datetime64[ns]"}
+        )
     )
     selected_frames.clear()
     grouped_label_values = _empty_grouped_label_values()
