@@ -848,7 +848,7 @@ def _factor_statistics_from_evaluations(config):
                             "timestamps": [],
                         }
             if metadata["strata"] or "daily_strata" in metadata["optional_member_rows"]:
-                members += ["daily_coverage", "daily_strata"]
+                members.append("daily_strata")
 
         with closing_iterator(ExitStack()) as stack:
             streams = {
@@ -881,24 +881,13 @@ def _factor_statistics_from_evaluations(config):
                 daily = {}
                 for name in heads:
                     head = heads[name]
-                    if (
-                        head is not None
-                        and not head.empty
-                        and head.timestamp.iloc[0] < timestamp
-                    ):
-                        raise ValueError("evaluation_daily_dates_mismatch")
                     daily[name] = (
                         head
-                        if head is not None
-                        and not head.empty
-                        and head.timestamp.iloc[0] == timestamp
+                        if head is not None and head.timestamp.iloc[0] == timestamp
                         else None
                     )
                     if daily[name] is not None:
                         heads[name] = next_date(streams[name])
-                coverage = daily.get("daily_coverage")
-                if "daily_coverage" in members and coverage is None:
-                    raise ValueError("evaluation_daily_dates_mismatch")
                 domains = [
                     ("metrics", metrics),
                     ("daily_strata", daily.get("daily_strata")),
@@ -961,8 +950,6 @@ def _factor_statistics_from_evaluations(config):
                             values[statistic].append(
                                 float(value) if pd.notna(value) else np.nan
                             )
-            if any(head is not None and not head.empty for head in heads.values()):
-                raise ValueError("evaluation_daily_dates_mismatch")
         declared_sessions = config.get("sessions", metadata.get("sessions"))
         if declared_sessions is not None:
             from quant_research_platform.contracts.evaluations import (

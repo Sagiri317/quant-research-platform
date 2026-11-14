@@ -136,7 +136,6 @@ INDEX_INFO_INTERIM_COLUMNS: tuple[str, ...] = (
     "index_type",
     "market_belonging",
     "calculation_formula",
-    "index_class",
     "start_date",
     "base_date",
 )
@@ -711,15 +710,12 @@ def _normalize_mapped_frame(
             if column not in result and column not in {
                 "source_asset_id",
                 "timestamp",
-                "index_class",
             }:
                 result[column] = pd.Series(
                     np.nan if column == "base_point" else pd.NA,
                     index=result.index,
                     dtype="float64" if column == "base_point" else "string",
                 )
-        if "index_class" not in result.columns and "index_category" in result.columns:
-            result["index_class"] = result["index_category"]
         if "base_point" in result.columns:
             base_point_text = result["base_point"].astype("string").str.strip()
             base_point = result["base_point"].mask(base_point_text.eq(""))

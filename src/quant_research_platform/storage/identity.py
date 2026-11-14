@@ -12,12 +12,10 @@ class _DigestingReader:
     def __init__(self, handle) -> None:
         self._handle = handle
         self._digest = hashlib.sha256()
-        self.bytes_read = 0
 
     def read(self, size: int = -1) -> bytes:
         chunk = self._handle.read(size)
         self._digest.update(chunk)
-        self.bytes_read += len(chunk)
         return chunk
 
     def __getattr__(self, name):
@@ -27,7 +25,6 @@ class _DigestingReader:
         read = getattr(self._handle, "read1", self._handle.read)
         chunk = read(size)
         self._digest.update(chunk)
-        self.bytes_read += len(chunk)
         return chunk
 
     def readinto(self, buffer) -> int:

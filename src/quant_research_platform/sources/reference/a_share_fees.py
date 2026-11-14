@@ -94,7 +94,7 @@ def load_a_share_fee_source(
         root / A_SHARE_FEE_SIDECAR_NAME if fee_sidecar is None else Path(fee_sidecar)
     )
     _metadata, sidecar_sha256 = _read_sidecar(sidecar_path)
-    rows, data_row_count, csv_sha256, csv_bytes, columns = _read_rows(csv_path)
+    rows, csv_sha256 = _read_rows(csv_path)
     digest = hashlib.sha256()
     for name, member_hash in sorted(
         (
@@ -131,10 +131,9 @@ def _read_sidecar(path: Path) -> tuple[dict[str, object], str]:
 
 def _read_rows(
     path: Path,
-) -> tuple[tuple[FeeSourceRow, ...], int, str, int, tuple[str, ...]]:
+) -> tuple[tuple[FeeSourceRow, ...], str]:
     rows: list[FeeSourceRow] = []
     seen: set[tuple[object, ...]] = set()
-    data_row_count = 0
     try:
         with closing_iterator(open_filesystem_file(path)) as binary:
             hashed = _DigestingReader(binary)
@@ -147,7 +146,6 @@ def _read_rows(
                 if any(columns.count(column) != 1 for column in FEE_CSV_COLUMNS):
                     raise ValueError("a_share_fee_source_schema_invalid")
                 for row in reader:
-                    data_row_count += 1
                     if None in row:
                         raise ValueError("a_share_fee_source_schema_invalid")
                     values = {}
@@ -212,7 +210,7 @@ def _read_rows(
         raise ValueError("a_share_fee_source_unavailable") from exc
     if not rows:
         raise ValueError("a_share_fee_source_empty")
-    return tuple(rows), data_row_count, hashed.hexdigest(), hashed.bytes_read, columns
+    return tuple(rows), hashed.hexdigest()
 
 
 def _parse_date(value: str) -> date:

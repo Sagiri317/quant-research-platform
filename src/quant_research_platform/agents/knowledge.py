@@ -94,17 +94,9 @@ def lookup(arguments, state):
                         .with_suffix(".py")
                         .read_text(encoding="utf-8")
                     )
-                    function = next(
-                        node
-                        for node in ast.parse(source).body
-                        if isinstance(node, ast.FunctionDef)
-                        and node.name == binding.names[0].name
-                    )
                     text += (
-                        "\nNative entry point (includes exact config fields):\n"
-                        + ast.get_source_segment(source, function)
+                        "\nNative entry point, module helpers and contracts:\n" + source
                     )
-                    text += "\nModule helpers and contracts:\n" + source
                 documents[name] = sanitize_shared_text(text)
     elif scope == "catalog":
         profile = research_profile(A_SHARE_PROFILE_ID)

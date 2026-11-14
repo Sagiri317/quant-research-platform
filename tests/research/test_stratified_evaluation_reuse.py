@@ -756,10 +756,9 @@ def test_cut_window_uses_only_selected_daily_members(tmp_path, monkeypatch):
     )
     assert {name for name, _ in scans} == {
         "metrics.parquet",
-        "daily_coverage.parquet",
         "daily_strata.parquet",
     }
-    assert len(scans) == 3 and all(filters is not None for _, filters in scans)
+    assert len(scans) == 2 and all(filters is not None for _, filters in scans)
     with read_statistics_artifact(reduced).table(
         "factor_stratified_diagnostics.parquet"
     ) as frame:
