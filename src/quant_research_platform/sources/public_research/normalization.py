@@ -397,8 +397,10 @@ def accepts(data_id, record):
         return path.endswith(".csv")
     if data_id == "public_fund_financial_cells":
         return path.endswith((".csv", ".csv.gz"))
-    if data_id in {"public_futures_contracts", "public_futures_member_positions"}:
+    if data_id == "public_futures_contracts":
         return path.endswith(".xml")
+    if data_id == "public_futures_member_positions":
+        return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_refinancing_balances":
         return path.endswith(".json")
     if record["source"].startswith("etf_pcf_"):
@@ -803,34 +805,42 @@ def normalize(data_id, path, record):
         result["publication_date"] = result.timestamp
         yield result
     elif source == "cffex_member_rankings":
-        frame = pd.DataFrame(
-            [
-                {child.tag.lower(): child.text for child in node}
-                for node in ET.parse(path).getroot()
-                if node.tag.lower() == "data"
-            ]
-        )
-        if frame.empty:
-            return
-        result = _rename(
-            frame,
-            {
-                "instrumentid": "contract_id",
-                "tradingday": "timestamp",
-                "datatypeid": "position_side",
-                "rank": "rank",
-                "partyid": "member_id",
-                "productid": "product",
-                "volume": "quantity",
-                "varvolume": "quantity_change",
-            },
-        )
-        result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
-        result["asset_id"] = (
-            result.contract_id + ":" + result.position_side + ":" + result["rank"]
-        )
-        result["publication_date"] = result.timestamp
-        yield result
+        mapping = {
+            "instrumentid": "contract_id",
+            "tradingday": "timestamp",
+            "datatypeid": "position_side",
+            "rank": "rank",
+            "partyid": "member_id",
+            "productid": "product",
+            "volume": "quantity",
+            "varvolume": "quantity_change",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                for field in ("product", "contract_id", "member_id"):
+                    result[field] = result[field].str.rstrip(" ")
+                result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
+                result["asset_id"] = (
+                    result.contract_id
+                    + ":"
+                    + result.position_side
+                    + ":"
+                    + result["rank"]
+                )
+                result["publication_date"] = result.timestamp
+                yield result
     elif source in SOURCES["public_refinancing_balances"]:
         payload = json.loads(path.read_bytes())
         rows = payload["data"]["list"]

@@ -494,6 +494,7 @@ CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头�
 | `public_fund_shares` | 交易所ETF总份额；读取结构化CSV，上交所万份换算为份，深交所按原“份”字段读取 |
 | `public_etf_pcf_baskets`／`public_etf_pcf_components` | 每申赎单位基金份额、估值日NAV／现金差额及交付篮子；股票股数与黄金克数分列，不能当实际持仓或指数权重。各基金规则对应各自可用时钟，保留原件URL与来源身份 |
 | `public_futures_daily` | IF／IH／IC／IM逐合约行情，价格为指数点，成交量与持仓为合约数；不混入期权或小计 |
+| `public_futures_member_positions` | IF／IH／IC／IM逐合约会员成交与持仓排名，数量为合约数；读取结构化CSV并去除标识字段的定长右侧空格，保留原件身份与修订。真实发布时间未知时，观察日按次日本地零点给出可用上界 |
 | `public_fund_holdings` | 报告期、经济组合、报告版本、真实证券市场与股票代码、股数、CNY公允价值、NAV百分比及披露范围；原始行与章节共同标识持仓，不混同港股和A股代码 |
 | `public_fund_holdings_reports` | 完整股票表状态、明确无股票声明、股票行数、经济组合及报告版本；零持仓报告独立于持仓行保存，未知解析状态不能当作零仓 |
 | `public_13f_holdings`／`public_nport_holdings` | 按申报编号和持仓行保留版本与修订；13F金额按实际申报日适用的美元／千美元规则换算；N-PORT保留报告币种 |
