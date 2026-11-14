@@ -16,6 +16,7 @@ import pandas as pd
 
 from quant_research_platform.artifacts.statistics import _COMPARISON_IDENTITY
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.share_safety import sanitize_shared_text
 
 
 def _styled(function):
@@ -101,7 +102,7 @@ def _figure(count, *, title, source_reference, sample_role, ratios=None):
         sample_role, sample_role or "样本"
     )
     figure.supxlabel(
-        f"{role_label} | 来源：{fill(str(source_reference), 110)}",
+        f"{role_label} | 来源：{fill(sanitize_shared_text(source_reference), 110)}",
         fontsize=8,
     )
     return figure, axes[:, 0]

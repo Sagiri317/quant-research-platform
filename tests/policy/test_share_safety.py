@@ -44,7 +44,7 @@ def test_failure_path_rejects_absolute_tokens(path: str) -> None:
 
 def test_sanitizer_redacts_windows_unc_and_posix_paths() -> None:
     # Intentional fake provider/source marker for share-safety rejection.
-    text = r"C:\Users\DELL\secret.csv \\server\share\raw.xlsx /mnt/data/private.csv /home/user/private.csv /Users/name/private.csv /tmp/x"  # noqa: E501
+    text = r"C:\Users\Researcher\secret.csv \\server\share\raw.xlsx /mnt/data/private.csv /home/user/private.csv /Users/name/private.csv /tmp/x"  # noqa: E501
 
     sanitized = sanitize_shared_text(text)
 
@@ -259,6 +259,8 @@ def test_leading_separator_credentials_match_structured_keys(key):
         "provider_id=choice",
         "row_samples=[{asset_id: 000001, timestamp: 2026}]",
         "data/raw/csmar/example.csv",
+        "./data/raw/csmar/example.csv",
+        "../results/metrics.json",
         ".run/private/s1/summary.json",
         "source_asset_id",
         "exact_runtime_payload",

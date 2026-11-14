@@ -283,6 +283,33 @@ def test_long_source_footer_present_and_inside_every_figure():
         assert 0 <= box.y0 < box.y1 <= figure.bbox.height
 
 
+@pytest.mark.parametrize(
+    "source_reference,displayed_reference",
+    [
+        ("C:/Users/researcher/project/results/metrics", "[local-path]"),
+        ("/home/researcher/project/results/metrics", "[local-path]"),
+        (
+            "https://example.org/data?api_key=private-value",
+            "https://example.org/data?[credential]",
+        ),
+        ("./results/metrics", "./results/metrics"),
+        ("../results/metrics", "../results/metrics"),
+    ],
+)
+def test_source_caption_preserves_public_references(
+    source_reference, displayed_reference
+):
+    figure, axes = plots.plot_metric_comparison(
+        [dict(candidate_id="candidate", metric_id="fees", value=1, status="DEFINED")],
+        metric_id="fees",
+        units="CNY",
+        source_reference=source_reference,
+        sample_role="test",
+    )
+    assert figure._supxlabel.get_text() == f"测试集 | 来源：{displayed_reference}"
+    assert axes[0].patches[0].get_width() == 1
+
+
 def test_cash_equity_curve_rejects_negative_nav():
     with pytest.raises(ValueError, match="plot_nav_negative"):
         plots.plot_portfolio_curve(
