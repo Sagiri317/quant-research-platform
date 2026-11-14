@@ -326,19 +326,19 @@ def test_cscv_complement_reuse_preserves_exhaustive_result_and_work(monkeypatch)
     for chosen in combinations(range(8), 4):
         train = np.concatenate([blocks[i] for i in chosen])
         test = np.concatenate([blocks[i] for i in range(8) if i not in chosen])
-        a = statistics._candidate_ranks(matrix[train], np.zeros_like(matrix[train]))
-        b = statistics._candidate_ranks(matrix[test], np.zeros_like(matrix[test]))
+        a = statistics._candidate_sharpes(matrix[train], np.zeros_like(matrix[train]))
+        b = statistics._candidate_sharpes(matrix[test], np.zeros_like(matrix[test]))
         winner = np.argmax(a)
         rank = 1 + np.sum(b < b[winner])
         total += rank / 8 <= 0.5
     calls = []
-    original = statistics._candidate_ranks
+    original = statistics._candidate_sharpes
 
     def counted(values, errors):
         calls.append(len(values))
         return original(values, errors)
 
-    monkeypatch.setattr(statistics, "_candidate_ranks", counted)
+    monkeypatch.setattr(statistics, "_candidate_sharpes", counted)
     result = statistics.cscv_pbo(matrix, slice_count=8)
     assert result.status == "DEFINED"
     assert result.pbo == total / comb(8, 4)

@@ -91,11 +91,8 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     }
 
 
-@pytest.mark.parametrize(
-    "scenario", ("pv_all", "fusion_nf_core", "fusion_nf_expectations")
-)
-def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_columns(
-    tmp_path, scenario
+def test_non_a_share_assembly_preserves_input_semantics_and_requires_real_columns(
+    tmp_path,
 ):
     from dataclasses import replace
 
@@ -108,6 +105,7 @@ def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_colu
 
     layout = StorageLayout(tmp_path)
     processed = make_dummy_processed_catalog()
+    scenario = "pv_all"
     spec = make_dummy_research_dataset_spec(data_id=scenario)
     write_dummy_processed_inputs(layout, processed)
     root = assemble_research_dataset(

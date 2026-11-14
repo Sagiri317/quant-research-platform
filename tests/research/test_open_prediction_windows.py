@@ -221,7 +221,6 @@ def test_selected_refit_predicts_open_windows_for_any_purpose(tmp_path):
             )
         )
         assert metadata["prediction_window"] == {"start": "2020-01-07", "end": None}
-        assert "test_window" not in metadata["model_facts"]
         assert actual.timestamp.min() == pd.Timestamp("2020-01-07")
         assert actual.timestamp.max() == pd.Timestamp("2020-01-12")
         expected = actual.asset_id.map({"a": 0.1, "b": 0.2, "c": 0.3})

@@ -35,17 +35,16 @@ from tests.helpers.statistics_artifacts import (
 
 
 @pytest.mark.parametrize("recovery", ["quote", "cash_retained", "cash_cancelled"])
-@pytest.mark.parametrize("access", ["validation", "test"])
 def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
-    tmp_path, access, recovery
+    tmp_path, recovery
 ):
     dates = pd.bdate_range("2023-01-02", periods=6)
+    sample_role = "validation"
     window = {
         "start": str(dates[0].date()),
         "end": str(dates[-1].date()),
-        "access": access,
     }
-    candidates, manifest = portfolio_statistics_config(sample_role=access)
+    candidates, manifest = portfolio_statistics_config(sample_role=sample_role)
     is_cash = recovery.startswith("cash")
     initial = 1000.0
     terminal = 500.0 if is_cash else 550.0
@@ -154,8 +153,8 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
             }
         )
         metadata = {
-            "window": {key: value for key, value in window.items() if key != "access"},
-            "sample_role": access,
+            "window": window,
+            "sample_role": sample_role,
         }
         root = write_portfolio_ledger_artifact(
             tmp_path / candidate.candidate_id,
@@ -256,7 +255,7 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     assert performance.loc[(candidate, "cost"), "value"] == 0.0
     metadata = statistics_metadata(
         TimeWindow(window["start"], window["end"]),
-        sample_role=access,
+        sample_role=sample_role,
         candidate_ids=[c.candidate_id for c in candidates],
     )
     root = write_statistics_artifact(

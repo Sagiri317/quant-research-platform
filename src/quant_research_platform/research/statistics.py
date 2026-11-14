@@ -634,8 +634,8 @@ def cscv_pbo(
         out_sample_ids = tuple(sorted(all_slice_ids.difference(in_sample_ids)))
         in_indices = np.concatenate([slices[index] for index in in_sample_ids])
         out_indices = np.concatenate([slices[index] for index in out_sample_ids])
-        in_scores = _candidate_ranks(matrix[in_indices], roundoff[in_indices])
-        out_scores = _candidate_ranks(matrix[out_indices], roundoff[out_indices])
+        in_scores = _candidate_sharpes(matrix[in_indices], roundoff[in_indices])
+        out_scores = _candidate_sharpes(matrix[out_indices], roundoff[out_indices])
         if in_scores is None or out_scores is None:
             return _undefined_pbo(
                 matrix, slice_count, combination_count, "candidate_sharpe_undefined"
@@ -1169,13 +1169,6 @@ def _return_sharpes(values: object, *, roundoff: object = 0.0) -> np.ndarray:
         out=np.full(data.shape[1:], np.nan),
         where=(deviation > 0) & ~unresolved & np.isfinite(errors).all(axis=0),
     )
-
-
-def _candidate_ranks(values: np.ndarray, errors: np.ndarray) -> np.ndarray | None:
-    scores = _candidate_sharpes(values, errors)
-    if scores is None:
-        return None
-    return np.unique(scores, return_inverse=True)[1]
 
 
 def _candidate_sharpes(values: np.ndarray, errors: np.ndarray) -> np.ndarray | None:

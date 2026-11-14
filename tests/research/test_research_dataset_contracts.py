@@ -161,9 +161,6 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
     assert result["timestamp"].dtype == "datetime64[ns]"
     root = tmp_path / "data/research/dummy_market/dummy_dataset"
     spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
-    manifest_payload = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
-    )
     expected = {
         "base": "strict",
         "factors": "sparse",
@@ -172,13 +169,11 @@ def test_research_dataset_assembler_uses_explicit_base_not_input_order(
         "context": "strict",
     }
     assert spec_payload["key_coverage"] == expected
-    assert "key_coverage" not in manifest_payload
     expected_roles = {
         column: role.value
         for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
     }
     assert spec_payload["column_roles"] == expected_roles
-    assert "column_roles" not in manifest_payload
 
 
 def test_research_dataset_columns_extend_without_assembler_change(

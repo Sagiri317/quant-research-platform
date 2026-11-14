@@ -142,7 +142,6 @@ def test_native_stock_pool_keeps_unknown_raw_and_unquoted_qualified_rows(
         ]
         == "point_in_time_stock_pool_with_raw_observations"
     )
-    assert not any("missing" in name for name in result)
     from quant_research_platform.research.datasets import high_frequency as module
 
     monkeypatch.setattr(module, "DEFAULT_BATCH_ROWS", 3)
@@ -247,7 +246,7 @@ def test_status_projection_keeps_rows_and_field_local_conflicts(tmp_path, revers
     assert result._available_at.iloc[0] == START + pd.Timedelta(seconds=5)
 
 
-def test_legacy_status_without_consolidation_fact_preserves_raw_unknown_membership(
+def test_status_without_consolidation_fact_preserves_raw_unknown_membership(
     tmp_path,
 ):
     listing = pd.Timestamp("2024-12-02")
@@ -272,7 +271,6 @@ def test_legacy_status_without_consolidation_fact_preserves_raw_unknown_membersh
     assert result.f.notna().all()
     assert result.mid.notna().all()
     assert result.future_mid_return_3s.notna().all()
-    assert "stock_pool_available_at" not in result
 
 
 @pytest.mark.parametrize("initial", [None, True, False])

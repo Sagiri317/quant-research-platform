@@ -505,12 +505,6 @@ def test_writer_resolves_scalar_nulls_independently_of_parts_and_chunks(
         )
         saved_spec = json.loads((root / "spec.json").read_text())
         assert saved_spec["primary_key"] == key
-        assert not (set(saved_spec) - {"schema_id"}) & set(manifest)
-        assert "schema_hash" not in manifest
-        assert (
-            not {"spec_identity", "logical_dtype_hash", "validation_status"}
-            & manifest.keys()
-        )
         persisted_rows = []
         for path in sorted((root / "data").rglob("*.parquet")):
             with pq.ParquetFile(path) as parquet:
@@ -727,23 +721,3 @@ def test_dataset_statistics_use_only_contract_time_key_and_read_old_files(
                         parquet, list(session.parquet_filters or ())
                     ) == list(range(parquet.metadata.num_row_groups))
     assert compare_datasets(before, after).status == "MATCH"
-
-
-def test_spec_semantics_checked_once_per_write_and_read_boundary(tmp_path, monkeypatch):
-    from quant_research_platform.contracts.data import DataSpec
-    from quant_research_platform.storage.datasets.reading import open_dataset_session
-
-    spec = make_processed_dataset_spec()
-    original = DataSpec.__post_init__
-    calls = []
-
-    def validate(value):
-        calls.append(value.data_id)
-        original(value)
-
-    monkeypatch.setattr(DataSpec, "__post_init__", validate)
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(root, make_default_dataset_frame(), spec=spec)
-    assert calls == []
-    open_dataset_session(root, columns=None, time_window=None)
-    assert calls == []

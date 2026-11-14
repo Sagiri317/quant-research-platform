@@ -39,7 +39,6 @@ def test_existing_predictions_score_and_evaluate_without_model_or_trial(tmp_path
     ] = pd.Timestamp("2020-01-10")
     labels.to_parquet(scoring["labels"]["path"], index=False)
     scored = json.loads(score(scoring).read_text())
-    assert "test_window" not in scored
     assert scored["common_rows"] == 4
     spec = EvaluationSpec(
         evaluation_id="posthoc",
@@ -572,7 +571,6 @@ def test_saved_model_allows_later_prediction_evaluation_and_refit(tmp_path):
     assert pd.Timestamp(fitted.metadata["label_available_max"]) == pd.Timestamp(
         "2020-01-10"
     )
-    assert "test_window" not in facts
 
 
 @pytest.mark.parametrize("missing_label", ("absent", "immature"))

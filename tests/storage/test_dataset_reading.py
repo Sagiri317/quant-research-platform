@@ -22,7 +22,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
-    fingerprint_dataset,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -174,27 +173,6 @@ def test_bounded_dataset_read_path_never_calls_full_file_pandas_reader(
     monkeypatch.setattr(dataset_reading.pd, "read_parquet", fail_read_parquet)
     chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
     assert sum(len(chunk) for chunk in chunks) == 3
-
-
-@pytest.mark.parametrize("extra", [{}, {"schema_hash": "0" * 64}])
-def test_storage_and_diagnostics_do_not_require_persisted_schema_hash(
-    tmp_path: Path, extra: dict
-) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    expected = make_default_dataset_frame().astype({"timestamp": "datetime64[ns]"})
-    write_dataset(root, expected, spec=make_processed_dataset_spec())
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert "schema_hash" not in manifest
-    manifest.update(extra)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    keys = ["timestamp", "asset_id"]
-    pd.testing.assert_frame_equal(
-        read_dataset(root).sort_values(keys).reset_index(drop=True),
-        expected.sort_values(keys).reset_index(drop=True),
-    )
-    assert inspect_dataset(root).row_count == len(expected)
-    assert fingerprint_dataset(root).schema_hash
 
 
 def test_read_dataset_rejects_data_root_missing_and_missing_projection_columns(

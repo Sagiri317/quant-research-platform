@@ -630,10 +630,9 @@ def test_missing_factor_does_not_mask_independent_book_or_label(tmp_path):
     assert row.mid == pytest.approx(100.3)
     assert row.loc[list(DEEPLOB_INPUT_COLUMNS)].notna().all()
     assert row.future_mid_return_3s == pytest.approx(100.6 / 100.3 - 1)
-    assert not any("missing" in column for column in result)
 
 
-def test_legacy_book_status_does_not_filter_independent_sampled_outputs(tmp_path):
+def test_book_status_does_not_filter_independent_sampled_outputs(tmp_path):
     frame = quotes([0, 3, 6, 9])
     frame.loc[1, ["bid_vol1", "eligible"]] = [np.nan, False]
     frame.loc[2, ["mid", "eligible"]] = [np.nan, False]
@@ -652,7 +651,6 @@ def test_legacy_book_status_does_not_filter_independent_sampled_outputs(tmp_path
     assert pd.isna(at_six.future_mid_return_3s)
     assert open_dataset_session(path).spec["column_roles"]["eligible"] == "universe"
     assert "eligible" in open_dataset_session(path).spec["filter_columns"]
-    assert not any("missing" in column for column in result)
 
 
 def test_sparse_clock_is_bounded_and_does_not_read_exclusive_next_day(

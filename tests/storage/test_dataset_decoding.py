@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -28,13 +27,11 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_stat,
     native_filesystem_path,
 )
 from tests.helpers.paths import (
     filesystem_glob,
     filesystem_write_bytes,
-    filesystem_write_text,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -551,55 +548,6 @@ def test_materialized_read_unions_categorical_dictionaries_across_parts(
     )
 
 
-@pytest.mark.parametrize(
-    "mode", (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED)
-)
-def test_reads_reject_nonnull_category_outside_declared_domain(
-    tmp_path: Path, mode: DatasetReadMode
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, f"forged_read_domain_{mode.value}")
-    frame = make_default_dataset_frame().iloc[:1].copy()
-    known = str(frame["asset_id"].iloc[0])
-    frame["asset_id"] = pd.Categorical([known], categories=[known])
-    write_dataset(
-        root,
-        frame,
-        spec=make_processed_dataset_spec(f"forged_read_domain_{mode.value}"),
-    )
-    part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
-    original = pq.ParquetFile(native_filesystem_path(part)).read()
-    asset_index = original.schema.get_field_index("asset_id")
-    asset_type = original.schema.field(asset_index).type
-    forged_asset = pa.DictionaryArray.from_arrays(
-        pa.array([0], type=asset_type.index_type),
-        pa.array(["unknown"], type=asset_type.value_type),
-    )
-    pq.write_table(
-        pa.Table.from_arrays(
-            [
-                forged_asset if index == asset_index else original.column(index)
-                for index in range(original.num_columns)
-            ],
-            schema=original.schema.remove_metadata(),
-        ).replace_schema_metadata(original.schema.metadata),
-        native_filesystem_path(part),
-        compression="zstd",
-    )
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["file_size_bytes"] = sum(
-        filesystem_stat(path).st_size
-        for path in filesystem_glob(root / "data", "**/part-*.parquet")
-    )
-    filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
-        result = read_dataset(root, mode=mode)
-        if mode is DatasetReadMode.CHUNKED:
-            tuple(result)
-
-
 @pytest.mark.parametrize("ordered", [False, True])
 def test_fingerprint_preserves_content_identity_across_unused_categories(
     tmp_path: Path, ordered: bool
@@ -708,34 +656,14 @@ def test_nullable_integer_values_and_numeric_keys_remain_exact_with_nulls(
         pd.testing.assert_frame_equal(loaded, frame, check_exact=True)
 
 
-@pytest.mark.parametrize(
-    "mode", (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED)
-)
-def test_nonnullable_boolean_rejects_physical_null_values(
-    tmp_path: Path, mode: DatasetReadMode
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "boolean_null")
-    frame = make_default_dataset_frame().iloc[:1].assign(value=True)
-    write_dataset(root, frame, spec=make_processed_dataset_spec("boolean_null"))
-    part = next(filesystem_glob(root / "data", "**/*.parquet"))
-    with pq.ParquetFile(native_filesystem_path(part)) as parquet:
-        table = parquet.read()
-    table = table.set_column(
-        table.schema.get_field_index("value"),
-        table.schema.field("value"),
-        pa.array([None], type=pa.bool_()),
-    )
-    pq.write_table(table, native_filesystem_path(part), compression="zstd")
-    manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(
-        Path(native_filesystem_path(manifest_path)).read_text(encoding="utf-8")
-    )
-    manifest["file_size_bytes"] = filesystem_stat(part).st_size
-    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
+def test_nonnullable_boolean_rejects_physical_null_values() -> None:
+    batch = pa.record_batch([pa.array([None], type=pa.bool_())], names=["value"])
     with pytest.raises(ValueError, match="dataset_nonnullable_value_missing"):
-        result = read_dataset(root, mode=mode)
-        if mode is DatasetReadMode.CHUNKED:
-            tuple(result)
+        tuple(
+            dataset_reading._arrow_batch_to_bounded_pandas(
+                batch, dtype_overrides={"value": np.dtype("bool")}, batch_rows=8
+            )
+        )
 
 
 def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -> None:

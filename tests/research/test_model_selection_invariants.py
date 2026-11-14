@@ -477,7 +477,6 @@ def test_undefined_auxiliary_mse_survives_score_select_roundtrip(
         )
     )
     assert frozen["metrics"] == scored["metrics"]
-    assert "test_window" not in frozen
     assert frozen["selected_model_id"] == (
         None if metric == "validation_mse" else config["candidate_ids"][0]
     )

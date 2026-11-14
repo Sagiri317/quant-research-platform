@@ -394,7 +394,8 @@ short 仍计算该端信号与原标签的相关性，不将收益反号，也�
 新截面EVAL在原生metadata保存 `grouping_rule=fixed_groups_shared_extreme_boundaries`，
 历史产物保留其原分组事实；代码更新不代表历史层收益已重算。
 六项结果扩展原有 metrics/ic_summary，另存各端选中数、有效配对数和未定义原因；不另建结果成员。
-单资产时序不套用截面多空分位，侧端指标记 `not_applicable`，不接受显式 `top_quantile`。
+单资产时序默认 `top_quantile=null`，侧端指标记 `not_applicable`；显式设置比例时，
+在该资产每个声明的时序评价块内按自身信号选取高、低分样本，用于条件相关性评价。
 单资产日内时序评价使用 `evaluate-time-series` 的逐日自身/共同域，不套用截面分层。
 单资产的条件层收益使用 `evaluate.response_diagnostics`：调用方提供各信号的历史参考阈值
 `cutpoints` 及 `reference_window`，共享评价模块一次读取输入，分别计算各因子、标签的层均值、

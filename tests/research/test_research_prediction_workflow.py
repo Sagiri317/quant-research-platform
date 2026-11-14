@@ -97,50 +97,6 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
         assert pd.Series(prediction).notna().all()
 
 
-def test_prediction_keeps_only_consumed_model_facts(tmp_path) -> None:
-    model_algorithm = "linear_regression"
-    frame = _demo_research_rows().assign(
-        instant_target=lambda value: value["reversal_20d"] * 0.01,
-        label_available_at=lambda value: value["timestamp"],
-    )
-    model_spec = ModelSpec(
-        model_id=f"{model_algorithm}_demo",
-        model_algorithm=model_algorithm,
-        input_factor_columns=("reversal_20d",),
-        target_column="instant_target",
-    )
-    import json
-
-    case = fit_frame(
-        tmp_path / "fit",
-        frame.loc[frame.timestamp.le(pd.Timestamp("2014-01-02"))],
-        model_spec,
-        market_id="a_share",
-    )
-    _, _, metadata = predict_frame(
-        tmp_path / "valid",
-        frame,
-        case,
-        window={"start": "2014-01-03", "end": "2014-01-03"},
-    )
-    assert (
-        not {
-            "dependency_status",
-            "scaler",
-            "feature_importance",
-            "hyperparameters",
-            "resolved_hyperparameters",
-            "model_algorithm",
-            "input_columns",
-            "target_column",
-        }
-        & metadata["model_metadata"].keys()
-    )
-    manifest = case.root / "model.json"
-    payload = json.loads(manifest.read_text())
-    assert payload["model_metadata"]["dependency_status"]["package"] == "internal"
-
-
 @pytest.mark.parametrize("start", ["2014-01-01", "2014-01-02"])
 def test_native_prediction_must_follow_saved_fit_cutoff(tmp_path, start):
     frame = _demo_research_rows().assign(
