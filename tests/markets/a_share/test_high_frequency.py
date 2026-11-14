@@ -344,6 +344,21 @@ def test_source_units_cancellation_and_snapshot_math():
     assert units["observed_trade_volume_30s"] == "shares"
 
 
+def test_price_position_ignores_midpoint_roundoff_and_preserves_real_ranges():
+    times = pd.date_range("2018-02-14 09:30:00", periods=103, freq="3s")
+    raw = raw_quotes(tuple(times.strftime("%H%M%S").astype(int) * 1000))
+    raw["bid_px1"] = [38690, 38680] * 50 + [38680, 38690, 38691]
+    raw["ask_px1"] = [38700, 38710] * 50 + [38700, 38710, 38710]
+    quotes = normalize(raw, "hft_quotes", INSTRUMENTS)
+    orders = normalize(raw_events("hft_orders").iloc[:0], "hft_orders", INSTRUMENTS)
+    trades = normalize(raw_events("hft_trades").iloc[:0], "hft_trades", INSTRUMENTS)
+    panel = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    factors = compute_factors(panel, columns=("price_position_300s",))
+    # Equal decimal midpoints form a flat reference, even with different spreads.
+    assert pd.isna(factors.price_position_300s.iloc[100])
+    np.testing.assert_allclose(factors.price_position_300s.iloc[101:], [2.0, 1.05])
+
+
 def test_shenzhen_cancellation_side_requires_one_known_order_index():
     frame = pd.concat([raw_events("hft_trades").iloc[[1]]] * 7, ignore_index=True)
     frame["bid_order_id"] = pd.Series([7, 0, 7, 0, None, 2**64 - 1, 0], dtype="UInt64")

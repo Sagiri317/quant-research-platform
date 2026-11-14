@@ -89,7 +89,7 @@ class ModelMatrixScaler:
             with np.errstate(over="ignore", invalid="ignore"):
                 values -= self.mean_
                 values /= self.scale_
-        return pd.DataFrame(values, index=frame.index, columns=self.columns)
+        return pd.DataFrame(values, index=frame.index, columns=self.columns, copy=False)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -207,16 +207,13 @@ def equal_timestamp_sample_weights(
 def _numeric_matrix(
     frame: pd.DataFrame, columns: tuple[str, ...], *, allow_null: bool = False
 ) -> np.ndarray:
-    values = np.column_stack(
-        [
-            strict_finite_numeric_series(
-                frame[column],
-                error=f"invalid_model_scaler_column: {column}",
-                allow_null=allow_null,
-            ).to_numpy(dtype="float64", copy=False)
-            for column in columns
-        ]
-    )
+    values = np.empty((len(frame), len(columns)), dtype="float64", order="F")
+    for index, column in enumerate(columns):
+        values[:, index] = strict_finite_numeric_series(
+            frame[column],
+            error=f"invalid_model_scaler_column: {column}",
+            allow_null=allow_null,
+        ).to_numpy(dtype="float64", copy=False)
     return values
 
 

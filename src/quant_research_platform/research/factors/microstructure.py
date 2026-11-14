@@ -199,7 +199,11 @@ def _intraday_themes(work, base, columns):
         )
         high, low = previous.max().where(complete), previous.min().where(complete)
         if "price_position_300s" in columns:
-            result["price_position_300s"] = (mid - low) / (high - low).where(high > low)
+            span = high - low
+            # Midpoint arithmetic can contribute one ULP from each price operand.
+            with np.errstate(invalid="ignore"):
+                roundoff = np.spacing(high) + np.spacing(low)
+            result["price_position_300s"] = (mid - low) / span.where(span > roundoff)
         if columns & {"peak_drawdown_300s", "drawdown_sell_pressure_300s"}:
             drawdown = (1 - mid / high).clip(lower=0)
             if "peak_drawdown_300s" in columns:

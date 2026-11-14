@@ -171,6 +171,28 @@ def test_scaler_peak_scratch_reduction_is_bounded_by_column():
     assert optimized < frame.size * 8 * 3.5
 
 
+@pytest.mark.parametrize("operation", ["fit", "transform"])
+def test_nullable_imputation_keeps_one_dense_work_matrix(operation):
+    frame = pd.DataFrame(
+        np.random.default_rng(29).normal(size=(8192, 32)), dtype="Float64"
+    )
+    frame.columns = frame.columns.astype(str)
+    for index, column in enumerate(frame):
+        frame.loc[frame.index % 37 == index, column] = pd.NA
+    scaler = ModelMatrixScaler.fit(frame, missing="impute")
+    tracemalloc.start()
+    try:
+        if operation == "fit":
+            ModelMatrixScaler.fit(frame, missing="impute")
+        else:
+            scaler.transform(frame)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    # Nullable conversion must release each column before collecting the next.
+    assert peak < frame.size * 8 * 1.6
+
+
 def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatch):
     frame = _case("ordinary")
     weights = np.arange(1.0, len(frame) + 1.0)
