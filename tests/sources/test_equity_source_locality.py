@@ -19,7 +19,7 @@ def _materialize(tmp_path, dataset, rows, chunksize=1):
     raw = tmp_path / "raw"
     raw.mkdir()
     path = raw / (RAW_TABLE_CONTRACTS[dataset].table_code + ".csv")
-    columns = RAW_TABLE_CONTRACTS[dataset].required_columns
+    columns = tuple(dict.fromkeys(column for row in rows for column in row))
     with path.open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()

@@ -246,29 +246,6 @@ COLUMN_MAPPINGS = {
 
 # These provider requirements differ from the mapped research columns.
 _REQUIRED_COLUMN_OVERRIDES = {
-    "stock_master": (
-        "Stkcd",
-        "Stknme",
-        "Listdt",
-        "DelistedDate",
-        "Markettype",
-        "Nnindcd",
-        "Nnindnme",
-        "Statco",
-        "Statdt",
-    ),
-    "index_market": (
-        "Indexcd",
-        "Idxtrd01",
-        "Idxtrd02",
-        "Idxtrd03",
-        "Idxtrd04",
-        "Idxtrd05",
-        "Idxtrd06",
-        "Idxtrd07",
-        "Idxtrd08",
-        "Idxtrd09",
-    ),
     "index_info": ("Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"),
 }
 

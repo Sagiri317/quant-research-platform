@@ -62,6 +62,7 @@ def _network(algorithm, width, parameters):
                 _, (hidden_state, _) = self.encoder(packed)
                 final = hidden_state[-1]
             else:
+                lengths = lengths.to(values.device)
                 positions = torch.arange(values.shape[1], device=values.device)
                 encoded = self.encoder(
                     self.projection(values) + self.position(positions),
@@ -198,7 +199,7 @@ class SequencePredictor:
                 with torch.inference_mode():
                     output = network(
                         torch.as_tensor(values, device=device),
-                        torch.as_tensor(sizes, device=device),
+                        torch.as_tensor(sizes),
                     )
                     if classification:
                         output = output.softmax(dim=1)
@@ -271,6 +272,7 @@ def fit_sequence(prepared, spec, validation=None):
     weights, scaler = prepared.preprocessing
     classification = spec.model_algorithm == "deeplob_classifier"
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
+    matrix = torch.from_numpy(matrix)
     target = prepared.training[spec.target_column].to_numpy(dtype="float64")
     mean = float(np.average(target, weights=weights))
     scale = float(np.sqrt(np.average((target - mean) ** 2, weights=weights))) or 1.0
@@ -300,6 +302,7 @@ def fit_sequence(prepared, spec, validation=None):
             ),
         )
         _, v_matrix, v_endpoints, v_starts = _sequence_arrays(validation, spec, scaler)
+        v_matrix = torch.from_numpy(v_matrix)
         v_target = validation.training[spec.target_column].to_numpy(dtype="float64")
         v_actual = (
             direction_classes(v_target, parameters["class_threshold"])
@@ -314,8 +317,8 @@ def fit_sequence(prepared, spec, validation=None):
         positions = ends[:, None] - lengths[:, None] + 1 + np.arange(int(lengths.max()))
         positions = np.minimum(positions, ends[:, None])
         predicted = network(
-            torch.as_tensor(values[positions], device=device),
-            torch.as_tensor(lengths, device=device),
+            torch.as_tensor(values[torch.as_tensor(positions)], device=device),
+            torch.as_tensor(lengths),
         )
         actual = torch.as_tensor(actual[selected], device=device)
         return (
@@ -344,7 +347,7 @@ def fit_sequence(prepared, spec, validation=None):
         for epoch in epochs:
             network.train()
             order = rng.permutation(len(target))
-            loss_sum = 0.0
+            loss_sum = torch.zeros((), dtype=torch.float64, device=device)
             for offset in range(0, len(order), parameters["batch_size"]):
                 selected = order[offset : offset + parameters["batch_size"]]
                 mass = torch.as_tensor(
@@ -359,15 +362,17 @@ def fit_sequence(prepared, spec, validation=None):
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
-                loss_sum += float((errors.detach() * mass).sum().cpu())
+                loss_sum += (errors.detach() * mass).sum().to(torch.float64)
             point = {
                 "epoch": epoch + 1,
-                "training_loss": loss_sum / float(weights.sum()) * scale**2,
+                "training_loss": float(loss_sum.cpu())
+                / float(weights.sum())
+                * scale**2,
                 "validation_loss": None,
             }
             if validation_arrays is not None:
                 network.eval()
-                validation_sum = 0.0
+                validation_sum = torch.zeros((), dtype=torch.float64, device=device)
                 with torch.inference_mode():
                     for offset in range(0, len(v_actual), parameters["batch_size"]):
                         selected = np.arange(
@@ -375,8 +380,10 @@ def fit_sequence(prepared, spec, validation=None):
                             min(offset + parameters["batch_size"], len(v_actual)),
                         )
                         errors = batch_errors(network, *validation_arrays, selected)
-                        validation_sum += float(errors.sum().cpu())
-                point["validation_loss"] = validation_sum / len(v_actual) * scale**2
+                        validation_sum += errors.sum().to(torch.float64)
+                point["validation_loss"] = (
+                    float(validation_sum.cpu()) / len(v_actual) * scale**2
+                )
             if point["validation_loss"] is not None and not np.isfinite(
                 point["validation_loss"]
             ):

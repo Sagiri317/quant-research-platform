@@ -713,7 +713,7 @@ def _scoped_evaluate(
                 (
                     "timestamp",
                     "asset_id",
-                    "eligible",
+                    *required_filter_columns(spec.filter_mode),
                     *signals,
                     *spec.label_columns,
                     *availability.values(),

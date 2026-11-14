@@ -12,6 +12,93 @@ from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config, input_spec
 
 
+@pytest.mark.parametrize(
+    "layers,dropout,training", [(1, 0.4, True), (2, 0.0, True), (2, 0.4, False)]
+)
+def test_lstm_valid_prefix_matches_gate_equations(layers, dropout, training):
+    import torch
+
+    from quant_research_platform.research.models.neural import _network
+
+    model = _network(
+        "lstm_regressor", 2, dict(hidden_size=2, num_layers=layers, dropout=dropout)
+    ).double()
+    model.train(training)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.copy_(
+                torch.linspace(-0.3, 0.4, parameter.numel()).reshape(parameter.shape)
+            )
+    reference = {
+        name: value.detach().clone().requires_grad_()
+        for name, value in model.named_parameters()
+    }
+    values = (
+        torch.arange(30, dtype=torch.float64).reshape(3, 5, 2) / 30
+    ).requires_grad_()
+    inputs = values.detach().clone().requires_grad_()
+    lengths = torch.tensor([5, 1, 3])
+    finals = []
+    for row, length in enumerate(lengths):
+        sequence = inputs[row, :length]
+        for layer in range(layers):
+            hidden, cell = inputs.new_zeros(2), inputs.new_zeros(2)
+            outputs = []
+            for observation in sequence:
+                gates = (
+                    reference[f"encoder.weight_ih_l{layer}"] @ observation
+                    + reference[f"encoder.bias_ih_l{layer}"]
+                    + reference[f"encoder.weight_hh_l{layer}"] @ hidden
+                    + reference[f"encoder.bias_hh_l{layer}"]
+                )
+                incoming, forget, candidate, outgoing = gates.chunk(4)
+                cell = forget.sigmoid() * cell + incoming.sigmoid() * candidate.tanh()
+                hidden = outgoing.sigmoid() * cell.tanh()
+                outputs.append(hidden)
+            sequence = torch.stack(outputs)
+        finals.append(sequence[-1])
+    expected = (
+        torch.stack(finals) @ reference["output.weight"].T + reference["output.bias"]
+    ).squeeze(-1)
+    actual = model(values, lengths)
+    torch.testing.assert_close(actual, expected, rtol=1e-10, atol=1e-12)
+    weights = values.new_tensor([0.4, 2.0, 1.5])
+    targets = values.new_tensor([-0.2, 0.3, 0.7])
+    ((actual - targets).square() * weights).sum().backward()
+    ((expected - targets).square() * weights).sum().backward()
+    torch.testing.assert_close(values.grad, inputs.grad, rtol=1e-10, atol=1e-12)
+    for name, parameter in model.named_parameters():
+        torch.testing.assert_close(
+            parameter.grad, reference[name].grad, rtol=1e-10, atol=1e-12
+        )
+    padding = torch.arange(values.shape[1])[None, :] >= lengths[:, None]
+    assert values.grad[padding].eq(0).all()
+
+
+def test_lstm_recurrent_dropout_preserves_packed_training_random_stream():
+    import torch
+
+    from quant_research_platform.research.models.neural import _network
+
+    model = _network(
+        "lstm_regressor", 2, dict(hidden_size=3, num_layers=2, dropout=0.4)
+    )
+    values = torch.arange(30, dtype=torch.float32).reshape(3, 5, 2) / 30
+    lengths = torch.tensor([5, 1, 3])
+    with torch.random.fork_rng():
+        torch.manual_seed(17)
+        actual = model(values, lengths)
+        actual_random_state = torch.random.get_rng_state()
+        torch.manual_seed(17)
+        packed = torch.nn.utils.rnn.pack_padded_sequence(
+            values, lengths, batch_first=True, enforce_sorted=False
+        )
+        _, (hidden, _) = model.encoder(packed)
+        expected = model.output(hidden[-1]).squeeze(-1)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert torch.equal(actual_random_state, torch.random.get_rng_state())
+
+
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
 @pytest.mark.parametrize("days", [[6, 7], [6, 9]])
 def test_validation_loss_uses_observed_history_between_sample_windows(

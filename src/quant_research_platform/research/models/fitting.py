@@ -551,13 +551,30 @@ def _fit_predictor(
         else:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", ConvergenceWarning)
-                estimator.fit(scaled_matrix, y, sample_weight=weights, **fit_options)
+                matrix = (
+                    _sklearn_fit_matrix(scaled_matrix, estimator)
+                    if spec.model_algorithm in {"lasso_regression", "ridge_regression"}
+                    else scaled_matrix
+                )
+                estimator.fit(matrix, y, sample_weight=weights, **fit_options)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
     finally:
         if patience is not None:
             estimator.set_params(early_stopping_rounds=patience, callbacks=None)
     return ScaledPredictor(estimator, scaler)
+
+
+def _sklearn_fit_matrix(matrix, estimator):
+    """Give an estimator that centers in place ownership of its borrowed matrix."""
+    if estimator.copy_X:
+        return matrix
+    return pd.DataFrame(
+        matrix.to_numpy(copy=False).copy(order="K"),
+        index=matrix.index,
+        columns=matrix.columns,
+        copy=False,
+    )
 
 
 def _fit_lasso_until_converged(estimator, matrix, target, weights):
@@ -574,7 +591,11 @@ def _fit_lasso_until_converged(estimator, matrix, target, weights):
             with warnings.catch_warnings():
                 # A block warning means continue the same coordinate-descent solve.
                 warnings.simplefilter("ignore", ConvergenceWarning)
-                estimator.fit(matrix, target, sample_weight=weights)
+                estimator.fit(
+                    _sklearn_fit_matrix(matrix, estimator),
+                    target,
+                    sample_weight=weights,
+                )
             iterations += estimator.n_iter_
             if estimator.dual_gap_ <= tolerance:
                 break

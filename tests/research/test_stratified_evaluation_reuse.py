@@ -1209,9 +1209,12 @@ def test_parallel_dates_preserve_native_tables_and_empty_domains(
     )
     config["sample_scope"] = scope
     if scope == "common":
+        peer_frame = frame.loc[~frame.timestamp.eq(dates[3])]
+        if filter_mode == "unfiltered":
+            peer_frame = peer_frame.drop(columns="eligible")
         peer = write_evaluation_input(
             tmp_path / "peer",
-            frame.loc[~frame.timestamp.eq(dates[3])],
+            peer_frame,
             factors=("z",),
             labels=("label",),
         )

@@ -11,7 +11,9 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 
 def write_evaluation_input(root, frame, *, features=(), factors=(), labels=()):
     roles = dict.fromkeys(frame.columns, "context")
-    roles.update(timestamp="timestamp", asset_id="key", eligible="mask")
+    roles.update(timestamp="timestamp", asset_id="key")
+    if "eligible" in roles:
+        roles["eligible"] = "mask"
     roles.update(dict.fromkeys(features, "feature"))
     roles.update(dict.fromkeys(factors, "factor"))
     roles.update(dict.fromkeys(labels, "label"))

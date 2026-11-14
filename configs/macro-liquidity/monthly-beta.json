@@ -3,7 +3,7 @@
   "data_id": "macro_liquidity_factors",
   "inputs": {
     "decision_panel": "data/processed/a_share/macro_decision_panel",
-    "macro_observations": "data/interim/macro_liquidity/new-observations",
+    "macro_observations": "data/interim/macro_liquidity/observations",
     "trading_calendar": "data/interim/csmar/trading_calendar"
   },
   "factor_columns": ["ml_cn_m2_beta", "ml_cn_m2_partial_beta"],

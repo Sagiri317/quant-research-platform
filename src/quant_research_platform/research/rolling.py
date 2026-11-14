@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, replace
 from datetime import date
+from itertools import groupby
 from pathlib import Path
 
 import numpy as np
@@ -360,8 +361,9 @@ def _select_inputs(fold, session, candidates):
 
 def _select(config, fold, session, candidates, calendar):
     from quant_research_platform.research.models.production import (
+        _fit_prepared,
         _fit_read_windows,
-        fit_model,
+        _prepare_fit,
     )
 
     candidates, input_groups = _select_inputs(fold, session, candidates)
@@ -422,7 +424,16 @@ def _select(config, fold, session, candidates, calendar):
         )
         common = common & validation.index.isin(filtered.index)
     predictions, rows = [], []
-    for model_id, spec in candidates:
+    for _, family in groupby(
+        candidates,
+        key=lambda item: (
+            item[0],
+            sequence_context_columns(item[1].model_algorithm, item[1].hyperparameters),
+            item[1].hyperparameters.get("early_stopping_rounds") is not None,
+        ),
+    ):
+        family = list(family)
+        spec = family[0][1]
         validate_model_input_roles(
             session.spec,
             model_spec_payload(spec),
@@ -431,46 +442,56 @@ def _select(config, fold, session, candidates, calendar):
             hyperparameters=spec.hyperparameters,
         )
         patience = spec.hyperparameters.get("early_stopping_rounds")
-        result = fit_model(
+        prepared, prepared_validation, prepared_cutoff = _prepare_fit(
             iter_dataset_chunks(
                 session.filtered_view(fold.train).projected_view(
                     _columns(spec, availability)
                 )
             ),
             spec,
-            fit_windows=[_window_payload(fold.train)],
-            fit_cutoff=pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns"),
+            windows=(fold.train,),
+            cutoff=pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns"),
             label_availability_column=availability,
             trading_calendar=calendar,
             **(
                 {
                     "validation_frames": iter(validation_frames),
                     "validation_cutoff": cutoff,
-                    "validation_windows": [_window_payload(fold.validation)],
+                    "validation_windows": (fold.validation,),
                 }
                 if patience is not None
                 else {}
             ),
         )
-        values = prediction_callable(spec.input_columns, result.prediction_model)(
-            scoring_context
-        )[-len(validation) :]
-        if values.shape != (len(validation),):
-            raise ValueError("invalid_prediction_values")
-        common = common & prediction_input_mask(validation, result.metadata).to_numpy()
-        predictions.append(values)
-        rows.append(
-            {
-                "model_id": model_id,
-                "hyperparameters": dict(spec.hyperparameters),
-                **(
-                    {"early_stopping": result.metadata["early_stopping"]}
-                    if patience is not None
-                    else {}
-                ),
-            }
-        )
-        del result
+        for model_id, spec in family:
+            result = _fit_prepared(
+                prepared,
+                spec,
+                validation=prepared_validation,
+                validation_cutoff=prepared_cutoff,
+            )
+            values = prediction_callable(spec.input_columns, result.prediction_model)(
+                scoring_context
+            )[-len(validation) :]
+            if values.shape != (len(validation),):
+                raise ValueError("invalid_prediction_values")
+            common = (
+                common & prediction_input_mask(validation, result.metadata).to_numpy()
+            )
+            predictions.append(values)
+            rows.append(
+                {
+                    "model_id": model_id,
+                    "hyperparameters": dict(spec.hyperparameters),
+                    **(
+                        {"early_stopping": result.metadata["early_stopping"]}
+                        if patience is not None
+                        else {}
+                    ),
+                }
+            )
+            del result
+        del prepared, prepared_validation
     if not common.any():
         raise ValueError("rolling_validation_sample_empty")
     actual = validation[target].to_numpy(dtype=float)[common]

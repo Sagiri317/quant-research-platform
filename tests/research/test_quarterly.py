@@ -222,6 +222,8 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
         "parameter_candidates": {
             "lasso": [{"alpha": 1e-6}, {"alpha": 0.1}],
             "xgb": [{"max_depth": 1}, {"max_depth": 2}],
+            "lstm": [{}, {"sequence_length": 3}],
+            "transformer": [{}, {"sequence_length": 3}],
         },
         "training_start": days[0].date().isoformat(),
         "sessions": days.strftime("%Y-%m-%d").tolist(),
@@ -248,7 +250,7 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
     }
     import quant_research_platform.research.models.production as production
 
-    native_fit = production.fit_model
+    native_fit = production._fit_prepared
     sequence_scores = {}
 
     def fit_and_check_sequence(*args, **kwargs):
@@ -264,26 +266,27 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
         from quant_research_platform.research.models.neural import _network
 
         predictor = result.prediction_model
-        validation_window = kwargs["validation_windows"][0]
+        validation_rows = kwargs["validation"].row_counts
         validation = frame.loc[
             frame.timestamp.between(
-                validation_window["start"], validation_window["end"]
+                validation_rows["train_start"], validation_rows["train_end"]
             )
             & frame.label_available_at.le(pd.Timestamp(kwargs["validation_cutoff"]))
         ]
-        # Build every two-observation sequence directly, including the prior fit date.
+        # Build each history directly, including observations before validation.
+        length = predictor.parameters["sequence_length"]
         arrays = []
         for row in validation.itertuples():
             history = frame.loc[
                 frame.asset_id.eq(row.asset_id) & frame.timestamp.le(row.timestamp),
                 ["x"],
-            ].tail(2)
+            ].tail(length)
             arrays.append(predictor.scaler.transform(history).to_numpy(dtype="float32"))
         with torch.random.fork_rng(), torch.inference_mode():
             network = _network(spec.model_algorithm, 1, predictor.parameters).eval()
             network.load_state_dict(predictor.state)
             values = network(
-                torch.as_tensor(np.stack(arrays)), torch.full((len(arrays),), 2)
+                torch.as_tensor(np.stack(arrays)), torch.full((len(arrays),), length)
             )
         values = (
             values.numpy().astype(float) * predictor.target_scale
@@ -292,7 +295,7 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
         errors = pd.Series(
             (values - validation.label.to_numpy()) ** 2, index=validation.index
         )
-        sequence_scores[spec.model_id] = (
+        sequence_scores.setdefault(spec.model_id, []).append(
             errors.groupby(validation.timestamp.dt.normalize()).mean().mean()
         )
         best = result.metadata["early_stopping"]["best_iteration"]
@@ -305,7 +308,7 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
         )
         return result
 
-    monkeypatch.setattr(production, "fit_model", fit_and_check_sequence)
+    monkeypatch.setattr(production, "_fit_prepared", fit_and_check_sequence)
     results = run_sessions(config)
     assert len(results) == 4
     frozen = []
@@ -346,11 +349,14 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
             )
             assert parameters[budget] == winner["early_stopping"]["best_iteration"] + 1
             if facts["model"]["model_id"] in sequence_scores:
-                assert winner["validation_daily_mse"] == pytest.approx(
+                for candidate, expected in zip(
+                    selection["candidates"],
                     sequence_scores[facts["model"]["model_id"]],
-                    rel=2e-5,
-                    abs=1e-10,
-                )
+                    strict=True,
+                ):
+                    assert candidate["validation_daily_mse"] == pytest.approx(
+                        expected, rel=2e-5, abs=1e-10
+                    )
         predictions, _ = read_predictions(item["predictions"])
         assert len(predictions) == 30
         assert predictions.timestamp.min() > pd.Timestamp(facts["fit_cutoff"])
@@ -493,6 +499,106 @@ def test_unfiltered_native_fit_and_mature_rolling_ignore_eligibility(
         sequence, _ = load_model(results[1]["model"])
         assert set(sequence.prediction_model.history.timestamp) == {days[79]}
         assert sequence.metadata["rows_after_input_label_dropna"] == 180
+
+
+def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models.fitting import prediction_callable
+    from quant_research_platform.research.models.production import fit_model
+    from quant_research_platform.research.rolling import RollingFold, _select
+    from quant_research_platform.storage.datasets.reading import (
+        _dataset_input_options,
+        open_dataset_session,
+    )
+
+    path = data(tmp_path)
+    frame = pd.read_parquet(path)
+    frame["episode"] = np.where(frame.timestamp.dt.day.le(3), "train", "held")
+    frame.loc[frame.timestamp.dt.day.isin([2, 5]) & frame.asset_id.eq("b"), "x"] = (
+        np.nan
+    )
+    frame.to_parquet(path, index=False)
+    declared = input_spec()
+    declared["column_roles"]["episode"] = "context"
+    session = open_dataset_session(
+        **_dataset_input_options({"path": str(path), "spec": declared})
+    )
+    fold = RollingFold(
+        "test",
+        TimeWindow("2020-01-01", "2020-01-03"),
+        TimeWindow("2020-01-04", "2020-01-06"),
+        TimeWindow("2020-01-07", "2020-01-09"),
+    )
+    base = ModelSpec(
+        model_id="lstm",
+        model_algorithm="lstm_regressor",
+        input_feature_columns=("x",),
+        target_column="label",
+        random_seed=17,
+    )
+    defaults = dict(
+        device="cpu", epochs=1, hidden_size=3, sequence_length=3, batch_size=32
+    )
+    candidates = [
+        (
+            "lstm",
+            replace(base, hyperparameters={**defaults, **parameters}),
+        )
+        for parameters in (
+            {"sequence_group_columns": ["episode"], "learning_rate": 0.01},
+            {"sequence_group_columns": [], "learning_rate": 0.02},
+            {"sequence_group_columns": ["episode"], "learning_rate": 0.03},
+            {"sequence_group_columns": ["episode"], "learning_rate": 0.035},
+            {
+                "sequence_group_columns": ["episode"],
+                "learning_rate": 0.04,
+                "epochs": 3,
+                "early_stopping_rounds": 1,
+            },
+        )
+    ]
+    selected = _select({"market_id": "a_share"}, fold, session, candidates, None)
+    scores = selected[0][2]["candidates"]
+    held = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
+    scoring = frame.loc[frame.timestamp.between("2020-01-03", "2020-01-06")]
+    cutoff = pd.Timestamp("2020-01-07") - pd.Timedelta(1, "ns")
+    for (_, spec), score in zip(candidates, scores, strict=True):
+        validation = (
+            {
+                "validation_frames": [scoring],
+                "validation_windows": (fold.validation,),
+                "validation_cutoff": cutoff,
+            }
+            if spec.hyperparameters.get("early_stopping_rounds") is not None
+            else {}
+        )
+        fresh = fit_model(
+            [frame],
+            spec,
+            fit_windows=(fold.train,),
+            fit_cutoff=pd.Timestamp("2020-01-04") - pd.Timedelta(1, "ns"),
+            **validation,
+        )
+        predictions = prediction_callable(spec.input_columns, fresh.prediction_model)(
+            scoring
+        )[-len(held) :]
+        observed = held.x.notna().to_numpy()
+        errors = pd.Series(
+            (predictions[observed] - held.label.to_numpy()[observed]) ** 2,
+            index=held.timestamp.loc[observed],
+        )
+        assert score["hyperparameters"] == dict(spec.hyperparameters)
+        assert score["validation_daily_mse"] == pytest.approx(
+            errors.groupby(level=0).mean().mean(), rel=1e-12, abs=1e-14
+        )
+        if validation:
+            assert score["early_stopping"] == fresh.metadata["early_stopping"]
+        else:
+            assert "early_stopping" not in score
+    assert selected[0][2]["common_rows"] == 8
 
 
 def test_quarterly_skips_immature_initial_history_and_continues(tmp_path):

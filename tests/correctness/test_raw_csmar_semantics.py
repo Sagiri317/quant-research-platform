@@ -2398,6 +2398,7 @@ def test_index_date_error_is_diagnosed_without_blocking_valid_base_date(tmp_path
         [
             {
                 inverse["index_code"]: "000905",
+                inverse["index_name"]: None,
                 inverse["base_date"]: "2020-01-01",
                 inverse["start_date"]: "invalid-date",
             }

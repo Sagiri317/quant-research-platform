@@ -35,11 +35,26 @@ from tests.helpers.paths import (
 
 
 def _write_csmar(root, data_id, rows, *, extra_columns=()):
-    columns = (*RAW_TABLE_CONTRACTS[data_id].required_columns, *extra_columns)
+    rows = iter(rows)
+    first = next(rows, None)
+    columns = tuple(
+        dict.fromkeys(
+            (
+                *(
+                    RAW_TABLE_CONTRACTS[data_id].required_columns
+                    if first is None
+                    else first
+                ),
+                *extra_columns,
+            )
+        )
+    )
     path = root / f"csmar__{data_id}__synthetic__full__export-20260101.csv"
     with open_filesystem_file(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
+        if first is not None:
+            writer.writerow(first)
         writer.writerows(rows)
 
 

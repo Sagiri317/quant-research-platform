@@ -17,12 +17,11 @@ class QuoteReturnLookup:
                 times, prices = pieces.setdefault(key, ([], []))
                 times.append(group.timestamp.to_numpy(dtype="datetime64[ns]"))
                 prices.append(group.mid.to_numpy(dtype=float))
-        self.quotes, self.observed_times = {}, {}
+        self.quotes = {}
         for key, (times, prices) in pieces.items():
             times, prices = np.concatenate(times), np.concatenate(prices)
             order = np.argsort(times, kind="stable")
             times, prices = times[order], prices[order]
-            self.observed_times[key] = times
             valid = np.isfinite(prices) & (prices > 0)
             self.quotes[key] = times[valid], prices[valid]
 

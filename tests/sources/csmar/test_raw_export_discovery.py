@@ -51,7 +51,7 @@ def test_requested_dataset_rejects_ambiguous_header(tmp_path: Path) -> None:
         )
 
 
-def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
+def test_canonical_dataset_root_ignores_sibling_archive(tmp_path):
     import csv
 
     import pandas as pd
@@ -65,6 +65,24 @@ def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
         "unrepaired,invalid\n", encoding="utf-8"
     )
     rows = {
+        "stock_master": {
+            "Stkcd": "000001",
+            "Stknme": "示例股票",
+            "Listdt": "2000-01-04",
+            "DelistedDate": "",
+            "Nnindcd": "J66",
+            "Nnindnme": "货币金融服务",
+            "Statco": "A",
+            "Statdt": "2020-01-02",
+        },
+        "index_market": {
+            "Indexcd": "000300",
+            "Idxtrd01": "2020-01-02",
+            "Idxtrd02": "100",
+            "Idxtrd05": "101",
+            "Idxtrd08": "1",
+            "Idxtrd09": "示例指数",
+        },
         "listing_status_changes": {
             "Symbol": "000001",
             "DeclareDate": "2020-01-02",
@@ -105,7 +123,7 @@ def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
             writer.writerow(row)
     members = tuple(raw_exports.dataset_files_by_id(raw))
     assert {dataset for dataset, _ in members} == set(rows)
-    assert len(members) == 3
+    assert len(members) == len(rows)
     for dataset, path in members:
         assert path.is_relative_to(raw)
         chunks = list(
@@ -127,7 +145,16 @@ def test_canonical_three_dataset_root_ignores_sibling_archive(tmp_path):
         )
         expected = interim.normalize_raw_frame(projected.astype("string"), dataset)
         pd.testing.assert_frame_equal(actual, expected, check_exact=True)
-        if dataset == "special_treatment_changes":
+        if dataset == "stock_master":
+            assert actual.source_asset_id.tolist() == ["000001"]
+            assert actual.timestamp.tolist() == [pd.Timestamp("2020-01-02")]
+            assert actual.stock_name.tolist() == ["示例股票"]
+            assert actual.industry_level1_code.tolist() == ["J66"]
+        elif dataset == "index_market":
+            assert actual.source_asset_id.tolist() == ["000300"]
+            assert actual.timestamp.tolist() == [pd.Timestamp("2020-01-02")]
+            assert actual.period_return.tolist() == pytest.approx([0.01])
+        elif dataset == "special_treatment_changes":
             assert len(rows[dataset]) == 11
             assert set(chunks[0]) == {"Symbol", "Chgtype", "Annoudt", "Execudt"}
             assert actual["change_type"].tolist() == ["ST"]

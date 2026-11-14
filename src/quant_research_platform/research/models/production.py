@@ -59,29 +59,19 @@ def _fit_read_windows(windows, *, sequence, context_start=None):
         previous = pd.Timestamp(upper) + pd.Timedelta(1 if closed else 0, "ns")
 
 
-def fit_model(
+def _prepare_fit(
     frames,
     spec: ModelSpec,
     *,
-    fit_windows,
-    fit_cutoff,
-    candidate_parameters=None,
+    windows,
+    cutoff,
     label_availability_column=None,
     trading_calendar=None,
     validation_frames=None,
     validation_cutoff=None,
     validation_windows=None,
 ):
-    """Fit one candidate on its legal observed domain."""
-    cutoff = strict_timestamp_series(
-        pd.Series([fit_cutoff]), error="invalid_fit_cutoff"
-    ).iloc[0]
-    windows = _fit_windows(fit_windows, cutoff)
-    if candidate_parameters is not None and spec.hyperparameters:
-        raise ValueError("candidate_parameters_conflict_with_hyperparameters")
-    if candidate_parameters is not None and spec.model_algorithm in SEQUENCE_ALGORITHMS:
-        spec = replace(spec, hyperparameters=candidate_parameters)
-        candidate_parameters = None
+    """Collect one legal sample and its requested independent validation domain."""
     if (validation_frames is None) != (validation_cutoff is None):
         raise ValueError("sequence_validation_configuration_invalid")
     if validation_windows is not None and validation_frames is None:
@@ -139,13 +129,11 @@ def fit_model(
             >= validation_start
         ):
             raise ValueError("model_validation_training_overlap")
-    if candidate_parameters is not None:
-        spec = replace(
-            spec,
-            hyperparameters=_resolve_candidate_parameters(
-                spec.model_algorithm, candidate_parameters, len(prepared.training)
-            ),
-        )
+    return prepared, validation, validation_cutoff
+
+
+def _fit_prepared(prepared, spec, *, validation=None, validation_cutoff=None):
+    """Fit a fresh candidate while borrowing an explicitly prepared sample."""
     patience = spec.hyperparameters.get("early_stopping_rounds")
     if patience is not None and validation is None:
         raise ValueError("early_stopping_validation_required")
@@ -166,6 +154,52 @@ def fit_model(
             ),
         )
     return result
+
+
+def fit_model(
+    frames,
+    spec: ModelSpec,
+    *,
+    fit_windows,
+    fit_cutoff,
+    candidate_parameters=None,
+    label_availability_column=None,
+    trading_calendar=None,
+    validation_frames=None,
+    validation_cutoff=None,
+    validation_windows=None,
+):
+    """Fit one candidate on its legal observed domain."""
+    cutoff = strict_timestamp_series(
+        pd.Series([fit_cutoff]), error="invalid_fit_cutoff"
+    ).iloc[0]
+    windows = _fit_windows(fit_windows, cutoff)
+    if candidate_parameters is not None and spec.hyperparameters:
+        raise ValueError("candidate_parameters_conflict_with_hyperparameters")
+    if candidate_parameters is not None and spec.model_algorithm in SEQUENCE_ALGORITHMS:
+        spec = replace(spec, hyperparameters=candidate_parameters)
+        candidate_parameters = None
+    prepared, validation, validation_cutoff = _prepare_fit(
+        frames,
+        spec,
+        windows=windows,
+        cutoff=cutoff,
+        label_availability_column=label_availability_column,
+        trading_calendar=trading_calendar,
+        validation_frames=validation_frames,
+        validation_cutoff=validation_cutoff,
+        validation_windows=validation_windows,
+    )
+    if candidate_parameters is not None:
+        spec = replace(
+            spec,
+            hyperparameters=_resolve_candidate_parameters(
+                spec.model_algorithm, candidate_parameters, len(prepared.training)
+            ),
+        )
+    return _fit_prepared(
+        prepared, spec, validation=validation, validation_cutoff=validation_cutoff
+    )
 
 
 def fit(config: Mapping) -> Path:

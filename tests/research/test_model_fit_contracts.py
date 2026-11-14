@@ -143,6 +143,7 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
     training = prepared.training.copy(deep=True)
     weights, scaler = prepared.preprocessing
     original_weights = weights.copy()
+    original_matrix = prepared.matrix.copy(deep=True)
     reference = build_estimator_from_model_spec(spec)
     reference.fit(
         prepared.matrix.copy(deep=True),
@@ -164,7 +165,66 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
     )
     pd.testing.assert_frame_equal(frame, source)
     pd.testing.assert_frame_equal(prepared.training, training)
+    pd.testing.assert_frame_equal(prepared.matrix, original_matrix, check_exact=True)
     np.testing.assert_array_equal(weights, original_weights)
+
+
+@pytest.mark.parametrize("algorithm", ["lasso_regression", "ridge_regression"])
+def test_shared_training_keeps_mutating_candidates_on_the_original_scale(algorithm):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models.production import (
+        _fit_prepared,
+        _prepare_fit,
+        fit_model,
+    )
+
+    values = np.arange(1.0, 7.0)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=6),
+            "asset_id": "a",
+            "x": values,
+            "label": 3 * values + 2,
+            "eligible": True,
+            "label_available_at": pd.Timestamp("2020-01-06"),
+        }
+    )
+    spec = ModelSpec(
+        model_id="candidate",
+        model_algorithm=algorithm,
+        input_factor_columns=("x",),
+        target_column="label",
+        training_scaling=False,
+        hyperparameters={"alpha": 0.01, "copy_X": False},
+    )
+    windows = (TimeWindow("2020-01-01", "2020-01-06"),)
+    prepared, _, _ = _prepare_fit(
+        [frame], spec, windows=windows, cutoff=pd.Timestamp("2020-01-06")
+    )
+    original = prepared.matrix.copy(deep=True)
+    for alpha in (0.01, 0.1):
+        candidate = replace(spec, hyperparameters={"alpha": alpha, "copy_X": False})
+        actual = _fit_prepared(prepared, candidate)
+        fresh = fit_model(
+            [frame], candidate, fit_windows=windows, fit_cutoff="2020-01-06"
+        )
+        slope = (
+            3 - alpha / np.var(values)
+            if algorithm == "lasso_regression"
+            else 3 * 17.5 / (17.5 + alpha)
+        )
+        expected = slope * (values - 3.5) + 12.5
+        np.testing.assert_allclose(
+            actual.prediction_model.predict(frame[["x"]]),
+            expected,
+            rtol=1e-12,
+            atol=1e-14,
+        )
+        assert actual.metadata == fresh.metadata
+        pd.testing.assert_frame_equal(prepared.matrix, original, check_exact=True)
+    pd.testing.assert_series_equal(prepared.training.x, frame.x)
 
 
 def test_training_filter_handles_duplicate_dataframe_index():

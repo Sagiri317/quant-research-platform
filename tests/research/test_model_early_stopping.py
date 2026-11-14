@@ -204,7 +204,8 @@ def test_early_stopping_parameter_contract(algorithm, patience):
         )
 
 
-def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution():
+@pytest.mark.parametrize("copy_X", [True, False])
+def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution(copy_X):
     phase = np.arange(40) * (2 * np.pi / 40)
     common = np.sin(phase) * np.sqrt(2)
     difference = 0.01 * np.cos(phase) * np.sqrt(2)
@@ -214,8 +215,8 @@ def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution():
             "timestamp": times,
             "asset_id": "a",
             "eligible": True,
-            "x1": common + difference,
-            "x2": common - difference,
+            "x1": common + difference + 7,
+            "x2": common - difference + 11,
             "label": 2 * common + 0.5,
             "label_available_at": times + pd.Timedelta(seconds=1),
         }
@@ -232,6 +233,7 @@ def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution():
             "tol": 1e-12,
             "max_iter": None,
             "precompute": True,
+            "copy_X": copy_X,
         },
     )
     result = fit_model(
@@ -241,9 +243,10 @@ def test_unbounded_lasso_converges_to_hand_calculated_correlated_solution():
         fit_cutoff="2020-01-02",
     )
     estimator = result.prediction_model.estimator
-    # Each Gram row sums to 2 and X'y/n=2, so both positive weights are 1-alpha/2.
+    # Centered Gram rows sum to 2 and X'y/n=2, so both weights are 1-alpha/2.
     np.testing.assert_allclose(estimator.coef_, [0.995, 0.995], rtol=1e-5, atol=1e-8)
-    assert estimator.intercept_ == pytest.approx(0.5, abs=1e-12)
+    assert estimator.intercept_ == pytest.approx(0.5 - 0.995 * 18, abs=1e-5)
+    assert estimator.n_iter_ > 1000
     assert estimator.max_iter is None
     assert estimator.dual_gap_ <= spec.hyperparameters["tol"] * np.mean(
         (frame.label - 0.5) ** 2

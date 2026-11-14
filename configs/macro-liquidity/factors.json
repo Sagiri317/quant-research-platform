@@ -3,7 +3,7 @@
   "data_id": "macro_liquidity_factors",
   "inputs": {
     "decision_panel": "data/processed/a_share/macro_decision_panel",
-    "macro_observations": "data/interim/macro_liquidity/new-observations"
+    "macro_observations": "data/interim/macro_liquidity/observations"
   },
   "factor_columns": [
     "ml_us_net_liquidity_level",
