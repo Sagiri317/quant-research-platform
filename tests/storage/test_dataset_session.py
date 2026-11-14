@@ -39,6 +39,10 @@ def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(
     session.spec["primary_key"].clear()
     session.manifest["physical_schema"].clear()
     session.schema.clear()
+    schema = session.schema
+    expected_kind = schema[0]["type"]["kind"]
+    schema[0]["type"]["kind"] = "caller_owned"
+    assert session.schema[0]["type"]["kind"] == expected_kind
     session.logical_dtypes["columns"].clear()
     assert tuple(session.spec["primary_key"]) == expected_primary_key
     assert session.schema == expected_schema

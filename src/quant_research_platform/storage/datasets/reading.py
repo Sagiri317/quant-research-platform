@@ -93,7 +93,7 @@ class DatasetSession:
     @property
     def schema(self) -> list[dict[str, Any]]:
         if self.native:
-            return list(self.manifest["physical_schema"])
+            return deepcopy(self._manifest["physical_schema"])
         return physical_schema_from_schema(
             pa.schema(
                 [self.arrow_schema.field(column) for column in self.physical_columns]
@@ -586,9 +586,9 @@ def _build_dataset_session(
         timestamp_column=timestamp_column,
         time_window=time_window,
         arrow_schema=arrow_schema,
-        _spec=deepcopy(spec_payload),
-        _manifest=deepcopy(manifest),
-        _logical_dtypes=deepcopy(logical_dtypes),
+        _spec=spec_payload,
+        _manifest=manifest,
+        _logical_dtypes=logical_dtypes,
         native=True,
         parquet_filters=tuple(physical_filters) or None,
     )
