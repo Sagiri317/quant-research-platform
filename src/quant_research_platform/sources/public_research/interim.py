@@ -385,13 +385,12 @@ def _report_observation_corrections(raw_root, records, data_ids):
         if not targets:
             continue
         path = raw_root / record["path"]
-        payload = path.read_bytes()
         for target in targets:
             evidence.setdefault(target, []).append(
                 {k: record[k] for k in ("path", "sha256")}
             )
         if source == "cn_fund_report_observation_metadata_extracted":
-            for row in json.loads(payload)["records"]:
+            for row in json.loads(path.read_bytes())["records"]:
                 key = row["original_report_source_sha256"]
                 date = pd.Timestamp(row["actual_report_period_end"])
                 if pd.isna(date) or (key in report_dates and report_dates[key] != date):

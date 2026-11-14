@@ -19,6 +19,7 @@ from quant_research_platform.sources.choice.raw_exports import (
 )
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
+    open_dataset_session,
     read_dataset,
 )
 from quant_research_platform.storage.identity import (
@@ -1286,6 +1287,7 @@ def test_unselected_financial_values_do_not_block_historical_window(
     with choice_session(response()) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+        _snapshot(session, layout, "2020-01-30", [None] * len(FIELDS), branch="3")
     arguments = dict(
         raw_root=layout.raw_source_root("choice"),
         data_ids=("financial_balance",),
@@ -1299,13 +1301,16 @@ def test_unselected_financial_values_do_not_block_historical_window(
     with choice_session(response()) as session:
         if period != "2019-12-31":
             _disclosure(session, layout, period=period, first=day)
-        _snapshot(
-            session,
-            layout,
-            day,
-            ["invalid-unused-numeric"] * len(FIELDS),
-            period=period,
-        )
+        for branch in ("1", "3"):
+            _snapshot(
+                session,
+                layout,
+                day,
+                [float("nan"), float("inf"), True, "100", False, float("-inf"), 0, 12.5]
+                + [None] * (len(FIELDS) - 8),
+                period=period,
+                branch=branch,
+            )
     raw_hashes = _file_hashes(layout.raw_source_root("choice"))
     historical = tmp_path / "historical"
     interim.materialize_interim_data(
@@ -1321,7 +1326,35 @@ def test_unselected_financial_values_do_not_block_historical_window(
     )
     selected = _read(result)["financial_balance"]
     assert selected.total_assets.iloc[0] == 100.0
-    assert selected.total_assets.isna().any()
+    unknown = selected.loc[
+        selected.report_period.eq(pd.Timestamp(period)) & selected.total_assets.isna()
+    ]
+    assert len(unknown) == 1
+    assert (
+        unknown[
+            [
+                "total_assets",
+                "total_liabilities",
+                "parent_equity",
+                "cash",
+                "short_term_borrowings",
+                "current_portion_noncurrent_liabilities",
+            ]
+        ]
+        .isna()
+        .all(axis=None)
+    )
+    assert unknown.long_term_borrowings.tolist() == [0.0]
+    assert unknown.bonds_payable.tolist() == [12.5]
+    counts = open_dataset_session(result.artifact_roots["financial_balance"]).manifest[
+        "producer_diagnostics"
+    ]["source_row_counts"]
+    assert {
+        key: value for key, value in counts.items() if key.startswith("invalid_")
+    } == {
+        f"invalid_TBALANCESTATEMENT_{field}_cells": 2
+        for field in (74, 128, 140, 9, 75, 88)
+    }
     assert _file_hashes(layout.raw_source_root("choice")) == raw_hashes
 
 

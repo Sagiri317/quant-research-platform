@@ -219,17 +219,6 @@ def _dates(value: object) -> tuple[date, ...]:
     return tuple(sorted(result))
 
 
-def _values(cells):
-    result = []
-    for value in cells:
-        if value is not None and (
-            type(value) not in (int, float) or not math.isfinite(value)
-        ):
-            value = None
-        result.append(None if value is None else float(value))
-    return result
-
-
 def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
     diagnostics = {} if diagnostics is None else diagnostics
     indicators = {
@@ -271,14 +260,15 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
             if not targets:
                 continue
             source_hash = root["manifest"]["sha256"]
+            request_id = request.identity()
             for data_id in targets:
                 hashes[data_id].extend(
                     (
                         (
-                            f"css:{request.identity()}:source_metadata",
+                            f"css:{request_id}:source_metadata",
                             raw_metadata,
                         ),
-                        (f"css:{request.identity()}:typed_rows", source_hash),
+                        (f"css:{request_id}:typed_rows", source_hash),
                     )
                 )
             if not response["Data"]:
@@ -360,12 +350,13 @@ def _raw_index(raw_root, data_ids, start, end, diagnostics=None):
                             diagnostics[f"invalid_{field}_cells"] = (
                                 diagnostics.get(f"invalid_{field}_cells", 0) + 1
                             )
+                            value = None
                         _put(
                             index,
                             "snapshot",
                             (*coordinate, field),
                             {
-                                "values": _values((values[field],))[0],
+                                "values": None if value is None else float(value),
                             },
                         )
                 for data_id in targets:
