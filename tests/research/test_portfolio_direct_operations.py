@@ -1,7 +1,6 @@
 """Native portfolio publication and local missing-input semantics."""
 
 from dataclasses import replace
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -142,9 +141,7 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
 
 
 @pytest.mark.parametrize("limit,passes", [(0.03, True), (0.02, False)])
-def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes, monkeypatch):
-    import quant_research_platform.research.portfolios.optimizer as optimizer
-
+def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes):
     frame = pd.DataFrame(
         {
             "asset_id": ["a", "b"],
@@ -156,13 +153,6 @@ def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes, monke
             "style": [1.0, 0.0],
         }
     )
-    captured = {}
-
-    def solve(objective, x0, **kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(success=True, x=x0)
-
-    monkeypatch.setattr(optimizer, "minimize", solve)
     frame = with_cash_asset(frame)
     kwargs = dict(
         cash_column="is_cash",
@@ -179,13 +169,15 @@ def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes, monke
     )
     if passes:
         result = optimize_portfolio(frame, **kwargs)
+        assert result.weights.loc["a"] == 0.6
         assert result.factor_variance == pytest.approx(0.0004)
         assert result.specific_variance == pytest.approx(0.0001)
         assert result.predicted_tracking_error == pytest.approx(np.sqrt(0.0005))
     else:
-        with pytest.raises(ValueError, match="optimizer_solution_invalid"):
+        # The frozen 60% holding has at least 10% active exposure. Neither
+        # cash nor another holding can reduce its independent 0.0005 risk.
+        with pytest.raises(ValueError, match="optimizer_failed_closed"):
             optimize_portfolio(frame, **kwargs)
-    assert captured["bounds"][0] == (0.6, 0.6)
 
 
 def test_frozen_quantity_is_not_rebalanced_to_old_weight_after_fees():

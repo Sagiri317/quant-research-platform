@@ -43,6 +43,7 @@ PORTFOLIO_CASH_ASSET_ID = "__cash__"
 RESEARCH_VALUATION_POLICY = "evidenced_rights_or_confirmed_delisting_zero"
 PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
 PORTFOLIO_DECISION_REASON_ENHANCED = "enhanced_optimizer"
+PORTFOLIO_DECISION_REASON_ROBUST = "robust_optimizer"
 PORTFOLIO_DECISION_REASON_BENCHMARK = "enhanced_benchmark_only"
 PORTFOLIO_DECISION_REASON_MAINTENANCE = "benchmark_maintenance"
 PORTFOLIO_DECISION_REASON_POLICY = "external_policy"
@@ -57,6 +58,23 @@ PORTFOLIO_LEDGER_COST_COLUMNS = (
 
 class PortfolioTargetBlocked(Exception):
     """A portfolio target cannot be built from currently available facts."""
+
+
+@dataclass(frozen=True, slots=True)
+class RobustPortfolioConfig:
+    """Confidence for rank-slope uncertainty and holding-period risk aversion."""
+
+    confidence: float = 0.95
+    risk_aversion: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name in ("confidence", "risk_aversion"):
+            value = strict_finite_float(
+                getattr(self, name), error="robust_portfolio_config_invalid"
+            )
+            object.__setattr__(self, name, value)
+        if not 0.0 < self.confidence < 1.0 or self.risk_aversion < 0.0:
+            raise ValueError("robust_portfolio_config_invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +216,7 @@ class PortfolioCandidateSpec:
         "quantile_equal_weight_half_step",
         "quantile_float_cap",
         "benchmark_enhanced",
+        "robust_long_only",
     ]
     prediction_selector: str
     rebalance_schedule: str
@@ -225,6 +244,7 @@ class PortfolioCandidateSpec:
             "quantile_equal_weight_half_step",
             "quantile_float_cap",
             "benchmark_enhanced",
+            "robust_long_only",
         }:
             raise ValueError("portfolio_candidate_construction_invalid")
         if (
@@ -265,10 +285,13 @@ class PortfolioCandidateSpec:
             if value < 0:
                 raise ValueError("portfolio_candidate_neutrality_limit_invalid")
             object.__setattr__(self, name, value)
-        if self.construction == "benchmark_enhanced":
+        if self.construction in {"benchmark_enhanced", "robust_long_only"}:
             if self.neutrality != "none":
                 raise ValueError("portfolio_candidate_neutrality_invalid")
-            if self.top_quantile is not None or self.benchmark_id is None:
+            if self.top_quantile is not None or (
+                (self.benchmark_id is not None)
+                != (self.construction == "benchmark_enhanced")
+            ):
                 raise ValueError("portfolio_candidate_construction_invalid")
             if not self.risk_style_columns:
                 raise ValueError("portfolio_candidate_risk_styles_invalid")

@@ -30,7 +30,7 @@ qrp prepare --config <数据准备配置.json>
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
 qrp run-quarterly --config configs/quarterly-a-share.json
-qrp run-sessions --config <会话扩窗配置.json>
+qrp run-sessions --config configs/high-frequency/rolling-etf.json
 qrp backtest-hft --config configs/backtest-hft.json
 qrp predict --config configs/predict.json
 qrp explain --config configs/explain-model.json
@@ -117,7 +117,7 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 | 标签成熟 | 预测目标依赖的未来价格或其他事实已经可用，标签此时才能用于训练或评分。 |
 | OOS（样本外） | 预测发生在该次模型拟合范围之后；是否还受到选型影响，需结合实际选择过程说明。 |
 | IC / RankIC | 预测与目标的相关系数 / 排名相关系数，用来衡量预测关联和排序能力。 |
-| Taker / Maker | 主动吃单 / 挂单等待成交；两者使用不同的费用与执行假设。 |
+| Taker / Maker | 主动吃单 / 挂单等待成交；前者消耗盘口容量，后者按订单生命周期和队列成交。 |
 | 数据产物 | 操作保存的数据表、模型、预测、账本或统计结果，每次写到新的输出位置。 |
 | 元数据与清单 | 元数据说明输入、参数、单位和时间范围；清单还记录产物成员及必要的物理信息。 |
 | 约定 | 接口、数据和计算必须遵守的规则，包括时间、单位、缺失和失败处理。 |
@@ -129,6 +129,7 @@ HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股计算方法与交易规则](docs/a-share.md)
+- [椭球不确定集的鲁棒组合优化](docs/robust-portfolio.md)
 - [A 股 Level-2、日级评价与库存账户](docs/a-share-hft.md)
 - [研究选择与比较方法](docs/research.md)
 - [策略学习、公式搜索与不确定性](docs/research-learning.md)

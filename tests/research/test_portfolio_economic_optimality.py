@@ -20,7 +20,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     PreparedTradeCost,
 )
 from quant_research_platform.research.portfolios import optimizer
-from tests.helpers.optimizer import with_cash_asset
+from tests.helpers.optimizer import ECONOMIC_UTILITY_ATOL, with_cash_asset
 from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
 
 
@@ -148,7 +148,8 @@ def test_side_aware_cost_reaches_independent_lp_optimum(seed, scale):
         + sell_rate * np.maximum(benchmark - stock, 0).sum()
     )
     economic = -alpha @ stock + fee
-    assert economic == pytest.approx(oracle.fun, abs=2e-12, rel=0)
+    objective_error = ECONOMIC_UTILITY_ATOL
+    assert economic == pytest.approx(oracle.fun, abs=objective_error, rel=0)
     assert result.expected_transaction_cost / nav == pytest.approx(fee, abs=2e-15)
     assert weights[-1] >= fee - 1e-10
     assert weights.sum() == pytest.approx(1.0, abs=1e-12)
@@ -385,14 +386,13 @@ def test_impact_cost_reaches_independent_two_asset_stationary_optimum():
     assert result.weights.iloc[-1] == pytest.approx(0.01)
     assert result.weights.iloc[-1] > result.expected_transaction_cost / nav
     curvature_floor = 1.5 * impact * np.sqrt(nav / adv[0] / 0.005)
-    weight_error = np.sqrt(
-        2 * optimizer.OptimizerConfig().solver_ftol / curvature_floor
-    )
+    objective_error = ECONOMIC_UTILITY_ATOL
+    weight_error = np.sqrt(2 * objective_error / curvature_floor)
     assert delta == pytest.approx(optimum, abs=weight_error)
     expected_value = (
         alpha_spread - 2 * fee
     ) * optimum - 2 * impact * optimum * np.sqrt(optimum * nav / adv[0])
     assert (
         alpha_spread * delta - result.expected_transaction_cost / nav
-        == pytest.approx(expected_value, abs=2e-12)
+        == pytest.approx(expected_value, abs=objective_error)
     )

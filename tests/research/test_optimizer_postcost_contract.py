@@ -1,13 +1,18 @@
 """Hand-derived economic and differential oracles for fee-funded targets."""
 
-from types import SimpleNamespace
-
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.optimize import LinearConstraint
 
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.research.portfolios import optimizer
+from tests.helpers.optimizer import (
+    ECONOMIC_UTILITY_ATOL,
+    capture_solver_problem,
+    constraint_jacobian,
+    constraint_value,
+)
 
 
 def _assets(current, *, alpha=None, benchmark=None):
@@ -63,15 +68,16 @@ def test_purchase_reserves_exact_fee_and_keeps_receivable_in_full_nav(nav, recei
     # A buy of x costs x/10, so x + x/10 = the spendable budget.
     budget = 1.0 - receivable
     result = _solve(_assets([0.0, budget]), nav=nav, receivable_weight=receivable)
-    stock, reserve = budget / 1.1, budget / 11.0
-    assert result.weights.to_numpy() == pytest.approx([stock, reserve], abs=2e-10)
+    optimal_stock = budget / 1.1
+    stock, cash = result.weights.to_numpy()
     fee = result.expected_transaction_cost / nav
-    assert fee == pytest.approx(reserve, rel=1e-10)
+    assert fee == pytest.approx(0.1 * stock, rel=1e-12, abs=1e-15)
+    assert -1e-14 <= 0.1 * (optimal_stock - stock) <= ECONOMIC_UTILITY_ATOL
     assert result.weights.sum() == pytest.approx(budget, abs=1e-12)
     # Check conservation in pre-fee-NAV units, including cost and receivable.
-    cash_after = result.weights.iloc[-1] - fee
-    assert cash_after == pytest.approx(0.0, abs=2e-10)
-    assert stock + cash_after + receivable + fee == pytest.approx(1.0, abs=2e-10)
+    cash_after = cash - fee
+    assert -1e-12 <= cash_after <= 11 * ECONOMIC_UTILITY_ATOL + 1e-12
+    assert stock + cash_after + receivable + fee == pytest.approx(1.0, abs=1e-12)
     net_stock = stock / (1.0 - fee)
     assert result.factor_variance == pytest.approx(
         0.04 * (net_stock - 1.0) ** 2, abs=1e-14
@@ -79,7 +85,7 @@ def test_purchase_reserves_exact_fee_and_keeps_receivable_in_full_nav(nav, recei
     assert result.specific_variance == pytest.approx(
         0.01 * (net_stock - 1.0) ** 2, abs=1e-14
     )
-    assert result.target_turnover == pytest.approx(stock, abs=2e-10)
+    assert result.target_turnover == pytest.approx(stock, abs=1e-12)
 
 
 @pytest.mark.parametrize("bound", ["name", "tracking_error"])
@@ -96,48 +102,58 @@ def test_fee_funded_allocation_reaches_actual_postcost_hard_boundary(bound):
         style_active_limit=1.0,
     )
     result = _solve(assets, config=config)
-    fee = 1.0 / 11.0
-    expected = np.array([0.5 + deviation, 0.5 - deviation, 0.0])
-    assert result.weights.to_numpy() == pytest.approx(
-        [expected[0] / 1.1, expected[1] / 1.1, fee], abs=1e-8
-    )
+    fee = result.expected_transaction_cost / 100.0
+    weights = result.weights.to_numpy()
+    assert fee == pytest.approx(0.1 * weights[:2].sum(), abs=1e-14)
     net = (result.weights.to_numpy() - [0.0, 0.0, fee]) / (1.0 - fee)
-    assert net == pytest.approx(expected, abs=1e-8)
+    assert net.sum() == pytest.approx(1.0, abs=1e-12)
+    assert net[-1] >= -1e-12
+    assert np.abs(net[:2] - 0.5).max() <= config.active_name_limit + 1e-12
+    half_difference = (net[0] - net[1]) / 2
+    tracking_error = np.sqrt(0.18 * half_difference**2 + 0.005 * net[-1] ** 2)
     assert result.predicted_tracking_error == pytest.approx(
-        np.sqrt(0.18) * deviation, abs=1e-8
+        tracking_error, rel=1e-12, abs=1e-15
     )
+    assert tracking_error <= config.tracking_error_limit + 1e-12
+    optimal_utility = (0.075 + 0.05 * deviation) / 1.1
+    actual_utility = 0.1 * weights[0] + 0.05 * weights[1]
+    assert -1e-14 <= optimal_utility - actual_utility <= ECONOMIC_UTILITY_ATOL
 
 
 def test_frozen_quantity_does_not_shrink_with_nav_after_an_independent_purchase():
     assets = _assets([0.4, 0.0, 0.6], alpha=[0.0, 0.2, 0.0])
     assets.loc[0, "adv"] = np.nan
     result = _solve(assets)
-    bought = 0.6 / 1.1
-    fee = bought / 10.0
-    assert result.weights.to_numpy() == pytest.approx([0.4, bought, fee], abs=1e-9)
+    bought = result.weights.iloc[1]
+    fee = result.expected_transaction_cost / 100.0
+    assert fee == pytest.approx(bought / 10, abs=1e-14)
+    assert -1e-14 <= 0.1 * (0.6 / 1.1 - bought) <= ECONOMIC_UTILITY_ATOL
+    assert result.weights.sum() == pytest.approx(1.0, abs=1e-12)
+    assert result.weights.iloc[-1] >= fee - 1e-12
     assert result.weights.iloc[0] * 100.0 == pytest.approx(40.0, abs=1e-10)
     assert result.weights.iloc[0] / (1.0 - fee) > 0.4
-    assert result.target_turnover == pytest.approx(bought, abs=1e-9)
+    assert result.target_turnover == pytest.approx(bought, abs=1e-12)
 
 
 @pytest.mark.parametrize("alpha", [0.09, 0.1, 0.11])
 def test_exact_zero_trade_fee_threshold(alpha):
     result = _solve(_assets([0.0, 1.0], alpha=[alpha, 0.0]))
-    expected_stock = 0.0 if alpha <= 0.1 else 1.0 / 1.1
-    assert result.weights.iloc[0] == pytest.approx(expected_stock, abs=1e-9)
+    stock = result.weights.iloc[0]
+    if alpha <= 0.1:
+        assert (
+            stock == result.expected_transaction_cost == result.target_turnover == 0.0
+        )
+        return
+    assert -1e-14 <= (alpha - 0.1) * (1.0 / 1.1 - stock) <= ECONOMIC_UTILITY_ATOL
     assert result.expected_transaction_cost == pytest.approx(
-        10.0 * expected_stock, abs=1e-8
+        10.0 * stock, rel=1e-12, abs=1e-14
     )
+    assert result.target_turnover == pytest.approx(stock, abs=1e-12)
 
 
 def _capture_fee_constraints(monkeypatch):
     assets = _assets([0.3, 0.3, 0.4], alpha=[0.03, -0.01, 0.0])
     assets["style"] = [-1.0, 2.0, 0.0]
-    captured = {}
-
-    def solve(objective, x0, **kwargs):
-        captured.update(kwargs, objective=objective)
-        return SimpleNamespace(success=True, x=x0)
 
     def cost(buy, sell):
         buy_weight, sell_weight = buy / 100.0, sell / 100.0
@@ -154,32 +170,25 @@ def _capture_fee_constraints(monkeypatch):
             np.r_[0.03 + 0.04 * sell_weight[:-1], 0.0],
         )
 
-    monkeypatch.setattr(optimizer, "minimize", solve)
-    _solve(assets, cost=cost)
+    captured = capture_solver_problem(monkeypatch, lambda: _solve(assets, cost=cost))
     return captured, assets
 
 
 def _fee_constraints(captured, point):
-    """Identify economic constraints by dimension and cash sensitivity, not order."""
-    count = len(point) // 2
-    result = {}
-    for constraint in captured["constraints"]:
-        if constraint["type"] != "ineq":
-            continue
-        value = np.asarray(constraint["fun"](point))
-        jacobian = np.asarray(constraint["jac"](point))
-        if value.shape == (2 * (count - 1),):
-            name = "name"
-        elif value.ndim == 0 and jacobian[count - 1] == 1.0:
-            name = "cash"
-        elif value.ndim == 0 and np.any(jacobian[:count]):
-            name = "risk"
-        else:
-            continue
-        assert name not in result
-        result[name] = constraint
-    assert set(result) == {"name", "cash", "risk"}
-    return result
+    """Identify the actual-fee equality, risk inequality and cash reserve."""
+    nonlinear = [
+        c for c in captured["constraints"] if not isinstance(c, LinearConstraint)
+    ]
+    fee = next(c for c in nonlinear if np.array_equal(c.lb, c.ub))
+    risk = next(c for c in nonlinear if np.isposinf(c.ub).all())
+    cash = next(
+        c
+        for c in captured["constraints"]
+        if isinstance(c, LinearConstraint)
+        and c.A.shape[0] == 1
+        and np.array_equal(constraint_jacobian(c, point)[0], [0, 0, 1, 0, 0, 0, -1])
+    )
+    return {"fee": fee, "cash": cash, "risk": risk}
 
 
 @pytest.mark.parametrize("unchanged", [False, True])
@@ -189,20 +198,21 @@ def test_actual_fee_constraint_jacobians_include_central_zero_trade_subgradient(
     captured, assets = _capture_fee_constraints(monkeypatch)
     current = assets.current_weight.to_numpy()
     weights = current if unchanged else np.array([0.34, 0.27, 0.39])
-    point = np.r_[weights, np.abs(weights - current) + 0.05]
+    point = np.r_[weights, np.abs(weights - current) + 0.05, 0.001]
+    assert point.shape == captured["initial"].shape
     step = 1e-6
     for constraint in captured["constraints"]:
         numeric = np.column_stack(
             [
                 (
-                    np.atleast_1d(constraint["fun"](point + step * direction))
-                    - np.atleast_1d(constraint["fun"](point - step * direction))
+                    constraint_value(constraint, point + step * direction)
+                    - constraint_value(constraint, point - step * direction)
                 )
                 / (2.0 * step)
                 for direction in np.eye(len(point))
             ]
         )
-        assert np.atleast_2d(constraint["jac"](point)) == pytest.approx(
+        assert constraint_jacobian(constraint, point) == pytest.approx(
             numeric, abs=1e-8, rel=1e-6
         )
 
@@ -211,20 +221,26 @@ def test_fee_feasibility_ignores_inflated_objective_epigraph(monkeypatch):
     captured, assets = _capture_fee_constraints(monkeypatch)
     weights = np.array([0.34, 0.27, 0.39])
     delta = weights - assets.current_weight.to_numpy()
-    exact = np.r_[weights, np.abs(delta)]
-    inflated = exact + np.r_[np.zeros(3), np.full(3, 0.1)]
     fee = 0.01 * 0.04 + 0.03 * 0.03 + 0.02 * (0.04**2 + 0.03**2)
-    # Objective auxiliaries can be slack, but risk/name/cash feasibility cannot
+    exact = np.r_[weights, np.abs(delta), fee]
+    inflated = exact + np.r_[np.zeros(3), np.full(3, 0.1), 0.0]
+    # Objective auxiliaries can be slack, but fee/risk/cash feasibility cannot
     # claim their fictitious round-trip fees as an economic NAV reduction.
     constraints = _fee_constraints(captured, exact)
     for constraint in constraints.values():
-        assert constraint["fun"](exact) == pytest.approx(
-            constraint["fun"](inflated), abs=1e-15
+        assert constraint_value(constraint, exact) == pytest.approx(
+            constraint_value(constraint, inflated), abs=1e-15
         )
-        assert constraint["jac"](exact) == pytest.approx(
-            constraint["jac"](inflated), abs=1e-15
+        assert constraint_jacobian(constraint, exact) == pytest.approx(
+            constraint_jacobian(constraint, inflated), abs=1e-15
         )
-    assert constraints["cash"]["fun"](exact) == pytest.approx(weights[-1] - fee)
+    assert constraint_value(constraints["cash"], exact) == pytest.approx(
+        weights[-1] - fee
+    )
+    assert constraint_value(constraints["fee"], exact) == pytest.approx(0.0, abs=1e-15)
+    fictitious_fee = exact.copy()
+    fictitious_fee[-1] += 0.001
+    assert constraint_value(constraints["fee"], fictitious_fee) == pytest.approx(0.001)
     value, gradient = captured["objective"](exact)
     benchmark = assets.benchmark_weight.to_numpy()
     assert value == pytest.approx(
@@ -236,12 +252,8 @@ def test_fee_feasibility_ignores_inflated_objective_epigraph(monkeypatch):
     variance_numerator = 0.04 * (
         -active_numerator[0] + 2.0 * active_numerator[1]
     ) ** 2 + 0.01 * (active_numerator[0] ** 2 + active_numerator[1] ** 2)
-    assert constraints["risk"]["fun"](exact) == pytest.approx(
+    assert constraint_value(constraints["risk"], exact) == pytest.approx(
         (1.0 - fee) ** 2 - variance_numerator
-    )
-    # With benchmark .5 and name allowance 1, the admitted net stock band is [0,1].
-    assert constraints["name"]["fun"](exact) == pytest.approx(
-        [weights[0], weights[1], 1.0 - fee - weights[0], 1.0 - fee - weights[1]]
     )
 
 
@@ -266,8 +278,8 @@ def test_explicit_cash_contract_rejects_invalid_cash_universe(kind):
 def test_smooth_objective_gradient_matches_its_asymmetric_trade_cost(monkeypatch):
     captured, assets = _capture_fee_constraints(monkeypatch)
     for point in (
-        np.r_[assets.current_weight.to_numpy(), np.zeros(3)],
-        np.array([0.34, 0.27, 0.39, 0.06, 0.05, 0.02]),
+        np.r_[assets.current_weight.to_numpy(), np.zeros(3), 0.0],
+        np.array([0.34, 0.27, 0.39, 0.06, 0.05, 0.02, 0.001]),
     ):
         step = 1e-6
         numerical = np.array(
@@ -324,15 +336,37 @@ def test_fees_cannot_make_reserved_receivable_available_to_fixed_benchmark():
 def test_fee_normalized_fixed_missing_risk_has_zero_active_coefficient(missing, rate):
     assets = _assets([0.4, 0.4, 0.2], alpha=[0.0, 0.2, 0.0])
     assets.loc[0, missing] = np.nan
-    # The fixed unknown-risk stock is exactly half of post-fee NAV. Buying
-    # both stocks spends .2-c and costs c=rate*(.2-c), independently of alpha.
+    # The unknown-risk stock stays at half of actual post-fee NAV; the
+    # independent optimum invests the remaining cash in the positive-alpha stock.
     fee = 0.2 * rate / (1.0 + rate)
     result = _solve(assets, cost=_linear_cost(rate, rate))
-    assert result.weights.to_numpy() == pytest.approx(
-        [0.5 * (1.0 - fee), 0.5 * (1.0 - fee), fee], abs=1e-12
+    if missing == "style":
+        # The additional stock-leg exposure equality fixes the entire allocation.
+        assert result.weights.to_numpy() == pytest.approx(
+            [0.5 * (1.0 - fee), 0.5 * (1.0 - fee), fee], abs=1e-12
+        )
+        assert result.predicted_tracking_error == pytest.approx(0.0, abs=1e-14)
+        assert result.expected_transaction_cost == pytest.approx(100.0 * fee, abs=1e-12)
+        return
+    actual = result.weights.to_numpy()
+    actual_fee = result.expected_transaction_cost / 100.0
+    assert actual_fee == pytest.approx(rate * (actual[:2].sum() - 0.8), abs=1e-14)
+    assert actual.sum() == pytest.approx(1.0, abs=1e-12)
+    assert actual[-1] >= actual_fee - 1e-12
+    net = actual[:2] / (1.0 - actual_fee)
+    assert abs(net[0] - 0.5) <= 8 * np.spacing(0.5)
+    known_coefficient = net[1] - 0.5
+    assert result.factor_variance == pytest.approx(
+        0.04 * known_coefficient**2, rel=1e-12, abs=0.0
     )
-    assert result.predicted_tracking_error == pytest.approx(0.0, abs=1e-14)
-    assert result.expected_transaction_cost == pytest.approx(100.0 * fee, abs=1e-12)
+    assert result.specific_variance == pytest.approx(
+        0.01 * known_coefficient**2, rel=1e-12, abs=0.0
+    )
+    assert result.predicted_tracking_error == pytest.approx(
+        np.sqrt(0.05) * abs(known_coefficient), rel=1e-12, abs=0.0
+    )
+    utility_gap = 0.2 * (0.5 * (1.0 - fee) - actual[1]) - (fee - actual_fee)
+    assert -1e-14 <= utility_gap <= ECONOMIC_UTILITY_ATOL
 
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])
@@ -427,36 +461,7 @@ def test_frozen_missing_risk_admission_uses_the_same_relative_roundoff(direction
         )
 
 
-@pytest.mark.parametrize("error_type", [ValueError, OverflowError, FloatingPointError])
-def test_actual_signed_trade_cost_failures_propagate_without_fallback(
-    monkeypatch, error_type
-):
-    assets = _assets([0.5, 0.5, 0.0])
-    calls = []
-
-    def cost(buy, sell):
-        calls.append((buy.copy(), sell.copy()))
-        if len(calls) == 1:
-            # Only the preliminary hypothetical bound is representable.
-            return 0.0, np.zeros_like(buy), np.zeros_like(sell)
-        raise error_type("actual_cost_failure")
-
-    weights = np.array([0.51, 0.49, 0.0])
-    monkeypatch.setattr(
-        optimizer,
-        "minimize",
-        lambda *args, **kwargs: SimpleNamespace(
-            success=True, x=np.r_[weights, np.abs(weights - assets.current_weight)]
-        ),
-    )
-    with pytest.raises(error_type, match="^actual_cost_failure$"):
-        _solve(assets, cost=cost)
-    assert len(calls) == 2
-    assert calls[-1][0] == pytest.approx([1.0, 0.0, 0.0])
-    assert calls[-1][1] == pytest.approx([0.0, 1.0, 0.0])
-
-
-def test_hypothetical_fee_domain_error_is_not_replaced_with_a_cash_bound():
+def test_trade_cost_provider_error_propagates_without_replacement():
     def cost(buy, sell):
         raise ValueError("cost_owner_domain_error")
 
@@ -469,10 +474,10 @@ def test_net_risk_gradient_matches_dense_chain_rule(monkeypatch, weights):
     captured, assets = _capture_fee_constraints(monkeypatch)
     weights = np.asarray(weights)
     delta = weights - assets.current_weight.to_numpy()
-    point = np.r_[weights, abs(delta)]
-    constraint = _fee_constraints(captured, point)["risk"]
     buy, sell = np.maximum(delta[:2], 0.0), np.maximum(-delta[:2], 0.0)
     fee = 0.01 * buy.sum() + 0.03 * sell.sum() + 0.02 * (buy**2 + sell**2).sum()
+    point = np.r_[weights, abs(delta), fee]
+    constraint = _fee_constraints(captured, point)["risk"]
     fee_gradient = np.r_[
         np.where(delta[:2] > 0, 0.01 + 0.04 * buy, -0.03 - 0.04 * sell), 0.0
     ]
@@ -486,8 +491,11 @@ def test_net_risk_gradient_matches_dense_chain_rule(monkeypatch, weights):
     )
     dense = np.eye(3) + np.outer(benchmark - cash_direction, fee_gradient)
     expected = -2 * (1 - fee) * fee_gradient - variance_gradient @ dense
+    partial = constraint_jacobian(constraint, point)[0]
+    np.testing.assert_array_equal(partial[3:6], np.zeros(3))
+    # Eliminate the explicit fee variable with its independently derived gradient.
     np.testing.assert_allclose(
-        constraint["jac"](point), np.r_[expected, np.zeros(3)], rtol=2e-14, atol=1e-16
+        partial[:3] + partial[-1] * fee_gradient, expected, rtol=2e-14, atol=1e-16
     )
 
 

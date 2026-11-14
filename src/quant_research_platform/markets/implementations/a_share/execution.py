@@ -67,8 +67,33 @@ def stock_order_limits(
     )
 
 
-def round_stock_orders(requested, minimum, increment, *, sellable=None):
-    """Round orders down; a sell may include the entire odd-share balance."""
+def round_stock_orders(requested, minimum, increment, *, sellable=None, nearest=False):
+    """Round down, or form a nearest candidate requiring account/model checks."""
+    if nearest:
+        candidates = [
+            round_stock_orders(requested, minimum, increment, sellable=sellable)
+        ]
+        upper = np.maximum(minimum, np.ceil(requested / increment) * increment)
+        if sellable is not None:
+            available = np.floor(sellable)
+            upper = np.minimum(upper, available)
+        candidates.append(
+            round_stock_orders(upper, minimum, increment, sellable=sellable)
+        )
+        if sellable is not None:
+            odd = available % increment
+            upper = (
+                odd
+                + np.maximum(0.0, np.ceil((requested - odd) / increment)) * increment
+            )
+            candidates.append(
+                round_stock_orders(
+                    np.minimum(upper, available), minimum, increment, sellable=sellable
+                )
+            )
+        candidates = np.stack(candidates)
+        closest = np.abs(candidates - requested).argmin(axis=0)
+        return np.take_along_axis(candidates, closest[None, :], axis=0)[0]
     nearest = np.rint(requested)
     whole = np.where(_quantity_equal(requested, nearest), nearest, np.floor(requested))
     rounded = np.where(whole >= minimum, whole // increment * increment, 0.0)
@@ -389,7 +414,7 @@ class PreparedTradeCost:
     ):
         """Return side cost and marginal rate, smoothly extended below zero.
 
-        SLSQP may evaluate infeasible buy/sell amounts. The linear fees retain
+        The optimizer may evaluate infeasible buy/sell amounts. Linear fees retain
         their tangent there; q**1.5 impact uses the C1 positive-part extension.
         Actual execution continues to require nonnegative amounts.
         """

@@ -1137,7 +1137,9 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         target_turnover_limit=0.20,
         industry_active_limit=0.02,
         style_active_limit=0.20,
-        solver_ftol=1e-12,
+        solver_gtol=1e-10,
+        solver_xtol=1e-12,
+        solver_barrier_tol=1e-12,
         solver_maxiter=1000,
     )
     result = optimize_portfolio(

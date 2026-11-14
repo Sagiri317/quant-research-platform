@@ -10,6 +10,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+from math import fsum
 from statistics import mean
 
 import numpy as np
@@ -26,6 +27,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_ENHANCED,
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
     PORTFOLIO_DECISION_REASON_POLICY,
+    PORTFOLIO_DECISION_REASON_ROBUST,
     PORTFOLIO_DECISION_REASON_SIMPLE,
     PORTFOLIO_LEDGER_COST_COLUMNS,
     RESEARCH_VALUATION_POLICY,
@@ -38,6 +40,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
     PortfolioValuation,
+    RobustPortfolioConfig,
     _portfolio_session_frame,
     portfolio_notional_tolerance,
 )
@@ -52,6 +55,7 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
+    round_stock_orders,
     stock_order_limits,
 )
 from quant_research_platform.markets.implementations.a_share.stock_pool import (
@@ -70,6 +74,7 @@ from quant_research_platform.research.portfolios.calibration import (
     alpha_calibration_intervals,
     alpha_calibration_start,
     alpha_interval_semantics,
+    alpha_uncertainty_loading,
     calibrate_expected_alpha,
 )
 from quant_research_platform.research.portfolios.construction import (
@@ -78,10 +83,14 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.portfolios.optimizer import (
+    AbsoluteRiskConfig,
     OptimizationResult,
     OptimizerConfig,
+    _net_name_bounds,
     _neutrality_bands,
     _neutrality_risk_limits,
+    _portfolio_incomplete,
+    _portfolio_objective,
     _portfolio_risk_limits,
     _project_neutral_target,
     optimize_portfolio,
@@ -304,6 +313,7 @@ class _EnhancedDecision:
     exposures: pd.DataFrame
     risk: FactorRiskEstimate | None
     calibration: AlphaCalibration
+    holding_sessions: int | None = None
 
 
 def backtest_a_share(
@@ -315,7 +325,8 @@ def backtest_a_share(
     formal_dataset_window: TimeWindow,
     prediction_window: TimeWindow | None = None,
     risk_config: FactorRiskConfig | None = None,
-    optimizer_config: OptimizerConfig | None = None,
+    optimizer_config: OptimizerConfig | AbsoluteRiskConfig | None = None,
+    robust_config: RobustPortfolioConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     on_final_calibration=None,
     prediction_lookup: object,
@@ -344,7 +355,10 @@ def backtest_a_share(
     if not isinstance(assumptions, ExecutionAssumptions):
         raise ValueError("portfolio_assumptions_invalid")
     _validate_windows(output_window, input_window, formal_dataset_window)
-    enhanced = candidate.construction == "benchmark_enhanced"
+    absolute = candidate.construction == "robust_long_only"
+    enhanced = candidate.construction in {"benchmark_enhanced", "robust_long_only"}
+    if absolute and robust_config is None:
+        raise ValueError("portfolio_robust_configuration_required")
     if decision_columns is not None and enhanced:
         raise ValueError("policy_and_enhanced_optimizer_are_separate_decisions")
     risk_style_columns = candidate.risk_style_columns
@@ -776,7 +790,11 @@ def backtest_a_share(
                 )
             if enhanced:
                 assert alpha is not None and current_cross is not None
-                decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
+                decision_reason = (
+                    PORTFOLIO_DECISION_REASON_ROBUST
+                    if robust_config is not None
+                    else PORTFOLIO_DECISION_REASON_BENCHMARK
+                )
                 scheduled = is_rebalance_session(
                     decision_timestamp, next_timestamp, candidate.rebalance_schedule
                 )
@@ -790,6 +808,8 @@ def backtest_a_share(
                 if not benchmark_weights.empty:
                     previous_benchmark_assets = frozenset(benchmark_weights.index)
                 initializing = not capital_allocated
+                if robust_config is not None:
+                    initializing &= scheduled
                 maintenance = membership_changed and (not scheduled)
                 has_predictions = bool(
                     (dataset.set_index("asset_id").eligible & alpha.notna()).any()
@@ -797,17 +817,18 @@ def backtest_a_share(
                 needs_target = has_predictions and (
                     scheduled or maintenance or initializing
                 )
-                required_assets = benchmark_weights.index[
-                    benchmark_weights.ne(0.0)
-                ].union(holdings.index[holdings.ne(0.0)])
-                industry = _industry_group_codes(
-                    view.valuation.set_index("asset_id"), "industry_level1_code"
-                ).reindex(required_assets)
-                missing_industry_context = industry.isna().any()
+                if not absolute:
+                    required_assets = benchmark_weights.index[
+                        benchmark_weights.ne(0.0)
+                    ].union(holdings.index[holdings.ne(0.0)])
+                    industry = _industry_group_codes(
+                        view.valuation.set_index("asset_id"), "industry_level1_code"
+                    ).reindex(required_assets)
+                    missing_industry_context = industry.isna().any()
                 if needs_target:
                     decision_skip_reason = (
                         "portfolio_benchmark_snapshot_missing"
-                        if benchmark_weights.empty
+                        if benchmark_weights.empty and not absolute
                         else "portfolio_industry_context_missing"
                         if missing_industry_context
                         else None
@@ -824,6 +845,25 @@ def backtest_a_share(
                         as_of=decision_timestamp,
                         frozen_calibration=frozen_calibration,
                     )
+                    if robust_config is not None and scheduled:
+                        if decision_timestamp not in calibration_dates.index:
+                            raise ValueError(
+                                "portfolio_robust_holding_interval_missing"
+                            )
+                        interval = calibration_dates.loc[decision_timestamp]
+                        horizon = int(
+                            trading_sessions.get_loc(interval.available_at)
+                            - trading_sessions.get_loc(interval.entry_at)
+                        )
+                        enhanced_decision = replace(
+                            enhanced_decision, holding_sessions=horizon
+                        )
+                    if absolute and enhanced_decision.calibration.undefined_reason:
+                        decision_skip_reason = (
+                            enhanced_decision.calibration.undefined_reason
+                        )
+                    if robust_config is not None:
+                        decision_reason = PORTFOLIO_DECISION_REASON_ROBUST
                     if maintenance:
                         target_override = benchmark_weights.copy(deep=True)
                         decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
@@ -833,7 +873,11 @@ def backtest_a_share(
                         if nav > 0
                         else holdings.multiply(0.0)
                     )
-                    decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
+                    decision_reason = (
+                        PORTFOLIO_DECISION_REASON_ROBUST
+                        if robust_config is not None
+                        else PORTFOLIO_DECISION_REASON_BENCHMARK
+                    )
                     if membership_changed:
                         # The proved membership snapshot authorizes independent
                         # removals even when there is no forecast or risk target.
@@ -909,11 +953,13 @@ def backtest_a_share(
                 raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
             effective_optimizer_config = optimizer_config
             if enhanced and initializing:
-                ordinary_config = optimizer_config or OptimizerConfig()
+                ordinary_config = optimizer_config or (
+                    AbsoluteRiskConfig() if absolute else OptimizerConfig()
+                )
                 effective_optimizer_config = replace(
                     ordinary_config,
                     target_turnover_limit=max(
-                        1.0, ordinary_config.target_turnover_limit
+                        1.0, ordinary_config.target_turnover_limit or 0.0
                     ),
                 )
             account, adv, _optimization, decision_delta, asset_ledger = _build_session(
@@ -944,6 +990,7 @@ def backtest_a_share(
                 decision_reason=decision_reason,
                 decision_skip_reason=decision_skip_reason,
                 optimizer_config=effective_optimizer_config,
+                robust_config=robust_config,
                 initializing=enhanced and initializing,
                 assumptions=assumptions,
                 fee_schedule=fee_schedule,
@@ -1416,11 +1463,13 @@ def _optimizer_assets(
     adv: pd.Series,
     eligible: pd.Series,
     receivable: float = 0.0,
+    absolute: bool = False,
 ) -> pd.DataFrame:
     assets = pd.Index(
         sorted(
             set(benchmark_weights.index[benchmark_weights.ne(0.0)])
             | set(current_weights.index[current_weights.ne(0.0)])
+            | (set(expected_alpha.index) if absolute else set())
         ),
         dtype="string",
     )
@@ -1495,7 +1544,8 @@ def _build_session(
     target_override: pd.Series | None,
     decision_reason: str,
     decision_skip_reason: str | None = None,
-    optimizer_config: OptimizerConfig | None = None,
+    optimizer_config: OptimizerConfig | AbsoluteRiskConfig | None = None,
+    robust_config: RobustPortfolioConfig | None = None,
     assumptions: ExecutionAssumptions,
     fee_schedule: object,
     fee_identity: str,
@@ -1513,6 +1563,15 @@ def _build_session(
     pd.DataFrame,
 ]:
     dataset = dataset.set_index("asset_id", drop=False)
+    absolute = candidate.construction == "robust_long_only"
+    config = optimizer_config or (
+        AbsoluteRiskConfig() if absolute else OptimizerConfig()
+    )
+    covariance_required = (
+        not absolute
+        or config.total_volatility_limit is not None
+        or robust_config.risk_aversion > 0.0
+    )
     if not np.isclose(
         float(holdings.sum()) + cash + decision_receivable,
         nav,
@@ -1572,6 +1631,20 @@ def _build_session(
         & (not external_target)
     )
     missing_assets = missing_scores.index[missing_scores]
+    if robust_config is not None and enhanced_decision is not None:
+        unknown = alpha.reindex(holdings.index).isna() & holdings.ne(0.0)
+        reference = enhanced_decision.benchmark_weights
+        unknown_reference = alpha.reindex(reference.index).isna() & reference.ne(0.0)
+        if unknown.any() or unknown_reference.any():
+            decision_skip_reason = "robust_held_prediction_unavailable"
+        if (
+            absolute
+            and covariance_required
+            and not enhanced_decision.calibration.benchmark_only
+            and enhanced_decision.risk is None
+            and decision_skip_reason is None
+        ):
+            decision_skip_reason = "factor_risk_factor_history_insufficient"
     decision_skip_reason = (
         "all_predictions_missing"
         if missing_scores.any() and not prediction_eligible.any()
@@ -1615,6 +1688,7 @@ def _build_session(
         if neutrality is not None:
             prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
     optimization: OptimizationResult | None = None
+    loading = None
     risk_repair_reason = None
     if decision_skip_reason:
         target = holdings.div(nav) if nav > 0 else holdings.multiply(0.0)
@@ -1704,6 +1778,11 @@ def _build_session(
             | set(held_units.index)
             | set(raw_target.index[raw_target.ne(0)])
             | (
+                set(enhanced_decision.expected_alpha.index)
+                if absolute and enhanced_decision is not None
+                else set()
+            )
+            | (
                 set(neutrality.index).intersection(next_panel.asset_id)
                 if neutrality is not None
                 else set()
@@ -1777,28 +1856,36 @@ def _build_session(
             ),
             adv=decision_adv,
             eligible=eligible,
+            absolute=absolute,
         )
     if (
         nav > 0
         and not decision_skip_reason
         and target_override is None
         and enhanced_decision is not None
-        and (enhanced_decision.risk is not None)
+        and (enhanced_decision.risk is not None or not covariance_required)
         and (not enhanced_decision.calibration.benchmark_only)
     ):
         assets_frame["is_financial"] = False
         stock = ~assets_frame.is_cash
-        assets_frame.loc[stock, "is_financial"] = ~_bool_series(
-            decision_panel.is_nonfinancial_industry.reindex(
-                assets_frame.loc[stock, "asset_id"]
-            ),
-            "portfolio_financial_context_invalid",
-        ).to_numpy()
+        if not absolute:
+            assets_frame.loc[stock, "is_financial"] = ~_bool_series(
+                decision_panel.is_nonfinancial_industry.reindex(
+                    assets_frame.loc[stock, "asset_id"]
+                ),
+                "portfolio_financial_context_invalid",
+            ).to_numpy()
         unavailable = assets_frame.asset_id.isin(missing_assets)
         assets_frame["can_enter"] = ~unavailable
         assets_frame["can_exit"] = ~unavailable
         assets_frame.loc[unavailable, "expected_alpha"] = 0.0
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
+        if absolute:
+            assets_frame["trade_capacity_weight"] = np.where(
+                np.isfinite(adv_values) & (adv_values > 0.0),
+                assumptions.adv_participation * adv_values / nav,
+                0.0,
+            )
         decision_markets = {
             str(asset): market_name_for_type(market_type)
             for asset, market_type in decision_panel.market_type.astype("Int64")
@@ -1854,23 +1941,48 @@ def _build_session(
             return total, *gradients
 
         try:
+            if robust_config is not None:
+                ranks = alpha.reindex(assets_frame.asset_id)
+                ranks.loc[assets_frame.is_cash.to_numpy() | unavailable.to_numpy()] = (
+                    0.0
+                )
+                loading = alpha_uncertainty_loading(
+                    enhanced_decision.calibration,
+                    ranks.fillna(0.0),
+                    confidence=robust_config.confidence,
+                )
+                asset_ledger_horizon = enhanced_decision.holding_sessions
             optimization = optimize_portfolio(
                 assets_frame,
-                factor_covariance=risk.factor_covariance,
+                factor_covariance=risk.factor_covariance if risk is not None else None,
                 industry_columns=tuple(
                     column
-                    for column in risk.factor_covariance.index
+                    for column in assets_frame.columns
                     if column.startswith("industry_")
                 ),
                 style_columns=candidate.risk_style_columns,
                 expected_transaction_cost=expected_cost,
-                config=optimizer_config,
+                config=config,
                 nav=float(nav),
                 assumptions=assumptions,
                 eligibility_column="eligible",
                 financial_column="is_financial",
                 cash_column="is_cash",
                 receivable_weight=float(decision_receivable / nav),
+                **(
+                    {
+                        "uncertainty_loading": loading,
+                        "risk_aversion": robust_config.risk_aversion,
+                        "holding_sessions": asset_ledger_horizon,
+                        **(
+                            {"risk_annualization": risk.annualization_factor}
+                            if robust_config.risk_aversion > 0.0
+                            else {}
+                        ),
+                    }
+                    if robust_config is not None
+                    else {}
+                ),
             )
         except ValueError as error:
             if str(error) not in {
@@ -1890,9 +2002,12 @@ def _build_session(
                 "optimizer_turnover_bounds_infeasible",
             }:
                 risk_repair_reason = str(error)
-                target = enhanced_decision.benchmark_weights.reindex(
-                    assets, fill_value=0.0
-                )
+                if absolute:
+                    decision_skip_reason = str(error)
+                else:
+                    target = enhanced_decision.benchmark_weights.reindex(
+                        assets, fill_value=0.0
+                    )
             else:
                 decision_skip_reason = str(error)
         if optimization is not None:
@@ -1969,10 +2084,13 @@ def _build_session(
             -current.div(nav).reindex(assets, fill_value=0.0).loc[independent_exits]
         ).astype("float64")
     if assets_frame is not None or neutrality is not None:
-        config = optimizer_config or OptimizerConfig()
         if assets_frame is not None:
             risk = enhanced_decision.risk
-            benchmark = assets_frame.benchmark_weight.to_numpy(dtype="float64")
+            benchmark = (
+                None
+                if absolute
+                else assets_frame.benchmark_weight.to_numpy(dtype="float64")
+            )
             columns = (
                 tuple(
                     column
@@ -1991,6 +2109,37 @@ def _build_session(
                 else risk.factor_covariance.to_numpy(dtype="float64")
             )
             cash_mask = assets_frame.is_cash.to_numpy()
+            if optimization is not None:
+                industry_columns = tuple(
+                    name for name in columns if name.startswith("industry_")
+                )
+                style_columns = tuple(
+                    name for name in columns if not name.startswith("industry_")
+                )
+                risk_aversion = (
+                    robust_config.risk_aversion if robust_config is not None else 0.0
+                )
+                risk_missing, alpha_missing, incomplete = _portfolio_incomplete(
+                    assets_frame,
+                    industry_columns,
+                    style_columns,
+                    config,
+                    risk_aversion,
+                )
+                net_bounds = _net_name_bounds(
+                    assets_frame,
+                    benchmark=benchmark,
+                    financial_column="is_financial",
+                    cash_column="is_cash",
+                    eligibility_column="eligible",
+                    incomplete=incomplete.to_numpy(),
+                    config=config,
+                )
+                objective_alpha = assets_frame.expected_alpha.where(
+                    ~(incomplete | alpha_missing), 0.0
+                ).to_numpy(dtype="float64")
+                objective_exposure = np.where(np.isfinite(exposure), exposure, 0.0)
+                objective_specific = np.where(risk_missing, 0.0, specific)
         else:
             bands = _neutrality_bands(
                 neutrality,
@@ -2003,13 +2152,19 @@ def _build_session(
             (
                 1.0
                 if initializing or assets_frame is None
-                else max(config.target_turnover_limit, exit_notional / execution_nav)
+                else max(
+                    config.target_turnover_limit
+                    if config.target_turnover_limit is not None
+                    else 1.0,
+                    exit_notional / execution_nav,
+                )
             )
             if execution_nav > 0
             else 0.0
         )
 
-        def evaluate(weights):
+        def evaluate(weights, *, strict=False):
+            strict |= optimization is not None
             result = account_for(weights.where(~weights.index.isin(exit_assets), 0.0))
             if result.nav_after <= 0:
                 return (
@@ -2020,7 +2175,8 @@ def _build_session(
                     },
                     (np.inf, np.inf, np.inf),
                 )
-            notionals = result.asset_ledger.set_index("asset_id").post_trade_notional
+            rows = result.asset_ledger
+            notionals = rows.set_index("asset_id").post_trade_notional
             notionals.loc[PORTFOLIO_CASH_ASSET_ID] = result.post_trade_cash
             if assets_frame is not None:
                 facts, violation = _portfolio_risk_limits(
@@ -2033,18 +2189,35 @@ def _build_session(
                     cash_mask,
                     columns,
                     config,
+                    strict=strict,
+                    net_bounds=net_bounds if strict else None,
                 )
             else:
                 facts, violation = _neutrality_risk_limits(
                     notionals.reindex(assets, fill_value=0.0), neutrality, bands
                 )
-            fills = result.asset_ledger.executed_delta_notional
+            fills = rows.executed_delta_notional
             turnover = (
                 max(fills.clip(lower=0).sum(), -fills.clip(upper=0).sum())
                 / result.nav_before
             )
-            if turnover > turnover_cap + 1e-8:
+            turnover_roundoff = (
+                8 * np.finfo(float).eps * max(turnover, turnover_cap)
+                if strict
+                else 1e-8
+            )
+            if turnover > turnover_cap + turnover_roundoff:
                 violation = (np.inf, np.inf)
+            if strict:
+                costs = rows.loc[:, PORTFOLIO_LEDGER_COST_COLUMNS]
+                cash_terms = (
+                    result.pre_trade_cash,
+                    *-fills,
+                    *-costs.to_numpy().ravel(),
+                )
+                cash_roundoff = 8 * np.finfo(float).eps * fsum(map(abs, cash_terms))
+                if fsum(cash_terms) < -cash_roundoff:
+                    violation = (np.inf, np.inf)
             distance = float(
                 np.square(
                     notionals.reindex(assets, fill_value=0.0) / result.nav_before
@@ -2057,7 +2230,9 @@ def _build_session(
             orders_requested
             and execution_nav > 0
             and not decision_skip_reason
-            and (neutrality is not None or enhanced_decision.risk is not None)
+            and (
+                neutrality is not None or absolute or enhanced_decision.risk is not None
+            )
         )
         if repair:
             minimum, increment = (pd.Series(0.0, index=assets) for _ in range(2))
@@ -2096,6 +2271,74 @@ def _build_session(
                 increment,
                 evaluate,
             )
+            if optimization is not None:
+                quantities = held_units.reindex(assets, fill_value=0.0)
+                change = (
+                    requested.loc[known] * execution_nav / entry.loc[known, "open"]
+                    - quantities.loc[known]
+                )
+                adjacent = abs(change.to_numpy())
+                sellable = quantities - pd.Series(
+                    locked_quantities, dtype="float64"
+                ).reindex(assets, fill_value=0.0)
+                buy_quantity = round_stock_orders(adjacent, lot, step, nearest=True)
+                sell_quantity = round_stock_orders(
+                    adjacent,
+                    lot,
+                    step,
+                    sellable=sellable.loc[known].to_numpy(),
+                    nearest=True,
+                )
+                adjacent = np.where(change > 0.0, buy_quantity, -sell_quantity)
+                adjacent = np.where(change == 0.0, 0.0, adjacent)
+                candidate_weights = requested.copy()
+                candidate_weights.loc[known] = (
+                    (quantities.loc[known] + adjacent).clip(lower=0.0)
+                    * entry.loc[known, "open"]
+                    / execution_nav
+                )
+
+                def actual_utility(result):
+                    rows = result.asset_ledger
+                    weights = (
+                        rows.set_index("asset_id")
+                        .post_trade_notional.reindex(
+                            assets_frame.asset_id, fill_value=0.0
+                        )
+                        .to_numpy()
+                        / result.nav_before
+                    )
+                    cost_ratio = float(
+                        rows.loc[:, PORTFOLIO_LEDGER_COST_COLUMNS].to_numpy().sum()
+                        / result.nav_before
+                    )
+                    weights[cash_mask] = (
+                        result.post_trade_cash / result.nav_before + cost_ratio
+                    )
+                    return _portfolio_objective(
+                        weights,
+                        benchmark=benchmark,
+                        expected_alpha=objective_alpha,
+                        loading=None if loading is None else loading.to_numpy(),
+                        cost_ratio=cost_ratio,
+                        risk_aversion=risk_aversion,
+                        horizon_scale=(
+                            enhanced_decision.holding_sessions
+                            / enhanced_decision.risk.annualization_factor
+                            if risk_aversion > 0.0
+                            else 0.0
+                        ),
+                        exposure=objective_exposure,
+                        covariance=covariance,
+                        specific=objective_specific,
+                    )["objective_value"]
+
+                # One joint native candidate; no integer search or per-name accounts.
+                trial = evaluate(candidate_weights, strict=True)
+                if trial[2][:2] == (0.0, 0.0) and actual_utility(
+                    trial[0]
+                ) >= actual_utility(selected[0]):
+                    selected = trial
             selected[1].update(
                 execution_constraints_status="UNDEFINED"
                 if selected[1]["realized_constraints_status"] == "UNDEFINED"
@@ -2119,6 +2362,12 @@ def _build_session(
         account = account_for(execution_target)
         asset_ledger = account.asset_ledger
     asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
+    if robust_config is not None and enhanced_decision is not None:
+        asset_ledger.attrs["robust_objective"] = {
+            "holding_sessions": enhanced_decision.holding_sessions,
+            "robust_confidence": robust_config.confidence,
+            "robust_risk_aversion": robust_config.risk_aversion,
+        }
     if decision_skip_reason:
         target = hold_target
         raw_target = hold_target.copy(deep=True)
@@ -2766,6 +3015,30 @@ def _ledger_batch(
             **asset_ledger.attrs.get("decision_availability", {}),
             **asset_ledger.attrs.get("neutrality_exposures", {}),
             **asset_ledger.attrs.get("realized_constraints", {}),
+            **asset_ledger.attrs.get("robust_objective", {}),
+            **(
+                {
+                    name: getattr(optimization_result, name)
+                    for name in (
+                        "expected_return",
+                        "robust_penalty",
+                        "holding_variance",
+                        "risk_penalty",
+                        "objective_value",
+                        "solver_iterations",
+                        "solver_variables",
+                        "solver_optimality",
+                        "solver_constraint_violation",
+                        "solver_complementarity",
+                        "solver_complementarity_sum",
+                        "solver_complementarity_count",
+                        "solver_termination",
+                        "predicted_total_volatility",
+                    )
+                }
+                if optimization_result is not None
+                else {}
+            ),
             **(
                 {
                     name: getattr(enhanced_decision.calibration, field)

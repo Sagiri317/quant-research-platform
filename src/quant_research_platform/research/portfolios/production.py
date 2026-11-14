@@ -15,6 +15,7 @@ from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapsh
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
+    RobustPortfolioConfig,
 )
 from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
@@ -36,6 +37,7 @@ from quant_research_platform.research.portfolios.daily import (
     backtest_a_share,
 )
 from quant_research_platform.research.portfolios.optimizer import (
+    AbsoluteRiskConfig,
     OptimizerConfig,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -84,6 +86,7 @@ def backtest(config: Mapping) -> Path:
         "sample_role",
         "selection_mode",
         "selection",
+        "robust_config",
     }
     if (
         not isinstance(config, Mapping)
@@ -144,7 +147,15 @@ def backtest(config: Mapping) -> Path:
     for key, value in inputs.items():
         for source in value if key == "risk_context" else (value,):
             _dataset_input_options(source)
-    enhanced = candidate.construction == "benchmark_enhanced"
+    absolute = candidate.construction == "robust_long_only"
+    enhanced = candidate.construction in {"benchmark_enhanced", "robust_long_only"}
+    robust_config = (
+        RobustPortfolioConfig(**config["robust_config"])
+        if "robust_config" in config
+        else None
+    )
+    if absolute and robust_config is None:
+        robust_config = RobustPortfolioConfig()
     if (candidate.benchmark_id is not None) != ("benchmark" in inputs) or enhanced != (
         "risk_context" in inputs
     ):
@@ -153,6 +164,7 @@ def backtest(config: Mapping) -> Path:
         "risk_model" in config
         or "optimizer_config" in config
         or "calibration" in config
+        or "robust_config" in config
     ):
         raise ValueError("portfolio_unused_configuration")
     risk_model = None
@@ -293,7 +305,11 @@ def backtest(config: Mapping) -> Path:
     final = []
     risk_config = risk_model.config if enhanced else None
     optimizer_config = (
-        OptimizerConfig(**config.get("optimizer_config", {})) if enhanced else None
+        (AbsoluteRiskConfig if absolute else OptimizerConfig)(
+            **config.get("optimizer_config", {})
+        )
+        if enhanced
+        else None
     )
 
     def produce(emit):
@@ -306,6 +322,7 @@ def backtest(config: Mapping) -> Path:
                 assumptions=assumptions,
                 risk_config=risk_config,
                 optimizer_config=optimizer_config,
+                robust_config=robust_config,
                 frozen_calibration=frozen,
                 on_final_calibration=final.append,
             )
@@ -323,6 +340,11 @@ def backtest(config: Mapping) -> Path:
             {
                 "risk_model": risk_model.to_dict(),
                 "optimizer_config": asdict(optimizer_config),
+                **(
+                    {"robust_config": asdict(robust_config)}
+                    if robust_config is not None
+                    else {}
+                ),
             }
             if enhanced
             else {}

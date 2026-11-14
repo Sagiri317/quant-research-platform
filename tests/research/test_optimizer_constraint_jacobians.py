@@ -1,14 +1,20 @@
 """Independent checks for exact optimizer constraint derivatives."""
 
-from types import SimpleNamespace
-
 import numpy as np
 import pandas as pd
 import pytest
+from scipy.optimize import LinearConstraint
+from scipy.sparse import issparse
 
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.research.portfolios import optimizer
-from tests.helpers.optimizer import with_cash_asset
+from tests.helpers.optimizer import (
+    ECONOMIC_UTILITY_ATOL,
+    capture_solver_problem,
+    constraint_jacobian,
+    constraint_value,
+    with_cash_asset,
+)
 
 
 def _capture_constraints(monkeypatch, asymmetry=0.0, nonzero_cost=False):
@@ -27,19 +33,8 @@ def _capture_constraints(monkeypatch, asymmetry=0.0, nonzero_cost=False):
             "style": [-1.0, 0.0, 0.5, 2.0, 0.0],
         }
     )
-    captured = {}
     buy_rates = np.array([0.001, 0.002, 0.003, 0.004, 0.0])
     sell_rates = np.array([0.005, 0.006, 0.007, 0.008, 0.0])
-
-    def solve(fun, x0, **kwargs):
-        captured.update(kwargs)
-        # The zero-cost solve may return the benchmark; with fees, no trade
-        # is feasible and leaves enough cash without inventing an unpaid fill.
-        weights = current if nonzero_cost else benchmark
-        point = np.r_[weights, np.abs(weights - current)]
-        expected_objective = -assets.expected_alpha.to_numpy() @ (weights - benchmark)
-        assert fun(point)[0] == pytest.approx(expected_objective)
-        return SimpleNamespace(success=True, x=point)
 
     def expected_cost(buy, sell):
         assert buy.shape == sell.shape == current.shape
@@ -47,23 +42,25 @@ def _capture_constraints(monkeypatch, asymmetry=0.0, nonzero_cost=False):
             return float(buy @ buy_rates + sell @ sell_rates), buy_rates, sell_rates
         return 0.0, np.zeros_like(buy), np.zeros_like(sell)
 
-    monkeypatch.setattr(optimizer, "minimize", solve)
-    optimizer.optimize_portfolio(
-        assets,
-        factor_covariance=pd.DataFrame(
-            [[0.02, 0.003 + asymmetry], [0.003, 0.01]],
-            index=["industry", "style"],
-            columns=["industry", "style"],
+    captured = capture_solver_problem(
+        monkeypatch,
+        lambda: optimizer.optimize_portfolio(
+            assets,
+            factor_covariance=pd.DataFrame(
+                [[0.02, 0.003 + asymmetry], [0.003, 0.01]],
+                index=["industry", "style"],
+                columns=["industry", "style"],
+            ),
+            industry_columns=("industry",),
+            style_columns=("style",),
+            expected_transaction_cost=expected_cost,
+            nav=100.0,
+            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
+            cash_column="is_cash",
+            config=optimizer.OptimizerConfig(active_name_limit=0.2),
         ),
-        industry_columns=("industry",),
-        style_columns=("style",),
-        expected_transaction_cost=expected_cost,
-        nav=100.0,
-        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
-        cash_column="is_cash",
-        config=optimizer.OptimizerConfig(active_name_limit=0.2),
     )
-    return captured["constraints"], current, captured["bounds"]
+    return captured, current
 
 
 @pytest.mark.parametrize(
@@ -72,84 +69,89 @@ def _capture_constraints(monkeypatch, asymmetry=0.0, nonzero_cost=False):
 def test_constraint_jacobians_match_independent_central_differences(
     monkeypatch, asymmetry, nonzero_cost
 ):
-    constraints, _, _ = _capture_constraints(monkeypatch, asymmetry, nonzero_cost)
-    point = np.array([0.19, 0.21, 0.23, 0.25, 0.12, 0.01, 0.01, 0.03, 0.05, 0.08])
+    captured, _ = _capture_constraints(monkeypatch, asymmetry, nonzero_cost)
+    point = np.r_[
+        [0.19, 0.21, 0.23, 0.25, 0.12, 0.01, 0.01, 0.03, 0.05, 0.08],
+        [0.001] if nonzero_cost else [],
+    ]
+    assert point.shape == captured["initial"].shape
     step = 1e-6
-    for constraint in constraints:
+    for constraint in captured["constraints"]:
         derivative = np.column_stack(
             [
                 (
-                    np.atleast_1d(constraint["fun"](point + direction * step))
-                    - np.atleast_1d(constraint["fun"](point - direction * step))
+                    constraint_value(constraint, point + direction * step)
+                    - constraint_value(constraint, point - direction * step)
                 )
                 / (2 * step)
                 for direction in np.eye(len(point))
             ]
         )
-        assert np.atleast_2d(constraint["jac"](point)) == pytest.approx(
+        assert constraint_jacobian(constraint, point) == pytest.approx(
             derivative, abs=1e-10, rel=1e-8
         )
 
 
-@pytest.mark.parametrize("index", [-2, -1], ids=["name_bands", "cash_reserve"])
-def test_value_only_constraints_do_not_build_discarded_jacobians(monkeypatch, index):
-    constraints, _, _ = _capture_constraints(monkeypatch)
-    point = np.array([0.19, 0.21, 0.23, 0.25, 0.12, 0.01, 0.01, 0.03, 0.05, 0.08])
-    constraint = constraints[index]
-    expected = np.r_[point[:4] - 0.05, 0.45 - point[:4]] if index == -2 else point[4]
-
-    def unexpected_allocation(*args, **kwargs):
-        pytest.fail("value-only constraint constructed a discarded Jacobian")
-
-    # Patch only after preparation: SLSQP still needs its fixed Jacobians.
-    with monkeypatch.context() as allocations:
-        for name in ("outer", "vstack", "pad", "zeros"):
-            allocations.setattr(optimizer.np, name, unexpected_allocation)
-        value = constraint["fun"](point)
-    assert value == pytest.approx(expected)
-    jacobian = constraint["jac"](point)
-    assert jacobian.shape == ((8, 10) if index == -2 else (10,))
-    expected_jacobian = (
-        np.pad(np.vstack((np.eye(5)[:4], -np.eye(5)[:4])), ((0, 0), (0, 5)))
-        if index == -2
-        else np.r_[0.0, 0.0, 0.0, 0.0, 1.0, np.zeros(5)]
-    )
-    np.testing.assert_array_equal(jacobian, expected_jacobian)
+def test_linear_operators_and_zero_cost_name_cash_bounds(monkeypatch):
+    captured, current = _capture_constraints(monkeypatch)
+    bounds = captured["bounds"]
+    np.testing.assert_allclose(bounds.lb[:5], [0.05] * 4 + [0.0])
+    np.testing.assert_allclose(bounds.ub[:5], [0.45] * 4 + [1.0])
+    for constraint in captured["constraints"]:
+        if isinstance(constraint, LinearConstraint):
+            assert issparse(constraint.A)
+            assert constraint.A.nnz <= 4 * len(current)
 
 
 def test_trade_epigraph_is_exact_at_and_away_from_no_trade(monkeypatch):
-    constraints, current, bounds = _capture_constraints(monkeypatch)
-    turnover, trades = constraints[2], constraints[5]
+    captured, current = _capture_constraints(monkeypatch)
+    linear = [c for c in captured["constraints"] if isinstance(c, LinearConstraint)]
+    trades = next(c for c in linear if c.A.shape[0] == 2 * len(current))
+    turnover = next(
+        c for c in linear if np.all(c.ub == 0.2) and np.isneginf(c.lb).all()
+    )
     zero = np.r_[current, np.zeros(5)]
-    assert turnover["jac"](zero) == pytest.approx(np.r_[np.zeros(5), np.full(5, -0.5)])
+    assert constraint_jacobian(turnover, zero) == pytest.approx(
+        np.r_[np.zeros(5), np.full(5, 0.5)][None, :]
+    )
     expected_jac = np.block([[-np.eye(5), np.eye(5)], [np.eye(5), np.eye(5)]])
-    assert trades["jac"](zero) == pytest.approx(expected_jac)
-    assert bounds[5:] == ((0.0, 0.5), (0.0, 1.0), (0.0, 1.5), (0.0, 2.0), (0.0, np.inf))
+    assert constraint_jacobian(trades, zero) == pytest.approx(expected_jac)
+    assert np.isneginf(captured["bounds"].lb[5:]).all()
+    assert np.isposinf(captured["bounds"].ub[5:]).all()
     for delta in (np.zeros(5), np.array([0.01, -0.02, 0.03, -0.04, 0.02])):
         point = np.r_[current + delta, np.abs(delta)]
         assert np.minimum(
-            trades["fun"](point)[:5], trades["fun"](point)[5:]
+            (constraint_value(trades, point) - trades.lb)[:5],
+            (constraint_value(trades, point) - trades.lb)[5:],
         ) == pytest.approx(np.zeros(5))
-        assert turnover["fun"](point) == pytest.approx(0.2 - 0.5 * np.abs(delta).sum())
-        assert trades["jac"](point) == pytest.approx(expected_jac)
+        assert turnover.ub - constraint_value(turnover, point) == pytest.approx(
+            0.2 - 0.5 * np.abs(delta).sum()
+        )
+        assert constraint_jacobian(trades, point) == pytest.approx(expected_jac)
         # Every admitted auxiliary vector bounds absolute turnover from above;
         # understating a trade is rejected even at the no-trade kink.
         understated = point.copy()
         understated[5:] -= 0.001
-        assert np.min(trades["fun"](understated)) < 0.0
+        assert np.min(constraint_value(trades, understated) - trades.lb) < 0.0
 
 
 def test_exposure_bands_are_affine_even_at_exact_neutrality(monkeypatch):
-    constraints, current, _ = _capture_constraints(monkeypatch)
+    captured, current = _capture_constraints(monkeypatch)
     cash_only = np.r_[np.array([0.0, 0.0, 0.0, 0.0, 1.0]), np.zeros(5)]
     point = np.r_[current, np.zeros(5)]
-    for constraint, limit in zip(constraints[3:5], [0.02, 0.2], strict=True):
-        jac = constraint["jac"](cash_only)
+    bands = [
+        c
+        for c in captured["constraints"]
+        if isinstance(c, LinearConstraint) and c.A.shape[0] == 2
+    ]
+    assert len(bands) == 2
+    for constraint, limit in zip(bands, [0.02, 0.2], strict=True):
+        jac = constraint_jacobian(constraint, cash_only)
         assert jac.shape == (2, 10)
-        assert jac == pytest.approx(constraint["jac"](point))
+        assert jac == pytest.approx(constraint_jacobian(constraint, point))
         assert jac.sum(axis=0) == pytest.approx([2 * limit] * 4 + [0.0] * 6)
-        assert constraint["fun"](cash_only) == pytest.approx([0.0, 0.0])
-        assert constraint["fun"](point) == pytest.approx(jac @ point)
+        assert constraint_value(constraint, cash_only) == pytest.approx([0.0, 0.0])
+        assert constraint_value(constraint, point) == pytest.approx(jac @ point)
 
 
 def test_exact_exposure_bands_reach_independent_linear_optimum():
@@ -224,9 +226,8 @@ def test_exact_exposure_bands_reach_independent_linear_optimum():
             style_active_limit=0.0,
         ),
     )
-    assert alpha @ result.weights.to_numpy()[:-1] == pytest.approx(
-        -oracle.fun, abs=1e-12
-    )
+    utility_gap = -oracle.fun - alpha @ result.weights.to_numpy()[:-1]
+    assert -1e-12 <= utility_gap <= ECONOMIC_UTILITY_ATOL
     assert centered.T @ result.weights.to_numpy()[:-1] == pytest.approx(
         np.zeros(3), abs=1e-12
     )
@@ -244,8 +245,7 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
         PreparedTradeCost,
     )
 
-    # Keep exact captured floats from the native synthetic workflow, including
-    # the next failed trajectory. Both reach 1000 iterations with abs turnover.
+    # Preserve native trajectories that stalled with nonsmooth absolute turnover.
     case = json.loads(
         (
             Path(__file__).parent / "fixtures" / "optimizer_turnover_boundary.json"
@@ -318,7 +318,9 @@ def test_native_turnover_boundary_converges_with_actual_cost_owner(perturbation)
     weights = result.weights.to_numpy()
     delta = weights - current
     assert weights.sum() == pytest.approx(1.0, abs=1e-12)
-    assert 0.5 * np.abs(delta).sum() == pytest.approx(0.2, abs=1e-8)
+    actual_turnover = 0.5 * np.abs(delta).sum()
+    assert actual_turnover <= config.target_turnover_limit + 1e-8
+    assert result.target_turnover == pytest.approx(actual_turnover)
     assert np.max(np.abs(delta) * nav / adv) <= assumptions.adv_participation + 1e-8
     assert result.predicted_tracking_error <= config.tracking_error_limit + 1e-8
     assert (

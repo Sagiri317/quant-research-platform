@@ -46,6 +46,7 @@ from quant_research_platform.research.risk import (
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.identity import filesystem_mkdir
+from tests.helpers.optimizer import ECONOMIC_UTILITY_ATOL
 from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.helpers.portfolio_ledger import (
     CONTINUOUS_EXECUTION_COLUMNS,
@@ -1247,14 +1248,36 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             fee_ratio = intercept / (1.0 - slope)
             assert ((net_target * (1.0 - fee_ratio) > current) == buying).all()
             assert fee_ratio > 0.0
+            alpha = kwargs["enhanced_decision"].expected_alpha.reindex(current.index)
+            stock = optimization.weights.reindex(current.index)
+            assert not buying.loc["a"] and buying.loc["b"]
+            assert ((stock > current) == buying).all()
+            actual_fee = float((rate * abs(stock - current)).sum())
+            hand_utility = float(alpha @ (net_target * (1.0 - fee_ratio)) - fee_ratio)
+            actual_utility = float(alpha @ stock - actual_fee)
+            # For x=a-a* and y=b*-b, funding gives x<=R*y and utility loss
+            # >=M*y. Thus a, b and cash have different error bounds.
+            objective_error = ECONOMIC_UTILITY_ATOL
+            assert actual_utility == pytest.approx(
+                hand_utility, abs=objective_error, rel=0.0
+            )
+            rotation_ratio = (1.0 + rate.loc["b"]) / (1.0 - rate.loc["a"])
+            assert alpha.loc["a"] + rate.loc["a"] > 0.0
+            margin = float(
+                alpha.loc["b"]
+                - rate.loc["b"]
+                - (alpha.loc["a"] + rate.loc["a"]) * rotation_ratio
+            )
+            assert margin > 0.0
+            weight_error = objective_error / margin
             assert optimization.weights.loc["a"] == pytest.approx(
-                0.495 * (1.0 - fee_ratio), abs=2e-8
+                0.495 * (1.0 - fee_ratio), abs=rotation_ratio * weight_error
             )
             assert optimization.weights.loc["b"] == pytest.approx(
-                0.505 * (1.0 - fee_ratio), abs=2e-8
+                0.505 * (1.0 - fee_ratio), abs=weight_error
             )
             assert optimization.weights.loc["__cash__"] == pytest.approx(
-                fee_ratio, abs=2e-8
+                fee_ratio, abs=max(1.0, rotation_ratio - 1.0) * weight_error
             )
             assert optimization.expected_transaction_cost == pytest.approx(
                 fee_ratio * kwargs["nav"], abs=2e-8

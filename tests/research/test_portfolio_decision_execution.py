@@ -299,7 +299,17 @@ def test_integer_fees_do_not_turn_missing_active_risk_into_defined_zero(
     assert facts["realized_constraints_status"] == "UNDEFINED"
     assert facts["realized_tracking_error_status"] == "UNDEFINED"
     assert "realized_tracking_error" not in facts
-    assert optimized.predicted_tracking_error == pytest.approx(0.0, abs=1e-14)
+    fee_ratio = optimized.expected_transaction_cost / inputs["nav"]
+    net_stock = optimized.weights.reindex(["a", "b"]) / (1.0 - fee_ratio)
+    # Only normalization-sized unknown coefficients may be omitted. The
+    # known stock's actual residual remains real factor and specific risk.
+    assert abs(net_stock.loc["a"] - 0.5) <= (
+        8 * np.finfo(float).eps * max(abs(net_stock.loc["a"]), 0.5)
+    )
+    expected_tracking_error = np.sqrt(0.01 + 0.01) * abs(net_stock.loc["b"] - 0.5)
+    assert optimized.predicted_tracking_error == pytest.approx(
+        expected_tracking_error, abs=1e-16, rel=1e-12
+    )
 
 
 @pytest.mark.parametrize("missing", ["specific", "exposure"])

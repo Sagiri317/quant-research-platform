@@ -212,6 +212,25 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
     artifact = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
     batches = list(artifact.iter_chunks())
     assert len(batches) == 3
+    # Zero fees, twelve symmetric benchmark names and price 100 invest the full NAV.
+    initial_shares = config["assumptions"]["initial_nav"] / 100.0
+    initial = [
+        row
+        for row in batches[0].valuations
+        if row.phase == "after" and row.asset_id != "__cash__"
+    ]
+    assert initial_shares == 120000.0
+    assert all(row.mark_price == 100.0 for row in initial)
+    assert sum(row.quantity for row in initial) == initial_shares
+    registered = sum(
+        row.entitlement_quantity
+        for batch in batches
+        for row in batch.rights_adjustments
+        if row.kind == "registration"
+    )
+    assert registered == initial_shares
+    assert ca.amount.eq(1.0).all()
+    expected_dividend = initial_shares * 1.0
     assert artifact.metadata["optimizer_config"] == asdict(
         daily.OptimizerConfig(**override)
     )
@@ -252,9 +271,9 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
     after = [row for row in batches[1].valuations if row.phase == "after"]
     pending = sum(row.receivable for row in after)
     if payment_date == "2023-01-06":
-        assert pending == pytest.approx(112800.0)
+        assert pending == pytest.approx(expected_dividend)
         assert sum(row.value - row.receivable for row in after) == pytest.approx(
-            11887200.0
+            config["assumptions"]["initial_nav"] - expected_dividend
         )
         assert _facts(batches[-1])["decision_status"] == "AVAILABLE"
         assert "decision_skip_reason" not in _facts(batches[-1])
@@ -270,7 +289,7 @@ def test_native_receivable_stays_in_nav_and_never_funds_buys(
             for batch in batches
             for flow in batch.cashflows
             if flow.kind == "dividend"
-        ) == pytest.approx(112800.0)
+        ) == pytest.approx(expected_dividend)
 
 
 @pytest.mark.parametrize("missing_context", [False, True])
@@ -369,7 +388,10 @@ def test_native_new_target_with_missing_industry_skips_and_keeps_account(
     ) == pytest.approx(12000000.0)
 
 
-def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_path):
+@pytest.mark.parametrize("rebalance", [False, True])
+def test_unknown_stock_exposure_persists_local_risk_or_a_resolved_target(
+    tmp_path, rebalance
+):
     args = _decision_inputs(holdings=(0.5, 0.4))
     args["cash"] = 10.0
     args["optimizer_config"] = daily.OptimizerConfig(active_name_limit=0.2)
@@ -378,14 +400,22 @@ def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_p
         enhanced, expected_alpha=enhanced.expected_alpha * 0.0
     )
     enhanced.exposures.loc[enhanced.exposures.asset_id.eq("a"), "style"] = np.nan
+    if not rebalance:
+        args["candidate"] = replace(
+            args["candidate"], rebalance_schedule="weekly-last-trading-day"
+        )
+        args["target_override"] = args["holdings"] / args["nav"]
     account, adv, optimized, delta, ledger = daily._build_session(**args)
-    assert optimized is None
-    assert ledger.executed_delta_notional.eq(0.0).all()
-    assert account.post_trade_cash == 10.0
-    assert (
-        ledger.attrs["decision_availability"]["decision_skip_reason"]
-        == "optimizer_stock_exposure_unavailable"
-    )
+    if rebalance:
+        assert optimized.weights.tolist() == pytest.approx([0.5, 0.5, 0.0])
+        assert ledger.executed_delta_notional.tolist() == [0.0, 10.0]
+        assert account.post_trade_cash == 0.0
+    else:
+        assert optimized is None
+        assert ledger.executed_delta_notional.eq(0.0).all()
+        assert account.post_trade_cash == 10.0
+    assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
+    assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
     batch = daily._ledger_batch(
         account=account,
         asset_ledger=ledger,
@@ -393,7 +423,9 @@ def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_p
         end_timestamp=args["endpoint_panel"].timestamp.iloc[0],
         decision_timestamp=args["decision_timestamp"],
         held_units=args["held_units"],
-        execution_units=args["held_units"],
+        execution_units=(
+            args["held_units"] + ledger.set_index("asset_id").executed_quantity
+        ),
         previous_values={},
         rights_adjustments=(),
         prediction_rank_score=args["alpha"],
@@ -420,12 +452,23 @@ def test_cash_missing_stock_exposure_keeps_te_and_persists_local_undefined(tmp_p
         )
     )
     facts = _facts(list(artifact.iter_chunks())[0])
-    assert facts["realized_constraints_status"] == "UNDEFINED"
-    assert facts["realized_exposure_status"] == "UNDEFINED"
+    assert facts["realized_constraints_status"] == (
+        "SATISFIED" if rebalance else "UNDEFINED"
+    )
+    assert facts["realized_exposure_status"] == (
+        "DEFINED" if rebalance else "UNDEFINED"
+    )
     assert facts["realized_tracking_error_status"] == "DEFINED"
-    assert facts["realized_tracking_error"] == pytest.approx(np.sqrt(0.0002))
-    assert facts["realized_style_active_exposure_status"] == "UNDEFINED"
-    assert "realized_style_active_exposure" not in facts
+    assert facts["realized_tracking_error"] == pytest.approx(
+        0.0 if rebalance else np.sqrt(0.0002)
+    )
+    assert facts["realized_style_active_exposure_status"] == (
+        "DEFINED" if rebalance else "UNDEFINED"
+    )
+    if rebalance:
+        assert facts["realized_style_active_exposure"] == 0.0
+    else:
+        assert "realized_style_active_exposure" not in facts
 
 
 @pytest.mark.parametrize("cash_weight", [0.0, 0.5])

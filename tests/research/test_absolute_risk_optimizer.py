@@ -1,7 +1,6 @@
 """Hand-derived targets for absolute risk, fees, and partial sellable holdings."""
 
 from dataclasses import asdict
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -9,6 +8,12 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.research.portfolios import optimizer
+from tests.helpers.optimizer import (
+    ECONOMIC_UTILITY_ATOL,
+    capture_solver_problem,
+    constraint_jacobian,
+    constraint_value,
+)
 
 
 def _assets(current, alpha):
@@ -61,9 +66,18 @@ def test_absolute_alpha_uses_decision_cost_threshold_without_annual_risk_penalty
     alpha, expected
 ):
     result = _solve(_assets([0.0, 1.0], [alpha, 0.0]), cost=_cost(0.1))
-    assert result.weights.iloc[0] == pytest.approx(expected, abs=1e-9)
-    assert result.expected_transaction_cost == pytest.approx(10 * expected, abs=1e-8)
-    assert result.weights.iloc[1] - result.expected_transaction_cost / 100 >= -1e-9
+    stock = result.weights.iloc[0]
+    if alpha <= 0.1:
+        assert (
+            stock == result.expected_transaction_cost == result.target_turnover == 0.0
+        )
+        return
+    assert -1e-14 <= (alpha - 0.1) * (expected - stock) <= ECONOMIC_UTILITY_ATOL
+    assert result.expected_transaction_cost == pytest.approx(
+        10 * stock, rel=1e-12, abs=1e-14
+    )
+    assert result.weights.sum() == pytest.approx(1.0, abs=1e-12)
+    assert result.weights.iloc[1] - result.expected_transaction_cost / 100 >= -1e-12
 
 
 @pytest.mark.parametrize("kind", ["name", "industry", "style", "volatility"])
@@ -137,9 +151,12 @@ def test_missing_alpha_freezes_physical_holding_while_other_purchase_pays_real_f
     assets = _assets([0.4, 0.0, 0.6], [np.nan, 0.2, 0.0])
     assets["sellable_weight"] = [0.4, 0.0, 0.0]
     result = _solve(assets, cost=_cost(0.1))
-    assert result.weights.tolist() == pytest.approx(
-        [0.4, 0.6 / 1.1, 0.6 / 11], abs=1e-9
-    )
+    bought = result.weights.iloc[1]
+    assert result.weights.iloc[0] == pytest.approx(0.4, abs=1e-12)
+    assert -1e-14 <= 0.1 * (0.6 / 1.1 - bought) <= ECONOMIC_UTILITY_ATOL
+    assert result.expected_transaction_cost == pytest.approx(10 * bought, abs=1e-12)
+    assert result.weights.sum() == pytest.approx(1.0, abs=1e-12)
+    assert result.weights.iloc[-1] >= result.expected_transaction_cost / 100 - 1e-12
     assert np.isnan(assets.loc[0, "expected_alpha"])
     # Actual stock shares stayed fixed even though fee-reduced NAV raises weight.
     assert result.weights.iloc[0] / (1 - result.expected_transaction_cost / 100) > 0.4
@@ -208,11 +225,6 @@ def test_absolute_fee_and_risk_constraint_gradients_match_central_differences(
     assets["industry"] = [1.0, 0.0, 0.0]
     assets["style"] = [-1.0, 2.0, 0.0]
     assets["specific_variance"] = [0.01, 0.02, 0.0]
-    captured = {}
-
-    def solve(fun, x0, **kwargs):
-        captured.update(kwargs, objective=fun)
-        return SimpleNamespace(success=True, x=x0)
 
     def cost(buy, sell):
         buy, sell = buy / 100, sell / 100
@@ -229,38 +241,41 @@ def test_absolute_fee_and_risk_constraint_gradients_match_central_differences(
             np.r_[0.03 + 0.04 * sell[:-1], 0.0],
         )
 
-    monkeypatch.setattr(optimizer, "minimize", solve)
-    _solve(
-        assets,
-        cost=cost,
-        config=optimizer.AbsoluteRiskConfig(
-            name_weight_limit=0.8,
-            industry_weight_limit=0.8,
-            style_exposure_limit=1.0,
-            total_volatility_limit=1.0,
-            target_turnover_limit=1.0,
+    captured = capture_solver_problem(
+        monkeypatch,
+        lambda: _solve(
+            assets,
+            cost=cost,
+            config=optimizer.AbsoluteRiskConfig(
+                name_weight_limit=0.8,
+                industry_weight_limit=0.8,
+                style_exposure_limit=1.0,
+                total_volatility_limit=1.0,
+                target_turnover_limit=1.0,
+            ),
+            factor_covariance=pd.DataFrame(
+                [[0.02, 0.003], [0.003, 0.04]],
+                index=["industry", "style"],
+                columns=["industry", "style"],
+            ),
+            industry_columns=("industry",),
+            style_columns=("style",),
         ),
-        factor_covariance=pd.DataFrame(
-            [[0.02, 0.003], [0.003, 0.04]],
-            index=["industry", "style"],
-            columns=["industry", "style"],
-        ),
-        industry_columns=("industry",),
-        style_columns=("style",),
     )
-    point = np.array([0.25, 0.18, 0.57, 0.08, 0.06, 0.1])
+    point = np.array([0.25, 0.18, 0.57, 0.08, 0.06, 0.1, 0.001])
+    assert point.shape == captured["initial"].shape
     for constraint in captured["constraints"]:
         numeric = np.column_stack(
             [
                 (
-                    np.atleast_1d(constraint["fun"](point + 1e-6 * direction))
-                    - np.atleast_1d(constraint["fun"](point - 1e-6 * direction))
+                    constraint_value(constraint, point + 1e-6 * direction)
+                    - constraint_value(constraint, point - 1e-6 * direction)
                 )
                 / 2e-6
                 for direction in np.eye(len(point))
             ]
         )
-        assert np.atleast_2d(constraint["jac"](point)) == pytest.approx(
+        assert constraint_jacobian(constraint, point) == pytest.approx(
             numeric, abs=1e-8, rel=1e-6
         )
 

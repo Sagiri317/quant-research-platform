@@ -1,0 +1,146 @@
+{
+  "candidate": {
+    "candidate_id": "stock_robust",
+    "selection_group": "quarterly",
+    "construction": "robust_long_only",
+    "prediction_selector": "lasso",
+    "rebalance_schedule": "monthly-last-trading-day",
+    "top_quantile": null,
+    "benchmark_id": null,
+    "risk_style_columns": [
+      "log_total_market_cap",
+      "beta_252d",
+      "momentum_252_20",
+      "residual_volatility_60d",
+      "amihud_60d"
+    ]
+  },
+  "inputs": {
+    "dataset": "data/research/a_share/stock/daily/factors",
+    "panel": "data/interim/factor-expansion-95ad4a83/market_panel_known_halts_industry_history_corrected",
+    "execution": "data/processed/a_share/stock/daily/execution",
+    "calendar": "data/interim/csmar-20261110/trading_calendar",
+    "fees": "data/interim/reference-20261105/a_share_fee_schedule",
+    "market_bars": "data/interim/csmar-20261110-r3/market_bars_1d",
+    "stock_master": "data/interim/csmar-20261110/stock_master",
+    "corporate_actions": "data/interim/csmar-20261110/corporate_actions",
+    "risk_context": [
+      "data/research/a_share/stock/daily/close-factors"
+    ]
+  },
+  "predictions": [
+    {
+      "path": "results/a_share/stock/daily/models/2014Q3/lasso/predictions",
+      "window": {
+        "start": "2014-07-01",
+        "end": "2014-09-30"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2014Q4/lasso/predictions",
+      "window": {
+        "start": "2014-10-01",
+        "end": "2014-12-31"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2015Q1/lasso/predictions",
+      "window": {
+        "start": "2015-01-01",
+        "end": "2015-03-31"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2015Q2/lasso/predictions",
+      "window": {
+        "start": "2015-04-01",
+        "end": "2015-06-30"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2015Q3/lasso/predictions",
+      "window": {
+        "start": "2015-07-01",
+        "end": "2015-09-30"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2015Q4/lasso/predictions",
+      "window": {
+        "start": "2015-10-01",
+        "end": "2015-12-31"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2016Q1/lasso/predictions",
+      "window": {
+        "start": "2016-01-01",
+        "end": "2016-03-31"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2016Q2/lasso/predictions",
+      "window": {
+        "start": "2016-04-01",
+        "end": "2016-06-30"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2016Q3/lasso/predictions",
+      "window": {
+        "start": "2016-07-01",
+        "end": "2016-09-30"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2016Q4/lasso/predictions",
+      "window": {
+        "start": "2016-10-01",
+        "end": "2016-12-31"
+      }
+    },
+    {
+      "path": "results/a_share/stock/daily/models/2017Q1/lasso/predictions",
+      "window": {
+        "start": "2017-01-01",
+        "end": "2017-03-31"
+      }
+    }
+  ],
+  "output_window": {
+    "start": "2017-01-03",
+    "end": "2017-03-31"
+  },
+  "input_window": {
+    "start": "2014-01-01",
+    "end": "2017-03-31"
+  },
+  "formal_dataset_window": {
+    "start": "2014-01-01",
+    "end": "2026-10-30"
+  },
+  "prediction_window": {
+    "start": "2014-07-01",
+    "end": "2017-03-31"
+  },
+  "robust_config": {
+    "confidence": 0.95,
+    "risk_aversion": 1.0
+  },
+  "optimizer_config": {
+    "name_weight_limit": 0.02,
+    "total_volatility_limit": 0.3,
+    "target_turnover_limit": 0.2
+  },
+  "assumptions": {
+    "initial_nav": 100000000.0,
+    "slippage_bps": 2.0,
+    "impact_bps": 5.0,
+    "adv_participation": 0.05,
+    "adv_sensitivities": [
+      1.0
+    ],
+    "minimum_commission": 5.0
+  },
+  "output": "results/a_share/stock/daily/portfolios/robust"
+}

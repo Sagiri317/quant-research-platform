@@ -293,6 +293,25 @@ def alpha_interval_semantics(rebalance_schedule):
     }
 
 
+def alpha_uncertainty_loading(calibration, rank_scores, *, confidence=0.95):
+    """Map the date-cluster slope confidence interval to rank-one return space.
+
+    The fitted intercept remains a nuisance parameter, as in expected alpha.
+    This models uncertainty of the common slope, not asset-return covariance.
+    """
+    if calibration.status != "DEFINED":
+        raise PortfolioTargetBlocked("robust_alpha_calibration_undefined")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("robust_portfolio_config_invalid")
+    radius = float(
+        student_t.isf(
+            (1.0 - confidence) / 2.0,
+            df=max(1, calibration.valid_rebalance_dates - 2),
+        )
+    )
+    return rank_scores * (radius * calibration.slope_standard_error)
+
+
 def frozen_alpha_calibration(payload, *, cutoff, selection_group, rebalance_schedule):
     """Bind a published native calibration to this consumer's group and horizon."""
     if (
