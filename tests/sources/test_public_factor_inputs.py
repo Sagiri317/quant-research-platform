@@ -267,25 +267,66 @@ def test_derived_manifest_without_aggregate_url_keeps_row_provenance(tmp_path):
 
 
 def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
-    path = tmp_path / "prices.json"
-    path.write_text(
-        json.dumps(
-            {
-                "data": {
-                    "code": "510300",
-                    "klines": ["2024-01-02,2,2.1,2.2,1.9,10,2050,1,2,0.1,3"],
-                }
-            }
+    path = tmp_path / "prices.csv.gz"
+    pd.DataFrame(
+        [
+            dict(
+                code="510300",
+                timestamp="2024-01-02",
+                open="2",
+                close="2.1",
+                high="2.2",
+                low="1.9",
+                volume="10",
+                amount="2050",
+                return_percent="2",
+                turnover_rate_percent="3",
+                source_sha256="original-response",
+                source_url="https://example.org/original",
+            )
+        ]
+    ).to_csv(path, index=False)
+    record = dict(
+        path=path.name,
+        source="eastmoney_cn_etf_daily",
+        sha256="combined-table",
+    )
+    write_source_manifest(tmp_path, {"records": [record]})
+    clock = tmp_path / "release-clocks.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="eastmoney_cn_etf_daily",
+                observation_date="2024-01-02",
+                published_at="2024-01-02T07:00:00Z",
+                estimated_available_at="2024-01-02T07:00:01Z",
+                availability_basis="official_quote_close",
+                evidence_url="https://example.org/release",
+            )
+        ]
+    ).to_csv(clock, index=False)
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(clock),
+            outputs={"public_domestic_etf_prices": str(output)},
         )
     )
-    frame = next(
-        normalize(
-            "public_domestic_etf_prices", path, {"source": "eastmoney_cn_etf_daily"}
-        )
-    )
+    frame = read_dataset(output)
     assert frame.volume.tolist() == [1000]
-    assert frame.amount.tolist() == ["2050"]
+    assert frame.amount.tolist() == [2050]
     assert frame.price_basis.tolist() == ["unadjusted_raw"]
+    assert frame.asset_id.tolist() == ["510300"]
+    assert frame.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+    assert frame.source_sha256.tolist() == ["original-response"]
+    assert frame.source_url.tolist() == ["https://example.org/original"]
+    assert frame.retrieved_at.isna().all()
+    assert frame.available_at.tolist() == [pd.Timestamp("2024-01-02T07:00:01Z")]
 
 
 def test_nport_value_is_usd_and_investment_currency_is_separate(tmp_path):

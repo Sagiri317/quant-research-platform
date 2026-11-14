@@ -354,7 +354,7 @@ def accepts(data_id, record):
     if record["source"] == "sec_nport_target_holdings_extracted":
         return path.endswith(".csv")
     if data_id == "public_domestic_etf_prices":
-        return path.endswith(".json")
+        return path.endswith((".csv", ".csv.gz"))
     if record["source"] in {
         "sec_13f_submission_metadata_extracted",
         "sec_13f_target_holdings_extracted",
@@ -618,28 +618,22 @@ def normalize(data_id, path, record):
                 yield result
         return
     if source == "eastmoney_cn_etf_daily":
-        payload = json.loads(path.read_bytes())["data"]
-        frame = pd.DataFrame(
-            [line.split(",") for line in payload["klines"]],
-            columns=[
+        frame = _read_csv(
+            path,
+            columns=(
+                "code",
                 "timestamp",
-                "open",
-                "close",
-                "high",
-                "low",
-                "volume",
-                "amount",
-                "amplitude_percent",
-                "return_percent",
-                "price_change",
-                "turnover_rate_percent",
-            ],
+                *(name for name in DATASETS[data_id] if name != "price_basis"),
+                "source_sha256",
+                "source_url",
+            ),
+            dtype="str",
         )
         if frame.empty:
             return
         _numbers(frame, ("volume",))
         frame["volume"] *= 100
-        frame["asset_id"] = str(payload["code"]).zfill(6)
+        frame["asset_id"] = frame.pop("code").str.zfill(6)
         frame["price_basis"] = "unadjusted_raw"
         yield frame
     elif source in {
