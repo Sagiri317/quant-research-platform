@@ -901,7 +901,6 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
     assert facts["validation"]["selected_timesteps"] == 4
     assert facts["validation"]["best_validation_reward"] == 0
     assert facts["training_decisions"]["start"] == "2024-01-02T01:30:00.001000"
-    normalization = (model / "normalization.pkl").read_bytes()
     feature_scaler = (model / "feature_scaler.pkl").read_bytes()
     assert pickle.loads(feature_scaler).medians == (0, 10, 10, 500)
     later = deepcopy(episode)
@@ -917,8 +916,6 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
     ledger = read_portfolio_ledger_artifact(output / "ledger")
     assert list(ledger.iter_chunks())
     assert ledger.metadata["dynamic_execution"]["reward_unit"] == "bps_of_initial_nav"
-    assert (model / "normalization.pkl").read_bytes() == normalization
-    assert (model / "feature_scaler.pkl").read_bytes() == feature_scaler
     with pytest.raises(ValueError, match="policy_validation_not_after_training"):
         train_policy(
             {

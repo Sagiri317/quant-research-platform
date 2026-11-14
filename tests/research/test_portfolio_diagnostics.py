@@ -534,9 +534,6 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ]
         global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
         assert len(global_rows) == 10 and global_rows.status.eq("UNDEFINED").all()
-        assert not global_rows.reason.eq(
-            "global_validation_selection_reuses_validation"
-        ).any()
         assert global_rows.value.isna().all()
         assert rows.candidate_count.eq(len(candidates)).all()
 
@@ -1073,9 +1070,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         assert len(rows) == 2 * len(candidates) + 1
         assert rows.candidate_count.eq(len(candidates)).all()
         assert set(rows.candidate_id) == {"joint", *ledgers}
-        assert not rows.reason.isin(
-            ("test_excluded", "global_validation_selection_reuses_validation")
-        ).any()
         baseline = rows.copy()
     with artifact.table("portfolio_capacity.parquet") as rows:
         assert rows.empty

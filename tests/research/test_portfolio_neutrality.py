@@ -138,7 +138,6 @@ def test_neutral_target_and_blocked_realized_exposure_are_distinct(
     assert facts["realized_exposure:industry:fixture:a"] == 0.0
     assert facts["realized_exposure_status"] == "DEFINED"
     assert any(row.name == "raw_target_weight" for row in first.diagnostics)
-    assert replace(candidate, neutrality="none").neutrality == "none"
 
 
 def test_nonrebalance_blocked_exit_keeps_realized_exposure_unknown(

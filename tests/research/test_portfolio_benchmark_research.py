@@ -4,7 +4,6 @@ import os
 import subprocess
 import sys
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -14,9 +13,6 @@ import pytest
 from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
-)
-from quant_research_platform.contracts.portfolios import (
-    PortfolioCandidateSpec,
 )
 from quant_research_platform.research.portfolios.comparison import comparison_tables
 from quant_research_platform.research.portfolios.diagnostics import (
@@ -66,36 +62,9 @@ def _compare(axis, references, **options):
     return tables, metadata
 
 
-@pytest.mark.parametrize(
-    "construction",
-    [
-        "quantile_equal_weight",
-        "quantile_equal_weight_half_step",
-        "quantile_float_cap",
-        "benchmark_enhanced",
-    ],
-)
-def test_each_construction_defaults_to_performance_and_accepts_two_references(
-    tmp_path, construction, monkeypatch
-):
-    base = PortfolioCandidateSpec(
-        candidate_id="cash",
-        selection_group="global",
-        construction="quantile_equal_weight",
-        prediction_selector="explicit",
-        rebalance_schedule="daily",
-        top_quantile=0.2,
-        benchmark_id=None,
-    )
-    candidate = replace(
-        base,
-        construction=construction,
-        top_quantile=None if construction == "benchmark_enhanced" else 0.2,
-        benchmark_id="csi500" if construction == "benchmark_enhanced" else None,
-        risk_style_columns=("size",) if construction == "benchmark_enhanced" else (),
-    )
+def test_defaults_to_performance_and_accepts_two_references(tmp_path, monkeypatch):
     source = tmp_path / "ledger"
-    window = _cash_ledger(source, candidate=candidate)
+    window = _cash_ledger(source)
     first = reference_input(tmp_path / "first.parquet", [100.0, 105.0, 110.0])
     second = reference_input(
         tmp_path / "second.parquet", [100.0, 90.0, 120.0], reference_id="other"

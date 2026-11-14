@@ -59,7 +59,6 @@ def test_research_factor_rosters_are_explicit():
     for factors in (PV25_FACTORS, CORE6_FACTORS):
         assert factors
         assert len(factors) == len(set(factors))
-    assert not hasattr(ModelSpec, "purge_gap_steps")
 
 
 def test_formal_price_volume_definitions_use_session_windows() -> None:

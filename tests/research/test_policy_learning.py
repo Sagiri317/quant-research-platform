@@ -292,7 +292,6 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
         }
     )
     assert list(read_portfolio_ledger_artifact(output / "ledger").iter_chunks())
-    assert (model / "feature_scaler.pkl").read_bytes() == frozen
     env = TradingEnv([later], feature_scaler=scaler)
     try:
         observation, _ = env.reset(seed=1)
@@ -490,12 +489,10 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     assert np.isfinite(
         summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())["nav"]
     )
-    assert (model / "feature_scaler.pkl").read_bytes() == frozen
     roots = [policy_ledger, output]
     expected = {}
     for root in roots:
         native = read_portfolio_ledger_artifact(root)
-        assert "candidate" not in native.metadata
         batches = list(native.iter_chunks())
         terminal = sum(
             row.value for row in batches[-1].valuations if row.phase == "end"

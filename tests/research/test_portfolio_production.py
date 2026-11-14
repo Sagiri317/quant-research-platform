@@ -166,7 +166,6 @@ def _build_producer(
     frozen_calibration: daily.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "quantile_equal_weight",
-    identity_overrides=None,
     raw_bar_orders=None,
     initial_nav=100.0,
     risk_config=None,
@@ -224,7 +223,6 @@ def _build_producer(
     }
     if "equity_events" in frames:
         identities["equity_events"] = "e" * 64
-    identities.update(identity_overrides or {})
     roots = {}
     for target_id, identity in identities.items():
         root = tmp_path / target_id / identity

@@ -21,8 +21,6 @@ def test_profiles_expose_catalogs_only(profile_id, market):
     assert profile.factors.list()
     assert profile.labels.list()
     assert profile.research_datasets.list()
-    assert not hasattr(profile, "producer_bindings")
-    assert not hasattr(profile, "protocol")
     with pytest.raises(FrozenInstanceError):
         profile.profile_id = "changed"
 
