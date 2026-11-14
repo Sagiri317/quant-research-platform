@@ -10,7 +10,10 @@ import pytest
 
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.public_research.normalization import normalize
-from quant_research_platform.storage.datasets.reading import read_dataset
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
+    read_dataset,
+)
 from tests.helpers.public_sources import write_source_csv, write_source_manifest
 
 
@@ -214,11 +217,27 @@ def test_szse_contract_listing_retains_identity_and_units_without_inventing_iv(
     )
     path = tmp_path / "contracts.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
-    (result,) = normalize(
-        "public_option_contracts",
-        path,
-        {"source": "szse_option_contract_events_extracted"},
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                {
+                    "source": "szse_option_contract_events_extracted",
+                    "path": path.name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            ]
+        },
     )
+    output = tmp_path / "contracts"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(tmp_path),
+            "outputs": {"public_option_contracts": str(output)},
+        }
+    )
+    result = read_dataset(output)
     assert result.security_id.tolist() == ["90000001"]
     assert result.contract_id.tolist() == ["159915C2406M02000"]
     assert result.option_type.tolist() == ["认购"]
@@ -236,20 +255,28 @@ def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
     row = dict(
         DATE="2024-01-02 00:00:00",
         SCODE="000001",
+        MARKET="融资融券_深证",
+        SECUCODE="000001.SZ",
         RZYE=100.0,
         RZMRE=12.0,
         RZCHE=7.5,
         RQYL=50.0,
         RQMCL=4.0,
         RQCHL="--",
+        source_sha256="a" * 64,
+        source_url="https://example.org/margin",
     )
     if with_balance:
         row["RQYE"] = 600.0
-    payload = json.dumps(dict(success=True, result=dict(data=[row], count=1))).encode()
+    payload = (
+        pd.DataFrame([{**row, "DATE": "2024-02-01 00:00:00", "RZYE": "invalid"}, row])
+        .to_csv(index=False)
+        .encode()
+    )
     data = gzip.compress(payload) if compressed else payload
     source = tmp_path / "raw"
     source.mkdir()
-    name = "margin.json.gz" if compressed else "margin.json"
+    name = "margin.csv.gz" if compressed else "margin.csv"
     (source / name).write_bytes(data)
     write_source_manifest(
         source,
@@ -262,21 +289,47 @@ def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
                     status="downloaded",
                     sha256=hashlib.sha256(data).hexdigest(),
                     bytes=len(data),
-                    url="https://example.org/margin",
+                    url="https://example.org/merged-margin",
                 )
             ],
         ),
     )
+    clocks = tmp_path / "clocks.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="eastmoney_margin_detail",
+                observation_date="2024-01-02",
+                estimated_available_at="2024-01-03T15:59:59Z",
+                availability_basis="explicit_research_assumption",
+                evidence_url="https://example.org/clock",
+                published_at=None,
+            )
+        ]
+    ).to_csv(clocks, index=False)
     output = tmp_path / "interim"
     prepare_source(
         dict(
             source_id="public_research",
             raw_root=str(source),
             outputs={"public_margin_balances": str(output)},
+            release_csv=str(clocks),
+            start_date="2024-01-01",
+            end_date="2024-01-31",
         )
     )
     frame = read_dataset(output)
     assert frame.asset_id.tolist() == ["000001"]
+    assert frame.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+    assert frame.source_sha256.tolist() == ["a" * 64]
+    assert frame.source_url.tolist() == ["https://example.org/margin"]
+    assert frame.published_at.isna().all()
+    assert frame.available_at.tolist() == [pd.Timestamp("2024-01-03T15:59:59Z")]
+    assert frame.availability_basis.tolist() == ["explicit_research_assumption"]
+    counts = open_dataset_session(output).manifest["producer_diagnostics"][
+        "source_invalid_numeric_cells"
+    ]
+    assert counts["financing_balance"] == 0
     assert frame.financing_repayment_amount.tolist() == [7.5]
     assert frame.financing_buy_amount.tolist() == [12.0]
     assert frame.lending_quantity.tolist() == [50.0]
@@ -285,21 +338,6 @@ def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
         assert frame.lending_balance.tolist() == [600.0]
     else:
         assert frame.lending_balance.isna().all()
-
-
-@pytest.mark.parametrize(
-    "payload",
-    ({"success": False, "result": None}, {"success": True, "result": {"data": None}}),
-)
-def test_eastmoney_margin_api_failure_is_not_empty_history(tmp_path, payload):
-    path = tmp_path / "failed.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
-    with pytest.raises(ValueError, match="public_margin_response_invalid"):
-        list(
-            normalize(
-                "public_margin_balances", path, {"source": "eastmoney_margin_detail"}
-            )
-        )
 
 
 @pytest.mark.parametrize("anchor", ("stock-table", None))
@@ -1276,16 +1314,43 @@ def test_cboe_structured_raw_preserves_ratio_scope(tmp_path):
     path.write_text(
         "observation_date,ratio_name,put_call_ratio,source_url,source_sha256,publication_date,published_at\n"
         "2024-01-02,EQUITY PUT/CALL RATIO,0.5,https://example.org/page,abc,,\n"
-        "2024-01-02,INDEX PUT/CALL RATIO,1.2,https://example.org/page,abc,,\n",
+        "2024-01-02,INDEX PUT/CALL RATIO,1.2,https://example.org/page,abc,,\n"
+        "2024-02-02,EQUITY PUT/CALL RATIO,invalid,https://example.org/page,abc,,\n",
         encoding="utf-8",
     )
-    frame = next(
-        normalize("public_option_put_call", path, {"source": "cboe_put_call_extracted"})
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                {
+                    "source": "cboe_put_call_extracted",
+                    "path": path.name,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            ]
+        },
     )
+    output = tmp_path / "ratios"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(tmp_path),
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "outputs": {"public_option_put_call": str(output)},
+        }
+    )
+    frame = read_dataset(output)
     assert frame.put_call_ratio.tolist() == [0.5, 1.2]
     assert frame.asset_id.nunique() == 2
     assert frame.source_url.eq("https://example.org/page").all()
     assert frame.source_sha256.eq("abc").all()
+    assert (
+        open_dataset_session(output).manifest["producer_diagnostics"][
+            "source_invalid_numeric_cells"
+        ]["put_call_ratio"]
+        == 0
+    )
 
 
 def test_finra_symbol_na_is_an_identifier_not_missing(tmp_path):

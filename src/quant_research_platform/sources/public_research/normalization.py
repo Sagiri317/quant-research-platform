@@ -1,6 +1,5 @@
 """Source-specific schemas; NAV, market prices and trading activity stay distinct."""
 
-import gzip
 import io
 import json
 import re
@@ -436,8 +435,6 @@ def accepts(data_id, record):
     if data_id == "public_finra_short_volume":
         return path.endswith(".txt")
     if data_id in {"public_fund_shares", "public_margin_balances"}:
-        if record["source"] == "eastmoney_margin_detail":
-            return path.endswith((".json", ".json.gz"))
         return path.endswith((".csv", ".csv.gz"))
     return path.endswith(".json" if data_id == "public_etf_prices" else ".xlsx")
 
@@ -496,21 +493,6 @@ def normalize(data_id, path, record):
         yield result
         return
     if source == "eastmoney_margin_detail":
-        payload = json.loads(
-            gzip.decompress(path.read_bytes())
-            if path.name.endswith(".gz")
-            else path.read_bytes()
-        )
-        if (
-            type(payload) is not dict
-            or payload.get("success") is not True
-            or type(payload.get("result")) is not dict
-            or type(payload["result"].get("data")) is not list
-        ):
-            raise ValueError("public_margin_response_invalid")
-        frame = pd.DataFrame(payload["result"]["data"])
-        if frame.empty:
-            return
         mapping = {
             "DATE": "timestamp",
             "SCODE": "asset_id",
@@ -520,15 +502,26 @@ def normalize(data_id, path, record):
             "RQYL": "lending_quantity",
             "RQMCL": "lending_sell_quantity",
             "RQCHL": "lending_repayment_quantity",
+            "RQYE": "lending_balance",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
         }
-        if "RQYE" in frame:
-            mapping["RQYE"] = "lending_balance"
-        result = _rename(frame, mapping)
-        if "RQYE" not in frame:
-            result["lending_balance"] = pd.NA
-        result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
-        _numbers(result, DATASETS[data_id])
-        yield result
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=tuple(key for key in mapping if key != "RQYE"),
+                optional_columns=("RQYE",),
+                dtype="str",
+                keep_default_na=False,
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                if "RQYE" not in frame:
+                    frame["RQYE"] = pd.NA
+                result = _rename(frame, mapping)
+                result["asset_id"] = result.asset_id.str.zfill(6)
+                yield result
         return
     elif source == "szse_option_contract_events_extracted":
         payload = json.loads(path.read_bytes())
@@ -561,15 +554,6 @@ def normalize(data_id, path, record):
                 + result.contract_id
                 + ":"
                 + frame.source_excel_row_index.astype("str")
-            )
-            _numbers(
-                result,
-                (
-                    "exercise_price",
-                    "contract_unit",
-                    "original_exercise_price",
-                    "original_contract_unit",
-                ),
             )
             yield result
         return
@@ -987,7 +971,6 @@ def normalize(data_id, path, record):
         )
         result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y-%m")
         result["asset_id"] = "US_MARGIN_ACCOUNTS"
-        _numbers(result, DATASETS[data_id])
         yield result
     elif source == "cboe_put_call_extracted":
         mapping = {
@@ -1004,7 +987,6 @@ def normalize(data_id, path, record):
             table,
             mapping,
         )
-        _numbers(result, ("put_call_ratio",))
         result["asset_id"] = result.ratio_name
         yield result
     elif source in {
@@ -1252,7 +1234,6 @@ def normalize(data_id, path, record):
         )
         for name in ("open", "high", "low", "close", "volume"):
             result[name] = result[name].str.replace(r"[$,]", "", regex=True)
-        _numbers(result, ("open", "high", "low", "close", "volume"))
         result["adjusted_close"] = float("nan")
         result["asset_id"] = path.stem.split("-")[0]
         result["adjustment_basis"] = "vendor_unspecified_not_total_return"
@@ -1291,14 +1272,6 @@ def normalize(data_id, path, record):
             result["_currency"] = frame.currency
         else:
             result["asset_id"] += ":" + result.event_type
-        _numbers(
-            result,
-            [
-                name
-                for name, unit in fields.items()
-                if unit not in {"text", "identifier"}
-            ],
-        )
         yield result
     elif source == "ssga_nav_shares":
         mapping = {
@@ -1316,7 +1289,6 @@ def normalize(data_id, path, record):
             pd.to_datetime(result.timestamp, errors="coerce").notna()
         ].copy()
         result["asset_id"] = path.stem.split("-")[0]
-        _numbers(result, DATASETS[data_id])
         yield result
 
 
@@ -1389,9 +1361,6 @@ def _cffex(payload, date):
     result["asset_id"] = result.asset_id.str.strip()
     result["product"] = result.asset_id.str[:2]
     result["timestamp"] = pd.to_datetime(date, format="%Y%m%d")
-    _numbers(
-        result, [name for name in DATASETS["public_futures_daily"] if name != "product"]
-    )
     return result
 
 
