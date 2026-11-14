@@ -1,5 +1,7 @@
 """Opening snapshots and realized variation have independent hand references."""
 
+from decimal import Decimal
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -23,6 +25,113 @@ def panel():
             observed_trade_volume=10.0,
             observed_signed_trade_volume=2.0,
         )
+    )
+
+
+def test_decimal_flat_midpoints_leave_price_normalizations_undefined():
+    frame = panel().iloc[:601].copy()
+    bid, ask = (
+        np.resize([3.869, 3.868], len(frame)),
+        np.resize([3.870, 3.871], len(frame)),
+    )
+    assert {
+        (Decimal(str(b)) + Decimal(str(a))) / 2 for b, a in zip(bid, ask, strict=True)
+    } == {Decimal("3.8695")}
+    frame = frame.assign(
+        mid=(bid + ask) / 2,
+        bid_px1=bid,
+        ask_px1=ask,
+        bid_vol1=100.0,
+        ask_vol1=100.0,
+    )
+    normalized = (
+        *(
+            f"price_{side}_acceleration_{width}s"
+            for side in ("up", "down")
+            for width in (30, 300)
+        ),
+        *(f"opening_path_efficiency_{minutes}m" for minutes in (5, 15, 30)),
+        "hf_downside_variance_fraction_30m",
+        "hf_downside_variance_fraction_1d",
+        "daily_jump_variation_fraction",
+        "signed_trend_efficiency_300s",
+        "volatility_compression_30_300s",
+        "compression_order_flow_300s",
+        "flow_absorption_30s",
+    )
+    returns = tuple(f"opening_observed_return_{minutes}m" for minutes in (5, 15, 30))
+    raw_variation = (
+        "hf_upside_realized_variance_1d",
+        "hf_downside_realized_variance_1d",
+        "daily_continuous_variation",
+    )
+    actual = compute_factors(frame, columns=(*normalized, *returns, *raw_variation))
+    assert actual[list(normalized)].isna().all(axis=None)
+    np.testing.assert_array_equal(actual.loc[600, list(returns)].to_numpy(float), 0)
+    assert np.isfinite(actual.loc[600, list(raw_variation)].to_numpy(float)).all()
+
+
+def test_price_fraction_evidence_keeps_small_moves_and_excludes_segment_repricing():
+    frame = panel().iloc[:702].copy()
+    first, later = (1.001 + 1.003) / 2, (1.001 + 1.0031) / 2
+    assert (Decimal("1.001") + Decimal("1.0031")) / 2 - Decimal("1.002") == Decimal(
+        "0.00005"
+    )
+    frame["mid"] = np.r_[np.full(100, first), np.full(len(frame) - 100, later)]
+    names = (
+        "hf_downside_variance_fraction_30m",
+        "hf_downside_variance_fraction_1d",
+        "daily_jump_variation_fraction",
+        "opening_path_efficiency_5m",
+    )
+    actual = compute_factors(frame, columns=names)
+    np.testing.assert_allclose(
+        actual.loc[600, list(names)].to_numpy(float), [0, 0, 1, 1]
+    )
+    assert pd.isna(actual.loc[700, names[0]])
+    assert actual.loc[700, names[1]] == 0
+
+    morning = panel().iloc[:601].copy()
+    bid, ask = (
+        np.resize([3.869, 3.868], len(morning)),
+        np.resize([3.870, 3.871], len(morning)),
+    )
+    morning["mid"] = (bid + ask) / 2
+    afternoon = morning.assign(
+        timestamp=morning.timestamp + pd.Timedelta(hours=3, minutes=30),
+        segment_id=1,
+        mid=morning.mid * 2,
+    )
+    repriced = compute_factors(
+        pd.concat([morning, afternoon], ignore_index=True), columns=names[:3]
+    )
+    assert repriced[list(names[:3])].isna().all(axis=None)
+
+
+@pytest.mark.parametrize("minutes", (5, 15, 30))
+def test_opening_gap_repair_uses_only_its_two_price_denominator_endpoints(minutes):
+    frame = panel().iloc[:601].copy()
+    first = (1.001 + 1.003) / 2
+    assert (Decimal("1.001") + Decimal("1.003")) / 2 == Decimal("1.002")
+    frame["mid"] = np.r_[first, np.full(len(frame) - 1, 1.0035)]
+    daily = pd.DataFrame(
+        dict(
+            asset_id=["a"],
+            timestamp=pd.Timestamp("2024-01-02 01:00"),
+            signal_session=pd.Timestamp("2023-12-29"),
+            close=1.002,
+        )
+    )
+    name = f"opening_gap_repair_fraction_{minutes}m"
+    assert calculate(frame, columns=(name,), daily_context=daily)[name].isna().all()
+    frame.loc[0, "mid"] = (1.001 + 1.0031) / 2
+    expected = -(Decimal("1.0035") / Decimal("1.00205") - 1) / (
+        Decimal("1.00205") / Decimal("1.002") - 1
+    )
+    actual = calculate(frame, columns=(name,), daily_context=daily)
+    assert actual[name].iloc[: minutes * 20].isna().all()
+    np.testing.assert_allclose(
+        actual[name].iloc[minutes * 20 :], float(expected), rtol=1e-10
     )
 
 

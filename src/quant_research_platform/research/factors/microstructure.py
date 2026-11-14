@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.history import has_price_variation
 from quant_research_platform.research.protocols import a_share_hft as protocol
 
 
@@ -200,10 +201,9 @@ def _intraday_themes(work, base, columns):
         high, low = previous.max().where(complete), previous.min().where(complete)
         if "price_position_300s" in columns:
             span = high - low
-            # Midpoint arithmetic can contribute one ULP from each price operand.
-            with np.errstate(invalid="ignore"):
-                roundoff = np.spacing(high) + np.spacing(low)
-            result["price_position_300s"] = (mid - low) / span.where(span > roundoff)
+            result["price_position_300s"] = (mid - low) / span.where(
+                has_price_variation(high, low)
+            )
         if columns & {"peak_drawdown_300s", "drawdown_sell_pressure_300s"}:
             drawdown = (1 - mid / high).clip(lower=0)
             if "peak_drawdown_300s" in columns:
@@ -219,12 +219,18 @@ def _intraday_themes(work, base, columns):
         "signed_trend_efficiency_300s",
     }:
         log_returns = np.log(work.mid).diff()
+        previous_mid = mid.shift()
+        # Each selected return also consumes the quote preceding its timestamp.
+        path_low = np.minimum(mid, previous_mid).rolling("300s").min()
+        path_high = np.maximum(mid, previous_mid).rolling("300s").max()
+        moving = has_price_variation(path_low, path_high).to_numpy()
     if columns & {
         "volatility_compression_30_300s",
         "compression_order_flow_300s",
         "flow_absorption_30s",
     }:
         variance = _trailing_sum(log_returns**2, work.timestamp, 300)
+        variance[~moving] = np.nan
     if columns & {"volatility_compression_30_300s", "compression_order_flow_300s"}:
         short_variance = _trailing_sum(log_returns**2, work.timestamp, 30)
         compression = np.sqrt(
@@ -241,7 +247,7 @@ def _intraday_themes(work, base, columns):
         path = _trailing_sum(log_returns.abs(), work.timestamp, 300)
         trend = _trailing_sum(log_returns, work.timestamp, 300)
         result["signed_trend_efficiency_300s"] = np.divide(
-            trend, path, out=np.full(len(work), np.nan), where=path > 0
+            trend, path, out=np.full(len(work), np.nan), where=(path > 0) & moving
         )
     if columns & {
         "trade_activity_ratio_30_300s",

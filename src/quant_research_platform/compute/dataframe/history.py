@@ -19,6 +19,12 @@ class HistoryWindow(BaseIndexer):
         return np.maximum(end - self.window_size, self.history_start), end
 
 
+def has_price_variation(first, second):
+    """Distinguish positive price levels beyond both endpoint ULP errors."""
+    with np.errstate(invalid="ignore"):
+        return np.abs(first - second) > np.spacing(first) + np.spacing(second)
+
+
 def path_efficiency(net_change, total_variation):
     """Signed displacement per total path variation; a flat path is undefined."""
     net_change, total_variation = np.broadcast_arrays(net_change, total_variation)
@@ -44,7 +50,7 @@ def quadratic_log_trend(prices):
         2 * coefficients[..., 2],
         rms,
         out=np.full(rms.shape, np.nan),
-        where=rms > 0,
+        where=(rms > 0) & has_price_variation(prices.min(axis=-1), prices.max(axis=-1)),
     )
     return slope, curvature
 

@@ -1,9 +1,12 @@
 """Independent examples for causal factor additions and consumed dependencies."""
 
+from decimal import Decimal
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.dataframe.history import quadratic_log_trend
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
@@ -18,6 +21,27 @@ from quant_research_platform.research.factors.price_volume.calculations import (
 from quant_research_platform.research.factors.style_structure import (
     calculate as style_factors,
 )
+
+
+@pytest.mark.parametrize("size", (11, 20, 60, 101))
+def test_quadratic_batches_distinguish_decimal_flat_quotes_from_real_curvature(size):
+    bid, ask = np.resize([3.869, 3.868], size), np.resize([3.870, 3.871], size)
+    assert {
+        (Decimal(str(b)) + Decimal(str(a))) / 2 for b, a in zip(bid, ask, strict=True)
+    } == {Decimal("3.8695")}
+    x = np.arange(size, dtype=float)
+    log_change = 0.001 * x + 0.00001 * x**2
+    prices = np.stack(((bid + ask) / 2, np.exp(log_change), np.exp(-log_change)))
+    slope, curvature = quadratic_log_trend(prices)
+    assert np.isnan(curvature[0])
+    increments = 0.001 + 0.00001 * (2 * np.arange(1, size) - 1)
+    expected_curvature = 0.00002 / np.sqrt(np.mean(increments**2))
+    np.testing.assert_allclose(
+        slope[1:], [0.001 + 0.00002 * x[-1], -0.001 - 0.00002 * x[-1]], rtol=1e-10
+    )
+    np.testing.assert_allclose(
+        curvature[1:], [expected_curvature, -expected_curvature], rtol=1e-9
+    )
 
 
 @pytest.mark.parametrize("direction", (1, -1))

@@ -5,6 +5,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.asof import latest_observations
 from quant_research_platform.compute.dataframe.cross_section import leave_one_out_mean
+from quant_research_platform.compute.dataframe.history import has_price_variation
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.markets.implementations.a_share import calendar
 from quant_research_platform.research.factors.intraday_path import (
@@ -460,13 +461,16 @@ def calculate(
             visible = np.arange(len(block)) >= end
             name = f"opening_gap_repair_fraction_{minutes}m"
             if name in columns and complete:
-                gap = (
-                    block.mid.iloc[0] / pd.to_numeric(daily.loc[at, "close"]).iloc[0]
-                    - 1
-                )
-                observed = block.mid.iloc[end] / block.mid.iloc[0] - 1
+                first = block.mid.iloc[0]
+                prior_close = pd.to_numeric(daily.loc[at, "close"]).iloc[0]
+                gap = first / prior_close - 1
+                observed = block.mid.iloc[end] / first - 1
                 result.loc[at, name] = np.where(
-                    visible, -observed / gap if gap != 0 else np.nan, np.nan
+                    visible,
+                    -observed / gap
+                    if has_price_variation(first, prior_close)
+                    else np.nan,
+                    np.nan,
                 )
     if all(name.startswith("opening_") for name in columns):
         return result

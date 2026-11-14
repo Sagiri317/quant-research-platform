@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.history import (
+    has_price_variation,
     path_efficiency,
     quadratic_log_trend,
 )
@@ -80,6 +81,11 @@ def calculate(panel, *, columns):
     daily_variation = bool(
         requested & {"daily_continuous_variation", "daily_jump_variation_fraction"}
     )
+    fractions = requested & {
+        "hf_downside_variance_fraction_30m",
+        "hf_downside_variance_fraction_1d",
+        "daily_jump_variation_fraction",
+    }
     segment_needed = any(
         name.startswith(("price_", "observed_", "event_")) for name in columns
     )
@@ -159,16 +165,17 @@ def calculate(panel, *, columns):
                         and (price[: end + 1] > 0).all()
                         and work.segment_id.iloc[: end + 1].nunique() == 1
                     ):
-                        value = (
-                            price[end] / price[0] - 1
-                            if kind == "observed_return"
-                            else float(
+                        if kind == "observed_return":
+                            value = price[end] / price[0] - 1
+                        elif has_price_variation(
+                            price[: end + 1].min(), price[: end + 1].max()
+                        ):
+                            value = float(
                                 path_efficiency(
                                     np.log(price[end] / price[0]),
                                     np.abs(np.diff(np.log(price[: end + 1]))).sum(),
                                 )
                             )
-                        )
                 if name in requested:
                     result[name] = np.where(visible, value, np.nan)
         if requested & {"late_session_flow_imbalance", "early_late_pressure_shift"}:
@@ -392,6 +399,11 @@ def calculate(panel, *, columns):
             same = work.segment_id.eq(work.segment_id.shift()).to_numpy()
             unexpected = r.isna().to_numpy() & same
             r = r.where(same, 0)
+            if fractions:
+                previous_price = np.r_[np.nan, price[:-1]]
+                moving = pd.Series(
+                    has_price_variation(price, previous_price) & same, index=times
+                )
             if daily_variation or "1d" in variance_windows:
                 day_known = (
                     complete_open
@@ -409,10 +421,18 @@ def calculate(panel, *, columns):
                 else:
                     u, d = up.cumsum(), down.cumsum()
                     known = day_known
+                fraction = d / (u + d).where(u + d > 0)
+                if f"hf_downside_variance_fraction_{width}" in requested:
+                    movement = (
+                        moving.rolling("30min").sum().gt(0)
+                        if width == "30m"
+                        else moving.cummax()
+                    )
+                    fraction = fraction.where(movement)
                 for side, values in (
                     ("upside_realized_variance", u),
                     ("downside_realized_variance", d),
-                    ("downside_variance_fraction", d / (u + d).where(u + d > 0)),
+                    ("downside_variance_fraction", fraction),
                 ):
                     name = f"hf_{side}_{width}"
                     if name in requested:
@@ -433,7 +453,7 @@ def calculate(panel, *, columns):
                             (variance - bipower).clip(lower=0)
                             / variance.where(variance > 0)
                         )
-                        .where(known)
+                        .where(known & moving.cummax().to_numpy())
                         .to_numpy()
                     )
         output.append(

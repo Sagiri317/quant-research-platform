@@ -34,6 +34,30 @@ def theme_panel(prices):
     return frame
 
 
+def test_return_normalizers_keep_the_first_irregular_predecessor_and_local_missingness():
+    seconds = np.r_[0, np.arange(5, 606, 3)]
+    frame = theme_panel(np.r_[100.0, np.full(len(seconds) - 1, 100.00005)])
+    frame["timestamp"] = pd.Timestamp("2024-01-02T01:30:00") + pd.to_timedelta(
+        seconds, unit="s"
+    )
+    names = (
+        "signed_trend_efficiency_300s",
+        "volatility_compression_30_300s",
+        "compression_order_flow_300s",
+        "flow_absorption_30s",
+    )
+    actual = compute_factors(frame, columns=(*names, "price_position_300s"))
+    at = int(np.flatnonzero(seconds == 302)[0])
+    # Return at t=5 consumes t=0, outside the price-only (2,302] window.
+    np.testing.assert_allclose(
+        actual.loc[at, list(names)].to_numpy(float), [1, 0, 0, -0.5]
+    )
+    assert pd.isna(actual.loc[at, "price_position_300s"])
+    assert actual.loc[len(frame) - 1, list(names)].isna().all()
+    frame.loc[50, "mid"] = np.nan
+    assert compute_factors(frame, columns=names).loc[at, list(names)].isna().all()
+
+
 def test_intraday_reference_extrema_volume_and_sell_pressure_by_hand():
     frame = theme_panel(np.r_[np.linspace(10, 20, 100), 15])
     actual = compute_factors(frame, columns=tuple(INTRADAY_THEME_FACTORS))
