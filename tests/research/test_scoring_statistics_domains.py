@@ -118,10 +118,14 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
     }
     scores = score(scoring)
     scored = json.loads(scores.read_text())
+    score_counts = [3, 2, 0] if partial_labels else [3, 3, 3]
+    # The saved unfiltered recipe includes c's mature label, while default
+    # supervised statistics below retain their distinct eligible-only domain.
+    score_mse = (8.7**2 / 3 + 8.7**2 / 2) / 2 if partial_labels else 8.7**2 / 3
     expected_counts = [2, 1, 0] if partial_labels else [2, 2, 2]
-    assert scored["common_rows"] == sum(expected_counts)
-    assert scored["metrics"][0]["validation_rows"] == sum(expected_counts)
-    assert scored["metrics"][0]["validation_mse"] < 1e-24
+    assert scored["common_rows"] == sum(score_counts)
+    assert scored["metrics"][0]["validation_rows"] == sum(score_counts)
+    assert scored["metrics"][0]["validation_mse"] == pytest.approx(score_mse, rel=1e-12)
     statistics = {
         "dataset": {"path": str(labels), "spec": label_spec} if bare else str(labels),
         "output": str(tmp_path / "statistics"),
@@ -184,13 +188,18 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
             }
         ).read_text()
     )
-    # The absent key belongs to an ineligible asset. It is diagnosed but cannot
-    # change the exact mature/eligible scientific domain or any metric.
-    assert missing_scores["common_rows"] == sum(expected_counts)
-    assert missing_scores["metrics"] == scored["metrics"]
+    # The missing c key changes unfiltered scoring only when its label is mature.
+    missing_rows = sum(score_counts) - (not partial_labels)
+    assert missing_scores["common_rows"] == missing_rows
+    assert missing_scores["metrics"][0]["validation_rows"] == missing_rows
+    assert missing_scores["metrics"][0]["validation_mse"] == pytest.approx(
+        score_mse if partial_labels else (8.7**2 / 3) * 2 / 3, rel=1e-12
+    )
+    if partial_labels:
+        assert missing_scores["metrics"] == scored["metrics"]
     assert missing_scores["candidates"][0]["coverage"] == {
-        "current_mature_label_rows": sum(expected_counts),
-        "paired_prediction_rows": sum(expected_counts),
+        "current_mature_label_rows": missing_rows,
+        "paired_prediction_rows": missing_rows,
         "mature_label_rows_without_prediction": 0,
         "prediction_rows_without_label": 1,
     }
@@ -235,13 +244,16 @@ def test_exact_scoring_domain_and_persisted_statistics_coverage(
             }
         ).read_text()
     )
-    # Removing every prediction for ineligible c leaves the scored domain intact.
+    # Removing c's predictions shrinks the unfiltered paired domain; its mature
+    # labels remain visible in candidate coverage.
     assert incomplete_scores["common_rows"] == sum(expected_counts)
-    assert incomplete_scores["metrics"] == scored["metrics"]
+    assert incomplete_scores["metrics"][0]["validation_rows"] == sum(expected_counts)
+    assert incomplete_scores["metrics"][0]["validation_mse"] < 1e-24
     assert incomplete_scores["candidates"][0]["coverage"] == {
-        "current_mature_label_rows": sum(expected_counts),
+        "current_mature_label_rows": sum(score_counts),
         "paired_prediction_rows": sum(expected_counts),
-        "mature_label_rows_without_prediction": 0,
+        "mature_label_rows_without_prediction": sum(score_counts)
+        - sum(expected_counts),
         "prediction_rows_without_label": 0,
     }
     # Selected and direct statistics consume actual saved keys. Historical X

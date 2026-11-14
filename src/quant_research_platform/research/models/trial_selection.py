@@ -24,9 +24,10 @@ from quant_research_platform.contracts.evaluations import (
     evaluation_sessions,
 )
 from quant_research_platform.contracts.experiments import (
-    legal_training_mask,
+    label_maturity_mask,
     training_availability_columns,
 )
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
@@ -43,6 +44,7 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_chunks,
@@ -504,7 +506,20 @@ def score(config):
         ):
             raise ValueError("evaluation_sessions_outside_window")
         config["sessions"] = [str(day.date()) for day in dates]
+
+    def read_label_columns(columns):
+        parts = []
+        for part in validation_windows:
+            with closing_iterator(
+                iter_dataset_chunks(
+                    label_session.filtered_view(part).projected_view(columns)
+                )
+            ) as chunks:
+                parts.extend(chunks)
+        return pd.concat(parts, ignore_index=True)
+
     labels = None
+    label_domains = {}
     candidates, frames, common, target, market = [], [], None, None, None
     for candidate_id, candidate_paths in zip(ids, paths, strict=True):
         if type(candidate_paths) is dict:
@@ -599,6 +614,11 @@ def score(config):
             if target is not None and target != label:
                 raise ValueError("model_selection_label_mismatch")
             target = label
+            if first_facts is not None:
+                compare_model_facts(facts, first_facts)
+            else:
+                first_facts = facts
+            mode = facts["model"]["sample_filter_mode"]
             if labels is None:
                 if label_projection is not None and target not in label_projection:
                     raise ValueError("scoring_label_projection_missing")
@@ -610,52 +630,61 @@ def score(config):
                 availability = declared.get("label_availability_columns", {}).get(
                     target, training_availability_columns(target)[0]
                 )
-                label_parts = []
-                for part in validation_windows:
-                    with closing_iterator(
-                        iter_dataset_chunks(
-                            label_session.filtered_view(part).projected_view(
-                                (
-                                    "timestamp",
-                                    "asset_id",
-                                    "eligible",
-                                    target,
-                                    availability,
-                                )
-                            )
-                        )
-                    ) as label_chunks:
-                        label_parts.extend(label_chunks)
-                labels = pd.concat(label_parts, ignore_index=True)
-                del label_parts
-                labels["timestamp"] = strict_timestamp_series(
-                    labels.timestamp, error="invalid_scoring_timestamp"
+                label_frame = read_label_columns(
+                    (
+                        "timestamp",
+                        "asset_id",
+                        *required_filter_columns(mode),
+                        target,
+                        availability,
+                    )
                 )
-                if labels.duplicated(["timestamp", "asset_id"]).any() or labels.loc[
-                    :, ["timestamp", "asset_id"]
-                ].isna().any(axis=None):
+                label_frame["timestamp"] = strict_timestamp_series(
+                    label_frame.timestamp, error="invalid_scoring_timestamp"
+                )
+                if label_frame.duplicated(
+                    ["timestamp", "asset_id"]
+                ).any() or label_frame.loc[:, ["timestamp", "asset_id"]].isna().any(
+                    axis=None
+                ):
                     raise ValueError("invalid_scoring_label_keys")
                 supplied_label_keys = pd.MultiIndex.from_frame(
-                    labels.loc[:, ["timestamp", "asset_id"]]
+                    label_frame.loc[:, ["timestamp", "asset_id"]]
                 )
-                labels = labels.loc[
-                    legal_training_mask(
-                        labels,
+                labels = label_frame.loc[
+                    label_maturity_mask(
+                        label_frame,
                         fitting_cutoff=cutoff,
                         availability_column=availability,
                         target_column=label,
                     )
                 ].set_index(["timestamp", "asset_id"])[target]
-            if first_facts is not None:
-                compare_model_facts(facts, first_facts)
-            else:
-                first_facts = facts
+                filter_frame = label_frame.set_index(["timestamp", "asset_id"])
+                del label_frame
+            elif mode not in label_domains:
+                columns = required_filter_columns(mode)
+                filter_frame = (
+                    read_label_columns(("timestamp", "asset_id", *columns)).set_index(
+                        ["timestamp", "asset_id"]
+                    )
+                    if columns
+                    else pd.DataFrame(index=labels.index)
+                )
+            if mode not in label_domains:
+                filtered, _ = apply_filter_mode(
+                    filter_frame, mode=mode, metadata_key="sample_filter_mode"
+                )
+                label_domains[mode] = labels.index.intersection(
+                    filtered.index, sort=False
+                )
+                del filter_frame, filtered
+            label_keys = label_domains[mode]
             actual_keys = pd.MultiIndex.from_frame(
                 predictions.loc[:, ["timestamp", "asset_id"]]
             )
             missing_label_rows += len(actual_keys.difference(supplied_label_keys))
             predictions = predictions.set_index(["timestamp", "asset_id"])
-            joined = predictions.loc[predictions.index.isin(labels.index)]
+            joined = predictions.loc[predictions.index.isin(label_keys)]
             del predictions, actual_keys
             reason = _prediction_loss_reason(
                 facts,
@@ -714,9 +743,9 @@ def score(config):
                 "fit_windows": training_windows,
                 "mse_reason": mse_reason,
                 "coverage": {
-                    "current_mature_label_rows": len(labels),
+                    "current_mature_label_rows": len(label_keys),
                     "paired_prediction_rows": len(finite_keys),
-                    "mature_label_rows_without_prediction": len(labels)
+                    "mature_label_rows_without_prediction": len(label_keys)
                     - len(finite_keys),
                     "prediction_rows_without_label": missing_label_rows,
                 },
