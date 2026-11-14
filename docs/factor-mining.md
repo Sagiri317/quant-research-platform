@@ -32,7 +32,7 @@
 
 ## 仓库已有的公式搜索能做什么
 
-入口为 `research/factors/search.py` 的 `search_factors(config)`，CLI 为 `search-factors`。必须先阅读实际配置校验；可以参考 `configs/research-learning/agent.json` 中的配置形状，但不得复制其中的样本选择。
+入口为 `research/factors/search.py` 的 `search_factors(config)`，CLI 为 `search-factors`。配置形状见 [search-factors.json](../configs/research-learning/search-factors.json)，输入和样本范围由调用者明确指定。
 
 已有实现支持随机搜索、PPO 搜索，以及显式提供的 `expressions`。表达式通过 AST 白名单解释，没有使用 Python `eval`。支持加减乘除、取负、`abs`、`sign`、`logabs`、截面 `rank` 和正整数窗口的 `delay`、`mean`、`std`。每次搜索有候选预算、深度和随机种子；记录所有已评价候选，包括未定义结果。
 

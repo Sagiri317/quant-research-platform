@@ -1,14 +1,14 @@
 # A 股 Level-2 高频研究
 
-数据来自 [Venvoo Hugging Face 数据集](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)，需要获批账号。先按明确日期下载到本地，再运行独立公开操作；接口不自动下载整库。
+数据来自 [Venvoo Hugging Face 数据集](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)，需要获批账号。采集侧先准备结构化数据，再运行独立研究操作；ETF 高频数据只在服务器保存。
 
 ## 来源与时钟
 
-`prepare-source` 的 `source_id=venvoo` 读取 `<raw_root>/<YYYYMMDD>/行情.parquet`、`逐笔委托.parquet`、`逐笔成交.parquet`，按显式证券列表过滤并分批写入原生数据集。证券列表分别指定 `wind_code`、项目 `asset_id`、`exchange`（SSE/SZSE）。`instrument_type` 支持 `stock`、`equity_etf` 和 `gold_etf`，省略时为 `stock`，并随原生来源与面板保存，供交易时段划分及账户执行使用。
+`prepare-source` 的 `source_id=venvoo` 读取[数据文档](data.md#venvoo-a-股-level-2)所述的三个业务流汇总入口，按显式证券列表过滤并分批写入原生数据集。证券列表分别指定 `wind_code`、项目 `asset_id`、`exchange`（SSE/SZSE）。`instrument_type` 支持 `stock`、`equity_etf` 和 `gold_etf`，省略时为 `stock`，并随原生来源与面板保存，供交易时段划分及账户执行使用。
 
-股票和 ETF 共用 [prepare-source-hft.json](../configs/prepare-source-hft.json)。ETF 改用对应原始目录和 revision `6ab4c56bb90833c078c2484aa9c7968bdbe36561`，证券列表设为 `510300.SZ`、`510500.SZ`、`159915.SZ`、`518880.SZ`；前三个股票 ETF 的 `instrument_type=equity_etf`，黄金 ETF 为 `gold_etf`。该归档的上海 ETF 供应商代码也写作 `.SZ`，实际交易所须显式声明：`159915` 为 `SZSE`，其余三只为 `SSE`，不按后缀推断。来源说明和单日实际覆盖均已核对。[数据集说明](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)
+股票和 ETF 共用 [prepare-source-hft.json](../configs/prepare-source-hft.json)。ETF 使用对应原始目录，来源 revision 由调用者明确提供。证券列表设为 `510300.SZ`、`510500.SZ`、`159915.SZ`、`518880.SZ`；前三个股票 ETF 的 `instrument_type=equity_etf`，黄金 ETF 为 `gold_etf`。上海 ETF 在此来源中的供应商代码也写作 `.SZ`，实际交易所须显式声明：`159915` 为 `SZSE`，其余三只为 `SSE`。来源映射见[数据集说明](https://huggingface.co/datasets/venvoo/china-a-share-l2-level2-limit-order-book-tick-data)。
 
-配置记录实际仓库 revision，输出保存所选本地文件 SHA256、证券映射与事件时间语义。证券价格除以 10000 转成 CNY，数量为股；`HHMMSSmmm` 按 Asia/Shanghai 解释后转成 UTC 无时区纳秒时间戳。筛选后源流的顺序编号用于区分同一毫秒的多个事件，不代表未筛选文件的物理行号。
+输出保存来源 revision、实际入口、证券映射与事件时间语义。证券价格除以 10000 转成 CNY，数量为股；`HHMMSSmmm` 按 Asia/Shanghai 解释后转成 UTC 无时区纳秒时间戳。筛选后源流的顺序编号用于区分同一毫秒的多个事件。
 
 供应商混用的日间 `HHMMSS` 与 `HHMMSSmmm` 编码在来源层统一解析，元数据记录各编码行数。原始 `uint64` 事件索引按可空整数读取，空值保留缺失，避免浮点转换导致索引精度丢失或跨批次类型漂移。
 
@@ -21,8 +21,6 @@
 的交易所／流分类及两日样本核对；来源元数据保存事件类型计数，不将有限样本声称为全历史覆盖。
 成交B/S目前按供应商`bs_flag`使用，来源元数据注明尚未独立验证其为主动成交方；
 这些列描述供应商方向标记的成交不平衡，不据此识别真实投资者身份或严格主动买卖量。
-
-本次核实的清单 revision `5c609748679ac8d3ec056446b7e6bd599bc3dfb5` 有 2382 个日期，2017-01-03 至 2026-10-28；这不是 2014 年起的高频覆盖。日频 2014 起训练与该高频可用区间分开配置。
 
 ## 面板、因子和标签
 
