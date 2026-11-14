@@ -336,6 +336,41 @@ SOURCES = {
 }
 
 
+EXCHANGE_FIELDS = {
+    "sse_etf_shares": {
+        "STAT_DATE": "timestamp",
+        "SEC_CODE": "asset_id",
+        "TOT_VOL": "shares_outstanding",
+    },
+    "sse_margin": {
+        "opDate": "timestamp",
+        "stockCode": "asset_id",
+        "rzye": "financing_balance",
+        "rzmre": "financing_buy_amount",
+        "rzche": "financing_repayment_amount",
+        "rqylje": "lending_balance",
+        "rqyl": "lending_quantity",
+        "rqmcl": "lending_sell_quantity",
+        "rqchl": "lending_repayment_quantity",
+    },
+    "szse_etf_shares": {
+        "日期": "timestamp",
+        "基金代码": "asset_id",
+        "基金规模(份)": "shares_outstanding",
+    },
+    "szse_margin": {
+        "observation_date": "timestamp",
+        "证券代码": "asset_id",
+        "融资买入额(元)": "financing_buy_amount",
+        "融资余额(元)": "financing_balance",
+        "融券卖出量(股/份)": "lending_sell_quantity",
+        "融券余量(股/份)": "lending_quantity",
+        "融券余额(元)": "lending_balance",
+        "融券偿还量(股/份)": "lending_repayment_quantity",
+    },
+}
+
+
 def accepts(data_id, record):
     if record.get("source") not in SOURCES[data_id]:
         return False
@@ -401,9 +436,7 @@ def accepts(data_id, record):
     if data_id in {"public_fund_shares", "public_margin_balances"}:
         if record["source"] == "eastmoney_margin_detail":
             return path.endswith((".json", ".json.gz"))
-        return path.endswith(
-            ".json" if record["source"].startswith("sse_") else ".xlsx"
-        )
+        return path.endswith((".csv", ".csv.gz"))
     return path.endswith(".json" if data_id == "public_etf_prices" else ".xlsx")
 
 
@@ -1082,84 +1115,44 @@ def normalize(data_id, path, record):
         yield result
     elif source in {"sec_13f", "sec_nport"}:
         yield from _sec(path, source, data_id=data_id)
-    elif source.startswith("sse_"):
-        payload = json.loads(path.read_bytes())
-        frame = pd.DataFrame(payload["result"])
-        if frame.empty:
-            return
-        if data_id == "public_fund_shares":
-            result = _rename(
-                frame,
-                {
-                    "STAT_DATE": "timestamp",
-                    "SEC_CODE": "asset_id",
-                    "TOT_VOL": "shares_outstanding",
-                },
-            )
-            _numbers(result, ["shares_outstanding"])
-            result["shares_outstanding"] *= 10000
-        else:
-            result = _rename(
-                frame,
-                {
-                    "opDate": "timestamp",
-                    "stockCode": "asset_id",
-                    "rzye": "financing_balance",
-                    "rzmre": "financing_buy_amount",
-                    "rzche": "financing_repayment_amount",
-                    "rqylje": "lending_balance",
-                    "rqyl": "lending_quantity",
-                    "rqmcl": "lending_sell_quantity",
-                },
-            )
-            result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y%m%d")
-            result["lending_repayment_quantity"] = (
-                frame["rqchl"] if "rqchl" in frame else pd.NA
-            )
-            _numbers(result, DATASETS[data_id])
-        result["asset_id"] = result.asset_id.astype("str").str.zfill(6)
-        yield result
-    elif source.startswith("szse_"):
-        mapping = (
-            {
-                "日期": "timestamp",
-                "基金代码": "asset_id",
-                "基金规模(份)": "shares_outstanding",
-            }
-            if data_id == "public_fund_shares"
-            else {
-                "证券代码": "asset_id",
-                "融资买入额(元)": "financing_buy_amount",
-                "融资余额(元)": "financing_balance",
-                "融券卖出量(股/份)": "lending_sell_quantity",
-                "融券余量(股/份)": "lending_quantity",
-                "融券余额(元)": "lending_balance",
-            }
+    elif source in EXCHANGE_FIELDS:
+        mapping = {
+            **EXCHANGE_FIELDS[source],
+            **{name: name for name in ("source_sha256", "source_url")},
+        }
+        optional = tuple(
+            key
+            for key, value in mapping.items()
+            if value == "lending_repayment_quantity"
         )
-        frame = _read_excel(
-            path,
-            columns=mapping,
-            optional_columns=("融券偿还量(股/份)",)
-            if data_id != "public_fund_shares"
-            else (),
-            dtype="str",
-        )
-        if frame.empty:
-            return
-        result = _rename(frame, mapping)
-        if data_id != "public_fund_shares":
-            result["timestamp"] = (
-                pd.Timestamp(record["requested_observation_date"])
-                if record.get("requested_observation_date")
-                else pd.to_datetime(path.stem, format="%Y%m%d")
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=tuple(key for key in mapping if key not in optional),
+                optional_columns=optional,
+                dtype="str",
+                keep_default_na=False,
+                na_values={
+                    key: [""]
+                    for key, value in mapping.items()
+                    if value not in DATASETS[data_id]
+                },
+                chunksize=50000,
             )
-            result["financing_repayment_amount"] = pd.NA
-            result["lending_repayment_quantity"] = (
-                frame["融券偿还量(股/份)"] if "融券偿还量(股/份)" in frame else pd.NA
-            )
-        _numbers(result, DATASETS[data_id])
-        result["asset_id"] = result.asset_id.str.zfill(6)
-        yield result
+        ) as frames:
+            for frame in frames:
+                for column in optional:
+                    if column not in frame:
+                        frame[column] = pd.NA
+                result = _rename(frame, mapping)
+                if source == "sse_margin":
+                    result["timestamp"] = pd.to_datetime(
+                        result.timestamp, format="%Y%m%d"
+                    )
+                elif source == "szse_margin":
+                    result["financing_repayment_amount"] = pd.NA
+                result["asset_id"] = result.asset_id.str.zfill(6)
+                yield result
     elif source == "cffex_daily":
         if path.suffix == ".zip":
             with zipfile.ZipFile(path) as archive:
@@ -1318,7 +1311,7 @@ def normalize(data_id, path, record):
 
 
 def normalize_selected_facts(frame, *, source):
-    """Interpret release-dependent facts only in the corrected observation domain."""
+    """Interpret source facts only in the corrected observation domain."""
     dates = ["publication_date"]
     if "_report_declared_send_date" in frame:
         dates.append("_report_declared_send_date")
@@ -1334,7 +1327,10 @@ def normalize_selected_facts(frame, *, source):
     frame["publication_date"] = (
         parsed[0] if len(parsed) == 1 else pd.concat(parsed, axis=1).max(axis=1)
     )
-    if source == "sec_13f":
+    if source == "sse_etf_shares":
+        _numbers(frame, ("shares_outstanding",))
+        frame["shares_outstanding"] *= 10000
+    elif source == "sec_13f":
         _numbers(frame, ("value_usd",))
         frame["value_usd"] *= frame.publication_date.lt("2023-01-03").map(
             {True: 1000, False: 1}

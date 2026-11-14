@@ -12,7 +12,7 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.tabular import read_csv
 from quant_research_platform.storage.datasets import read_dataset
-from tests.helpers.public_sources import write_source_manifest
+from tests.helpers.public_sources import write_source_csv, write_source_manifest
 
 
 def _csv(columns, values, *, separator=","):
@@ -36,7 +36,6 @@ def _public_config(raw, path, source, data_id):
                     "status": "downloaded",
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
-                    "retrieved_at": "2026-01-01T00:00:00Z",
                 }
             ],
         },
@@ -100,7 +99,6 @@ def test_public_weight_csv_preserves_projection_and_rejects_ambiguity(
         "weight_percent": "2",
         "source_url": "https://example.org/weights",
         "source_sha256": "a" * 64,
-        "retrieved_at": "2026-01-01T00:00:00Z",
         "publication_date": "2024-01-02",
         "published_at": "2024-01-02T16:00:00+08:00",
     }
@@ -131,7 +129,7 @@ def test_public_weight_csv_preserves_projection_and_rejects_ambiguity(
 
 
 @pytest.mark.parametrize("duplicate", [False, True])
-def test_public_excel_consumed_headers_without_rejecting_extra_columns(
+def test_public_exchange_csv_consumed_headers_without_rejecting_extra_columns(
     tmp_path, duplicate
 ):
     columns = ["日期", "基金代码", "基金规模(份)", "说明", "说明"]
@@ -139,8 +137,8 @@ def test_public_excel_consumed_headers_without_rejecting_extra_columns(
     if duplicate:
         columns.append("基金规模(份)")
         values.append("999999")
-    path = tmp_path / "shares.xlsx"
-    pd.DataFrame([values], columns=columns).to_excel(path, index=False)
+    path = tmp_path / "shares.csv"
+    write_source_csv(path, pd.DataFrame([values], columns=columns))
     config = _public_config(tmp_path, path, "szse_etf_shares", "public_fund_shares")
     if duplicate:
         with pytest.raises(ValueError, match="source_columns_invalid"):

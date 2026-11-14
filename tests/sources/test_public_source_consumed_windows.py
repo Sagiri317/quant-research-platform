@@ -25,7 +25,6 @@ def _manifest(raw, path, source):
                     "status": "downloaded",
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
-                    "retrieved_at": "2026-01-01T00:00:00Z",
                 }
             ],
         },
@@ -81,7 +80,6 @@ def test_fund_report_release_dates_are_parsed_after_window_selection(
             "source_sha256": str(index) * 64,
             "source_url": "https://example.org/report",
             "source_path": "report.html",
-            "source_retrieved_at": "2026-01-01T00:00:00Z",
             "publication_date": "2024-03-01",
             "report_declared_send_date": "2024-03-02",
             "stock_code": "000002",
@@ -221,8 +219,6 @@ def test_source_business_facts_do_not_gate_other_observation_windows(tmp_path, s
                 "published_at": None,
                 "source_url": "https://example.org/source",
                 "source_sha256": str(index) * 64,
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "source_retrieved_at": "2026-01-01T00:00:00Z",
             }
         )
     if source == "cn_fund_report_descriptors_extracted":

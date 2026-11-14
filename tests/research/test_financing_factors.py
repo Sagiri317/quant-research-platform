@@ -378,7 +378,7 @@ def test_native_preparation_keeps_public_clock_and_selected_factor(
         if column not in observations:
             if column in spec.column_units:
                 observations[column] = np.nan
-            elif column in {"published_at", "retrieved_at"}:
+            elif column == "published_at":
                 observations[column] = pd.Series(
                     pd.NaT, index=observations.index, dtype="datetime64[ns, UTC]"
                 )

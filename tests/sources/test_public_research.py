@@ -11,7 +11,7 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.public_research.normalization import normalize
 from quant_research_platform.storage.datasets.reading import read_dataset
-from tests.helpers.public_sources import write_source_manifest
+from tests.helpers.public_sources import write_source_csv, write_source_manifest
 
 
 def test_public_import_closes_archive_when_output_already_exists(tmp_path, monkeypatch):
@@ -32,7 +32,6 @@ def test_public_import_closes_archive_when_output_already_exists(tmp_path, monke
         "status": "downloaded",
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "bytes": path.stat().st_size,
-        "retrieved_at": "2024-02-01T00:00:00Z",
     }
     write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
@@ -96,7 +95,6 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
         "status": "downloaded",
         "sha256": hashlib.sha256(payload).hexdigest(),
         "bytes": len(payload),
-        "retrieved_at": "2026-11-11T12:00:00Z",
         "contract_id": security_id,
         "underlying_security_code": "159915",
         "trading_code_as_reported": trading_code,
@@ -265,7 +263,6 @@ def test_eastmoney_margin_retains_reported_repayments_and_native_publication(
                     sha256=hashlib.sha256(data).hexdigest(),
                     bytes=len(data),
                     url="https://example.org/margin",
-                    retrieved_at="2026-11-11T00:00:00Z",
                 )
             ],
         ),
@@ -319,7 +316,6 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
         source_sha256="a" * 64,
         source_url="https://example.org/report",
         source_path="report.html",
-        source_retrieved_at="2026-11-11T00:00:00Z",
         report_declared_send_date="2024-08-20",
     )
     positions = tmp_path / "holdings.csv.gz"
@@ -457,7 +453,6 @@ def test_report_cell_identity_does_not_require_known_economic_portfolio(
                 leaf_table_index="1",
                 source_row_index="2",
                 expanded_column_index="3",
-                source_retrieved_at="2026-11-11T00:00:00Z",
                 source_url="https://example.org/report",
                 source_sha256="a" * 64,
                 published_at=None,
@@ -510,7 +505,6 @@ def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
                 leaf_table_index="1",
                 source_row_index=str(row),
                 expanded_column_index="3",
-                source_retrieved_at="2026-11-11T00:00:00Z",
                 source_url="https://example.org/report",
                 source_sha256="a" * 64,
                 published_at=None,
@@ -664,7 +658,6 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
                 creation_unit_fund_shares="300000",
                 source_url="https://example.org/pcf",
                 source_sha256="a" * 64,
-                retrieved_at="2026-11-09T19:00:00Z",
                 publication_date=None,
                 published_at=None,
             )
@@ -697,7 +690,6 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
                 "url": "https://example.org/pcf",
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "bytes": path.stat().st_size,
-                "retrieved_at": "2026-11-10T00:00:00Z",
             }
         )
     write_source_manifest(source, {"schema_version": 1, "records": records})
@@ -752,7 +744,6 @@ def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
             weight_percent=[160 if invalid_weight else 60, 40],
             source_url="https://example.org/frozen-index-weights",
             source_sha256="a" * 64,
-            retrieved_at="2026-11-11T00:00:00Z",
             publication_date=None,
             published_at=None,
         )
@@ -771,7 +762,6 @@ def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
                     sha256=hashlib.sha256(file.read_bytes()).hexdigest(),
                     bytes=file.stat().st_size,
                     url="https://example.org/frozen-index-weights",
-                    retrieved_at="2026-11-11T00:00:00Z",
                 )
             ],
         ),
@@ -803,22 +793,17 @@ def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
 def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     source = tmp_path / "raw"
     source.mkdir()
-    payload = json.dumps(
-        {
-            "result": [
-                {"STAT_DATE": "2024-01-02", "SEC_CODE": "510050", "TOT_VOL": "12.5"}
-            ]
-        }
-    ).encode()
-    (source / "shares.json").write_bytes(payload)
+    payload = write_source_csv(
+        source / "shares.csv",
+        [{"STAT_DATE": "2024-01-02", "SEC_CODE": "510050", "TOT_VOL": "12.5"}],
+    )
     record = {
-        "path": "shares.json",
+        "path": "shares.csv",
         "source": "sse_etf_shares",
         "status": "downloaded",
         "url": "https://example.org/shares",
         "bytes": len(payload),
         "sha256": hashlib.sha256(payload).hexdigest(),
-        "retrieved_at": "2024-01-03T12:00:00Z",
         "historical_published_at": None,
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
@@ -833,6 +818,8 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     assert result.skipped == ()
     frame = read_dataset(output)
     assert frame.shares_outstanding.tolist() == [125000]
+    assert frame.source_sha256.tolist() == ["original-response"]
+    assert frame.source_url.tolist() == ["https://example.org/original"]
     assert frame.timestamp.iloc[0] == pd.Timestamp("2024-01-02")
     assert frame.published_at.isna().all()
     assert frame.availability_basis.tolist() == ["unknown_historical_release"]
@@ -859,30 +846,94 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
 
 
 def test_sse_missing_lending_amount_is_not_zero(tmp_path):
-    path = tmp_path / "margin.json"
-    path.write_text(
-        json.dumps(
+    path = tmp_path / "margin.csv"
+    payload = write_source_csv(
+        path,
+        [
             {
-                "result": [
-                    {
-                        "opDate": "20240102",
-                        "stockCode": "000001",
-                        "rzye": 100,
-                        "rzmre": 5,
-                        "rzche": 3,
-                        "rqylje": "",
-                        "rqyl": 2,
-                        "rqmcl": 1,
-                    }
-                ]
+                "opDate": "20240102",
+                "stockCode": "000001",
+                "rzye": 100,
+                "rzmre": 5,
+                "rzche": 3,
+                "rqylje": "",
+                "rqyl": 2,
+                "rqmcl": 1,
             }
-        ),
-        encoding="utf-8",
+        ],
     )
-    frame = next(normalize("public_margin_balances", path, {"source": "sse_margin"}))
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                {
+                    "source": "sse_margin",
+                    "path": path.name,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            ]
+        },
+    )
+    output = tmp_path / "interim"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(tmp_path),
+            "outputs": {"public_margin_balances": str(output)},
+        }
+    )
+    frame = read_dataset(output)
     assert frame.asset_id.tolist() == ["000001"]
     assert frame.lending_balance.isna().all()
     assert frame.financing_balance.tolist() == [100]
+
+
+def test_szse_margin_keeps_observation_date_and_unknown_repayments(tmp_path):
+    source = tmp_path / "raw"
+    source.mkdir()
+    path = source / "balances.csv"
+    payload = write_source_csv(
+        path,
+        [
+            {
+                "observation_date": "2024-01-02",
+                "证券代码": "000001",
+                "融资买入额(元)": "10",
+                "融资余额(元)": "100",
+                "融券卖出量(股/份)": "2",
+                "融券余量(股/份)": "3",
+                "融券余额(元)": "4",
+            }
+        ],
+    )
+    write_source_manifest(
+        source,
+        {
+            "records": [
+                {
+                    "source": "szse_margin",
+                    "path": path.name,
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                }
+            ]
+        },
+    )
+    output = tmp_path / "interim"
+    prepare_source(
+        {
+            "source_id": "public_research",
+            "raw_root": str(source),
+            "outputs": {"public_margin_balances": str(output)},
+        }
+    )
+    frame = read_dataset(output)
+    assert frame.asset_id.tolist() == ["000001"]
+    assert frame.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+    assert frame.financing_balance.tolist() == [100]
+    assert frame.lending_quantity.tolist() == [3]
+    assert frame.financing_repayment_amount.isna().all()
+    assert frame.lending_repayment_quantity.isna().all()
+    assert frame.available_at.isna().all()
 
 
 @pytest.mark.parametrize("filing_type", ["NPORT-P", "NPORT-P/A", "NPORT-NP"])
@@ -909,7 +960,6 @@ def test_nport_public_form_date_is_not_a_private_filing_clock(tmp_path, filing_t
         "url": "https://example.org/nport",
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "bytes": path.stat().st_size,
-        "retrieved_at": "2026-11-10T00:00:00Z",
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
@@ -971,7 +1021,6 @@ def test_structured_fund_reports_preserve_scope_shares_and_china_clock(
         "url": "https://example.org/report",
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "bytes": path.stat().st_size,
-        "retrieved_at": "2026-11-10T00:00:00Z",
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
@@ -1006,13 +1055,11 @@ def test_public_source_rejects_duplicate_output_coordinates(tmp_path, repeated_r
         "rqmcl": 1,
     }
     rows = [row] if repeated_record else [row, {**row, "rzye": 200}]
-    payload = json.dumps({"result": rows}).encode()
-    (source / "margin.json").write_bytes(payload)
+    payload = write_source_csv(source / "margin.csv", rows)
     record = {
-        "path": "margin.json",
+        "path": "margin.csv",
         "source": "sse_margin",
         "sha256": hashlib.sha256(payload).hexdigest(),
-        "retrieved_at": "2026-11-09T00:00:00Z",
     }
     write_source_manifest(
         source, {"records": [record, record] if repeated_record else [record]}
@@ -1036,24 +1083,23 @@ def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_
     source.mkdir()
     records = []
     for i in (1, 2):
-        payload = json.dumps(
-            {
-                "result": [
-                    {
-                        "opDate": "20240102",
-                        "stockCode": f"{i:06}",
-                        "rzye": i * 100,
-                        "rzmre": "invalid",
-                        "rzche": 3,
-                        "rqylje": "inf",
-                        "rqyl": 2,
-                        "rqmcl": 1,
-                    }
-                ]
-            }
-        ).encode()
-        name = f"margin-{i}.json"
-        (source / name).write_bytes(payload)
+        name = f"margin-{i}.csv"
+        payload = write_source_csv(
+            source / name,
+            [
+                {
+                    "opDate": day,
+                    "stockCode": f"{i:06}",
+                    "rzye": i * 100,
+                    "rzmre": "invalid" if i == 1 else "nan",
+                    "rzche": 3,
+                    "rqylje": "inf",
+                    "rqyl": 2,
+                    "rqmcl": 1,
+                }
+                for day in ("20240102", "20240202")
+            ],
+        )
         records.append(
             {
                 "path": name,
@@ -1062,7 +1108,6 @@ def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_
                 "url": "https://example.org/margin",
                 "sha256": hashlib.sha256(payload).hexdigest(),
                 "bytes": len(payload),
-                "retrieved_at": "2026-11-09T00:00:00Z",
             }
         )
     write_source_manifest(source, {"schema_version": 1, "records": records})
@@ -1071,6 +1116,8 @@ def test_invalid_public_numeric_cells_are_local_and_counted_after_all_files(tmp_
         {
             "source_id": "public_research",
             "raw_root": str(source),
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
             "outputs": {"public_margin_balances": str(output)},
         }
     )
@@ -1097,18 +1144,17 @@ def test_manifest_publication_clock_cannot_invent_an_earlier_release(
 ):
     source = tmp_path / "raw"
     source.mkdir()
-    payload = (
-        b'{"result":[{"STAT_DATE":"2024-01-02","SEC_CODE":"510050","TOT_VOL":"1"}]}'
+    payload = write_source_csv(
+        source / "shares.csv",
+        [{"STAT_DATE": "2024-01-02", "SEC_CODE": "510050", "TOT_VOL": "1"}],
     )
-    (source / "shares.json").write_bytes(payload)
     record = {
-        "path": "shares.json",
+        "path": "shares.csv",
         "source": "sse_etf_shares",
         "status": "downloaded",
         "url": "https://example.org/shares",
         "sha256": hashlib.sha256(payload).hexdigest(),
         "bytes": len(payload),
-        "retrieved_at": "2026-11-09T00:00:00Z",
         "historical_published_at": clock,
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
@@ -1161,7 +1207,6 @@ def test_extracted_source_release_has_the_same_chronology_boundary(
         "url": "https://example.org/cboe",
         "sha256": hashlib.sha256(payload).hexdigest(),
         "bytes": len(payload),
-        "retrieved_at": "2026-11-09T00:00:00Z",
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
     with pytest.raises(ValueError, match="precedes_dependency"):
@@ -1206,7 +1251,6 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
                     "status": "downloaded",
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
-                    "retrieved_at": "2024-01-01T00:00:00Z",
                 }
             ],
         },
@@ -1280,7 +1324,6 @@ def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
                     "url": "https://example.org/chart",
                     "sha256": hashlib.sha256(payload).hexdigest(),
                     "bytes": len(payload),
-                    "retrieved_at": "2026-11-09T12:00:00Z",
                 }
             ],
         },
@@ -1424,7 +1467,6 @@ def test_window_excludes_unrelated_release_chronology_failure(tmp_path, clock_co
         "url": "https://example.org/cboe",
         "sha256": hashlib.sha256(payload).hexdigest(),
         "bytes": len(payload),
-        "retrieved_at": "2024-03-01T00:00:00Z",
     }
     write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     data_id = "public_option_put_call"

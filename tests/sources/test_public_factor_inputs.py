@@ -187,7 +187,6 @@ def test_source_collection_reads_archived_contracts_and_ignores_unconsumed_recor
                 "source": "cffex_contract_parameters",
                 "url": "https://example.org/contract",
                 "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
-                "retrieved_at": "2026-11-11T00:00:00Z",
             }
         ],
     }
@@ -350,7 +349,6 @@ def test_nport_value_is_usd_and_investment_currency_is_separate(tmp_path):
                 filing_date="2024-03-01",
                 published_at="",
                 source_zip_sha256="a" * 64,
-                source_retrieved_at="2026-11-11T00:00:00Z",
                 evidence_url="https://example.org",
                 holding_id="1",
             )

@@ -100,8 +100,6 @@ def test_native_financing_official_priority_supplements_and_revision_clocks(
             ],
             source_sha256=[str(i) * 64 for i in range(7)],
             source_url="https://example.org/margin",
-            # Retrieval is deliberately much later than every research decision.
-            retrieved_at=pd.Timestamp("2026-01-01", tz="UTC"),
             published_at=pd.NaT,
             publication_date=pd.NaT,
             availability_basis="declared_release_assumption",
