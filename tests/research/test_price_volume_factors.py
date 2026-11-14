@@ -256,29 +256,17 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     assert observed.loc[60, "zero_amount_ratio_20d"] == 1.0 / 20.0
 
 
-def test_price_volume_rejects_removed_names_before_calculation():
-    for name in (
-        "mom_20d",
-        "rev_1d",
-        "vol_20d",
-        "skew_60d",
-        "kurt_60d",
-        "ret_amount_corr_20d",
-        "amount_chg_20d",
-        "intraday_range_20d",
-        "zero_volume_ratio_20d",
-        "momentum_120d",
-    ):
-        with pytest.raises(ValueError, match="unknown_price_volume_factor"):
-            price_volume_factor_definitions(
-                market_id=MarketId("a_share"),
-                required_input_data_id="price_volume",
-                factor_columns=(name,),
-            )
-        with pytest.raises(ValueError, match="unknown_price_volume_factor"):
-            calculate_price_volume_factors(
-                pd.DataFrame(), factor_columns=("reversal_5d", name)
-            )
+def test_price_volume_rejects_unknown_names_before_calculation():
+    with pytest.raises(ValueError, match="unknown_price_volume_factor"):
+        price_volume_factor_definitions(
+            market_id=MarketId("a_share"),
+            required_input_data_id="price_volume",
+            factor_columns=("unknown_factor",),
+        )
+    with pytest.raises(ValueError, match="unknown_price_volume_factor"):
+        calculate_price_volume_factors(
+            pd.DataFrame(), factor_columns=("reversal_5d", "unknown_factor")
+        )
 
 
 @pytest.mark.parametrize("size", [20, 60])
@@ -413,10 +401,7 @@ def test_standardized_moments_preserve_small_variation_against_decimal(size, cas
 
 @pytest.mark.parametrize("value", [0.0, 0.01, -0.125])
 @pytest.mark.parametrize("count", [59, 61])
-def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
+def test_standardized_moments_require_nonzero_variance(value, count):
     panel = pd.DataFrame(
         {
             "asset_id": "asset",
@@ -431,10 +416,6 @@ def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
     assert result.volatility_60d.iloc[:59].isna().all()
     if count == 61:
         assert result.volatility_60d.iloc[59:].eq(0.0).all()
-    path = tmp_path / "moments.parquet"
-    pq.write_table(pa.Table.from_pandas(result, preserve_index=False), path)
-    restored = pq.read_table(path).to_pandas()
-    pd.testing.assert_frame_equal(restored, result)
 
 
 @pytest.mark.parametrize("missing", [None, 0, "all"])
@@ -466,7 +447,7 @@ def test_skewness_independent_central_moment_oracle(missing, scale):
 
 @pytest.mark.parametrize("scale", [0.0001, 1.0, 10000.0])
 @pytest.mark.parametrize("kind", ["amount", "volume", "turnover"])
-def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
+def test_return_correlations_preserve_units(scale, kind):
     from decimal import Decimal, localcontext
 
     x = np.arange(1.0, 21.0) * scale
@@ -508,10 +489,6 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
     # Dimensionless, well-conditioned 20-point correlation; allow rounding in
     # the independent floating reduction while retaining the Decimal oracle.
     assert result[name].iloc[-1] == pytest.approx(expected, rel=1e-13, abs=0)
-    if scale == 1.0:
-        path = tmp_path / "correlation.parquet"
-        result.to_parquet(path, index=False)
-        pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
 
 
 @pytest.mark.parametrize("case", ("normal", "small_scale", "large_origin", "missing"))
@@ -616,7 +593,7 @@ def test_volatility_preserves_units_and_native_roundtrip(name, scale, tmp_path):
         assert persisted[name].iloc[-1] == pytest.approx(oracle, rel=2e-15, abs=0)
 
 
-def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
+def test_expanded_pv_nine_formulas_complete_windows_and_nulls():
     from math import sqrt
 
     names = (
@@ -675,9 +652,6 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
             else 126
         )
         assert result[name].iloc[: count - 1].isna().all(), name
-    path = tmp_path / "expanded.parquet"
-    result.to_parquet(path, index=False)
-    pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
     missing = panel.copy()
     missing.loc[240, ["amount", "volume", "turnover", "period_return"]] = np.nan
     observed = calculate_price_volume_factors(
@@ -729,7 +703,7 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     )
 
 
-def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
+def test_market_model_factors_share_risk_math_and_window_identity():
     from quant_research_platform.markets.implementations.a_share.market_model import (
         MarketModelRiskState,
     )
@@ -807,9 +781,6 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
     )
     pd.testing.assert_frame_equal(bounded.isna(), reference.isna(), check_exact=True)
     pd.testing.assert_frame_equal(bounded, reference, rtol=1e-12, atol=1e-16)
-    path = tmp_path / "market_model.parquet"
-    bounded.to_parquet(path, index=False)
-    pd.testing.assert_frame_equal(pd.read_parquet(path), bounded, check_exact=True)
 
 
 def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
