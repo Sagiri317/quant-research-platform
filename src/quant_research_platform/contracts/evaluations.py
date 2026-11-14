@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
@@ -22,7 +21,7 @@ from quant_research_platform.contracts.signals import (
     _cross_signal_id_column_overlaps,
     resolve_top_quantile,
 )
-from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -254,63 +253,6 @@ class EvaluationDiagnostics:
     max_timestamp: str | None
     n_groups: int
     skipped_timestamp_count: int
-
-    def __post_init__(self) -> None:
-        validate_evaluation_filter_mode(self.filter_mode)
-        _validate_column_tuple(
-            self.filter_columns_used,
-            "filter_columns_used",
-            required=False,
-        )
-        if type(self.filter_definition) is not str or not self.filter_definition:
-            raise ValueError("evaluation_filter_definition_required")
-        count_fields = (
-            "rows_input",
-            "rows_after_filter_mode",
-            "rows_after_signal_label_dropna",
-            "metric_rows",
-            "grouped_label_value_rows",
-            "ic_summary_rows",
-            "group_spread_summary_rows",
-            "timestamp_count",
-            "skipped_timestamp_count",
-        )
-        for field_name in count_fields:
-            value = getattr(self, field_name)
-            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-                raise ValueError(f"invalid_evaluation_diagnostics_count: {field_name}")
-        if not isinstance(self.n_groups, int) or isinstance(self.n_groups, bool):
-            raise ValueError("invalid_evaluation_diagnostics_count: n_groups")
-        if self.n_groups < 2:
-            raise ValueError("evaluation_diagnostics_n_groups_too_small")
-        parsed_bounds: list[date | datetime | None] = []
-        for field_name in ("min_timestamp", "max_timestamp"):
-            value = getattr(self, field_name)
-            parsed: date | datetime | None = None
-            if value is not None:
-                try:
-                    parsed = TimeWindow(value, value).start
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"invalid_evaluation_{field_name}") from exc
-                if (
-                    time_value_isoformat(
-                        parsed,
-                        preserve_datetime=isinstance(parsed, datetime),
-                    )
-                    != value
-                ):
-                    raise ValueError(f"invalid_evaluation_{field_name}")
-            parsed_bounds.append(parsed)
-        minimum, maximum = parsed_bounds
-        if (
-            minimum is not None
-            and maximum is not None
-            and (
-                isinstance(minimum, datetime) != isinstance(maximum, datetime)
-                or minimum > maximum
-            )
-        ):
-            raise ValueError("invalid_evaluation_timestamp_range")
 
 
 def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:
