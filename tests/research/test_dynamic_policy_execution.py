@@ -689,8 +689,35 @@ def test_target_penalty_is_integrated_without_a_second_fee_or_cashflow(tmp_path)
     assert not any(batch.trades or batch.cashflows for batch in batches)
 
 
-@pytest.mark.parametrize("n_envs", [1, 2])
-def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(tmp_path, n_envs):
+@pytest.mark.parametrize(
+    "n_envs,timesteps,eval_freq,evaluations,updates,stopped_early",
+    [
+        (1, 64, 4, [4, 8, 12], [0, 1, 2], True),
+        (2, 64, 4, [4, 8, 12], [0, 0, 1], True),
+        (1, 4, 4, [4, 4], [0, 1], False),
+        (1, 4, 8, [4], [1], False),
+    ],
+)
+def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
+    tmp_path,
+    monkeypatch,
+    n_envs,
+    timesteps,
+    eval_freq,
+    evaluations,
+    updates,
+    stopped_early,
+):
+    from stable_baselines3.common import callbacks
+
+    evaluate = callbacks.evaluate_policy
+    evaluated_updates = []
+
+    def observed_evaluation(model, *args, **kwargs):
+        evaluated_updates.append(model._n_updates)
+        return evaluate(model, *args, **kwargs)
+
+    monkeypatch.setattr(callbacks, "evaluate_policy", observed_evaluation)
     episode = execution_episode(tmp_path / "inputs", scores=(0, 0, 0, 0))
     validation = deepcopy(episode)
     validation["window"] = {
@@ -700,10 +727,10 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(tmp_path, 
     config = {
         "episodes": [episode],
         "validation_episodes": [validation],
-        "early_stopping": {"eval_freq": 4, "patience": 1, "min_evals": 1},
+        "early_stopping": {"eval_freq": eval_freq, "patience": 1, "min_evals": 1},
         "fit_cutoff": "2024-01-03T01:30:12",
         "output": str(tmp_path / "policy"),
-        "timesteps": 64,
+        "timesteps": timesteps,
         "seed": 1,
         "device": "cpu",
         "n_envs": n_envs,
@@ -718,8 +745,12 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(tmp_path, 
     }
     model = train_policy(config)
     facts = parse_qrp_json_object((model / "policy.json").read_bytes())
-    assert facts["actual_timesteps"] < 64
-    assert facts["validation"]["stopped_early"]
+    assert facts["actual_timesteps"] == evaluations[-1]
+    assert facts["validation"]["stopped_early"] == stopped_early
+    assert [
+        item["timesteps"] for item in facts["validation"]["evaluations"]
+    ] == evaluations
+    assert evaluated_updates == updates
     assert facts["validation"]["selected_timesteps"] == 4
     assert facts["validation"]["best_validation_reward"] == 0
     assert facts["training_decisions"]["start"] == "2024-01-02T01:30:00.001000"

@@ -68,6 +68,7 @@ from quant_research_platform.research.signals.processing import (
     process_prediction_signals,
     signal_processing_parameters,
 )
+from quant_research_platform.storage.datasets.inspection import inspect_dataset_session
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     materialize_dataset_session,
@@ -1843,8 +1844,16 @@ def _daily_market_views(daily, window):
         {"equity_events"},
     )
     calendar = read_dataset(Path(daily["calendar"]))
+    # Native bounds retain all mark/event warmup; no fact can affect earlier views.
+    first_facts = [pd.Timestamp(window.start)]
+    for name in ("panel", "market_bars", "corporate_actions", "equity_events"):
+        if name in daily:
+            source = open_dataset_session(**_dataset_input_options(daily[name]))
+            first = inspect_dataset_session(source).date_min
+            if first is not None:
+                first_facts.append(pd.Timestamp(first))
     daily_window = TimeWindow(
-        pd.Timestamp(calendar.calendar_date.min()).date(),
+        max(pd.Timestamp(calendar.calendar_date.min()), min(first_facts)).date(),
         pd.Timestamp(window.end).date(),
     )
     return iter_portfolio_sessions(

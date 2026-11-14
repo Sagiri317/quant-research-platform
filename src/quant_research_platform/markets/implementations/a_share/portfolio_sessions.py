@@ -293,8 +293,16 @@ def iter_portfolio_sessions(
         pending_bar = next(bar_frames, None)
         pending_panel = next(panel_frames, None)
         pending_execution = next(execution_frames, None)
+        # Keep preceding evidence and the caller's complete cash-only session axis.
+        first_facts = [pd.Timestamp(time_window.start)]
+        for frame in (pending_bar, pending_panel, pending_execution):
+            if frame is not None:
+                first_facts.append(pd.Timestamp(frame.timestamp.iloc[0]))
         dates = pd.date_range(
-            calendar.index.get_level_values("calendar_date").min(),
+            max(
+                calendar.index.get_level_values("calendar_date").min(),
+                min(first_facts),
+            ).normalize(),
             pd.Timestamp(time_window.end),
             freq="D",
         ).as_unit("ns")

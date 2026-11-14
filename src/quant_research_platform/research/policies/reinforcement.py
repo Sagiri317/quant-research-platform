@@ -276,13 +276,14 @@ def train_policy(config):
                         best["selected_timesteps"] = self.num_timesteps
                         return True
 
+                stopper = StopTrainingOnNoModelImprovement(
+                    max_no_improvement_evals=stopping["patience"],
+                    min_evals=stopping["min_evals"],
+                )
                 callback = EvalCallback(
                     validation,
                     callback_on_new_best=SaveNormalization(),
-                    callback_after_eval=StopTrainingOnNoModelImprovement(
-                        max_no_improvement_evals=stopping["patience"],
-                        min_evals=stopping["min_evals"],
-                    ),
+                    callback_after_eval=stopper,
                     n_eval_episodes=len(validation_episodes),
                     eval_freq=max(1, stopping["eval_freq"] // config["n_envs"]),
                     best_model_save_path=checkpoint_directory,
@@ -292,12 +293,16 @@ def train_policy(config):
                 )
             model.learn(total_timesteps=config["timesteps"], callback=callback)
             if callback is not None:
-                # Also select the final update when the budget is below eval_freq.
-                callback.eval_freq = 1
-                callback.on_step()
+                stopped_early = (
+                    stopper.no_improvement_evals > stopper.max_no_improvement_evals
+                )
+                if not stopped_early:
+                    # Evaluate the last gradient update, also below eval_freq.
+                    callback.eval_freq = 1
+                    callback.on_step()
                 best.update(
                     best_validation_reward=float(callback.best_mean_reward),
-                    stopped_early=model.num_timesteps < config["timesteps"],
+                    stopped_early=stopped_early,
                     evaluations=[
                         {
                             "timesteps": int(stamp),
