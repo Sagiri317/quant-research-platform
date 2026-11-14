@@ -600,7 +600,6 @@ def normalize(data_id, path, record):
             "filing_date": "publication_date",
             "published_at": "published_at",
             "source_zip_sha256": "source_sha256",
-            "source_retrieved_at": "retrieved_at",
             "evidence_url": "source_url",
         }
         with closing_iterator(
@@ -681,15 +680,12 @@ def normalize(data_id, path, record):
                     *mapping,
                     *(() if data_id == "public_13f_filings" else ("infotable_sk",)),
                 ),
-                optional_columns=("source_retrieved_at",),
                 dtype="str",
                 chunksize=50000,
             )
         ) as source_frames:
             for frame in source_frames:
                 result = _rename(frame, mapping)
-                if "source_retrieved_at" in frame:
-                    result["retrieved_at"] = frame.source_retrieved_at
                 result["timestamp"] = result.report_date
                 result["asset_id"] = (
                     result.accession
@@ -711,7 +707,6 @@ def normalize(data_id, path, record):
             "denominator": "denominator",
             "value_decimal": "value",
             "report_version_identity": "report_version_identity",
-            "source_retrieved_at": "retrieved_at",
             "source_url": "source_url",
             "source_sha256": "source_sha256",
             "published_at": "published_at",
@@ -889,7 +884,6 @@ def normalize(data_id, path, record):
                 for name in (
                     "source_url",
                     "source_sha256",
-                    "retrieved_at",
                     "publication_date",
                     "published_at",
                 )
@@ -912,7 +906,6 @@ def normalize(data_id, path, record):
                 for name in (
                     "source_url",
                     "source_sha256",
-                    "retrieved_at",
                     "publication_date",
                     "published_at",
                 )
@@ -984,7 +977,6 @@ def normalize(data_id, path, record):
             "published_at": "published_at",
             "source_url": "source_url",
             "source_sha256": "source_sha256",
-            "source_retrieved_at": "retrieved_at",
         }
         if data_id == "public_fund_holdings":
             mapping.update(

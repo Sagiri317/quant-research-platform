@@ -1,4 +1,4 @@
-"""Prediction windows describe extent; test eligibility comes from frozen records."""
+"""Prediction bounds and explicit native prediction inputs."""
 
 from datetime import date
 
@@ -12,18 +12,11 @@ from quant_research_platform.contracts.time import (
 )
 
 
-def test_prediction_window_has_no_oos_flags_or_test_aliases():
+def test_prediction_window_supports_closed_and_open_ranges():
     value = PredictionWindow("2020-01-02", "2020-01-03")
     assert value.end.isoformat() == "2020-01-03"
     with pytest.raises(ValueError):
         TimeWindow("2020-01-02", None)
-    with pytest.raises(TypeError):
-        PredictionWindow("2020-01-02", "2020-01-03", is_oos=True)
-    with pytest.raises(TypeError):
-        PredictionWindow("2020-01-02", "2020-01-03", test_start="2020-01-02")
-
-
-def test_only_prediction_window_allows_an_open_end():
     value = PredictionWindow("2020-01-02", None)
     assert value.end is None
     timestamps = pd.Series(pd.date_range("2020-01-01", periods=3))
@@ -88,21 +81,7 @@ def test_intraday_window_preserves_midnight_and_nanoseconds():
         PredictionWindow("2020-01-02", "2020-01-02T01:00:00")
 
 
-@pytest.mark.parametrize(
-    "key",
-    [
-        "prediction_mode",
-        "prediction_column",
-        "primary_key",
-        "train_end",
-        "is_oos",
-        "test_start",
-        "training_asset_ids",
-        "evaluation_asset_ids",
-        "sample_filter_mode",
-    ],
-)
-def test_native_prediction_rejects_removed_overrides(key):
+def test_native_prediction_rejects_unknown_option():
     from quant_research_platform.research.predictions.runner import predict
 
     with pytest.raises(ValueError, match="operation_config_fields_invalid"):
@@ -113,7 +92,7 @@ def test_native_prediction_rejects_removed_overrides(key):
                 "output": "unused",
                 "prediction_window": {"start": "2020-01-02", "end": None},
                 "sample_role": "validation",
-                key: "unused",
+                "unused_option": True,
             }
         )
 

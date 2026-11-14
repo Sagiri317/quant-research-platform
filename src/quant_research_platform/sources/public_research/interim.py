@@ -21,7 +21,6 @@ PROVENANCE = (
     "source",
     "source_url",
     "source_sha256",
-    "retrieved_at",
     "publication_date",
     "published_at",
     "available_at",
@@ -132,11 +131,7 @@ def materialize_interim_data(
                     raise ValueError("public_source_path_outside_root")
                 digest = record["sha256"]
                 evidence.append(
-                    {
-                        k: record[k]
-                        for k in ("path", "url", "sha256", "retrieved_at")
-                        if k in record
-                    }
+                    {k: record[k] for k in ("path", "url", "sha256") if k in record}
                 )
                 if record["source"] == "cffex_daily" and path.suffix == ".zip":
                     if digest in complete_archives:
@@ -153,8 +148,6 @@ def materialize_interim_data(
                             )
                         if "source_sha256" not in frame:
                             frame["source_sha256"] = digest
-                        if "retrieved_at" not in frame:
-                            frame["retrieved_at"] = record.get("retrieved_at")
                         if "publication_date" not in frame:
                             frame["publication_date"] = pd.NaT
                         frame["timestamp"] = pd.to_datetime(frame.timestamp).astype(
@@ -194,7 +187,6 @@ def materialize_interim_data(
                                 "historical_published_at"
                             )
                         frame["published_at"] = _utc_times(frame.published_at)
-                        frame["retrieved_at"] = _utc_times(frame.retrieved_at)
                         from quant_research_platform.sources.macro.interim import (
                             date_end_available,
                         )

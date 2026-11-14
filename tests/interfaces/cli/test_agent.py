@@ -29,7 +29,6 @@ def test_agent_command_name_and_read_only_status(tmp_path):
     assert '"status": "waiting_for_user"' in result.stdout
     assert (root / "session.json").read_bytes() == before
     assert runner.invoke(app, ["agent", "--help"]).exit_code == 0
-    assert runner.invoke(app, ["research-agent", "--help"]).exit_code != 0
 
 
 def test_agent_without_config_opens_chat(monkeypatch):

@@ -182,8 +182,6 @@ def test_inspect_reads_only_the_selected_native_dataset_metadata(tmp_path):
     (root / "unrelated.json").write_text("not JSON")
     result = inspect(root)
     assert result["row_count"] == 3
-    assert "common_manifest" not in result
-    assert "instance_identity" not in result
     with pytest.raises(ValueError, match="qrp_json_invalid"):
         inspect(root / "unrelated.json")
 

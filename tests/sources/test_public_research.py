@@ -729,7 +729,6 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
         pd.Timestamp("2024-01-03T01:31:00Z"),
     ]
     assert baskets.published_at.isna().all()
-    assert baskets.retrieved_at.eq(pd.Timestamp("2026-11-09T19:00:00Z")).all()
     assert baskets.valuation_date.eq(pd.Timestamp("2024-01-02")).all()
     assert baskets.declared_component_count.tolist() == [1, 1]
     assert components.asset_id.tolist() == ["510300:000001", "518880:Au9999"]

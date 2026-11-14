@@ -262,7 +262,6 @@ def test_derived_manifest_without_aggregate_url_keeps_row_provenance(tmp_path):
     )
     frame = read_dataset(output)
     assert frame.source_url.tolist() == ["https://example.org/original"]
-    assert frame.retrieved_at.isna().all()
     assert frame.value_usd.tolist() == [12500]
 
 
@@ -325,7 +324,6 @@ def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
     assert frame.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
     assert frame.source_sha256.tolist() == ["original-response"]
     assert frame.source_url.tolist() == ["https://example.org/original"]
-    assert frame.retrieved_at.isna().all()
     assert frame.available_at.tolist() == [pd.Timestamp("2024-01-02T07:00:01Z")]
 
 
