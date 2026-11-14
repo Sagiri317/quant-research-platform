@@ -1,0 +1,209 @@
+{
+  "models": [
+    {
+      "model_id": "lasso",
+      "model_algorithm": "lasso_regression",
+      "hyperparameters": {
+        "alpha": 1e-05,
+        "tol": 0.0001,
+        "max_iter": null,
+        "selection": "cyclic",
+        "fit_intercept": true,
+        "precompute": true
+      },
+      "random_seed": 42,
+      "training_scaling": true,
+      "target_column": "future_mid_return_30s",
+      "sample_filter_mode": "unfiltered",
+      "raw_input_count": 137,
+      "feature_input_count": 0,
+      "parameter_candidates": [
+        {
+          "alpha": 1e-05
+        },
+        {
+          "alpha": 1e-06
+        },
+        {
+          "alpha": 1e-07
+        }
+      ]
+    },
+    {
+      "model_id": "xgboost",
+      "model_algorithm": "xgboost_regressor",
+      "hyperparameters": {
+        "n_estimators": null,
+        "early_stopping_rounds": 50,
+        "max_depth": 3,
+        "learning_rate": 0.05,
+        "min_child_weight": 20,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "reg_lambda": 1.0,
+        "reg_alpha": 0.0,
+        "gamma": 0.0,
+        "max_bin": 256,
+        "tree_method": "hist",
+        "device": "cuda",
+        "n_jobs": 8
+      },
+      "random_seed": 42,
+      "training_scaling": false,
+      "target_column": "future_mid_return_30s",
+      "sample_filter_mode": "unfiltered",
+      "raw_input_count": 137,
+      "feature_input_count": 0,
+      "parameter_candidates": [
+        {
+          "max_depth": 3,
+          "reg_lambda": 1.0
+        },
+        {
+          "max_depth": 3,
+          "reg_lambda": 10.0
+        },
+        {
+          "max_depth": 6,
+          "reg_lambda": 1.0
+        },
+        {
+          "max_depth": 6,
+          "reg_lambda": 10.0
+        }
+      ]
+    },
+    {
+      "model_id": "lstm",
+      "model_algorithm": "lstm_regressor",
+      "hyperparameters": {
+        "epochs": null,
+        "early_stopping_rounds": 10,
+        "sequence_length": 20,
+        "hidden_size": 32,
+        "num_layers": 1,
+        "batch_size": 4096,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+        "dropout": 0.0,
+        "device": "cuda",
+        "sequence_group_columns": [
+          "session_date",
+          "segment_id"
+        ]
+      },
+      "random_seed": 42,
+      "training_scaling": true,
+      "target_column": "future_mid_return_30s",
+      "sample_filter_mode": "unfiltered",
+      "raw_input_count": 137,
+      "feature_input_count": 0,
+      "parameter_candidates": [
+        {},
+        {
+          "sequence_length": 60,
+          "hidden_size": 64,
+          "learning_rate": 0.0003
+        }
+      ]
+    },
+    {
+      "model_id": "transformer",
+      "model_algorithm": "transformer_regressor",
+      "hyperparameters": {
+        "epochs": null,
+        "early_stopping_rounds": 10,
+        "sequence_length": 20,
+        "hidden_size": 32,
+        "num_layers": 1,
+        "n_heads": 4,
+        "batch_size": 2048,
+        "learning_rate": 0.001,
+        "weight_decay": 0.0001,
+        "dropout": 0.1,
+        "device": "cuda",
+        "sequence_group_columns": [
+          "session_date",
+          "segment_id"
+        ]
+      },
+      "random_seed": 42,
+      "training_scaling": true,
+      "target_column": "future_mid_return_30s",
+      "sample_filter_mode": "unfiltered",
+      "raw_input_count": 137,
+      "feature_input_count": 0,
+      "parameter_candidates": [
+        {},
+        {
+          "sequence_length": 60,
+          "hidden_size": 64,
+          "num_layers": 2,
+          "learning_rate": 0.0003
+        }
+      ]
+    }
+  ],
+  "samples": [
+    {
+      "asset": "510300",
+      "training_start": "2022-01-04",
+      "rolling_window": {
+        "start": "2022-01-04",
+        "end": "2026-10-30"
+      },
+      "validation_sessions": 20,
+      "minimum_training_sessions": 60,
+      "prediction_sessions": 20,
+      "scheduled_folds": 55,
+      "first_scheduled_fold": "2022-05-10",
+      "last_scheduled_fold": "2026-10-22",
+      "label_unit": "decimal_return"
+    },
+    {
+      "asset": "510500",
+      "training_start": "2022-01-04",
+      "rolling_window": {
+        "start": "2022-01-04",
+        "end": "2026-10-30"
+      },
+      "validation_sessions": 20,
+      "minimum_training_sessions": 60,
+      "prediction_sessions": 20,
+      "scheduled_folds": 55,
+      "first_scheduled_fold": "2022-05-10",
+      "last_scheduled_fold": "2026-10-22",
+      "label_unit": "decimal_return"
+    },
+    {
+      "asset": "159915",
+      "training_start": "2023-09-07",
+      "rolling_window": {
+        "start": "2023-09-07",
+        "end": "2026-10-30"
+      },
+      "validation_sessions": 20,
+      "minimum_training_sessions": 60,
+      "prediction_sessions": 20,
+      "scheduled_folds": 34,
+      "first_scheduled_fold": "2024-01-08",
+      "last_scheduled_fold": "2026-09-29",
+      "label_unit": "decimal_return"
+    },
+    {
+      "asset": "518880",
+      "training_start": "2023-09-07",
+      "rolling_window": {
+        "start": "2023-09-07",
+        "end": "2026-10-30"
+      },
+      "validation_sessions": 20,
+      "minimum_training_sessions": 60,
+      "prediction_sessions": 20,
+      "scheduled_folds": 34,
+      "first_scheduled_fold": "2024-01-08",
+      "last_scheduled_fold": "2026-09-29",
+      "label_unit": "decimal_return"
+    }
+  ]
+}
