@@ -13,6 +13,8 @@ class PolicyDecision:
 
     Features are indexed by asset ID. Quantities and sellable balances are shares;
     marks are currency per share, while cash and NAV are account currency amounts.
+    Prediction inventory targets use physical_sellable before order reservations,
+    after settlement and equity locks; cash plus reserved_cash is actual cash.
     The account consumes a target Series or dynamic PolicyExecution request sent
     back to the yielding iterator.
     """
@@ -35,6 +37,7 @@ class PolicyDecision:
         Callable[[str, float, str], tuple[float, float]] | None
     ) = None
     order_state: pd.DataFrame | None = None
+    physical_sellable: pd.Series | None = None
 
 
 @dataclass(frozen=True)

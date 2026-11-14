@@ -77,11 +77,12 @@ def inventory_targets(decision, maximum, parameters):
     """Compare quadratic stationary points and inventory knots with actual-size costs.
 
     Native fee estimates or explicit bps assumptions are not ledger charges.
-    Live orders inform candidates and available budgets, never actual inventory.
+    Strategy budgets use physical sellability and actual cash before reservations.
     The account remains responsible for the shared cash budget and actual fills.
     """
     targets = pd.Series(np.nan, index=decision.features.index, dtype="float64")
     risk = parameters["inventory_risk_bps"]
+    cash = decision.cash + decision.reserved_cash
     for asset, score in decision.features.prediction_score.items():
         price = decision.marks[asset]
         limit = maximum[asset]
@@ -97,16 +98,11 @@ def inventory_targets(decision, maximum, parameters):
             continue
         actual = decision.quantities[asset]
         opening = decision.opening_quantities[asset]
-        pending = decision.pending_quantities[asset]
-        committed = actual + pending
-        lower = max(0, actual - decision.sellable[asset] + min(pending, 0))
-        upper = max(
-            lower, min(limit, actual + max(pending, 0) + max(0, decision.cash) / price)
-        )
+        lower = max(0, actual - decision.physical_sellable[asset])
+        upper = max(lower, min(limit, actual + max(0, cash) / price))
         # Proportional-cost stationary points plus knots form a transparent baseline.
         candidates = np.clip(
             [
-                committed,
                 actual,
                 opening,
                 lower,

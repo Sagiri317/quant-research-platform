@@ -117,6 +117,7 @@ def test_quadratic_band_sizes_weak_missing_and_pending():
         pd.Series({"a": np.nan}),
         pd.Series({"a": 0.0}),
         lambda asset, delta: 0.0,
+        physical_sellable=pd.Series({"a": 100.0}),
     )
     p = inventory_policy_parameters(
         {"trade_cost_bps": 1, "exit_cost_bps": 1, "inventory_risk_bps": 10}
@@ -130,7 +131,10 @@ def test_quadratic_band_sizes_weak_missing_and_pending():
     )
     assert inventory_targets(weak, {"a": 300}, p)["a"] == 100
     away = replace(
-        weak, quantities=pd.Series({"a": 200.0}), sellable=pd.Series({"a": 200.0})
+        weak,
+        quantities=pd.Series({"a": 200.0}),
+        sellable=pd.Series({"a": 200.0}),
+        physical_sellable=pd.Series({"a": 200.0}),
     )
     assert inventory_targets(away, {"a": 300}, p)["a"] < 200
     pending = replace(

@@ -993,6 +993,7 @@ def inventory_batches(
                 receivable_value=fsum(entitlements.receivables.values()),
                 estimate_trade_cost_gradient=estimate_trade_cost_gradient,
                 order_state=passive.state(at, assets) if dynamic_execution else None,
+                physical_sellable=available_sellable,
             )
             modes = None
             strategy_targets = None

@@ -3,7 +3,7 @@
 import pickle
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -26,6 +26,7 @@ from quant_research_platform.research.policies.environments import (
     TradingEnv,
     _trading_seconds,
 )
+from quant_research_platform.research.policies.inventory_policy import inventory_targets
 from quant_research_platform.research.policies.reinforcement import (
     backtest_policy,
     train_policy,
@@ -687,6 +688,152 @@ def test_target_penalty_is_integrated_without_a_second_fee_or_cashflow(tmp_path)
     assert sum(rewards) == pytest.approx(expected, rel=1e-9, abs=1e-15)
     assert info["economic_reward_bps"] == 0
     assert not any(batch.trades or batch.cashflows for batch in batches)
+
+
+@pytest.mark.parametrize("kind", ["gold_etf", "equity_etf"])
+@pytest.mark.parametrize("side", [1, -1])
+@pytest.mark.parametrize("partial_fill", [0, 100])
+def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
+    monkeypatch, kind, side, partial_fill
+):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=(
+            "01:30:00",
+            "01:30:00.020",
+            "01:30:03",
+            "01:30:04.001",
+            "01:30:06",
+            "01:30:09",
+            "01:30:12",
+        ),
+    ).assign(instrument_type=kind)
+    predictions = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02T01:30:00.001")
+            + pd.to_timedelta([0, 3, 6, 9], unit="s"),
+            "asset_id": "a",
+            "prediction_score": side * 0.1,
+        }
+    )
+    events = pd.DataFrame(
+        [
+            (
+                pd.Timestamp("2024-01-02T01:30:04.5"),
+                "a",
+                0,
+                "trade",
+                "sell" if side == 1 else "buy",
+                10 - side * 0.01,
+                500 + partial_fill,
+            )
+        ]
+        if partial_fill
+        else [],
+        columns=(
+            "timestamp",
+            "asset_id",
+            "source_row",
+            "event_kind",
+            "side",
+            "price",
+            "volume",
+        ),
+    ).astype({"timestamp": "datetime64[ns]", "price": "float64", "volume": "float64"})
+    monkeypatch.setattr(high_frequency, "materialize_dataset_session", lambda _: events)
+    params = parameters(("a",), restore_at="14:50:00")
+    del params["buy_threshold"], params["sell_threshold"]
+    params.update(
+        initial_capital=20_000,
+        initial_inventory={"a": 1000},
+        maximum_inventory={"a": 2000},
+        minimum_commission=0,
+        passive={"queue_model": "conservative", "cancel_latency_ms": 10_000},
+    )
+    episode = {
+        "kind": "hft",
+        "task": "dynamic_execution",
+        "asset_ids": ["a"],
+        "feature_columns": ["prediction_score"],
+        "window": {"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:12"},
+        "prediction": {"paths": ["memory"]},
+        "account": {"trades": "memory", "parameters": params},
+        "inventory_parameters": {"trade_cost_bps": 0, "exit_cost_bps": 0},
+        "risk_aversion": 0,
+        "target_deviation_bps": 10,
+        "unfinished_penalty_bps": 0,
+    }
+
+    @contextmanager
+    def native_stream(selected):
+        with closing_iterator(
+            high_frequency.inventory_batches(
+                [(daily_view(panel), panel, predictions)],
+                etf_schedule(),
+                params,
+                TimeWindow(**selected["window"]),
+                decision_columns=("prediction_score",),
+                prediction_decisions=True,
+                prediction_task="dynamic_execution",
+                quote_visibility_delay_ms=1,
+                trade_session=SimpleNamespace(filtered_view=lambda _: None),
+                max_quote_gap_seconds=6,
+            )
+        ) as stream:
+            yield stream
+
+    # Matching, eligibility and reward stay native; only input I/O is supplied.
+    monkeypatch.setattr(environments, "_stream", native_stream)
+    batches, decisions, targets, rewards = [], [], [], []
+    env = TradingEnv([episode], on_batch=batches.append)
+    try:
+        env.reset(seed=0)
+        for action in (2, 4, 0, 0):
+            decisions.append(env.decision)
+            targets.append(env.target.a)
+            _, reward, done, _, info = env.step([action])
+            rewards.append(reward)
+        assert done
+    finally:
+        env.close()
+    # The first live order is only 200 shares; replacement freezes a 1000-share intent.
+    assert targets == [2000.0 if side == 1 else 0.0] * 4
+    assert decisions[1].pending_quantities.a == side * 200
+    assert decisions[2].pending_quantities.a == side * (200 - partial_fill)
+    assert decisions[2].quantities.a == 1000 + side * partial_fill
+    gross_cash = 10_000 - side * partial_fill * (10 - side * 0.01)
+    assert decisions[2].cash + decisions[2].reserved_cash == pytest.approx(gross_cash)
+    physical = 1000 + side * partial_fill if side == -1 or kind == "gold_etf" else 1000
+    assert decisions[2].physical_sellable.a == physical
+    if side == 1:
+        assert decisions[1].reserved_cash == pytest.approx(1998)
+        assert decisions[2].reserved_cash == pytest.approx((1000 - partial_fill) * 9.99)
+        assert decisions[2].sellable.a == physical
+    else:
+        assert decisions[1].sellable.a == 800
+        assert decisions[2].sellable.a == 0
+        assert decisions[2].reserved_cash == 0
+    # The later three-second interval rewards only actual inventory reduction.
+    expected_penalty = -10 * ((1000 - partial_fill) * 10 / 20_000) ** 2 * 3 / 14400
+    assert rewards[2] == pytest.approx(expected_penalty, rel=1e-10, abs=1e-15)
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [trade.quantity for trade in trades] == (
+        [side * partial_fill] if partial_fill else []
+    )
+    assert info["economic_reward_bps"] == pytest.approx(
+        partial_fill * 0.01 / 20_000 * 10000
+    )
+    opposite = decisions[2].features.copy()
+    opposite["prediction_score"] = -side * 0.1
+    opposite_target = inventory_targets(
+        replace(decisions[2], features=opposite),
+        params["maximum_inventory"],
+        env.episode["inventory_parameters"],
+    )
+    assert opposite_target.a == (
+        2000 if side == -1 else partial_fill if kind == "equity_etf" else 0
+    )
 
 
 @pytest.mark.parametrize(
