@@ -965,10 +965,10 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 显式 `feature_groups` 也约束已物化 FEATURE 列的复用，按其原生配方来源识别版本；
 无版本来源的 FEATURE 列归为 `processed`。例如 `["raw"]` 不会自动夹带已处理列。
 显式 `feature_columns` 与组选择冲突时拒绝；省略 `feature_groups` 时按默认规则复用。
-省略配方时，已有完整输出组的因子默认直接复用，只为尚无该组输出的新增因子计算；
-显式指定配方/变换参数而产生同名输出时仍拒绝。`feature_recipe=null` 可明确关闭新特征生成。
+省略或设置 `feature_recipe=null` 时不生成新特征，已有特征按原配方复用；
+显式配方生成的特征与复用列同名时拒绝。
 
-`assemble.feature_recipe=null` 保留原始因子；`label_columns=[]` 可生成仅供预测的无标签数据集。
+`label_columns=[]` 可生成仅供预测的无标签数据集。
 选用配方后，`feature_transform` 可分别设置 `clip`、`industry_neutralize`、`size_neutralize`、
 `center`、`scale`。`clip` 支持 `none`、`mad`、`quantile_1_99`；
 上述其余字段为布尔值。`size_column` 默认 `log_total_market_cap`，也可显式选择
@@ -983,7 +983,7 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 中心化不改变单位，标准化输出无量纲。仅缩放而不中心化时，零方差结果未定义；
 中心化并缩放的常数截面按配方输出零。
 
-默认规范特征流水线：
+选用 `a_share_canonical` 时的默认处理：
 
 ```text
 符合 eligible 的横截面

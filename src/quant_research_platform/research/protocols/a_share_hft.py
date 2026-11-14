@@ -508,6 +508,7 @@ def research_dataset_catalog():
     label_columns = tuple(item.output_column for item in labels)
     maturity = {item.output_column: item.available_at_column for item in labels}
     context = (
+        "eligible",
         "session_date",
         "exchange",
         "instrument_type",
@@ -515,7 +516,7 @@ def research_dataset_catalog():
         "mid",
         *maturity.values(),
     )
-    columns = (*KEY, *DEFAULT_FACTORS, *label_columns, "eligible", *context)
+    columns = (*KEY, *DEFAULT_FACTORS, *label_columns, *context)
     return ResearchDatasetCatalog(
         (
             ResearchDatasetSpec(
@@ -526,14 +527,12 @@ def research_dataset_catalog():
                 factor_columns=DEFAULT_FACTORS,
                 label_columns=label_columns,
                 label_availability_columns=maturity,
-                filter_columns=("eligible",),
                 context_columns=context,
                 frequency="tick",
                 grain="research_row",
-                column_roles={
-                    **_roles(columns, factors=FACTOR_INPUTS, labels=label_columns),
-                    "eligible": "universe",
-                },
+                column_roles=_roles(
+                    columns, factors=FACTOR_INPUTS, labels=label_columns
+                ),
                 primary_key=KEY,
                 partition_columns=("year",),
             ),

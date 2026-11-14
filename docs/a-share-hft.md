@@ -24,11 +24,11 @@
 
 ## 面板、因子和标签
 
-`prepare` 分别生成 `hft_panel`、`hft_factors`、`hft_labels`，逐笔统计使用 `hft_event_factors`，冻结 Hawkes 强度使用 `hft_hawkes_factors`；`assemble` 按显式列组装。原 `a_share_hft` 配方仍只选择原有 18 项因子。配置示例依次为 `prepare-source-hft.json`、`prepare-hft-panel.json`、`prepare-hft-factors.json`、`prepare-hft-labels.json`、`assemble-hft.json`；扩展见 [high-frequency 配置](../configs/high-frequency/)。
+`prepare` 分别生成 `hft_panel`、`hft_factors`、`hft_labels`，逐笔统计使用 `hft_event_factors`，冻结 Hawkes 强度使用 `hft_hawkes_factors`；`assemble` 按显式列组装。`assemble-hft.json` 显式选择 18 项基础因子，数据集名称只标识输出。配置示例依次为 `prepare-source-hft.json`、`prepare-hft-panel.json`、`prepare-hft-factors.json`、`prepare-hft-labels.json`、`assemble-hft.json`；扩展见 [high-frequency 配置](../configs/high-frequency/)。
 
 面板按证券、日期、连续竞价时段分片。上午 09:30—11:30、下午 13:00 起。深圳连续竞价截止 14:57，上海股票从 2018-08-20 起截止 14:57。上海股票 ETF 和黄金 ETF 在 2026-07-06 之前截止 15:00，此后截止 14:57。终点采用左闭右开区间。午休、隔夜或超过 `max_gap_seconds`（默认 6 秒）的真实报价间隔会断段。盘口字段缺失不截断不依赖它的事件流；价格、深度和订单流各自检查实际依赖。[上海基金收盘集合竞价生效通知](https://www.sse.com.cn/lawandrules/sselawsrules2025/stocks/exchange/c/c_20260424_10816482.shtml)
 
-原 `hft_panel.eligible` 保留完整最优盘口状态的旧含义，不作为整行有效性。只要最优买卖价格有效且未交叉，数量缺失不清空 mid、价差或价格标签。研究数据的 `eligible` 表示研究池资格，与执行方向的实际价格、数量及账户约束独立；未配置股票池的旧单资产入口显式记为不筛选，不据此声称完成全市场资格判断。
+`hft_panel.eligible` 表示最优盘口的完整状态，不作为整行有效性。只要最优买卖价格有效且未交叉，数量缺失不清空 mid、价差或价格标签。装配配置将盘口状态保留为 context；`sample_hft` 负责生成研究池资格，与执行方向的实际价格、数量及账户约束独立。未配置股票池时，盘口状态输入不额外筛选；已有研究池资格按原值继承。
 
 原有 18 项因子包含买卖价差、相对价差、一/五/十档不平衡、微价格偏离、OFI 与深度标准化 OFI、3/30/60 秒收益、60 秒波动，以及可观察成交、委托和撤单流。流量区间为 `(前一报价, 当前报价]`。归档外或没有可确认方向的流量不补零；窗口端点不足时保留缺失。
 
@@ -65,7 +65,7 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 
 股票截面默认每 3 秒决策，30 秒保留为采样对照。预测期限独立保留 3、30、60 秒，主要比较期限为 30 秒。它们不设定实际调仓频率、交易门槛或 ETF/股票执行策略。
 
-`sample-hft` 调用 `research.datasets.high_frequency.sample_hft`，示例见 [sample-hft-common.json](../configs/high-frequency/sample-hft-common.json)。输入是一份原始报价时间轴上的面板或已组装因子数据集，必须包含 `session_date,exchange,instrument_type,segment_id,eligible,mid`。原 `a_share_hft` 配方保留这些上下文。输出为新原生研究数据集，原始 `hft_panel`、单股时序与 ETF 链路不变，执行仍读取原始行情。单个因子或盘口字段缺失保持空值，不添加专用缺失字段，也不抹去不依赖该字段的其他输入、标签或结果。
+`sample-hft` 调用 `research.datasets.high_frequency.sample_hft`，示例见 [sample-hft-common.json](../configs/high-frequency/sample-hft-common.json)。输入是一份原始报价时间轴上的面板或已组装因子数据集，必须包含 `session_date,exchange,instrument_type,segment_id,eligible,mid`。`assemble-hft.json` 显式保留这些上下文。输出为新原生研究数据集，原始 `hft_panel`、单股时序与 ETF 链路不变，执行仍读取原始行情。单个因子或盘口字段缺失保持空值，不添加专用缺失字段，也不抹去不依赖该字段的其他输入、标签或结果。
 
 采样每半日读取一次所需宽列，共享价格索引并执行批量按资产 as-of，输出继续使用原生批大小。
 其内存随半日输入与采样结果增长；当前文件布局仍需每半日打开所选年份的成员 footer，未声称全历史只扫描一次。
@@ -103,7 +103,7 @@ Hawkes 数值优化按已观察事件数缩放负对数似然和梯度，并按�
 
 `deeplob_regressor` 和 `deeplob_classifier` 复用已有序列模型的拟合、缩放、保存、加载和预测。结构采用[DeepLOB](https://arxiv.org/abs/1808.03668)的空间卷积、Inception 与 LSTM；本项目时间卷积使用只向过去填充的适配，不声称完整复现论文训练设置。默认序列长 100、卷积通道 32、Inception 通道 64、隐藏层 64，调用者可明确调整。
 
-模型输入必须是十档、每档依次 `ask_px,ask_vol,bid_px,bid_vol` 的固定 40 列；显式 `feature_columns` 选择原始盘口，`feature_recipe=null`。`session_date`、`segment_id` 和 `eligible` 保留为上下文。输入盘口必须完整，缺失会中断序列；跨股票、交易日和连续片段隔离历史。变长片段初始窗口可短于配置长度，不用未来值补齐。
+模型输入必须是十档、每档依次 `ask_px,ask_vol,bid_px,bid_vol` 的固定 40 列；显式 `feature_columns` 选择原始盘口，`feature_recipe=null`。`session_date`、`segment_id` 用于分片，示例模型显式采用 `sample_filter_mode="unfiltered"`。输入盘口必须完整，缺失会中断序列；跨股票、交易日和连续片段隔离历史。变长片段初始窗口可短于配置长度，不用未来值补齐。
 
 三分类明确设置 `class_threshold`，把小数收益 `<-threshold`、闭区间 `[-threshold,threshold]`、`>threshold` 分别映射为跌/平/涨。训练使用交叉熵，原生 PRED 保存 `probability_down/flat/up`，方向评分只有一份 `prediction_score=probability_up-probability_down`。它不是收益预测；回归 MSE 与收益残差校准不适用。`score`/`select` 支持 log loss、Brier、准确率及固定三类宏平均 F1，分类候选必须使用同一阈值和目标语义。`evaluate` 在成熟且合格的自身样本上另存 `classification_metrics`；股票截面的 `common` 与分层接口也可消费原生 PRED，先取共同样本再计算各指标。
 
