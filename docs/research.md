@@ -79,6 +79,13 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 会话扩窗默认 `min_train_sessions=60`、`validation_sessions=20`、`prediction_sessions=20`，末块可以不足 20 个会话；标签成熟仍按每折真实时点决定，不能以名义会话数代替成熟样本数。正式研究的模型、参数候选、目标单位和窗口属于本次运行配置，示例值不代表通用最优参数。该流程按时间反复选择和重拟合，研究结果应如实说明这种使用方式。
 
+候选范围参考以下原始资料，再由本次历史验证段选择。论文中的数据、目标和架构与本项目不同，其表现不作为本项目结果。
+
+- [Gu、Kelly、Xiu 的资产定价研究](https://www.nber.org/system/files/working_papers/w25398/w25398.pdf)采用保持时间顺序的训练、验证和随后预测：参数由训练段估计，复杂度由验证误差选择。本项目按季度或会话块重复这一过程。
+- [LASSO 官方说明](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Lasso.html)给出正则目标、收敛容差及 Gram 预计算。`alpha` 随目标量纲选择，不能将标准化日频目标的数值原样用于小数高频收益；`precompute` 只改变求解方式。
+- [XGBoost 参数](https://xgboost.readthedocs.io/en/stable/parameter.html)与[早停回调](https://xgboost.readthedocs.io/en/stable/python/callbacks.html)支持按验证误差选择树前缀。树深、叶节点约束、采样和正则强度共同控制复杂度，较低学习率配合早停，而非预设总树数。
+- [DeepLOB](https://arxiv.org/abs/1808.03668)与[Transformers for Limit Order Books](https://arxiv.org/abs/2003.00130)提供盘口序列建模的依据。本项目的 LSTM、Transformer 消费因子序列，不冒称复现其盘口网络；序列长度、网络容量和学习率在历史验证段比较，缩放及缺失处理仅由训练样本估计。
+
 ## 独立操作与证据
 
 研究过程使用独立 Python 操作，不使用 Notebook。数据准备、组装、训练、预测、评价、组合和统计分别指定输入、窗口和新输出。主线按时间滚动训练、验证选型和后续预测，不要求另设独立最终留出集；显式冻结的历史研究模板仍保留。季度窗口以前方已成熟数据训练；起点及窗口由调用者设定。因子预热历史不等于提前开始训练。

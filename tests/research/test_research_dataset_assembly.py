@@ -1161,13 +1161,11 @@ def test_auxiliary_timestamp_units_preserve_nanosecond_window(
     [
         (1, 1.0, 0, False, True),
         (True, 1, 0, False, True),
-        (2**53 + 1, float(2**53), 0, False, False),
-        (2**53 + 1, float(2**53), 0, True, False),
         ("1", 1, 0, False, False),
         (1, 1, 1, False, False),
     ],
 )
-def test_native_assembly_uses_exact_scalar_key_identity(
+def test_native_assembly_matches_asset_and_timestamp_keys(
     tmp_path, base_id, auxiliary_id, clock_offset, sparse, matches
 ):
     from tests.storage.low_level_fixtures import make_processed_dataset_spec

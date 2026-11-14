@@ -160,7 +160,9 @@ def _iter_joined_processed_chunks(
                 frame.timestamp, error="invalid_time_chunk_timestamp_values"
             )
             frame = frame.assign(timestamp=timestamps)
-            base_keys = set(_scalar_keys(frame, dataset_spec.primary_key))
+            base_index = pd.MultiIndex.from_frame(
+                frame.loc[:, list(dataset_spec.primary_key)]
+            )
             inputs = {}
             for data_id, selected in auxiliary.items():
                 pieces = []
@@ -170,11 +172,10 @@ def _iter_joined_processed_chunks(
                     )
                     if stop:
                         consumed = selected.iloc[:stop]
-                        matched = [
-                            key in base_keys
-                            for key in _scalar_keys(consumed, dataset_spec.primary_key)
-                        ]
-                        if any(matched):
+                        matched = pd.MultiIndex.from_frame(
+                            consumed.loc[:, list(dataset_spec.primary_key)]
+                        ).isin(base_index)
+                        if matched.any():
                             pieces.append(consumed.loc[matched])
                     if stop < len(selected):
                         selected = selected.iloc[stop:]
@@ -188,6 +189,7 @@ def _iter_joined_processed_chunks(
                 dataset_spec=dataset_spec,
                 input_frames=inputs,
                 base_frame=frame,
+                base_index=base_index,
                 diagnostics=diagnostics,
                 risk_exposure_input=risk_exposure_input,
                 risk_facts=risk_facts,
@@ -206,6 +208,7 @@ def _join_processed_inputs(
     dataset_spec: ResearchDatasetSpec,
     input_frames: Mapping[str, pd.DataFrame],
     base_frame: pd.DataFrame,
+    base_index: pd.MultiIndex,
     diagnostics: dict | None = None,
     risk_exposure_input: Mapping | None = None,
     risk_facts: pd.DataFrame | None = None,
@@ -217,26 +220,24 @@ def _join_processed_inputs(
         and not base_frame.market_id.eq(str(dataset_spec.market_id)).all()
     ):
         raise ValueError("research_dataset_market_mismatch")
-    base_keys = (
-        _scalar_keys(assembled, dataset_spec.primary_key) if input_frames else []
-    )
     for input_data_id, input_frame in input_frames.items():
-        positions = _input_key_positions(
-            base_keys,
-            input_frame,
-            dataset_spec=dataset_spec,
-            input_data_id=input_data_id,
-        )
-        matched = input_frame.iloc[
-            [position for position in positions if position >= 0]
-        ]
+        positions = pd.MultiIndex.from_frame(
+            input_frame.loc[:, list(dataset_spec.primary_key)]
+        ).get_indexer(base_index)
+        missing = np.count_nonzero(positions < 0)
+        if (
+            missing
+            and dataset_spec.key_coverage.get(input_data_id, "strict") != "sparse"
+        ):
+            raise ValueError(f"missing_research_input_keys: {input_data_id}: {missing}")
+        matched = input_frame.iloc[positions[positions >= 0]]
         if (
             "market_id" in matched
             and not matched.market_id.eq(str(dataset_spec.market_id)).all()
         ):
             raise ValueError("research_dataset_market_mismatch")
         payload = input_frame.drop(columns=list(dataset_spec.primary_key))
-        if -1 in positions:
+        if missing:
             # Adding a missing row must not round observed discrete values.
             payload = payload.copy()
             for column, dtype in payload.dtypes.items():
@@ -281,33 +282,6 @@ def _ordered_input_data_ids(
         base,
         *(data_id for data_id in dataset_spec.input_data_ids if data_id != base),
     )
-
-
-def _scalar_keys(frame: pd.DataFrame, columns: tuple[str, ...]) -> list[tuple]:
-    return list(frame.loc[:, list(columns)].itertuples(index=False, name=None))
-
-
-def _input_key_positions(
-    base_keys: list[tuple],
-    input_frame: pd.DataFrame,
-    *,
-    dataset_spec: ResearchDatasetSpec,
-    input_data_id: str,
-) -> list[int]:
-    input_positions = {
-        key: position
-        for position, key in enumerate(
-            _scalar_keys(input_frame, dataset_spec.primary_key)
-        )
-    }
-    positions = [input_positions.get(key, -1) for key in base_keys]
-    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
-    if policy == "sparse":
-        return positions
-    missing = positions.count(-1)
-    if missing:
-        raise ValueError(f"missing_research_input_keys: {input_data_id}: {missing}")
-    return positions
 
 
 def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
