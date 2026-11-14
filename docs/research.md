@@ -69,7 +69,7 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 ## 滚动选参与重拟合
 
-`research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。季度示例见 [quarterly-a-share.json](../configs/quarterly-a-share.json)，从 2014 年首季预热，研究窗截至 2026-10-30。
+`research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。[A 股季度配置](../configs/quarterly-a-share.json)从 2014 年积累历史；[ETF 会话配置](../configs/high-frequency/rolling-etf.json)以 518880 为一份示例，其他 ETF 由调用者替换输入、证券和真实训练起点。两份配置均包含 LASSO、XGBoost、LSTM、Transformer 及其历史验证候选，研究窗截至 2026-10-30。特征列、目标、窗口和输出都由配置显式提供，算法不根据数据集名称选择研究规则。
 
 每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions=20` 个用于验证。20 日标签会使该验证段前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。最早预测季度由合法训练样本决定，不能为补齐首折消费未成熟标签。
 
