@@ -16,6 +16,7 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import _strict_config
 from quant_research_platform.contracts.models import (
+    DEEPLOB_ALGORITHMS,
     SEQUENCE_ALGORITHMS,
     _model_spec,
     model_spec_payload,
@@ -273,6 +274,8 @@ def _historical_validation(fold, session, candidates, days, count):
 def _select_inputs(fold, session, candidates):
     groups = {}
     for _, spec in candidates:
+        if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+            continue
         key = (
             spec.input_factor_columns,
             spec.input_feature_columns,
@@ -329,6 +332,10 @@ def _select_inputs(fold, session, candidates):
         }
     selected, facts = [], {}
     for model_id, spec in candidates:
+        if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+            selected.append((model_id, spec))
+            facts[model_id] = {"retained": list(spec.input_columns)}
+            continue
         key = (
             spec.input_factor_columns,
             spec.input_feature_columns,

@@ -149,6 +149,105 @@ def test_session_windows_keep_declared_axis_and_partial_final_block(
     assert folds[-1].prediction.end == days[-1].date()
 
 
+@pytest.mark.parametrize(
+    "varying,model_order",
+    [
+        (False, ("book",)),
+        (True, ("book", "lstm")),
+        (True, ("lstm", "book")),
+    ],
+)
+def test_deeplob_selection_keeps_constant_book_columns(tmp_path, varying, model_order):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.models import (
+        DEEPLOB_INPUT_COLUMNS,
+        ModelSpec,
+        model_spec_payload,
+        validate_model_input_roles,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models.deeplob import complete_book_rows
+    from quant_research_platform.research.models.production import _prepare_fit
+    from quant_research_platform.research.rolling import RollingFold, _select_inputs
+    from quant_research_platform.storage.datasets.reading import (
+        _dataset_input_options,
+        open_dataset_session,
+    )
+
+    frame = pd.DataFrame(100.0, index=range(2), columns=DEEPLOB_INPUT_COLUMNS)
+    for level in range(1, 11):
+        frame[f"ask_px{level}"] = 4 + level / 1000
+        frame[f"bid_px{level}"] = 4 - level / 1000
+    if varying:
+        frame["ask_vol1"] = [100.0, 200.0]
+    frame["timestamp"] = pd.to_datetime(["2024-01-02T01:30:00", "2024-01-02T01:30:03"])
+    frame["asset_id"] = "510300"
+    frame["session_date"] = frame.timestamp.dt.normalize()
+    frame["segment_id"] = "am"
+    frame["label"] = [0.001, 0.002]
+    frame["label_available_at"] = frame.timestamp + pd.Timedelta(seconds=30)
+    assert complete_book_rows(frame).tolist() == [True, True]
+    path = tmp_path / "book.parquet"
+    frame.to_parquet(path, index=False)
+    declared = input_spec()
+    declared["column_roles"].pop("x")
+    declared["column_roles"].pop("eligible")
+    declared["column_roles"].update(
+        {column: "feature" for column in DEEPLOB_INPUT_COLUMNS},
+        session_date="context",
+        segment_id="context",
+    )
+    session = open_dataset_session(
+        **_dataset_input_options({"path": str(path), "spec": declared})
+    )
+    book = ModelSpec(
+        model_id="book",
+        model_algorithm="deeplob_regressor",
+        input_feature_columns=DEEPLOB_INPUT_COLUMNS,
+        target_column="label",
+        sample_filter_mode="unfiltered",
+        hyperparameters={"device": "cpu", "epochs": 1},
+    )
+    models = {
+        "book": book,
+        "lstm": replace(book, model_id="lstm", model_algorithm="lstm_regressor"),
+    }
+    for name in model_order:
+        validate_model_input_roles(
+            session.spec,
+            model_spec_payload(models[name]),
+            market_id="a_share",
+            include_target=True,
+        )
+    fold = RollingFold(
+        "book",
+        TimeWindow("2024-01-02", "2024-01-02"),
+        TimeWindow("2024-01-03", "2024-01-03"),
+        TimeWindow("2024-01-04", "2024-01-04"),
+    )
+    selected, facts = _select_inputs(
+        fold, session, [(name, models[name]) for name in model_order]
+    )
+    selected = dict(selected)
+    assert selected["book"].input_columns == DEEPLOB_INPUT_COLUMNS
+    assert facts["book"] == {"retained": list(DEEPLOB_INPUT_COLUMNS)}
+    if "lstm" in selected:
+        assert selected["lstm"].input_columns == ("ask_vol1",)
+        assert facts["lstm"]["retained"] == ["ask_vol1"]
+    prepared, _, _ = _prepare_fit(
+        [frame],
+        selected["book"],
+        windows=(fold.train,),
+        cutoff=pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns"),
+    )
+    assert len(prepared.training) == 2
+    assert prepared.input_columns == DEEPLOB_INPUT_COLUMNS
+    if not varying:
+        with pytest.raises(ValueError, match="rolling_no_varying_inputs"):
+            _select_inputs(fold, session, [("book", book), ("lstm", models["lstm"])])
+
+
 def test_four_models_select_historical_mature_rows_then_refit_without_future_labels(
     tmp_path,
     monkeypatch,
