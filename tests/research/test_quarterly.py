@@ -118,17 +118,34 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
     assert counts == [9, 18]
 
 
-def test_session_windows_keep_declared_axis_and_partial_final_block():
-    days = pd.bdate_range("2022-01-03", periods=125)
-    folds = session_folds(days)
+@pytest.mark.parametrize(
+    "periods,parameters,indices",
+    [
+        (125, {}, (59, 60, 79, 80, 79, 120)),
+        (
+            14,
+            {
+                "min_train_sessions": 3,
+                "validation_sessions": 2,
+                "prediction_sessions": 4,
+            },
+            (2, 3, 4, 5, 6, 13),
+        ),
+    ],
+)
+def test_session_windows_keep_declared_axis_and_partial_final_block(
+    periods, parameters, indices
+):
+    days = pd.bdate_range("2022-01-03", periods=periods)
+    folds = session_folds(days, **parameters)
     assert len(folds) == 3
     assert folds[0].train.start == days[0].date()
-    assert folds[0].train.end == days[59].date()
-    assert folds[0].validation.start == days[60].date()
-    assert folds[0].validation.end == days[79].date()
-    assert folds[0].prediction.start == days[80].date()
-    assert folds[1].train.end == days[79].date()
-    assert folds[-1].prediction.start == days[120].date()
+    assert folds[0].train.end == days[indices[0]].date()
+    assert folds[0].validation.start == days[indices[1]].date()
+    assert folds[0].validation.end == days[indices[2]].date()
+    assert folds[0].prediction.start == days[indices[3]].date()
+    assert folds[1].train.end == days[indices[4]].date()
+    assert folds[-1].prediction.start == days[indices[5]].date()
     assert folds[-1].prediction.end == days[-1].date()
 
 

@@ -96,13 +96,9 @@ def session_folds(
     sessions, *, min_train_sessions=60, validation_sessions=20, prediction_sessions=20
 ):
     """Expand history every prediction block on the caller's complete session axis."""
-    if (
-        type(min_train_sessions) is not int
-        or min_train_sessions < 60
-        or type(validation_sessions) is not int
-        or validation_sessions < 20
-        or type(prediction_sessions) is not int
-        or prediction_sessions < 1
+    if any(
+        type(count) is not int or count < 1
+        for count in (min_train_sessions, validation_sessions, prediction_sessions)
     ):
         raise ValueError("rolling_session_counts_invalid")
     days = evaluation_sessions(sessions)

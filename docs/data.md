@@ -135,8 +135,7 @@ CSS 类型及境内证券代码限定使用域，不执行汇率换算；境外�
 `fundamental_pit` 保存 `balance_report_period`、`income_report_period`、
 `cashflow_report_period` 三个日期上下文字段（`datetime64[ns]`，未知为 `NaT`）。
 它们表示各表最新合法事实的报告截止期，不是公告时点；跨表公式按实际依赖使用。
-旧 PIT 用于跨表因子时，先从财务来源重算 PIT，再重算相关因子；
-独立或同表公式不要求无关期间字段。
+跨表公式要求其实际依赖的报告期能够对齐；独立或同表公式不要求无关期间字段。
 无法定位真实披露时间的报告局部不发布并诊断，其他报告及指标保持可用。
 缺少真实版本、含糊的同日冲突或覆盖不足只影响实际依赖该事实的目标；
 不能补造旧原件的时间、版本或完成字段，也不等待无关的全供应商历史保证才使用已合格范围。
@@ -411,12 +410,12 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 `quantity`/`locked_quantity` 是对应账户单位数量，`receivable` 是尚未到账应收，
 `cash_amount`/`amount`/`value` 为约定规定币种金额；实际成交和持仓为整数股，以原生 `float64` 数值列保存。公司行动逐事件向下取整，舍弃数量保存于 `quantity_rounding_loss` 和 `target_quantity_rounding_loss`（各在 `[0,1)`）；两者是披露事实，不计入持仓。价格和金额也采用原生数值列。
 经济汇总及 `performance` 的 `equity_rounding_pnl` 披露按事件阶段估值的舍尾负贡献，不重复扣减总损益；没有同生命周期正估值时该指标为未定义，原因是 `rounding_price_unavailable`。元数据 `corporate_action_policy.fractional_share_policy=floor_per_event_research_approximation` 标明此回测近似。
-具体现金、权益、应收和锁定状态的守恒由同一账本约定核验，不以表存在或字段非空代替。
+现金、权益、应收和锁定状态由原生账户引擎按同一经济状态转移构造。
 原股账户的相邻 `end` 与 `before` 必须保持全账户财富及每项原股估值连续，金额使用
 金额容差 `max(1e-8, abs(nav)*1e-12)`；股份权益比较采用相对 `1e-12`、绝对 `1e-9` 股的容差。
 生命周期、事件、时点和相同持久化值保持原值。分红支付后的应收残余小于 `1e-8` 元时归零。
-即使总 NAV 相同，也不能在边界静默更换各股票的估值或股数。该不变量由原生 PORT
-写入时的状态转换校验建立；读取与统计沿用已发布事实，不重验财富连续性。
+即使总 NAV 相同，也不能在边界静默更换各股票的估值或股数。PORT 直接保存账户引擎
+生成的账本；读取与统计沿用已发布事实，不重验财富连续性。
 
 
 ### 模型预测描述指标
@@ -488,13 +487,13 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 
 ## 宏观源补充
 
-`prepare-source`的`source_id=public_research`接收带版本清单的结构化JSON、CSV、XLSX或ZIP内的表格。
-默认读取raw根下的`manifest.json`，也可用`manifests`显式列出多个相对raw根的清单，合并冻结批次和增量批次。
-文件路径必须在该根内；读取所需文件时核验原始字节数和SHA-256，不扫描或解码无关来源。
+`prepare-source`的`source_id=public_research`接收结构化JSON、CSV、XLSX或ZIP内的表格。
+读取raw根下唯一的`manifest.json`，`manifests`选择其中`collections`的集合标识；
+文件路径相对于其中的`source_root`，只读取当前研究所需来源，保留清单中的来源身份，不复验原件字节或计数。
 CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
 可定位的坏数字／非有限业务单元格在唯一数值解释边界保留为NA，并按字段累计
 `source_invalid_numeric_cells`，其他字段及记录继续规范化；不补零。主键、来源结构、
-单位、哈希与可用时钟错误仍明确失败，不以数值缺失规则掩盖。
+单位与可用时钟错误仍明确失败，不以数值缺失规则掩盖。
 表定义和单位由`sources/public_research/normalization.py`的`DATASETS`唯一声明：
 
 | 原生表 | 主要事实与口径 |
