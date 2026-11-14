@@ -54,6 +54,7 @@ def test_market_and_industry_contexts_are_not_cross_sectionally_rescaled(tmp_pat
         "dataset_id": "contexts",
         "inputs": {"context": str(source)},
         "factor_columns": list(factors),
+        "feature_recipe": "a_share_canonical",
         "label_columns": [],
         "feature_transform": {
             "industry_neutralize": False,

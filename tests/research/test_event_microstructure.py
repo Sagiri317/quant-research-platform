@@ -195,7 +195,6 @@ def test_event_factor_prepare_and_native_assembly(tmp_path):
             "base_input_data_id": "hft_panel",
             "factor_columns": columns,
             "feature_recipe": None,
-            "filter_columns": ["eligible"],
             "time_window": window,
             "output_root": str(tmp_path / "dataset"),
         }

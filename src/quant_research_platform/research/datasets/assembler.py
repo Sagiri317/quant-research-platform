@@ -523,15 +523,6 @@ def _generated_feature_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
     )
 
 
-def _unfiltered_hft_scope(spec: ResearchDatasetSpec) -> bool:
-    return (
-        spec.market_id == "a_share"
-        and spec.base_input_data_id == "hft_panel"
-        and spec.frequency == "tick"
-        and spec.eligibility_recipe is None
-    )
-
-
 def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
     if dataset_spec.market_id != MARKET_ID:
         return ()
@@ -539,10 +530,7 @@ def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str,
     if dataset_spec.feature_transforms or "model_target" in dataset_spec.label_columns:
         needed.add("eligible")
     generated = []
-    if "eligible" in needed and (
-        dataset_spec.eligibility_recipe is not None
-        or _unfiltered_hft_scope(dataset_spec)
-    ):
+    if "eligible" in needed and dataset_spec.eligibility_recipe is not None:
         generated.append("eligible")
     if "model_target" in dataset_spec.label_columns:
         generated.extend(("model_target", "model_target_available_at"))
@@ -560,9 +548,7 @@ def _add_a_share_semantic_columns(
 ) -> pd.DataFrame:
     generated = _generated_semantic_columns(dataset_spec)
     result = frame.copy() if generated else frame
-    if "eligible" in generated and _unfiltered_hft_scope(dataset_spec):
-        result["eligible"] = True
-    elif "eligible" in generated:
+    if "eligible" in generated:
         result["eligible"] = a_share_eligibility(
             result,
             dataset_spec.eligibility_recipe,
@@ -673,33 +659,7 @@ def assemble(config: Mapping) -> Path:
     if not isinstance(bounds, Mapping) or set(bounds) != {"start", "end"}:
         raise ValueError("assemble_window_invalid")
     window = TimeWindow(**bounds)
-    if config["market_id"] == "a_share":
-        from quant_research_platform.research.protocols.a_share import (
-            research_dataset_catalog,
-        )
-
-        if config["dataset_id"] == "a_share_hft":
-            from quant_research_platform.research.protocols.a_share_hft import (
-                research_dataset_catalog,
-            )
-    else:
-        research_dataset_catalog = None
-    defaults = (
-        next(
-            (
-                item
-                for item in research_dataset_catalog().list()
-                if item.data_id == config["dataset_id"]
-            ),
-            None,
-        )
-        if research_dataset_catalog is not None
-        else None
-    )
-    base_input = config.get(
-        "base_input_data_id",
-        defaults.base_input_data_id if defaults else next(iter(inputs)),
-    )
+    base_input = config.get("base_input_data_id", next(iter(inputs)))
     if type(base_input) is not str or base_input not in inputs:
         raise ValueError("assemble_base_input_invalid")
     risk_exposure_input = config.get("risk_exposure_input")
@@ -773,35 +733,20 @@ def assemble(config: Mapping) -> Path:
     }
     reused_features = config.get(
         "feature_columns",
-        [
-            column
-            for column in (defaults.feature_columns if defaults else selected_roles)
-            if column in selected_features
-        ],
+        [column for column in selected_roles if column in selected_features],
     )
     factors = config.get(
         "factor_columns",
-        [
-            column
-            for column in (defaults.factor_columns if defaults else selected_roles)
-            if column in selected_factors
-        ],
+        [column for column in selected_roles if column in selected_factors],
     )
     target_label = config.get("target_label_column", "forward_return_20d")
     if type(target_label) is not str or not target_label:
         raise ValueError("target_label_column_required")
     labels = config.get(
         "label_columns",
-        [
-            column
-            for column in (defaults.label_columns if defaults else selected_roles)
-            if column in selected_labels
-            or (column == "model_target" and target_label in selected_labels)
-        ],
+        [column for column in selected_roles if column in selected_labels],
     )
-    filters = config.get(
-        "filter_columns", list(defaults.filter_columns) if defaults else []
-    )
+    filters = config.get("filter_columns", [])
     context = config.get("context_columns", [])
     if "signal_session" in selected_roles:
         context = list(dict.fromkeys((*context, *DECISION_CONTEXT_COLUMNS)))
@@ -879,14 +824,7 @@ def assemble(config: Mapping) -> Path:
     ) and (config["market_id"] != "a_share" or "model_target" not in labels):
         raise ValueError("assemble_target_transform_requires_model_target")
     business_columns = set((*factors, *labels, *filters, *context))
-    recipe = config.get(
-        "feature_recipe",
-        "a_share_canonical"
-        if config["market_id"] == "a_share"
-        and config["dataset_id"] != "a_share_hft"
-        and factors
-        else None,
-    )
+    recipe = config.get("feature_recipe")
     groups = config.get("feature_groups", ["raw", "processed"] if recipe else ["raw"])
     if (
         type(groups) is not list
@@ -982,22 +920,6 @@ def assemble(config: Mapping) -> Path:
         if recipe is not None and transform_factors
         else ()
     )
-    if transforms and "feature_recipe" not in config and not options:
-        transform = transforms[0]
-        pending_sources = tuple(
-            factor
-            for factor in transform.source_columns
-            if not set(
-                replace(transform, source_columns=(factor,)).output_columns
-            ).issubset(reused_features)
-        )
-        transforms = (
-            (replace(transform, source_columns=pending_sources),)
-            if pending_sources
-            else ()
-        )
-        if not transforms:
-            recipe = None
     generated_features = tuple(
         column for transform in transforms for column in transform.output_columns
     )
@@ -1060,14 +982,6 @@ def assemble(config: Mapping) -> Path:
         },
         **dict.fromkeys(context, ColumnRole.CONTEXT),
     }
-    if (
-        "eligible" in filters
-        and config["market_id"] == "a_share"
-        and base_input == "hft_panel"
-        and source.frequency == "tick"
-        and config.get("eligibility_recipe") is None
-    ):
-        output_roles["eligible"] = ColumnRole.UNIVERSE
     spec = ResearchDatasetSpec(
         data_id=config["dataset_id"],
         market_id=config["market_id"],
@@ -1087,10 +1001,7 @@ def assemble(config: Mapping) -> Path:
         label_columns=labels,
         filter_columns=tuple(filters),
         context_columns=context,
-        eligibility_recipe=config.get(
-            "eligibility_recipe",
-            defaults.eligibility_recipe if defaults else None,
-        ),
+        eligibility_recipe=config.get("eligibility_recipe"),
         minimum_listing_sessions=config.get("minimum_listing_sessions", 252),
         exclude_st=config.get("exclude_st", True),
         exclude_pt=config.get("exclude_pt", True),
@@ -1233,16 +1144,6 @@ def assemble(config: Mapping) -> Path:
             "inputs": inputs,
             "producer_diagnostics": {
                 "reused_feature_transforms": feature_lineage,
-                **(
-                    {
-                        "eligibility": {
-                            "mode": "unfiltered",
-                            "meaning": "no_stock_pool_filter",
-                        }
-                    }
-                    if _unfiltered_hft_scope(spec)
-                    else {}
-                ),
             },
             "parameters": {
                 "base_input_data_id": base_input,

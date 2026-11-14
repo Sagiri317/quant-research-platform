@@ -150,6 +150,10 @@ def prepare_a_share_acceptance(root: Path):
             "output_root": str(root / "assembled"),
             "time_window": {"start": "2017-10-02", "end": "2019-10-31"},
             "factor_columns": factors,
+            "feature_columns": [],
+            "feature_recipe": "a_share_canonical",
+            "eligibility_recipe": "a_share_all",
+            "filter_columns": ["eligible"],
             "label_columns": ["model_target", "forward_return_20d"],
         }
     )

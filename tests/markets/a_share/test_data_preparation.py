@@ -494,6 +494,13 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
                         "inputs": {
                             key: str(inputs[key]) for key in spec.input_data_ids
                         },
+                        "base_input_data_id": spec.base_input_data_id,
+                        "factor_columns": list(spec.factor_columns),
+                        "feature_columns": [],
+                        "label_columns": list(spec.label_columns),
+                        "filter_columns": list(spec.filter_columns),
+                        "feature_recipe": "a_share_canonical",
+                        "eligibility_recipe": spec.eligibility_recipe,
                         "time_window": {
                             "start": str(window[0].date()),
                             "end": str(window[-1].date()),

@@ -52,9 +52,7 @@
   "label_columns": [
     "future_mid_return_30s"
   ],
-  "filter_columns": [
-    "eligible"
-  ],
+  "filter_columns": [],
   "context_columns": [
     "session_date",
     "segment_id"

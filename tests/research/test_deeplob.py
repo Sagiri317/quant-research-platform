@@ -77,7 +77,7 @@ def book_dataset(root):
             "feature_columns": list(DEEPLOB_INPUT_COLUMNS),
             "factor_columns": [],
             "label_columns": ["future_mid_return_3s"],
-            "filter_columns": ["eligible"],
+            "filter_columns": [],
             "context_columns": ["session_date", "segment_id"],
             "feature_recipe": None,
             "time_window": window,
@@ -112,6 +112,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                 "model": {
                     "model_id": algorithm,
                     "model_algorithm": algorithm,
+                    "sample_filter_mode": "unfiltered",
                     "input_feature_columns": list(DEEPLOB_INPUT_COLUMNS),
                     "target_column": "future_mid_return_3s",
                     "hyperparameters": params,
@@ -367,6 +368,7 @@ def test_native_deeplob_roundtrip_probabilities_and_segment_isolation(
                     ],
                     "label_columns": ["future_mid_return_3s"],
                     "evaluation_axis": "single_asset_time_series",
+                    "filter_mode": "unfiltered",
                 },
                 "output": str(tmp_path / "evaluation"),
             }

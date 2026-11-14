@@ -458,28 +458,104 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
                 }
             )
         )
-    path = assemble(
-        {
-            "market_id": "a_share",
-            "dataset_id": "a_share_hft",
-            "inputs": inputs,
-            "time_window": window,
-            "output_root": str(tmp_path / "research"),
-            "factor_columns": [
-                "relative_spread",
-                "imbalance_1",
-                "observed_cancel_flow_imbalance",
-            ],
-            "label_columns": ["future_mid_return_3s"],
-        }
-    )
+    from quant_research_platform.contracts.data import ProcessedDataSpec
+    from quant_research_platform.research.datasets.high_frequency import sample_hft
+    from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+
+    assembly = {
+        "market_id": "a_share",
+        "dataset_id": "a_share_hft",
+        "inputs": inputs,
+        "base_input_data_id": "hft_panel",
+        "time_window": window,
+        "factor_columns": [
+            "relative_spread",
+            "imbalance_1",
+            "observed_cancel_flow_imbalance",
+        ],
+        "feature_columns": [],
+        "label_columns": ["future_mid_return_3s"],
+        "context_columns": [
+            "eligible",
+            "session_date",
+            "exchange",
+            "instrument_type",
+            "segment_id",
+            "mid",
+        ],
+    }
+    reference = None
+    for index, (dataset_id, base) in enumerate(
+        (("a_share_hft", "hft_panel"), ("renamed", "hft_panel"), ("renamed", "quotes"))
+    ):
+        path = assemble(
+            {
+                **assembly,
+                "dataset_id": dataset_id,
+                "base_input_data_id": base,
+                "inputs": {
+                    base if name == "hft_panel" else name: value
+                    for name, value in inputs.items()
+                },
+                "output_root": str(tmp_path / f"research-{index}"),
+            }
+        )
+        actual = read_dataset(path)
+        declaration = inspect_dataset(path).spec
+        assert declaration["feature_transforms"] == []
+        if reference is None:
+            reference, reference_spec = actual, declaration
+        else:
+            pd.testing.assert_frame_equal(actual, reference, check_exact=True)
+            for field in ("column_roles", "column_units", "label_availability_columns"):
+                assert declaration[field] == reference_spec[field]
     result = read_dataset(path)
     assert len(result) == 4
     assert result.future_mid_return_3s.notna().sum() == 3
-    assert result.eligible.all()
+    assert result.eligible.tolist() == [True, False, True, True]
+    assert declaration["column_roles"]["eligible"] == "context"
     assert result.relative_spread.iloc[1] == pytest.approx(0.02 / 10.01)
     assert pd.isna(result.imbalance_1.iloc[1])
     assert result.observed_cancel_flow_imbalance.iloc[1] == 1.0
+
+    legacy = tmp_path / "unfiltered-quotes"
+    write_dataset(
+        legacy,
+        result.assign(eligible=True),
+        spec=ProcessedDataSpec(
+            data_id="unfiltered_quotes",
+            market_id="a_share",
+            kind="panel",
+            frequency="tick",
+            grain="asset_timestamp",
+            primary_key=tuple(declaration["primary_key"]),
+            partition_columns=(),
+            column_roles={
+                column: "universe"
+                if column == "eligible"
+                else declaration["column_roles"][column]
+                for column in result
+            },
+            column_units=declaration["column_units"],
+            label_availability_columns=declaration["label_availability_columns"],
+        ),
+    )
+    sampled = []
+    for index, source in enumerate((path, legacy)):
+        sampled.append(
+            read_dataset(
+                sample_hft(
+                    {
+                        "inputs": str(source),
+                        "output": str(tmp_path / f"sampled-{index}"),
+                        "dataset_id": "common_clock",
+                        "time_window": window,
+                    }
+                )
+            )
+        )
+    pd.testing.assert_frame_equal(sampled[0], sampled[1], check_exact=True)
+    assert len(sampled[0]) == 5 and sampled[0].eligible.all()
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
@@ -489,7 +565,6 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
     from quant_research_platform.research.portfolios import high_frequency
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.sources.reference.interim import fee_schedule_spec
-    from quant_research_platform.storage.datasets.writing import write_dataset
 
     model = fit(
         {
@@ -499,6 +574,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
             "model": {
                 "model_id": "ols",
                 "model_algorithm": "linear_regression",
+                "sample_filter_mode": "unfiltered",
                 "input_factor_columns": ["relative_spread"],
                 "target_column": "future_mid_return_3s",
             },
@@ -537,6 +613,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
                 ],
                 "label_columns": ["future_mid_return_3s"],
                 "evaluation_axis": "single_asset_time_series",
+                "filter_mode": "unfiltered",
             },
         }
     )

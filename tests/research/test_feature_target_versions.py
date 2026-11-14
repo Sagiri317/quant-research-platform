@@ -382,6 +382,7 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
             "output_root": str(tmp_path / "output"),
             "time_window": {"start": "2020-01-02", "end": "2020-01-02"},
             "factor_columns": ["factor", "other"],
+            "feature_recipe": "a_share_canonical",
             "feature_groups": groups,
             "filter_columns": ["eligible"],
             "label_columns": ["model_target"],
@@ -452,8 +453,9 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
             )
         )
         mixed = materialize_dataset_session(mixed_session)
-        assert mixed_session.spec["feature_transforms"][0]["source_columns"] == ["new"]
-        assert mixed.feature_new.notna().all()
+        assert mixed_session.spec["feature_transforms"] == []
+        assert "feature_new" not in mixed
+        np.testing.assert_array_equal(mixed.new, new_frame.new)
         for column in session.spec["feature_columns"]:
             pd.testing.assert_series_equal(mixed[column], result[column])
         for group in groups:

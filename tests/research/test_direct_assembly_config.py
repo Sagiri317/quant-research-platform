@@ -99,7 +99,7 @@ def test_disabled_steps_accept_input_without_unneeded_context_and_persist_option
     assert spec["column_units"]["feature_reversal_20d"] == "return"
 
 
-def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_path):
+def test_explicit_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_path):
     from quant_research_platform.contracts.data import ProcessedDataSpec
 
     frame = _frame().assign(
@@ -131,8 +131,12 @@ def test_default_mixed_macro_and_stock_features_preserve_macro_amplitude(tmp_pat
             },
         ),
     )
-    config = _config(tmp_path, root, factor_columns=["reversal_20d", macro])
-    config.pop("feature_recipe")
+    config = _config(
+        tmp_path,
+        root,
+        factor_columns=["reversal_20d", macro],
+        feature_recipe="a_share_canonical",
+    )
     config["inputs"]["macro"] = str(macro_root)
     result = assembler.assemble(config)
     data = read_dataset(result)

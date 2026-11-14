@@ -4,6 +4,7 @@
   "model": {
     "model_id": "deeplob_direction",
     "model_algorithm": "deeplob_classifier",
+    "sample_filter_mode": "unfiltered",
     "input_feature_columns": [
       "ask_px1",
       "ask_vol1",

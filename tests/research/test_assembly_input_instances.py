@@ -347,7 +347,7 @@ def test_same_native_identity_never_allows_conflicting_business_columns(tmp_path
 
 
 @pytest.mark.parametrize("feature", ["previous_feature", "feature_reversal_20d"])
-def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, feature):
+def test_borrowed_feature_requires_explicit_factor_transform(tmp_path, feature):
     from dataclasses import replace
 
     from quant_research_platform.contracts.columns import ColumnRole
@@ -371,14 +371,17 @@ def test_borrowed_feature_does_not_disable_default_factor_transform(tmp_path, fe
     )
     config = _config(tmp_path, source, feature_columns=[feature])
     config.pop("feature_recipe")
+    output = assembler.assemble(config)
+    actual = read_dataset(output)
+    np.testing.assert_array_equal(actual[feature], frame[feature])
+    assert inspect_dataset(output).spec["feature_transforms"] == []
+    config["feature_recipe"] = "a_share_canonical"
+    config["output_root"] = str(tmp_path / "explicit")
     if feature == "feature_reversal_20d":
-        output = assembler.assemble(config)
-        np.testing.assert_array_equal(read_dataset(output)[feature], frame[feature])
-        config["feature_recipe"] = "a_share_canonical"
-        config["output_root"] = str(tmp_path / "conflict")
         with pytest.raises(ValueError, match="assemble_feature_output_conflict"):
             assembler.assemble(config)
         return
+    assert "feature_reversal_20d" not in actual
     output = assembler.assemble(config)
     actual = read_dataset(output)
     np.testing.assert_array_equal(actual[feature], frame[feature])

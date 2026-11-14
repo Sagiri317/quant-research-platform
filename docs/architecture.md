@@ -229,6 +229,8 @@ Matplotlib与中文字体只在绘图时加载，缺字体明确报错。
 
 `assemble` 必填 `market_id, dataset_id, inputs, time_window, output_root`；
 可明确选择 `factor_columns, label_columns, feature_recipe, base_input_data_id`。
+`dataset_id` 只命名输出；列选择来自实际输入角色，特征处理与资格计算由显式配方决定，
+不按目录名、输入实例名或 catalog 定义补入科学规则。
 原生清单的 `inputs` 保留本次输入路径及显式 `files/years/time_window/row_filters/columns`
 等选择；省略的选择器不额外限域。`parameters.input_columns` 记录实际使用列（含必要依赖），
 输入级时间窗口与总体 `time_window` 取交集，不建立下游身份绑定或自动重算。
@@ -554,9 +556,10 @@ within_timestamp 的 MSE 先逐日算均值，再日期等权；temporal_blocks 
 `feature_columns` 选择已经物化的特征，省略时取输入实际投影中的 FEATURE 列；
 可用 `factor_columns=[]` 不选原始因子，这些已有列不重新变换。
 实际空值、单位、标签成熟事实与原变换说明随复用保留，
-再次组装或评价不能把它们当作未经处理的原始值。省略配方及变换参数时，
-已有完整目标组输出的因子直接复用，仅为未处理的新增因子生成默认特征；
-显式配方/参数要求的新生成特征与复用列同名时明确失败。
+再次组装或评价不能把它们当作未经处理的原始值。省略 `feature_recipe` 时不生成新特征；
+显式配方要求的新生成特征与复用列同名时明确失败。
+报价面板的盘口有效性保留为 context；`sample_hft` 根据实际角色和显式股票池生成研究 universe，
+装配不把它改成常真资格。直接使用未筛选盘口的模型明确选择 `sample_filter_mode="unfiltered"`。
 组装对每个辅助输入扫描一次、规范时间并稳定排序，再随完整基表时间块向前消费和按精确主键对齐；
 辅助文件可按资产排列，不按每个基表块反复解码同一行组。首次输出前仍物化全部选定辅助表，
 内存占用随选定辅助行数增长，不承诺只保留当前区段。

@@ -6,6 +6,45 @@
     "hft_factors": "data/processed/a_share/hft_factors",
     "hft_labels": "data/processed/a_share/hft_labels"
   },
+  "base_input_data_id": "hft_panel",
+  "factor_columns": [
+    "spread_cny",
+    "relative_spread",
+    "imbalance_1",
+    "imbalance_5",
+    "imbalance_10",
+    "microprice_deviation",
+    "book_ofi",
+    "depth_normalized_ofi",
+    "return_3s",
+    "return_30s",
+    "return_60s",
+    "realized_volatility_60s",
+    "observed_trade_flow_imbalance",
+    "observed_order_flow_imbalance",
+    "observed_cancel_flow_imbalance",
+    "observed_trade_volume_30s",
+    "observed_signed_trade_volume_30s",
+    "book_ofi_30s"
+  ],
+  "feature_columns": [],
+  "label_columns": [
+    "future_mid_return_3s",
+    "future_mid_direction_3s",
+    "future_mid_return_30s",
+    "future_mid_direction_30s",
+    "future_mid_return_60s",
+    "future_mid_direction_60s"
+  ],
+  "context_columns": [
+    "eligible",
+    "session_date",
+    "exchange",
+    "instrument_type",
+    "segment_id",
+    "mid"
+  ],
+  "feature_recipe": null,
   "time_window": {
     "start": "2018-02-14",
     "end": "2018-02-14"
