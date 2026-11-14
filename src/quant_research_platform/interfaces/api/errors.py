@@ -47,7 +47,16 @@ def register_api_error_handlers(app: FastAPI) -> None:
             ApiError(
                 error_code="request_validation_error",
                 status_code=422,
-                details=_validation_error_details(exc),
+                details={
+                    "errors": [
+                        {
+                            "type": item["type"],
+                            "loc": item["loc"],
+                            "msg": "validation_error",
+                        }
+                        for item in exc.errors()
+                    ]
+                },
             )
         )
 
@@ -62,22 +71,3 @@ def register_api_error_handlers(app: FastAPI) -> None:
                 status_code=500,
             )
         )
-
-
-def _validation_error_details(exc: RequestValidationError) -> dict[str, object]:
-    errors: list[dict[str, object]] = []
-    for item in exc.errors():
-        raw_loc = item.get("loc", ())
-        loc = (
-            tuple(part for part in raw_loc if type(part) in {str, int})[:16]
-            if isinstance(raw_loc, (tuple, list))
-            else ()
-        )
-        errors.append(
-            {
-                "type": str(item.get("type", ""))[:128],
-                "loc": loc,
-                "msg": "validation_error",
-            }
-        )
-    return {"errors": errors} if errors else {}

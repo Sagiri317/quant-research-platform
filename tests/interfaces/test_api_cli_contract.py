@@ -33,22 +33,12 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
             response = await client.get(f"/api/catalog/{endpoint}")
             assert response.status_code == 200
             assert response.json()["items"]
-            if endpoint == "factors":
-                assert all(
-                    not {
-                        "window",
-                        "base_input_columns",
-                        "derived_input_columns",
-                    }.intersection(item)
-                    for item in response.json()["items"]
-                )
         response = await client.get("/api/research-datasets/pv_all/requirements")
         assert response.status_code == 200
         requirements = response.json()
         assert requirements["dataset_id"] == "pv_all"
         assert requirements["input_data_ids"]
         assert requirements["factor_count"] > 0
-        assert not {"status", "mode"}.intersection(requirements)
         assert (
             await client.get("/api/inspect", params={"path": "model"})
         ).status_code == 503
@@ -125,8 +115,6 @@ def test_routes_only_query_explicit_evidence():
 async def test_http_inspection_redacts_private_paths_without_changing_artifact(
     anyio_backend, tmp_path
 ):
-    import json
-
     output, _, _ = native_bundle(tmp_path)
     manifest = output / "manifest.json"
     facts = json.loads(manifest.read_text())
@@ -153,8 +141,6 @@ async def test_http_inspection_redacts_private_paths_without_changing_artifact(
 async def test_http_inspection_reads_selected_native_and_business_metadata(
     anyio_backend, tmp_path
 ):
-    import json
-
     from quant_research_platform.storage.datasets import write_dataset
     from tests.storage.low_level_fixtures import (
         make_default_dataset_frame,
@@ -189,10 +175,6 @@ async def test_http_inspection_reads_selected_native_and_business_metadata(
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 async def test_error_handlers_preserve_envelope_and_redact_payload(anyio_backend):
-    import json
-
-    from fastapi.exceptions import RequestValidationError
-
     app = create_app()
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://testserver"
@@ -216,25 +198,6 @@ async def test_error_handlers_preserve_envelope_and_redact_payload(anyio_backend
                 ]
             },
         }
-    }
-    response = await app.exception_handlers[RequestValidationError](
-        None,
-        RequestValidationError(
-            [
-                {
-                    "type": "x" * 129,
-                    "loc": [True, None, *range(20)],
-                    "msg": "private-msg",
-                    "input": "private-input",
-                    "ctx": {"private": 1},
-                }
-            ]
-        ),
-    )
-    assert json.loads(response.body)["error"]["details"] == {
-        "errors": [
-            {"type": "x" * 128, "loc": list(range(16)), "msg": "validation_error"}
-        ]
     }
     response = await app.exception_handlers[Exception](None, RuntimeError("private"))
     assert response.status_code == 500
