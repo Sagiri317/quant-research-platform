@@ -2,40 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 from typing import Final
 
 import pandas as pd
 
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
-    _validate_non_empty_string,
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
 
 DEFAULT_ROOT_SEED: Final[int] = 42
-
-
-@dataclass(frozen=True, kw_only=True)
-class ExperimentFold:
-    fold_id: str
-    train: TimeWindow
-    validation: TimeWindow
-
-    def __post_init__(self) -> None:
-        _validate_non_empty_string(self.fold_id, "fold_id_required")
-        if not all(
-            isinstance(window, TimeWindow) for window in (self.train, self.validation)
-        ):
-            raise TypeError("experiment_fold_window_required")
-        if isinstance(self.train.start, datetime) != isinstance(
-            self.validation.start, datetime
-        ):
-            raise ValueError("experiment_time_kind_mismatch")
-        if self.train.end >= self.validation.start:
-            raise ValueError("experiment_fold_windows_overlap")
 
 
 def label_maturity_mask(

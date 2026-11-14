@@ -167,7 +167,7 @@ def read_local(arguments, state, root):
         if (path / "spec.json").is_file() and (
             path / "_manifest" / "manifest.json"
         ).is_file():
-            from quant_research_platform.agents.protocol import dataset_context
+            from quant_research_platform.agents.config import dataset_context
 
             result["dataset"] = dataset_context({"data": path})["data"]
         return result

@@ -18,9 +18,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from quant_research_platform.agents.protocol import (
-    before_holdout,
-    bind_protocol,
+from quant_research_platform.agents.config import (
     resolve_inputs,
     set_argument,
 )
@@ -64,12 +62,10 @@ def run_native(
     parameters,
     inputs,
     artifacts,
-    protocol,
     root,
     *,
     timeout,
     attached_inputs,
-    test_start=None,
     cwd=None,
 ):
     """Call the existing CLI with fixed scientific fields and fresh output paths."""
@@ -78,7 +74,7 @@ def run_native(
     arguments = deepcopy(template["config"])
     for path, value in parameters.items():
         set_argument(arguments, path, value)
-    arguments = resolve_inputs(bind_protocol(arguments, protocol), attached_inputs)
+    arguments = resolve_inputs(arguments, attached_inputs)
     bindings = template.get("bindings", {})
     if set(inputs) != set(bindings):
         raise ValueError("agent_input_bindings_mismatch")
@@ -101,8 +97,6 @@ def run_native(
             allow_generated=allow_generated,
         )
         set_argument(arguments, path, resolved)
-    if test_start is not None:
-        before_holdout(arguments, test_start)
     arguments = _resolve_artifacts(arguments, artifacts)
     operation = template["operation"]
     suffix = (

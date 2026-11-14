@@ -1,14 +1,16 @@
 """A resumable research harness around the platform's existing calculations."""
 
-import re
 import time
 from copy import deepcopy
 from pathlib import Path
 from uuid import uuid4
 
-import pandas as pd
-
 from quant_research_platform.agents.client import AgentAction, OpenAIResponsesClient
+from quant_research_platform.agents.config import (
+    OPERATIONS,
+    validate_budget,
+    validate_config,
+)
 from quant_research_platform.agents.execution import (
     _metrics,
     error_feedback,
@@ -16,12 +18,6 @@ from quant_research_platform.agents.execution import (
     run_native,
 )
 from quant_research_platform.agents.knowledge import lookup, propose_patch, remember
-from quant_research_platform.agents.protocol import (
-    OPERATIONS,
-    artifact_references,
-    validate_budget,
-    validate_config,
-)
 from quant_research_platform.agents.session import (
     BUILTINS,
     context_messages,
@@ -42,10 +38,6 @@ from quant_research_platform.agents.workspace import (
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
-)
-from quant_research_platform.contracts.time import (
-    TimeWindow,
-    time_window_timestamp_interval,
 )
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.storage.atomic import reject_if_exists
@@ -78,18 +70,15 @@ def run_agent(config, *, client=None, control=None, on_event=None):
             key: str(Path(value).resolve()) for key, value in config["inputs"].items()
         }
     state = {
-        "version": 1,
         "id": uuid4().hex,
         "cwd": str(Path.cwd()),
         "config": config,
         "public": public,
         "status": "ready",
-        "phase": "discussion" if config["protocol"] is None else "development",
         "events": [],
         "requests": [],
         "steering": [],
         "elapsed_seconds": 0.0,
-        "frozen": {},
         "pending_question": None,
         "conclusion": None,
     }
@@ -102,7 +91,7 @@ def run_agent(config, *, client=None, control=None, on_event=None):
 def resume_agent(
     root, *, message=None, budget=None, client=None, control=None, on_event=None
 ):
-    """Continue the same protocol and artifacts; budget changes are caller-owned."""
+    """Continue the task and artifacts; budget changes are caller-owned."""
     root = Path(root).resolve()
     with session_lock(root):
         state = read_session(root)
@@ -158,15 +147,6 @@ class _Runner:
         self.control, self.on_event = control, on_event
         self.started = time.monotonic()
         self.elapsed_before = state["elapsed_seconds"]
-        self.test_start = (
-            None
-            if self.config["protocol"] is None
-            else pd.Timestamp(
-                time_window_timestamp_interval(
-                    TimeWindow(**self.config["protocol"]["test_window"])
-                )[0]
-            )
-        )
 
     def checkpoint(self):
         self.state["elapsed_seconds"] = (
@@ -230,21 +210,7 @@ class _Runner:
             for item in self.state["events"]
             if item["result"]["status"] == "completed" and "artifact" in item
         }
-        for alias, identifier in {
-            **self.state["frozen"],
-            **self.completed_final_steps(),
-        }.items():
-            result[alias] = result[identifier]
         return result
-
-    def completed_final_steps(self):
-        return {
-            item["action"]["tool"]: item["id"]
-            for item in self.state["events"]
-            if item["phase"] == "final_evaluation"
-            and item["action"]["kind"] == "tool"
-            and item["result"]["status"] == "completed"
-        }
 
     def poll_control(self):
         if self.control is None:
@@ -281,7 +247,6 @@ class _Runner:
         write_qrp_json_file(root / "action.json", action.model_dump())
         event = {
             "id": identifier,
-            "phase": self.state["phase"],
             "action": action.model_dump(),
             "experiment": experiment,
             "result": {"status": "running"},
@@ -307,15 +272,9 @@ class _Runner:
                 }
             )
 
-    def execute(self, action, *, final_template=None):
-        dynamic = (
-            final_template is None
-            and action.tool == "research"
-            and "inputs" in self.config
-        )
-        native = (
-            dynamic or action.tool in self.config["tools"] or final_template is not None
-        )
+    def execute(self, action):
+        dynamic = action.tool == "research" and "inputs" in self.config
+        native = dynamic or action.tool in self.config["tools"]
         arguments = action.arguments()
         web = action.tool == "web_search" or (
             action.tool == "search"
@@ -366,8 +325,6 @@ class _Runner:
                         timeout=max(0.001, self.remaining()),
                     )
             elif native:
-                if self.config["protocol"] is None:
-                    raise ValueError("agent_research_protocol_required")
                 if dynamic:
                     arguments = _strict_config(
                         arguments, {"operation", "config"}, {"metrics", "facts"}
@@ -400,62 +357,18 @@ class _Runner:
                     arguments = _strict_config(
                         arguments, set(), {"parameters", "inputs"}
                     )
-                    template = (
-                        final_template
-                        if final_template is not None
-                        else self.config["tools"][action.tool]
-                    )
+                    template = self.config["tools"][action.tool]
                 result, artifact = run_native(
                     template,
                     arguments.get("parameters", {}),
                     arguments.get("inputs", {}),
                     self.artifacts(),
-                    self.config["protocol"],
                     root,
                     timeout=max(0.001, self.remaining()),
                     attached_inputs=self.config.get("inputs", {}),
                     cwd=Path(self.state["cwd"]),
-                    test_start=self.test_start if final_template is None else None,
                 )
                 trusted = True
-            elif action.tool == "configure" and "inputs" in self.config:
-                arguments = _strict_config(
-                    arguments, {"protocol"}, {"final_evaluation"}
-                )
-                if arguments["protocol"] is None:
-                    raise ValueError("agent_research_protocol_required")
-                experiment_started = any(
-                    item["experiment"] and item["phase"] == "development"
-                    for item in self.state["events"]
-                )
-                if (
-                    experiment_started
-                    and arguments["protocol"] != self.config["protocol"]
-                ):
-                    raise ValueError("agent_protocol_already_in_use")
-                if (
-                    self.config.get("final_evaluation")
-                    and "final_evaluation" in arguments
-                    and arguments["final_evaluation"] != self.config["final_evaluation"]
-                    and experiment_started
-                ):
-                    raise ValueError("agent_final_steps_already_in_use")
-                settings = deepcopy(self.config)
-                settings.update(arguments)
-                settings, public = validate_config(settings)
-                self.config.update(settings)
-                self.state["public"] = public
-                self.state["phase"] = "development"
-                self.test_start = pd.Timestamp(
-                    time_window_timestamp_interval(
-                        TimeWindow(**settings["protocol"]["test_window"])
-                    )[0]
-                )
-                result = {
-                    "status": "completed",
-                    "protocol": public["protocol"],
-                    "final_evaluation": public["final_evaluation"],
-                }
             elif action.tool == "compare":
                 arguments = _strict_config(arguments, {"evidence"}, set())
                 sources = {item["id"]: item for item in self.state["events"][:-1]}
@@ -532,54 +445,6 @@ class _Runner:
         self.finish_event(event, result, artifact, trusted=trusted)
         return event
 
-    def freeze(self, action):
-        arguments = _strict_config(action.arguments(), {"candidates"}, set())
-        candidates = arguments["candidates"]
-        if not candidates or not self.config.get("final_evaluation"):
-            raise ValueError("agent_final_evaluation_requires_candidates_and_steps")
-        artifacts = self.artifacts()
-        step_names = {item["name"] for item in self.config["final_evaluation"]}
-        for alias, identifier in candidates.items():
-            if (
-                not re.fullmatch(r"[A-Za-z][A-Za-z_0-9-]*", alias)
-                or alias in artifacts
-                or alias in step_names
-            ):
-                raise ValueError("agent_candidate_alias_invalid")
-            if identifier not in artifacts or not artifacts[identifier]["trusted"]:
-                raise ValueError("agent_final_candidate_requires_native_artifact")
-
-        available = set(artifacts) | set(candidates)
-        for step in self.config["final_evaluation"]:
-            if set(artifact_references(step["config"])) - available:
-                raise ValueError("agent_final_input_reference_unknown")
-            available.add(step["name"])
-        self.state["frozen"] = candidates
-        self.state["phase"] = "final_evaluation"
-        self.checkpoint()
-
-    def finalize(self):
-        for template in self.config["final_evaluation"]:
-            name = template["name"]
-            if name in self.completed_final_steps():
-                continue
-            if not self.poll_control():
-                return False
-            if not self.budget_available(experiment=True):
-                return False
-            action = AgentAction(
-                kind="tool", tool=name, summary=template["description"]
-            )
-            event = self.execute(action, final_template=template)
-            if event is None:
-                return False
-            if event["result"]["status"] != "completed":
-                self.state["status"] = "final_evaluation_failed"
-                return False
-        self.state["phase"] = "reporting"
-        self.checkpoint()
-        return True
-
     def handle_decision(self, action):
         event, _ = self.new_event(action, experiment=False)
         try:
@@ -601,12 +466,8 @@ class _Runner:
                 self.state.update(
                     status="waiting_for_user", pending_question=action.summary
                 )
-            elif action.kind == "freeze":
-                self.freeze(action)
             elif action.kind == "finish":
-                arguments = _strict_config(
-                    action.arguments(), set(), {"outcome", "claims"}
-                )
+                arguments = _strict_config(action.arguments(), set(), {"claims"})
                 claims = arguments.get("claims", [])
                 if type(claims) is not list:
                     raise ValueError("agent_claims_must_be_list")
@@ -628,12 +489,6 @@ class _Runner:
                         raise ValueError("agent_claim_value_must_be_numeric_or_null")
                     if claim["value"] != metrics[claim["metric"]]:
                         raise ValueError("agent_claim_value_mismatch")
-                if (
-                    self.state["phase"] == "development"
-                    and self.config.get("final_evaluation")
-                    and arguments.get("outcome") != "no_candidate"
-                ):
-                    raise ValueError("agent_freeze_before_final_conclusion")
                 self.state["conclusion"] = {
                     "text": action.summary,
                     "evidence": action.evidence,
@@ -650,8 +505,6 @@ class _Runner:
             while self.state["status"] == "running":
                 if not self.poll_control():
                     break
-                if self.state["phase"] == "final_evaluation" and not self.finalize():
-                    break
                 if not self.budget_available(request=True):
                     break
                 messages, _ = context_messages(self.state)
@@ -665,20 +518,6 @@ class _Runner:
                     event, _ = self.new_event(action, experiment=False)
                     self.finish_event(
                         event, {"status": "superseded", "reason": "new_user_steering"}
-                    )
-                    continue
-                if self.state["phase"] == "reporting" and not (
-                    action.kind == "finish"
-                    or action.kind == "tool"
-                    and action.tool in {"lookup", "compare"}
-                ):
-                    event, _ = self.new_event(action, experiment=False)
-                    self.finish_event(
-                        event,
-                        {
-                            "status": "failed",
-                            "reason": "agent_only_report_allowed_after_final",
-                        },
                     )
                     continue
                 if action.kind == "tool":

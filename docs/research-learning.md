@@ -256,7 +256,7 @@ Python 仍可用 `backtest_policy(config, portfolio_context=provider)` 注入已
 
 `apply-formula` 读取冻结的搜索结果，在晚于选择截止的 `output_window` 发布
 `discovered_factor`。`input_window` 可以包含更早的滚动预热历史，输出只保留请求窗口。
-搜索和多轮 agent 调整都属于开发过程，验证成绩不能当作未经选型的测试证据。
+搜索和多轮 Agent 调整都属于假设或参数选择过程，验证成绩不能当作未经选型的测试证据。
 
 ## 不确定性估计
 
@@ -295,7 +295,7 @@ Python 仍可用 `backtest_policy(config, portfolio_context=provider)` 注入已
 
 ## 独立研究 Agent
 
-使用 `qrp agent` 启动或恢复量化研究会话。完整的配置、工具、交互、记忆、冻结评价和报告约定见 [Agent 文档](agent.md)；示例为 `configs/research-learning/agent.json`。
+使用 `qrp agent` 启动或恢复量化研究会话。完整的配置、工具、交互、记忆和报告约定见 [Agent 文档](agent.md)；示例为 `configs/research-learning/agent.json`。
 
 ## 服务器隔离环境
 

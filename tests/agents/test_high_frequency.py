@@ -56,18 +56,6 @@ def test_hft_fit_evaluate_backtest_and_inventory_use_native_artifacts(tmp_path):
         **{"daily_" + name: path for name, path in account["daily_inputs"].items()},
     }
     window = {"start": "2024-01-03", "end": "2024-01-03"}
-    protocol = {
-        "label": "label",
-        "train_window": {"start": "2024-01-02", "end": "2024-01-02"},
-        "validation_window": window,
-        "test_window": {"start": "2024-01-04", "end": "2024-01-04"},
-        "costs": {
-            "initial_capital": 5000.0,
-            "minimum_commission": 0.0,
-            "fee_schedule": "input:fees",
-        },
-        "metric": "rank_ic",
-    }
     fit = {
         "market_id": "a_share",
         "inputs": "input:source",
@@ -76,7 +64,7 @@ def test_hft_fit_evaluate_backtest_and_inventory_use_native_artifacts(tmp_path):
             "model_id": "hft_linear",
             "model_algorithm": "linear_regression",
             "input_factor_columns": ["x"],
-            "target_column": "protocol:label",
+            "target_column": "label",
             "random_seed": 1,
         },
         "fit_windows": [{"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:06"}],
@@ -87,7 +75,7 @@ def test_hft_fit_evaluate_backtest_and_inventory_use_native_artifacts(tmp_path):
         "inputs": "input:source",
         "predictions": {"linear": ["artifact:e0002/"]},
         "factor_columns": [],
-        "label": "protocol:label",
+        "label": "label",
         "window": window,
         "cutoff": "2024-01-03T23:59:59",
         "sessions": ["2024-01-03"],
@@ -108,7 +96,7 @@ def test_hft_fit_evaluate_backtest_and_inventory_use_native_artifacts(tmp_path):
     backtest = {
         "panel": "input:quotes",
         "predictions": ["artifact:e0002/"],
-        "fee_schedule": "protocol:costs.fee_schedule",
+        "fee_schedule": "input:fees",
         "daily_inputs": {
             name: "input:daily_" + name for name in account["daily_inputs"]
         },
@@ -188,7 +176,6 @@ def test_hft_fit_evaluate_backtest_and_inventory_use_native_artifacts(tmp_path):
     root = run_agent(
         {
             "question": "Compare the high-frequency model with holding.",
-            "protocol": protocol,
             "tools": {},
             "inputs": attached,
             "budget": {"max_requests": 10, "max_experiments": 8, "wall_seconds": 300},

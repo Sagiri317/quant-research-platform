@@ -21,21 +21,13 @@ class ScriptedClient:
 
 def agent_config(tmp_path):
     learning_panel(tmp_path / "input")
-    protocol = {
-        "label": "label",
-        "train_window": {"start": "2020-01-01", "end": "2020-01-03"},
-        "validation_window": {"start": "2020-01-05", "end": "2020-01-07"},
-        "test_window": {"start": "2020-01-20", "end": "2020-01-30"},
-        "costs": {},
-        "metric": "validation_rank_ic",
-    }
     search = {
         "dataset": str(tmp_path / "input"),
         "columns": ["x"],
         "baseline_columns": [],
-        "label": "protocol:label",
-        "train_window": "protocol:train_window",
-        "validation_window": "protocol:validation_window",
+        "label": "label",
+        "train_window": {"start": "2020-01-01", "end": "2020-01-03"},
+        "validation_window": {"start": "2020-01-05", "end": "2020-01-07"},
         "train_cutoff": "2020-01-04",
         "selection_cutoff": "2020-01-08",
         "method": "random",
@@ -61,7 +53,7 @@ def agent_config(tmp_path):
         },
         "apply": {
             "operation": "apply-formula",
-            "description": "Apply a frozen search result to later development rows.",
+            "description": "Apply a frozen search result to later rows.",
             "config": {
                 "search": "bound_by_runner",
                 "dataset": str(tmp_path / "input"),
@@ -76,7 +68,6 @@ def agent_config(tmp_path):
     }
     return {
         "question": "Compare declared causal formulas.",
-        "protocol": protocol,
         "tools": tools,
         "budget": {"max_requests": 4, "max_experiments": 3, "wall_seconds": 60},
         "output": str(tmp_path / "agent"),

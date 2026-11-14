@@ -114,7 +114,6 @@ def test_direct_chat_waits_for_input_and_carries_completed_turn_into_followup(
     if configured:
         config.update(
             question="",
-            protocol=None,
             workspace=str(tmp_path),
         )
         config.pop("documents")
@@ -301,7 +300,7 @@ def test_chat_answer_renders_markdown_instead_of_printing_source(tmp_path, capsy
 
 def test_configured_chat_requires_a_new_output_directory(tmp_path):
     config = agent_config(tmp_path)
-    config.update(question="", protocol=None, tools={}, workspace=str(tmp_path))
+    config.update(question="", tools={}, workspace=str(tmp_path))
     root = tmp_path / "agent"
     root.mkdir()
     marker = root / "conversation.json"

@@ -6,10 +6,9 @@ import json
 import re
 from pathlib import Path
 
-from quant_research_platform.agents.protocol import OPERATIONS
+from quant_research_platform.agents.config import OPERATIONS
 from quant_research_platform.agents.session import (
     evidence_record,
-    final_evaluation_status,
     replace_json,
 )
 from quant_research_platform.contracts.json_codec import (
@@ -76,24 +75,13 @@ def lookup(arguments, state):
                     continue
                 text = ast.get_docstring(command) or name
                 if arguments.get("key") == name:
-                    examples = parse_qrp_json_object(
-                        (
-                            package.parents[1] / "configs/research-learning/agent.json"
-                        ).read_bytes()
-                    )
-                    templates = [
-                        *examples["tools"].values(),
-                        *examples.get("final_evaluation", []),
-                    ]
-                    example = next(
-                        (item for item in templates if item["operation"] == name), None
-                    )
-                    if example is not None:
+                    for example in sorted(
+                        (package.parents[1] / "configs").glob(f"{name}*.json")
+                    ):
                         text += (
-                            "\nExample template for research.config. "
-                            "Replace bindings with artifact: references. "
-                            "Example paths, labels and dates are not task inputs.\n"
-                            + json.dumps(example, ensure_ascii=False, indent=2)
+                            f"\nNative config example: {example.name}. "
+                            "Paths and dates are examples, not task inputs.\n"
+                            + example.read_text(encoding="utf-8")
                         )
                     binding = next(
                         node
@@ -216,8 +204,6 @@ def remember(arguments, state, identifier):
             },
         },
         "question": state["public"]["question"],
-        "protocol": state["public"]["protocol"],
-        "final_evaluation_status": final_evaluation_status(state),
         "finding": sanitize_shared_text(arguments["text"]),
         "evidence": [evidence_record(events[key]) for key in arguments["evidence"]],
     }

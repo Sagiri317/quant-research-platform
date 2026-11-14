@@ -25,7 +25,6 @@ def workspace_config(tmp_path):
     config = agent_config(tmp_path)
     config.update(
         workspace=str(tmp_path),
-        protocol=None,
         tools={},
         inputs={},
         web_search=True,
@@ -50,7 +49,7 @@ def state_and_event(tmp_path):
     return {"config": config, "events": [{"id": root.name}]}, root
 
 
-def test_default_inventory_needs_no_protocol_or_manual_binding(tmp_path):
+def test_default_inventory_reads_workspace_without_manual_binding(tmp_path):
     config = workspace_config(tmp_path)
     data = tmp_path / "data/raw"
     data.mkdir(parents=True)
@@ -81,7 +80,6 @@ def test_default_inventory_needs_no_protocol_or_manual_binding(tmp_path):
     assert set(pinned["builtin_tools"]) == set(TOOLS) == {"read", "search", "terminal"}
     assert pinned["runtime"]["model"] == "configured-model"
     assert "operations" not in pinned
-    assert state["config"]["protocol"] is None
 
 
 def test_paths_are_local_and_secret_files_are_not_readable(tmp_path):
@@ -442,11 +440,11 @@ def test_factor_mining_runs_native_source_through_local_terminal(tmp_path):
     other.mkdir()
     agent_config_template = native_config(other)
     search = agent_config_template["tools"]["search"]["config"]
-    protocol = agent_config_template["protocol"]
+    search = agent_config_template["tools"]["search"]["config"]
     search.update(
         label="label",
-        train_window=protocol["train_window"],
-        validation_window=protocol["validation_window"],
+        train_window=search["train_window"],
+        validation_window=search["validation_window"],
         expressions=["x", "-x"],
         budget=2,
     )

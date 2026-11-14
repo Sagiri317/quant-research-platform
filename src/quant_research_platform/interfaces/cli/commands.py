@@ -377,7 +377,6 @@ def agent(
         _echo_result(
             {
                 "status": state["status"],
-                "phase": state["phase"],
                 "pending_question": state["pending_question"],
                 **usage_summary(state),
             }

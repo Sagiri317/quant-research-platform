@@ -7,7 +7,6 @@ import pytest
 from quant_research_platform.agents.runner import resume_agent, run_agent
 from quant_research_platform.agents.session import (
     context_messages,
-    final_evaluation_status,
     read_session,
 )
 from quant_research_platform.storage.datasets import read_dataset
@@ -99,7 +98,7 @@ def test_pause_resume_reuses_successful_artifact_without_rerunning(tmp_path):
     assert "Keep the original formula" in client.messages[0]
 
 
-def test_question_waits_for_answer_and_keeps_protocol(tmp_path):
+def test_question_waits_for_answer_and_keeps_native_configuration(tmp_path):
     config = agent_config(tmp_path)
     root = run_agent(
         config,
@@ -120,7 +119,7 @@ def test_question_waits_for_answer_and_keeps_protocol(tmp_path):
         root, message="Test whether positive momentum persists.", client=client
     )
     state = read_session(root)
-    assert state["public"]["protocol"] == config["protocol"]
+    assert state["config"]["tools"] == config["tools"]
     assert "positive momentum" in client.messages[0]
     assert state["pending_question"] is None
 
@@ -160,80 +159,26 @@ def test_new_steering_supersedes_an_unexecuted_model_action(tmp_path):
     assert "Stop exploration" in client.messages[1]
 
 
-def final_config(tmp_path):
+def test_lookup_pages_omitted_evidence(tmp_path):
     config = agent_config(tmp_path)
-    apply = config["tools"].pop("apply")
-    apply.pop("bindings")
-    apply["name"] = "final_formula"
-    apply["config"]["search"] = "artifact:candidate"
-    apply["config"]["output_window"] = "protocol:test_window"
-    config["protocol"]["test_window"] = {"start": "2020-01-10", "end": "2020-01-12"}
-    config["final_evaluation"] = [apply]
-    config["budget"]["max_requests"] = 5
-    return config
-
-
-def test_freeze_runs_native_final_step_and_forbids_further_tuning(tmp_path):
-    config = final_config(tmp_path)
-    client = ScriptedClient(
-        [
-            call("search", parameters={"expressions": ["x", "-x"]}),
-            {
-                "kind": "freeze",
-                "summary": "Freeze positive x after development comparison.",
-                "arguments_json": '{"candidates":{"candidate":"e0001"}}',
-                "evidence": ["e0001"],
-            },
-            call("search", parameters={"expressions": ["-x"]}),
-            {
-                "kind": "finish",
-                "summary": (
-                    "The fixed formula was applied; association is not a return "
-                    "guarantee."
-                ),
-                "evidence": ["e0001", "e0003"],
-            },
-        ]
-    )
-    root = run_agent(config, client=client)
-    state = read_session(root)
-    assert state["phase"] == "reporting"
-    assert state["status"] == "completed"
-    assert final_evaluation_status(state) == "completed"
-    assert state["events"][2]["action"]["tool"] == "final_formula"
-    assert (
-        state["events"][3]["result"]["reason"]
-        == "agent_only_report_allowed_after_final"
-    )
-    assert (
-        read_dataset(root / "e0003/result").discovered_factor.tolist()
-        == [1.0, 2.0, 3.0] * 3
-    )
-    with pytest.raises(ValueError, match="completed_session"):
-        resume_agent(
-            root, message="Try the opposite formula.", client=ScriptedClient([])
-        )
-
-
-def test_reporting_can_page_omitted_evidence_without_reopening_development(tmp_path):
-    config = final_config(tmp_path)
-    config["budget"]["max_context_chars"] = 10000
+    config["budget"].update(max_requests=5, max_context_chars=10000)
     search = call("search")
     search["summary"] = "Compare the candidate to the baseline. " * 400
-    actions = [
-        search,
-        {
-            "kind": "freeze",
-            "summary": "Freeze the development formula.",
-            "arguments_json": '{"candidates":{"candidate":"e0001"}}',
-        },
-        call("lookup", scope="evidence", query="", key="e0001", page_size=512),
-        call(
-            "lookup", scope="evidence", query="", key="e0001", offset=512, page_size=512
-        ),
-        finish(),
-    ]
-    client = ScriptedClient(actions)
+    client = ScriptedClient(
+        [
+            search,
+            call("lookup", scope="evidence", query="", key="e0001", page_size=512),
+            call(
+                "lookup",
+                scope="evidence",
+                query="",
+                key="e0001",
+                offset=512,
+                page_size=512,
+            ),
+            finish(),
+        ]
+    )
     root = run_agent(config, client=client)
     state = read_session(root)
     original = state["events"][0]
@@ -244,9 +189,8 @@ def test_reporting_can_page_omitted_evidence_without_reopening_development(tmp_p
     _, omitted = context_messages(state)
     assert omitted > 0
     for offset, event, message in zip(
-        (0, 512), state["events"][3:5], client.messages[3:5], strict=True
+        (0, 512), state["events"][1:3], client.messages[2:4], strict=True
     ):
-        assert event["phase"] == "reporting"
         assert event["result"]["status"] == "completed"
         assert event["result"]["text"] == text[offset : offset + 512]
         assert event["result"]["next_offset"] == offset + 512
@@ -254,15 +198,14 @@ def test_reporting_can_page_omitted_evidence_without_reopening_development(tmp_p
         assert received["result"]["text"] == event["result"]["text"]
 
 
-def test_negative_research_can_finish_without_final_evaluation(tmp_path):
-    config = final_config(tmp_path)
+def test_undefined_formula_remains_a_negative_research_result(tmp_path):
+    config = agent_config(tmp_path)
     client = ScriptedClient(
         [
             call("search", parameters={"expressions": ["x/(x-x)"]}),
             {
                 "kind": "finish",
                 "summary": "The proposed formula was undefined.",
-                "arguments_json": '{"outcome":"no_candidate"}',
                 "evidence": ["e0001"],
             },
         ]
@@ -272,8 +215,6 @@ def test_negative_research_can_finish_without_final_evaluation(tmp_path):
     root = run_agent(config, client=client)
     state = read_session(root)
     assert state["events"][0]["result"]["metrics"] == {"score": None}
-    assert final_evaluation_status(state) == "not_started"
-    assert "holdout_viewed" not in state
     assert state["status"] == "completed"
     assert (root / "report.md").read_text(encoding="utf-8").count(
         "The proposed formula was undefined."
@@ -390,7 +331,7 @@ def test_completed_research_memory_links_evidence_and_can_be_retrieved(tmp_path)
     root = run_agent(config, client=ScriptedClient([call("search"), finish()]))
     memory = json.loads(next((tmp_path / "memory").glob("*.json")).read_text())
     assert memory["evidence"][0]["metrics"] == {"score": 1.0}
-    assert memory["protocol"] == config["protocol"]
+    assert memory["question"] == config["question"]
     assert memory["session"] == read_session(root)["id"]
     assert memory["local_source"]["root"] == str(root)
     assert (root / memory["local_source"]["artifacts"]["e0001"]).is_file()
@@ -407,37 +348,30 @@ def test_completed_research_memory_links_evidence_and_can_be_retrieved(tmp_path)
     assert "local_source" not in json.dumps(read_session(second)["events"][0]["result"])
 
 
-def test_interrupted_final_step_resumes_without_duplicate_computation(tmp_path):
+def test_interrupted_native_step_resumes_without_repeating(tmp_path):
     def interrupt_after_saved_result(event):
-        if event["tool"] == "final_formula":
+        if event["tool"] == "apply":
             raise KeyboardInterrupt
 
     root = run_agent(
-        final_config(tmp_path),
+        agent_config(tmp_path),
         client=ScriptedClient(
-            [
-                call("search"),
-                {
-                    "kind": "freeze",
-                    "summary": "Freeze the development formula.",
-                    "arguments_json": '{"candidates":{"candidate":"e0001"}}',
-                },
-            ]
+            [call("search"), call("apply", inputs={"search": "e0001"})]
         ),
         on_event=interrupt_after_saved_result,
     )
     assert read_session(root)["status"] == "paused"
-    before = (root / "e0003/result/spec.json").read_bytes()
     resume_agent(root, client=ScriptedClient([finish()]))
     state = read_session(root)
     assert state["status"] == "completed"
+    assert len([e for e in state["events"] if e["action"]["tool"] == "apply"]) == 1
     assert (
-        len([e for e in state["events"] if e["action"]["tool"] == "final_formula"]) == 1
+        read_dataset(root / "e0002/result").discovered_factor.tolist()
+        == [1.0, 2.0, 3.0] * 3
     )
-    assert (root / "e0003/result/spec.json").read_bytes() == before
 
 
-def test_interrupted_unrecorded_final_output_retries_same_frozen_config(
+def test_interrupted_unrecorded_output_allows_explicit_native_retry(
     tmp_path, monkeypatch
 ):
     from quant_research_platform.agents import runner
@@ -448,43 +382,34 @@ def test_interrupted_unrecorded_final_output_retries_same_frozen_config(
     def interrupt_after_output(template, *args, **kwargs):
         nonlocal interrupted
         result = native(template, *args, **kwargs)
-        if template.get("name") == "final_formula" and not interrupted:
+        if template["operation"] == "apply-formula" and not interrupted:
             interrupted = True
             raise KeyboardInterrupt
         return result
 
     monkeypatch.setattr(runner, "run_native", interrupt_after_output)
     root = run_agent(
-        final_config(tmp_path),
+        agent_config(tmp_path),
         client=ScriptedClient(
-            [
-                call("search"),
-                {
-                    "kind": "freeze",
-                    "summary": "Freeze the development formula.",
-                    "arguments_json": '{"candidates":{"candidate":"e0001"}}',
-                },
-            ]
+            [call("search"), call("apply", inputs={"search": "e0001"})]
         ),
     )
-    state = read_session(root)
-    assert state["status"] == "paused"
-    assert final_evaluation_status(state) == "interrupted"
-    original = (root / "e0003/result/spec.json").read_bytes()
-    resume_agent(root, client=ScriptedClient([finish()]))
+    assert read_session(root)["status"] == "paused"
+    resume_agent(
+        root,
+        client=ScriptedClient([call("apply", inputs={"search": "e0001"}), finish()]),
+    )
     state = read_session(root)
     assert state["status"] == "completed"
-    assert final_evaluation_status(state) == "completed"
-    before = json.loads((root / "e0003/config.json").read_bytes())
-    after = json.loads((root / "e0004/config.json").read_bytes())
-    assert before.pop("output") != after.pop("output")
-    assert before == after
-    assert (root / "e0003/result/spec.json").read_bytes() == original
-    assert (root / "e0004/result/spec.json").read_bytes() == original
-    assert [item["result"]["status"] for item in state["events"][2:4]] == [
+    assert [e["result"]["status"] for e in state["events"][1:3]] == [
         "interrupted",
         "completed",
     ]
+    for evidence in ("e0002", "e0003"):
+        assert (
+            read_dataset(root / evidence / "result").discovered_factor.tolist()
+            == [1.0, 2.0, 3.0] * 3
+        )
 
 
 def test_completed_session_can_finish_memory_publication_after_io_failure(tmp_path):

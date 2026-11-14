@@ -17,10 +17,10 @@ from quant_research_platform.contracts.json_codec import (
 
 
 class AgentAction(BaseModel):
-    """One tool call, question, frozen selection or evidence-backed conclusion."""
+    """One tool call, question, evidence-backed conclusion."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
-    kind: Literal["tool", "ask_user", "freeze", "finish"]
+    kind: Literal["tool", "ask_user", "finish"]
     tool: str | None = None
     arguments_json: str = "{}"
     summary: str = Field(
@@ -61,7 +61,7 @@ class _ToolAction(AgentAction):
 
 
 class _ControlAction(AgentAction):
-    kind: Literal["ask_user", "freeze", "finish"]
+    kind: Literal["ask_user", "finish"]
     tool: None = None
 
 

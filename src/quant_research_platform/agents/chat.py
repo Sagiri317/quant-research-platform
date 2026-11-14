@@ -13,12 +13,12 @@ from rich.markdown import Markdown
 from rich.table import Table
 from rich.text import Text
 
-from quant_research_platform.agents.execution import error_feedback
-from quant_research_platform.agents.protocol import (
+from quant_research_platform.agents.config import (
     OPERATIONS,
     dataset_context,
     validate_budget,
 )
+from quant_research_platform.agents.execution import error_feedback
 from quant_research_platform.agents.runner import resume_agent, run_agent
 from quant_research_platform.agents.session import (
     read_session,
@@ -61,7 +61,6 @@ def chat_status(root):
     )
     return {
         "status": state["status"] if state else "ready",
-        "phase": state["phase"] if state else None,
         "pending_question": state["pending_question"] if state else None,
         "waiting_for_model": running,
         "inputs": list(config.get("inputs", {})),
@@ -82,11 +81,7 @@ class _Terminal:
             resumed is None or (resumed / "conversation.json").is_file()
         )
         if config is not None:
-            self.conversation = (
-                config["protocol"] is None
-                and not config["question"]
-                and "workspace" in config
-            )
+            self.conversation = not config["question"] and "workspace" in config
         if self.conversation:
             if resumed is not None:
                 self.config = read_qrp_json_file(resumed / "conversation.json")[1]
@@ -109,7 +104,6 @@ class _Terminal:
                 self.config["documents"] = deepcopy(profile.get("documents", {}))
                 self.config.update(
                     question="",
-                    protocol=None,
                     tools={},
                     inputs={},
                     workspace=str(Path.cwd()),
@@ -175,7 +169,6 @@ class _Terminal:
             )
             self.emit(
                 f"当前：{current}；任务：{status['status']}；"
-                f"阶段：{status['phase'] or '尚未开始'}\n"
                 f"本轮请求：{status.get('requests', 0)}；"
                 f"实验：{status.get('experiments', 0)}；"
                 f"对话累计请求：{status['total_usage'].get('requests', 0)}；"

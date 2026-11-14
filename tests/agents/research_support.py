@@ -1,6 +1,5 @@
 """A small daily research task using native factors, models and share accounting."""
 
-from copy import deepcopy
 from dataclasses import asdict
 
 import pandas as pd
@@ -51,8 +50,8 @@ def daily_research_config(root):
     )
     train = {"start": "2022-12-01", "end": "2022-12-05"}
     validation = {"start": "2022-12-07", "end": "2022-12-08"}
-    development = {"start": "2022-12-29", "end": "2023-01-03"}
-    test = {"start": "2023-01-04", "end": "2023-01-06"}
+    historical = {"start": "2022-12-29", "end": "2023-01-03"}
+    prediction = {"start": "2023-01-04", "end": "2023-01-06"}
     costs = asdict(
         ExecutionAssumptions(100000.0, 0.0, 0.0, 1.0, (1.0,), minimum_commission=0.0)
     )
@@ -88,9 +87,9 @@ def daily_research_config(root):
             "dataset": str(source),
             "columns": ["x"],
             "baseline_columns": [],
-            "label": "protocol:label",
-            "train_window": "protocol:train_window",
-            "validation_window": "protocol:validation_window",
+            "label": "label",
+            "train_window": train,
+            "validation_window": validation,
             "train_cutoff": "2022-12-06",
             "selection_cutoff": "2022-12-09",
             "method": "random",
@@ -115,14 +114,14 @@ def daily_research_config(root):
     tools["apply"] = tool(
         "apply-formula",
         (
-            "Apply the frozen discovery formula to later development dates. "
+            "Apply the frozen discovery formula to later dates. "
             "Bind search to the search evidence."
         ),
         {
             "search": "bound",
             "dataset": str(source),
-            "input_window": {"start": "2022-12-01", "end": "2023-01-03"},
-            "output_window": {"start": "2022-12-12", "end": "2023-01-03"},
+            "input_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "output_window": {"start": "2022-12-12", "end": "2023-01-06"},
             "output": "assigned",
         },
         bindings={"search": ""},
@@ -148,7 +147,7 @@ def daily_research_config(root):
             "label_columns": ["label"],
             "filter_columns": ["eligible"],
             "context_columns": ["float_market_cap", "total_market_cap"],
-            "time_window": {"start": "2022-12-12", "end": "2023-01-03"},
+            "time_window": {"start": "2022-12-12", "end": "2023-01-06"},
             "output_root": "assigned",
         },
         bindings={"inputs.formula.path": ""},
@@ -156,16 +155,16 @@ def daily_research_config(root):
     tools["evaluate"] = tool(
         "evaluate",
         (
-            "Compare candidate and baseline on later development days; "
+            "Compare candidate and baseline on historical observation days; "
             "inspect their separate IC and coverage. Bind inputs to "
             "assembled evidence."
         ),
         {
             "inputs": "bound",
             "output": "assigned",
-            "window": development,
+            "window": historical,
             "cutoff": "2023-01-03T18:00:00",
-            "sample_role": "development",
+            "sample_role": "evaluation",
             "evaluation": {
                 "evaluation_id": "agent_factors",
                 "market_id": "a_share",
@@ -187,6 +186,10 @@ def daily_research_config(root):
             },
         },
         bindings={"inputs": ""},
+        parameters={
+            "window": "Explicit evaluation window.",
+            "cutoff": "Actual label maturity cutoff.",
+        },
         metrics={
             "candidate_ic": metric(
                 "ic", "metrics.parquet", [["signal", "==", "candidate"]]
@@ -219,12 +222,12 @@ def daily_research_config(root):
         {
             "dataset": "bound",
             "output": "assigned",
-            "window": development,
+            "window": historical,
             "label_cutoff": "2023-01-03T18:00:00",
             "analyses": ["rank_ic"],
             "evaluation": {
                 "factors": ["x", "discovered_factor"],
-                "primary_label": "protocol:label",
+                "primary_label": "label",
             },
             "statistics": {
                 "hac_lag": 0,
@@ -250,8 +253,8 @@ def daily_research_config(root):
         "fit",
         (
             "Fit a candidate on Dec 12-23 only, after formula discovery. "
-            "Bind inputs to assembled evidence; the later development and "
-            "final dates remain excluded."
+            "Bind inputs to assembled evidence; later prediction dates remain "
+            "excluded."
         ),
         {
             "market_id": "a_share",
@@ -269,7 +272,7 @@ def daily_research_config(root):
                 "hyperparameters": {},
                 "random_seed": 1,
                 "training_scaling": True,
-                "target_column": "protocol:label",
+                "target_column": "label",
             },
         },
         bindings={"inputs": ""},
@@ -283,15 +286,15 @@ def daily_research_config(root):
     tools["predict"] = tool(
         "predict",
         (
-            "Predict on the later development dates. Bind model to "
+            "Predict on the later dates. Bind model to "
             "fitted-model evidence and inputs to assembled evidence."
         ),
         {
             "model": "bound",
             "inputs": "bound",
             "output": "assigned",
-            "prediction_window": development,
-            "sample_role": "development",
+            "prediction_window": prediction,
+            "sample_role": "evaluation",
         },
         bindings={"model": "", "inputs": ""},
     )
@@ -307,7 +310,7 @@ def daily_research_config(root):
         {
             "candidate": {
                 "candidate_id": "agent_candidate",
-                "selection_group": "global",
+                "selection_group": "agent_candidate",
                 "construction": "quantile_equal_weight",
                 "prediction_selector": "champion",
                 "top_quantile": 0.5,
@@ -315,85 +318,35 @@ def daily_research_config(root):
                 "benchmark_id": None,
             },
             "inputs": market,
-            "predictions": [{"path": "bound", "window": development}],
+            "predictions": [{"path": "bound", "window": prediction}],
             "output": "assigned",
-            "output_window": development,
-            "input_window": {"start": "2022-12-01", "end": "2023-01-03"},
-            "formal_dataset_window": {"start": "2022-12-01", "end": "2023-01-03"},
-            "prediction_window": development,
+            "output_window": prediction,
+            "input_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "formal_dataset_window": {"start": "2022-12-01", "end": "2023-01-06"},
+            "prediction_window": prediction,
             "assumptions": costs,
-            "sample_role": "development",
+            "sample_role": "evaluation",
         },
         bindings={"predictions.0.path": ""},
         metrics={name: metric(name) for name in ("net_pnl", "fees", "nav")},
     )
-    final = []
-    for name in ("apply", "assemble", "evaluate", "statistics", "predict", "backtest"):
-        step = deepcopy(tools[name])
-        step.update(name="final_" + name, parameters={}, bindings={})
-        final.append(step)
-    final[0]["config"].update(
-        search="artifact:formula",
-        input_window={"start": "2022-12-01", "end": "2023-01-06"},
-        output_window="protocol:test_window",
-    )
-    final[1]["config"]["inputs"]["formula"]["path"] = "artifact:final_apply"
-    final[1]["config"]["time_window"] = "protocol:test_window"
-    for step in final[2:4]:
-        key = "inputs" if step["operation"] == "evaluate" else "dataset"
-        step["config"][key] = "artifact:final_assemble"
-        step["config"]["window"] = "protocol:test_window"
-        step["config"]["cutoff" if key == "inputs" else "label_cutoff"] = "2023-01-09"
-        step["config"]["sample_role"] = "test"
-    final[4]["config"].update(
-        model="artifact:model",
-        inputs="artifact:final_assemble",
-        prediction_window="protocol:test_window",
-        sample_role="test",
-    )
-    final[5]["config"].update(
-        predictions=[
-            {"path": "artifact:final_predict", "window": "protocol:test_window"}
-        ],
-        output_window="protocol:test_window",
-        prediction_window="protocol:test_window",
-        input_window={"start": "2022-12-01", "end": "2023-01-06"},
-        formal_dataset_window={"start": "2022-12-01", "end": "2023-01-06"},
-        sample_role="test",
-    )
-    final.append(
+    tools["curve"] = tool(
+        "plot",
+        "Render the native account curve.",
         {
-            "name": "final_curve",
-            "operation": "plot",
-            "description": "Render the final account curve from the native ledger.",
-            "parameters": {},
-            "metrics": {},
-            "config": {
-                "kind": "curve",
-                "inputs": "artifact:final_backtest",
-                "output": "curve.png",
-                "timezone": "Asia/Shanghai",
-                "sample_role": "test",
-            },
-        }
+            "kind": "curve",
+            "inputs": "bound",
+            "output": "curve.png",
+            "timezone": "Asia/Shanghai",
+        },
+        bindings={"inputs": ""},
     )
     return {
         "question": (
-            "Compare a proposed rank formula against x, inspect statistics, "
-            "fit and backtest with actual fees, then freeze formula and "
-            "model for the final sample. Preserve the deliberately negative "
-            "final result."
+            "Compare formula and baseline ranks, native inference and "
+            "later fee-adjusted account results."
         ),
-        "protocol": {
-            "label": "label",
-            "train_window": train,
-            "validation_window": validation,
-            "test_window": test,
-            "costs": costs,
-            "metric": "candidate_ic",
-        },
         "tools": tools,
-        "final_evaluation": final,
         "budget": {"max_requests": 20, "max_experiments": 20, "wall_seconds": 180},
         "output": str(root / "agent"),
         "llm": {},

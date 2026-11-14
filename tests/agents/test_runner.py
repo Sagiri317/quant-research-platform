@@ -3,7 +3,7 @@ from dataclasses import replace
 import pandas as pd
 import pytest
 
-from quant_research_platform.agents.protocol import dataset_context
+from quant_research_platform.agents.config import dataset_context
 from quant_research_platform.agents.runner import run_agent
 from quant_research_platform.agents.session import read_session
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
@@ -52,7 +52,7 @@ def test_agent_real_cli_dynamic_binding_and_numerical_feedback(tmp_path):
     assert "PRIVATE_SENTINEL" not in "\n".join(client.messages)
 
 
-def test_agent_retains_failed_attempt_and_rejects_holdout_and_protocol_changes(
+def test_agent_retains_undeclared_parameter_failure(
     tmp_path,
 ):
     config = agent_config(tmp_path)
@@ -71,13 +71,6 @@ def test_agent_retains_failed_attempt_and_rejects_holdout_and_protocol_changes(
     report = parse_qrp_json_object((root / "report.json").read_bytes())
     assert report["experiments"][0]["status"] == "failed"
     assert report["experiments"][0]["error"] == "ValueError"
-    config["tools"]["search"]["config"]["selection_cutoff"] = "2020-01-20"
-    with pytest.raises(ValueError, match="reaches_holdout"):
-        run_agent(config, client=client)
-    config["tools"]["search"]["config"]["selection_cutoff"] = "2020-01-08"
-    config["tools"]["search"]["config"]["label"] = "another_label"
-    with pytest.raises(ValueError, match="label_conflict"):
-        run_agent(config, client=client)
 
 
 def test_agent_budget_and_model_failure_are_recorded(tmp_path):
@@ -124,7 +117,6 @@ def test_sandbox_full_table_is_context_while_native_search_filters_maturity(tmp_
     config["sandbox"] = {"inputs": {"panel": str(tmp_path / "late-labels")}}
     config["tools"].pop("apply")
     config["tools"]["search"]["config"]["dataset"] = str(tmp_path / "late-labels")
-    config["protocol"]["test_window"] = {"start": "2020-01-10", "end": "2020-01-12"}
     client = ScriptedClient(
         [
             {"kind": "tool", "tool": "search", "summary": "Use only mature labels."},
@@ -145,9 +137,6 @@ def test_sandbox_full_table_is_context_while_native_search_filters_maturity(tmp_
     # The two reversed-label dates are immature; the retained date has equal ranks.
     assert state["events"][0]["result"]["metrics"] == {"score": 1.0}
     assert "label_available_at" in client.messages[0]
-    report = parse_qrp_json_object((root / "report.json").read_bytes())
-    assert report["final_evaluation_status"] == "not_started"
-    assert "holdout_viewed" not in report
 
 
 @pytest.mark.parametrize("empty", [False, True])

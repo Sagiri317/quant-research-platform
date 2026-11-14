@@ -40,7 +40,7 @@
 - `research.policies.cost_aware.fit_cost_model(config)` / `backtest_cost_model(config)`：连续权重训练近似与原生日频验证
 - `research.factors.search.search_factors(config)` / `apply_formula(config)`：训练域搜索、验证域选型与冻结应用
 - `research.predictions.uncertainty.calibrate_uncertainty(config)` / `apply_uncertainty(config)` / `evaluate_uncertainty(config)`：冻结残差区间及独立覆盖评价
-- `agents.runner.run_agent(config)` / `resume_agent(root)`：固定口径的研究会话、工具循环与冻结评价。`qrp agent` 默认连续对话使用宿主终端，具有当前用户的文件和网络权限；只有显式配置的 `python` 工具使用无网络容器，详见 [Agent 权限边界](agent.md#本地命令网络与复杂文件)。
+- `agents.runner.run_agent(config)` / `resume_agent(root)`：显式原生配置的研究会话、工具循环与任务恢复。`qrp agent` 默认连续对话使用宿主终端，具有当前用户的文件和网络权限；只有显式配置的 `python` 工具使用无网络容器，详见 [Agent 权限边界](agent.md#本地命令网络与复杂文件)。
 
 策略学习操作的配置、产物、单位与资源安排见[研究学习文档](research-learning.md)；Agent 的交互、记忆、报告及验证边界见[Agent 文档](agent.md)。
 宏观来源、决策时钟和因子见[宏观流动性](macro-liquidity.md)；微观结构、DeepLOB 和队列模型见[A 股高频](a-share-hft.md)。

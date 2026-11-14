@@ -67,7 +67,7 @@ def test_agent_still_requires_session_for_resume_options(options):
 
 def test_conversation_status_is_read_only_and_resume_uses_chat(tmp_path, monkeypatch):
     config = agent_config(tmp_path)
-    config.update(protocol=None, tools={}, inputs={})
+    config.update(tools={}, inputs={})
     workspace = tmp_path / "conversation"
     workspace.mkdir()
     config["output"] = str(workspace)
