@@ -205,14 +205,17 @@ PRED 只检查本次使用的数值收益、单位与时钟定义，以及消费
 都完整回放一次，以 episode 奖励总和的等权均值选最佳 checkpoint，同时保存该时点的训练
 归一化。`early_stopping={eval_freq,patience,min_evals}` 使用 SB3 的 `EvalCallback` 和
 `StopTrainingOnNoModelImprovement`：经过最少评估次数后，连续无提升次数**超过** patience
-才结束整个 `learn`。`eval_freq` 按总环境步数折算，末次更新也评价；`policy.json.validation`
+才结束整个 `learn`。`eval_freq` 按总环境步数折算，末次梯度更新也评价；
+已早停且权重及归一化未再更新时不重复回放。`policy.json.validation`
 保存评估成绩、选中步数与是否早停，`training_decisions` 保存实际首末决策和数量。
 `ppo.target_kl` 只限制单轮策略更新，不代替整段训练早停。
 
 [训练配置](../configs/research-learning/train-policy-etf-execution.json)和
 [冻结回放配置](../configs/research-learning/backtest-policy-etf-execution.json)以 518880 单 ETF
-账户为权威示例，其他证券由调用者替换，不复制四套配置。默认 CPU、小型两层 64 单元 MLP、
-2048 步 rollout、256 batch、学习率 0.0003；训练预算 200 万步并允许历史验证早停。
+账户为权威示例，其他证券由调用者替换，不复制四套配置。环境数、rollout、batch、
+学习率和训练预算统一在该配置调整；每轮收集 `n_envs * n_steps` 次交互，
+增加环境数也会改变每轮更新的样本量。验证频率按所有环境累计交互数计，
+不随环境数重复验证，也不裁剪验证窗口。
 参数是起点，不声称已经实证最优。保留同一任务的 `strategy="immediate"` 作为固定目标
 taker 基线：使用同一输入与目标策略，每次提交全部缺口；调用方仅更换策略、候选身份和输出。
 

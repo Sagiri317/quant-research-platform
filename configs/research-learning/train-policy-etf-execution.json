@@ -157,7 +157,7 @@
   "timesteps": 2000000,
   "seed": 42,
   "device": "cpu",
-  "n_envs": 1,
+  "n_envs": 8,
   "threads": 1,
   "ppo": {
     "n_steps": 2048,
