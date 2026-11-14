@@ -269,10 +269,11 @@ def fit_sequence(prepared, spec, validation=None):
 
     parameters = sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
     device = get_device(parameters["device"])
+    input_device = device if parameters["preload_inputs"] else "cpu"
     weights, scaler = prepared.preprocessing
     classification = spec.model_algorithm == "deeplob_classifier"
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
-    matrix = torch.from_numpy(matrix)
+    matrix = torch.as_tensor(matrix, device=input_device)
     target = prepared.training[spec.target_column].to_numpy(dtype="float64")
     mean = float(np.average(target, weights=weights))
     scale = float(np.sqrt(np.average((target - mean) ** 2, weights=weights))) or 1.0
@@ -302,7 +303,7 @@ def fit_sequence(prepared, spec, validation=None):
             ),
         )
         _, v_matrix, v_endpoints, v_starts = _sequence_arrays(validation, spec, scaler)
-        v_matrix = torch.from_numpy(v_matrix)
+        v_matrix = torch.as_tensor(v_matrix, device=input_device)
         v_target = validation.training[spec.target_column].to_numpy(dtype="float64")
         v_actual = (
             direction_classes(v_target, parameters["class_threshold"])
@@ -317,7 +318,9 @@ def fit_sequence(prepared, spec, validation=None):
         positions = ends[:, None] - lengths[:, None] + 1 + np.arange(int(lengths.max()))
         positions = np.minimum(positions, ends[:, None])
         predicted = network(
-            torch.as_tensor(values[torch.as_tensor(positions)], device=device),
+            torch.as_tensor(
+                values[torch.as_tensor(positions, device=values.device)], device=device
+            ),
             torch.as_tensor(lengths),
         )
         actual = torch.as_tensor(actual[selected], device=device)

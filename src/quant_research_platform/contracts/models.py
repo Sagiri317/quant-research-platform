@@ -134,6 +134,7 @@ def sequence_parameters(algorithm, parameters):
         "weight_decay": 0.0,
         "dropout": 0.0,
         "device": "cuda",
+        "preload_inputs": False,
     }
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
@@ -172,6 +173,8 @@ def sequence_parameters(algorithm, parameters):
     ):
         if type(defaults[name]) is not int or defaults[name] < 1:
             raise ValueError(f"sequence_parameter_invalid: {name}")
+    if type(defaults["preload_inputs"]) is not bool:
+        raise ValueError("sequence_parameter_invalid: preload_inputs")
     epochs = defaults["epochs"]
     if epochs is None:
         if defaults.get("early_stopping_rounds") is None:
@@ -490,6 +493,12 @@ def _resolve_candidate_parameters(algorithm, parameters, n_train):
 
 def compare_model_facts(facts, expected):
     """Compare the published recipe with a new refit or portfolio request."""
+
+    def scientific_parameters(parameters):
+        return {
+            key: value for key, value in parameters.items() if key != "preload_inputs"
+        }
+
     for key in (
         "market_id",
         "family_id",
@@ -499,9 +508,24 @@ def compare_model_facts(facts, expected):
         "input_units",
         "target_definition",
     ):
-        if facts.get(key) != expected.get(key):
+        actual, requested = facts.get(key), expected.get(key)
+        if key == "candidate_parameters":
+            actual, requested = (
+                scientific_parameters(actual),
+                scientific_parameters(requested),
+            )
+        if actual != requested:
             raise ValueError(f"model_scientific_facts_mismatch: {key}")
-    if facts["model"] != expected["model"]:
+    actual_model, requested_model = (
+        {
+            **source["model"],
+            "hyperparameters": scientific_parameters(
+                source["model"]["hyperparameters"]
+            ),
+        }
+        for source in (facts, expected)
+    )
+    if actual_model != requested_model:
         raise ValueError("model_scientific_facts_mismatch: model")
 
 

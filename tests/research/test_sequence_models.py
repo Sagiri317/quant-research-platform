@@ -5,11 +5,24 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config, input_spec
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_preload_inputs_requires_boolean(value):
+    with pytest.raises(ValueError, match="sequence_parameter_invalid: preload_inputs"):
+        ModelSpec(
+            model_id="lstm",
+            model_algorithm="lstm_regressor",
+            input_feature_columns=("x",),
+            target_column="label",
+            hyperparameters={"preload_inputs": value},
+        )
 
 
 @pytest.mark.parametrize(
@@ -101,8 +114,9 @@ def test_lstm_recurrent_dropout_preserves_packed_training_random_stream():
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
 @pytest.mark.parametrize("days", [[6, 7], [6, 9]])
+@pytest.mark.parametrize("preload_inputs", [False, True])
 def test_validation_loss_uses_observed_history_between_sample_windows(
-    tmp_path, algorithm, days
+    tmp_path, algorithm, days, preload_inputs
 ):
     inputs = data(tmp_path)
     frame = pd.read_parquet(inputs)
@@ -120,6 +134,7 @@ def test_validation_loss_uses_observed_history_between_sample_windows(
             "hidden_size": 4,
             "epochs": 1,
             "sequence_length": 3,
+            "preload_inputs": preload_inputs,
         },
     )
     config["validation"] = {
@@ -130,6 +145,9 @@ def test_validation_loss_uses_observed_history_between_sample_windows(
     }
     model_path = fit(config)
     result, _ = load_model(model_path)
+    assert (
+        result.metadata["resolved_hyperparameters"]["preload_inputs"] is preload_inputs
+    )
     predictions, _ = read_predictions(
         predict(
             {
@@ -193,6 +211,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
             "sequence_group_columns": ["episode"] if grouped else [],
         },
     )
+    config["candidate_parameters"] = None
     config["validation"] = {
         "windows": [{"start": "2020-01-04", "end": "2020-01-09"}],
         "cutoff": "2020-01-09",
@@ -201,6 +220,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     result, _ = load_model(fitted)
     model = result.prediction_model
     assert result.metadata["resolved_hyperparameters"]["device"] == "cuda"
+    assert result.metadata["resolved_hyperparameters"]["preload_inputs"] is False
 
     # Independent identities isolate contiguous episodes even when group values
     # repeat. Default models instead skip empty rows and retain asset history.

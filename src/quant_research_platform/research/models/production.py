@@ -229,6 +229,9 @@ def fit(config: Mapping) -> Path:
     reject_if_exists(output)
     spec = _model_spec(config["model"])
     recipe = model_spec_payload(spec)
+    parameters = config.get("candidate_parameters")
+    if parameters is None:
+        parameters = _thaw_model_hyperparameters(spec.hyperparameters)
     source = config["inputs"]
     cutoff = strict_timestamp_series(
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
@@ -280,7 +283,7 @@ def fit(config: Mapping) -> Path:
         market_id=config["market_id"],
         include_target=True,
         selected_columns=selected_columns,
-        hyperparameters=config.get("candidate_parameters", spec.hyperparameters),
+        hyperparameters=parameters,
     )
     availability = declared.get("label_availability_columns", {}).get(
         spec.target_column
@@ -343,9 +346,7 @@ def fit(config: Mapping) -> Path:
         "inputs": config["inputs"],
         "fit_windows": [_window_payload(w) for w in windows],
         "fit_cutoff": time_value_isoformat(cutoff, preserve_datetime=True),
-        "candidate_parameters": config.get(
-            "candidate_parameters", _thaw_model_hyperparameters(spec.hyperparameters)
-        ),
+        "candidate_parameters": parameters,
         "label_unit": config["label_unit"],
         "target_definition": _target_definition(
             declared, spec.target_column, session.manifest
@@ -378,10 +379,7 @@ def fit(config: Mapping) -> Path:
             dict.fromkeys(
                 (
                     *columns,
-                    *sequence_context_columns(
-                        spec.model_algorithm,
-                        config.get("candidate_parameters", spec.hyperparameters),
-                    ),
+                    *sequence_context_columns(spec.model_algorithm, parameters),
                 )
             )
         )
@@ -394,10 +392,7 @@ def fit(config: Mapping) -> Path:
                     "timestamp",
                     "asset_id",
                     *spec.input_columns,
-                    *sequence_context_columns(
-                        spec.model_algorithm,
-                        config.get("candidate_parameters", spec.hyperparameters),
-                    ),
+                    *sequence_context_columns(spec.model_algorithm, parameters),
                 )
             )
         )

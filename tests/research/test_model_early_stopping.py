@@ -85,10 +85,12 @@ def test_best_state_native_roundtrip_and_validation_maturity(
     tmp_path, algorithm, limit
 ):
     config, frame, late = stopping_config(tmp_path, algorithm)
+    config["candidate_parameters"] = None
     limit_name = "n_estimators" if algorithm == "xgboost_regressor" else "epochs"
     config["model"]["hyperparameters"][limit_name] = limit
     model = fit(config)
-    result, _ = load_model(model)
+    result, facts = load_model(model)
+    assert facts["candidate_parameters"] == config["model"]["hyperparameters"]
     stopped = result.metadata["early_stopping"]
     best = stopped["best_iteration"]
     assert 0 <= best < stopped["iterations"]
@@ -114,6 +116,7 @@ def test_best_state_native_roundtrip_and_validation_maturity(
 
     # A separately trained fixed-budget model is an independent checkpoint oracle.
     fixed = deepcopy(config)
+    fixed.pop("candidate_parameters")
     fixed["output"] = str(tmp_path / "fixed")
     fixed.pop("validation")
     parameters = fixed["model"]["hyperparameters"]

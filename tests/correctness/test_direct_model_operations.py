@@ -71,13 +71,39 @@ def fit_config(tmp_path, inputs, model_id="linear"):
     }
 
 
-def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "algorithm,explicit_null",
+    (
+        ("linear_regression", False),
+        ("linear_regression", True),
+        ("lstm_regressor", False),
+        ("transformer_regressor", False),
+    ),
+)
+def test_explicit_model_roundtrip_freeze_and_repeated_prediction(
+    tmp_path, monkeypatch, algorithm, explicit_null
+):
     inputs = data(tmp_path)
-    config = fit_config(tmp_path, inputs)
+    config = fit_config(tmp_path, inputs, model_id=algorithm)
+    config["model"]["model_algorithm"] = algorithm
+    if algorithm != "linear_regression":
+        config["model"]["hyperparameters"] = {
+            "device": "cpu",
+            "epochs": 1,
+            "sequence_length": 2,
+            "hidden_size": 4,
+            "batch_size": 9,
+        }
+        if algorithm == "transformer_regressor":
+            config["model"]["hyperparameters"]["preload_inputs"] = False
+    if explicit_null:
+        config["candidate_parameters"] = None
     model = fit(config)
     fitted, facts = load_model(model)
     assert fitted.metadata["rows_after_input_label_dropna"] == 9
     assert facts["fit_windows"] == config["fit_windows"]
+    if algorithm == "linear_regression":
+        assert facts["candidate_parameters"] == {}
     import quant_research_platform.research.models.fitting as fitting
 
     original = fitting._fit_model_result
@@ -96,11 +122,16 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
     pd.testing.assert_frame_equal(
         read_predictions(predictions)[0], read_predictions(other)[0]
     )
+    if algorithm == "linear_regression":
+        # Fitting y=2*x+day on days 1..3 gives slope 2 and intercept 2.
+        assert read_predictions(predictions)[0].prediction_score.tolist() == (
+            pytest.approx([4.0, 6.0, 8.0] * 3)
+        )
     score_path = score(
         {
             "predictions": [str(predictions)],
             "labels": {"path": str(inputs), "spec": input_spec()},
-            "candidate_ids": ["linear"],
+            "candidate_ids": [algorithm],
             "scoring_window": prediction_config["prediction_window"],
             "validation_windows": [prediction_config["prediction_window"]],
             "cutoff": "2020-01-06",
@@ -116,21 +147,33 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
             "output": str(tmp_path / "selection.json"),
             "selection_metric": "validation_rankic",
             "selection_direction": "maximize",
-            "tie_break_order": ["linear"],
+            "tie_break_order": [algorithm],
             "refit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "refit_cutoff": "2020-01-06",
         }
     )
     monkeypatch.setattr(fitting, "_fit_model_result", original)
+    refit_model = dict(config["model"])
+    if algorithm != "linear_regression":
+        assert fitted.metadata["resolved_hyperparameters"]["preload_inputs"] is False
+        refit_model["hyperparameters"] = {
+            **refit_model["hyperparameters"],
+            "preload_inputs": True,
+        }
     final = fit(
         {
             **config,
+            "model": refit_model,
             "output": str(tmp_path / "final"),
             "fit_windows": [{"start": "2020-01-01", "end": "2020-01-06"}],
             "fit_cutoff": "2020-01-06",
             "selection": str(selection),
         }
     )
+    if algorithm != "linear_regression":
+        refitted, _ = load_model(final)
+        assert refitted.metadata["resolved_hyperparameters"]["preload_inputs"] is True
+        assert refitted.metadata["rows_after_input_label_dropna"] == 18
     test = predict(
         {
             **prediction_config,
@@ -141,6 +184,13 @@ def test_explicit_model_roundtrip_freeze_and_repeated_prediction(tmp_path, monke
         }
     )
     assert len(read_predictions(test)[0]) == 9
+    if algorithm == "linear_regression":
+        _, refit_facts = load_model(final)
+        assert refit_facts["candidate_parameters"] == {}
+        # Refit days 1..6 changes only the fitted day mean to 3.5.
+        assert read_predictions(test)[0].prediction_score.tolist() == (
+            pytest.approx([5.5, 7.5, 9.5] * 3)
+        )
 
 
 def test_prediction_role_is_usage_and_does_not_require_selection(tmp_path):

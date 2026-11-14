@@ -1075,6 +1075,7 @@
         "weight_decay": 0.0001,
         "dropout": 0.0,
         "device": "cuda",
+        "preload_inputs": true,
         "sequence_group_columns": [
           "listing_date"
         ]
@@ -1438,6 +1439,7 @@
         "weight_decay": 0.0001,
         "dropout": 0.1,
         "device": "cuda",
+        "preload_inputs": true,
         "sequence_group_columns": [
           "listing_date"
         ]
