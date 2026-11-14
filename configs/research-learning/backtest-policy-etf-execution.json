@@ -1,0 +1,78 @@
+{
+  "episode": {
+    "kind": "hft",
+    "task": "dynamic_execution",
+    "asset_ids": [
+      "518880"
+    ],
+    "feature_columns": [
+      "prediction_score",
+      "mid",
+      "bid_px1",
+      "ask_px1",
+      "bid_vol1",
+      "ask_vol1",
+      "observed_trade_volume",
+      "observed_signed_trade_volume",
+      "observed_order_volume",
+      "observed_signed_order_volume",
+      "observed_cancel_volume",
+      "observed_signed_cancel_volume"
+    ],
+    "window": {
+      "start": "2024-01-29",
+      "end": "2024-02-02"
+    },
+    "prediction": {
+      "paths": [
+        "results/a_share/etf/intraday/518880/models/2024-01-08/lasso/predictions"
+      ],
+      "horizon_seconds": 30,
+      "decision_interval_seconds": 3,
+      "quote_visibility_delay_ms": 1
+    },
+    "inventory_parameters": {
+      "inventory_risk_bps": 10
+    },
+    "target_deviation_bps": 10,
+    "risk_aversion": 1,
+    "unfinished_penalty_bps": 0,
+    "account": {
+      "candidate_id": "etf_ppo_execution",
+      "panel": "data/processed/etf-high-frequency/518880/panel",
+      "trades": "data/interim/etf-high-frequency/518880/hft_trades",
+      "fee_schedule": "data/interim/etf-execution/fees",
+      "daily_inputs": {
+        "panel": "data/interim/etf-execution/panel",
+        "calendar": "data/interim/csmar-20261110/trading_calendar",
+        "market_bars": "data/interim/etf-execution/market-bars",
+        "stock_master": "data/interim/etf-execution/instruments",
+        "corporate_actions": "data/interim/etf-execution/corporate-actions",
+        "equity_events": "data/interim/etf-execution/equity-events"
+      },
+      "parameters": {
+        "initial_capital": 1000000,
+        "initial_inventory": {
+          "518880": 100000
+        },
+        "maximum_inventory": {
+          "518880": 200000
+        },
+        "participation_rate": 0.05,
+        "minimum_commission": 5,
+        "latency_ms": 10,
+        "taker_depth_levels": 1,
+        "restore_at": "14:50:00",
+        "passive": {
+          "queue_model": "conservative",
+          "cancel_latency_ms": 10,
+          "quote_level": 1
+        }
+      }
+    }
+  },
+  "strategy": "ppo",
+  "policy": "results/a_share/etf/execution/518880/policy",
+  "device": "cpu",
+  "output": "results/a_share/etf/execution/518880/backtest"
+}

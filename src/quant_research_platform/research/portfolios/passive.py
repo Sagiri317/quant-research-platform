@@ -95,6 +95,7 @@ class PassiveOrders:
         max_quote_gap_seconds,
         face_value_per_share=None,
         instrument_types=None,
+        cash_balance=None,
     ):
         self.config = config
         gap = strict_finite_float(
@@ -109,6 +110,7 @@ class PassiveOrders:
             if instrument_types is None
             else instrument_types.reindex(market_types.index)
         )
+        self.instrument_types = kinds
         ends = [
             continuous_session_end(
                 pd.Series(
@@ -141,10 +143,15 @@ class PassiveOrders:
         self.day = day
         self.schedule = schedule
         self.assumptions = assumptions
+        self.cash_balance = cash_balance
         self.costs = {}
         self.face_value_per_share = face_value_per_share
         self.orders = {}
         self.intents = {}
+        self.execution_modes = {}
+        self.pending_reservations = {}
+        self.intent_cancellations = {}
+        self.replacements = {}
         self.segments = {}
         self.counter = 0
         self.last_trade = {}
@@ -190,12 +197,107 @@ class PassiveOrders:
             order.face_value_per_share,
         )
 
-    def frozen_cash(self):
-        return fsum(self.reservation(order) for order in self.orders.values())
+    def _intent_reservation(self, asset, target, record):
+        if record is None:
+            return 0.0, 0
+        book, mode, cap, available, initial, quantities = record
+        requested = target - quantities[asset]
+        side = 1 if requested > 0 else -1
+        change = quantities[asset] - initial
+        available = max(
+            0,
+            available
+            + (
+                change if self.instrument_types[asset] == "gold_etf" else min(0, change)
+            ),
+        )
+        market, minimum, increment, maximum = self.limits[asset]
+        count = int(
+            round_stock_orders(
+                min(abs(requested), available if side == -1 else np.inf, maximum),
+                minimum,
+                increment,
+                sellable=available if side == -1 else None,
+            )
+        )
+        if not count:
+            return 0.0, 0
+        book_side = (
+            ("bid" if side == 1 else "ask")
+            if mode == "maker"
+            else ("ask" if side == 1 else "bid")
+        )
+        level = self.config.get("quote_level", 1) if mode == "maker" else 1
+        price = book[f"{book_side}_px{level}"]
+        if not np.isfinite(price) or price <= 0:
+            return 0.0, 0
+        key = market, side
+        if key not in self.costs:
+            self.costs[key] = prepare_trade_cost(
+                self.day,
+                market,
+                "buy" if side == 1 else "sell",
+                self.schedule,
+                self.assumptions,
+            )
+        required = self._required_cash(
+            self.costs[key],
+            side,
+            price,
+            count,
+            face_value_per_share=None
+            if self.face_value_per_share is None
+            else self.face_value_per_share.get(asset),
+        )
+        return min(cap, required), count if side == -1 else 0
+
+    def _pending_reservation(self, asset):
+        cash, shares = 0.0, 0
+        candidates = []
+        if asset in self.intents:
+            candidates.append(
+                (self.intents[asset][0], self.pending_reservations.get(asset))
+            )
+        if asset in self.replacements:
+            intent, _, record = self.replacements[asset]
+            candidates.append((intent[0], record))
+        for target, record in candidates:
+            required, reserved = self._intent_reservation(asset, target, record)
+            cash, shares = max(cash, required), max(shares, reserved)
+        return cash, shares
+
+    def _cash_reservations(self, *, exclude_assets=()):
+        result = {
+            asset: self.reservation(order)
+            for asset, order in self.orders.items()
+            if asset not in exclude_assets
+        }
+        remaining = (
+            np.inf
+            if self.cash_balance is None
+            else max(0.0, self.cash_balance() - fsum(result.values()))
+        )
+        for asset in sorted(
+            (self.pending_reservations.keys() | self.replacements.keys())
+            - set(exclude_assets)
+        ):
+            existing = result.get(asset, 0.0)
+            extra = min(
+                remaining, max(0.0, self._pending_reservation(asset)[0] - existing)
+            )
+            result[asset] = existing + extra
+            remaining -= extra
+        return result
+
+    def frozen_cash(self, *, exclude_assets=()):
+        return fsum(self._cash_reservations(exclude_assets=exclude_assets).values())
 
     def frozen_shares(self, asset):
         order = self.orders.get(asset)
-        return order.remaining if order is not None and order.side == -1 else 0
+        return max(
+            order.remaining if order is not None and order.side == -1 else 0,
+            self._pending_reservation(asset)[1],
+        )
 
     def _remove(self, asset, status):
         order = self.orders.pop(asset)
@@ -216,16 +318,43 @@ class PassiveOrders:
         for asset in list(self.orders):
             rows.extend(self._remove(asset, status))
         self.intents.clear()
+        self.execution_modes.clear()
+        self.pending_reservations.clear()
+        self.intent_cancellations.clear()
+        self.replacements.clear()
         return rows
 
     def advance(self, at, *, inclusive=True):
         """Release stale orders before prints and cancellations after tied prints."""
         diagnostics = []
+        for asset, acknowledgement in list(self.intent_cancellations.items()):
+            if acknowledgement <= at.value if inclusive else acknowledgement < at.value:
+                if asset in self.intents and asset not in self.orders:
+                    diagnostics.append(
+                        PortfolioDiagnostic(
+                            asset,
+                            None,
+                            "execution_cancel_confirmed",
+                            text=str(self.intents[asset][1]),
+                        )
+                    )
+                self.intents.pop(asset, None)
+                self.pending_reservations.pop(asset, None)
+                self.intent_cancellations.pop(asset)
+                if asset in self.replacements:
+                    intent, mode, reservation = self.replacements.pop(asset)
+                    self.intents[asset] = intent
+                    self.execution_modes[asset] = mode
+                    if reservation is not None:
+                        self.pending_reservations[asset] = reservation
         for asset, order in list(self.orders.items()):
             if order.expires_at <= at.value:
                 diagnostics.extend(self._remove(asset, "observation_gap"))
                 if asset in self.intents and self.intents[asset][3]:
                     self.intents.pop(asset)
+                    self.pending_reservations.pop(asset, None)
+                if asset in self.replacements and self.replacements[asset][0][3]:
+                    self.replacements.pop(asset)
             elif order.cancel_at is not None and (
                 order.cancel_at <= at.value if inclusive else order.cancel_at < at.value
             ):
@@ -281,24 +410,89 @@ class PassiveOrders:
             costs,
         )
 
-    def request(self, at, targets, activation_times, *, segment_bound=True):
+    def request(
+        self,
+        at,
+        targets,
+        activation_times,
+        *,
+        segment_bound=True,
+        modes=None,
+        decision_book=None,
+        quantities=None,
+        sellable=None,
+        cash=None,
+    ):
         """Start cancellation at the decision clock, independently of quote latency."""
         diagnostics = []
         at_ns = int(at.value)
         for asset, target in targets.items():
-            if (
+            mode = "maker" if modes is None else modes[asset]
+            if mode == "wait":
+                continue
+            previous_mode = self.execution_modes.get(asset, "maker")
+            order = self.orders.get(asset)
+            if mode == "cancel":
+                self.replacements.pop(asset, None)
+                if asset not in self.intents and order is None:
+                    continue
+                self.intent_cancellations.setdefault(
+                    asset, at_ns + int(self.config["cancel_latency_ms"] * 1_000_000)
+                )
+            if mode != "cancel" and (
                 asset not in self.intents
                 or target != self.intents[asset][0]
+                or previous_mode != mode
                 or not segment_bound
+                or asset in self.intent_cancellations
             ):
-                self.intents[asset] = (
+                intent = (
                     float(target),
                     at_ns,
                     activation_times[asset],
                     segment_bound,
                 )
-            order = self.orders.get(asset)
-            if order is not None and target != order.target and order.cancel_at is None:
+                reservation = None
+                if decision_book is not None and activation_times[asset] is not None:
+                    reservation = (
+                        decision_book.loc[asset],
+                        mode,
+                        max(0.0, cash - self.frozen_cash(exclude_assets=(asset,))),
+                        sellable[asset],
+                        float(quantities[asset]),
+                        quantities,
+                    )
+                if modes is not None and (
+                    asset in self.intent_cancellations
+                    or (
+                        asset in self.intents
+                        and (order is not None or asset in self.pending_reservations)
+                    )
+                ):
+                    self.replacements[asset] = intent, mode, reservation
+                    if asset not in self.intent_cancellations:
+                        self.intent_cancellations[asset] = at_ns + int(
+                            self.config["cancel_latency_ms"] * 1_000_000
+                        )
+                        if order is None:
+                            diagnostics.append(
+                                PortfolioDiagnostic(
+                                    asset,
+                                    None,
+                                    "execution_cancel_requested",
+                                    text=str(self.intents[asset][1]),
+                                )
+                            )
+                else:
+                    self.intents[asset] = intent
+                    self.execution_modes[asset] = mode
+                    if reservation is not None:
+                        self.pending_reservations[asset] = reservation
+            if (
+                order is not None
+                and (target != order.target or mode in {"cancel", "taker"})
+                and order.cancel_at is None
+            ):
                 order.cancel_at = at_ns + int(
                     self.config["cancel_latency_ms"] * 1_000_000
                 )
@@ -309,13 +503,71 @@ class PassiveOrders:
                 )
                 if order.cancel_at == at_ns:
                     diagnostics.extend(self._remove(asset, "cancelled"))
+        diagnostics.extend(self.advance(at))
         return diagnostics
+
+    def taker_requests(self, at, assets):
+        """Release one IOC attempt after order latency and old-maker cancellation."""
+        result = {}
+        for asset in assets:
+            if (
+                self.execution_modes.get(asset) != "taker"
+                or asset in self.orders
+                or asset not in self.intents
+            ):
+                continue
+            target, signal_at, activation_at, _ = self.intents[asset]
+            if (
+                activation_at is not None
+                and at.value >= activation_at
+                and at.value > signal_at
+            ):
+                result[asset] = (signal_at, target)
+                self.intents.pop(asset)
+                self.pending_reservations.pop(asset, None)
+        return result
+
+    def state(self, at, assets):
+        """Expose existing order facts without maintaining another order book."""
+        result = pd.DataFrame(
+            0.0,
+            index=assets,
+            columns=("quantity", "queue_ahead", "age_seconds", "cancel_seconds"),
+        )
+        result["mode"] = 0.0
+        result["replacement_mode"] = 0.0
+        for asset, intent in self.intents.items():
+            result.loc[asset, "age_seconds"] = (at.value - intent[1]) / 1e9
+            result.loc[asset, "mode"] = (
+                2.0 if self.execution_modes.get(asset) == "taker" else 1.0
+            )
+        for asset, acknowledgement in self.intent_cancellations.items():
+            result.loc[asset, "cancel_seconds"] = (
+                max(0, acknowledgement - at.value) / 1e9
+            )
+        for asset, (intent, mode, _) in self.replacements.items():
+            result.loc[asset, "replacement_mode"] = 2.0 if mode == "taker" else 1.0
+            if asset not in self.intents:
+                result.loc[asset, "age_seconds"] = (at.value - intent[1]) / 1e9
+        for asset, order in self.orders.items():
+            result.loc[
+                asset, ["quantity", "queue_ahead", "age_seconds", "cancel_seconds"]
+            ] = (
+                order.side * order.remaining,
+                order.ahead,
+                (at.value - order.submitted_at) / 1e9,
+                0.0
+                if order.cancel_at is None
+                else max(0, order.cancel_at - at.value) / 1e9,
+            )
+            result.loc[asset, "mode"] = 1.0
+        return result
 
     def quote(self, at, current, units, sellable, cash):
         diagnostics = self.advance(at)
         at_ns = int(at.value)
-        free = cash - self.frozen_cash()
         for asset, row in current.iterrows():
+            free = cash - self.frozen_cash()
             crossed = (
                 pd.notna(row.bid_px1)
                 and pd.notna(row.ask_px1)
@@ -331,10 +583,13 @@ class PassiveOrders:
             ):
                 if asset in self.intents and self.intents[asset][3]:
                     self.intents.pop(asset)
+                    self.pending_reservations.pop(asset, None)
+                if asset in self.replacements and self.replacements[asset][0][3]:
+                    self.replacements.pop(asset)
             self.segments[asset] = row.segment_id
             if order is not None and (crossed or row.segment_id != order.segment):
-                free += self.reservation(order)
                 diagnostics.extend(self._remove(asset, "observation_gap"))
+                free = cash - self.frozen_cash()
                 order = None
             if order is not None:
                 morning_end, afternoon_end = self.session_ends[asset]
@@ -367,7 +622,12 @@ class PassiveOrders:
                             - reduction * min(1.0, order.ahead / order.depth),
                         )
                     order.depth = depth
-            if order is not None or asset not in self.intents or crossed:
+            if (
+                order is not None
+                or asset not in self.intents
+                or crossed
+                or self.execution_modes.get(asset, "maker") != "maker"
+            ):
                 continue
             target, signal_at, activation_at, _ = self.intents[asset]
             if activation_at is None or at_ns < activation_at or at_ns <= signal_at:
@@ -375,6 +635,7 @@ class PassiveOrders:
             requested = target - units[asset]
             if not requested:
                 self.intents.pop(asset)
+                self.pending_reservations.pop(asset, None)
                 continue
             side = 1 if requested > 0 else -1
             if side == 1 and not bool(row.get("can_enter", True)):
@@ -446,23 +707,26 @@ class PassiveOrders:
                     cost, side, price, count, face_value_per_share=face
                 )
 
+            pending_cash = self._cash_reservations().get(asset, 0.0)
+            budget = free + pending_cash
+
             if (
                 side == 1
                 and quantity
-                and _portfolio_budget_exceeded((required(quantity),), (free,))
+                and _portfolio_budget_exceeded((required(quantity),), (budget,))
             ):
                 low, high = 0, quantity // increment
                 while low < high:
                     middle = (low + high + 1) // 2
                     if not _portfolio_budget_exceeded(
-                        (required(middle * increment),), (free,)
+                        (required(middle * increment),), (budget,)
                     ):
                         low = middle
                     else:
                         high = middle - 1
                 quantity = int(low * increment) if low * increment >= minimum else 0
             if not quantity or _portfolio_budget_exceeded(
-                (required(quantity),), (free,)
+                (required(quantity),), (budget,)
             ):
                 diagnostics.append(
                     PortfolioDiagnostic(
@@ -493,8 +757,9 @@ class PassiveOrders:
                     morning_end if at_ns < morning_end else afternoon_end,
                 ),
                 face_value_per_share=face,
+                cancel_at=self.intent_cancellations.get(asset),
             )
-            free -= required(quantity)
+            self.pending_reservations.pop(asset, None)
             diagnostics.extend(
                 (
                     PortfolioDiagnostic(

@@ -164,6 +164,25 @@ Hawkes 数值优化按已观察事件数缩放负对数似然和梯度，并按�
 
 `backtest-policy` 增加 `almgren_chriss` 和 `signal_ac`，仍共用既有 `TradingEnv` 和股数账户。AC 剩余比例为 `sinh(k*(T-t))/sinh(k*T)`，`k=sqrt(risk_aversion/temporary_impact)*price_volatility`；零风险厌恶退化为 TWAP。风险厌恶单位为 1/CNY，价格波动为 CNY/股/根号秒，临时冲击系数为 CNY·秒/股²；参数 `as_of` 必须早于执行开始。信号版按买卖方向增加 `gain*signal*f*(1-f)`，累计进度不回退；这是明确的启发式调整，不宣称重新求解最优控制。费用仍由账户计入，不把调度参数的理论成本重复收费。参照[Almgren–Chriss 论文](https://www.smallake.kr/wp-content/uploads/2016/03/optliq.pdf)。
 
+### PPO 动态选择执行方式
+
+`train-policy` / `backtest-policy` 的 `task="dynamic_execution"` 复用上述盘口、逐笔、
+`PassiveOrders`、`execute_stock_target` 与同一账户结算。目标库存继续由透明预测策略决定；
+PPO 只选等待、撤单、maker/taker 及缺口的 25%/50%/100%。目标策略、动作、扣费后奖励、
+历史验证和最佳模型配对归一化的具体接口见[策略学习说明](research-learning.md#etf-预测驱动的-ppo-执行)。
+
+maker 与 taker 可以在同一账户的不同证券动态共存，不各领一份预算。原 `PassiveOrders`
+统一保有挂单和在途请求的现金/库存预留；在途现金按决策可见报价及实际可用预算估计，
+不是未来成交费用。实际受理或 IOC 仍用当时真实盘口、费用和剩余共享余额决定合法数量。
+maker 占用的现金和库存不能再给 taker；撤单确认前预留不释放，原单仍可能部分成交。
+切换为主动方式后，旧 maker 撤单确认和新请求执行延迟均满足，才用当前真实盘口尝试 IOC；
+不会使用撤单前后同一记录的成交量两次。股票 ETF T+1 与黄金 ETF T+0 沿原账户生效。
+当日单在原会话结束失效，盘中截止保留真实未完成状态，不补成交或强行清仓。
+
+动态任务的 14:50 恢复是同一目标策略的开盘底仓目标，仍由 PPO 执行；30 秒预测期限
+不触发反向交易。冻结回放和固定目标 taker 基线均输出原生账本，收益包含真实盘中和隔夜
+持有、费用及权益；目标偏离惩罚属于训练目标，不能混入账本现金流或替代账户收益。
+
 ## 显式预处理、学习诊断与日级解释
 
 序列模型的 `sequence_group_columns` 由调用方声明。高频配置通常传入 `["session_date", "segment_id"]`，日频配置按自己的历史分组。共享模型消费这些边界列及数值输入。每次拟合的窗口、验证窗口、轮数、batch、学习率和设备均来自显式配置。

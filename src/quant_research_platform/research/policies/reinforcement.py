@@ -6,8 +6,11 @@ updating the saved policy or normalization statistics.
 """
 
 import pickle
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
+from shutil import copyfile
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
@@ -19,7 +22,7 @@ from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
-from quant_research_platform.contracts.policies import PolicyDecision
+from quant_research_platform.contracts.policies import PolicyDecision, PolicyExecution
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
@@ -77,7 +80,7 @@ def train_policy(config):
             "threads",
             "ppo",
         },
-        set(),
+        {"validation_episodes", "early_stopping"},
     )
     for key in ("timesteps", "n_envs", "threads"):
         if type(config[key]) is not int or config[key] < 1:
@@ -85,6 +88,9 @@ def train_policy(config):
     if type(config["seed"]) is not int or config["seed"] < 0:
         raise ValueError("policy_seed_invalid")
     episodes = [_episode(value) for value in config["episodes"]]
+    validation_episodes = [
+        _episode(value) for value in config.get("validation_episodes", [])
+    ]
     cutoff = pd.Timestamp(config["fit_cutoff"])
     if (
         pd.isna(cutoff)
@@ -94,10 +100,41 @@ def train_policy(config):
                 time_window_timestamp_interval(TimeWindow(**item["window"]))[1]
             )
             > cutoff
-            for item in episodes
+            for item in (*episodes, *validation_episodes)
         )
     ):
         raise ValueError("policy_training_after_cutoff")
+    stopping = None
+    if validation_episodes:
+        stopping = _strict_config(
+            config.get("early_stopping"),
+            {"eval_freq", "patience", "min_evals"},
+            set(),
+        )
+        if any(type(value) is not int or value < 1 for value in stopping.values()):
+            raise ValueError("policy_early_stopping_invalid")
+        train_end = max(
+            pd.Timestamp(
+                time_window_timestamp_interval(TimeWindow(**item["window"]))[1]
+            )
+            for item in episodes
+        )
+        validation_start = min(
+            pd.Timestamp(
+                time_window_timestamp_interval(TimeWindow(**item["window"]))[0]
+            )
+            for item in validation_episodes
+        )
+        if train_end >= validation_start:
+            raise ValueError("policy_validation_not_after_training")
+        probe = TradingEnv([*episodes, *validation_episodes])
+        probe.close()
+    elif "early_stopping" in config or episodes[0]["task"] == "dynamic_execution":
+        raise ValueError("policy_historical_validation_required")
+    config["episodes"] = episodes
+    if validation_episodes:
+        config["validation_episodes"] = validation_episodes
+        config["early_stopping"] = stopping
     parameters = _strict_config(
         config["ppo"],
         set(),
@@ -127,16 +164,31 @@ def train_policy(config):
     try:
         torch.set_num_threads(config["threads"])
         observations = []
+        decision_start = decision_end = None
+        decision_count = 0
         for episode in episodes:
+            observed = False
             with _stream(episode) as stream:
                 try:
                     event = next(stream)
                     while True:
                         if isinstance(event, PolicyDecision):
+                            observed = True
+                            decision_start = (
+                                event.timestamp
+                                if decision_start is None
+                                else min(decision_start, event.timestamp)
+                            )
+                            decision_end = (
+                                event.timestamp
+                                if decision_end is None
+                                else max(decision_end, event.timestamp)
+                            )
+                            decision_count += 1
                             observations.append(
                                 event.features.reindex(episode["asset_ids"])[
                                     episode["feature_columns"]
-                                ]
+                                ].to_numpy(dtype="float64")
                             )
                             target = (
                                 event.quantities.reindex(
@@ -145,27 +197,43 @@ def train_policy(config):
                                 if episode["kind"] == "hft"
                                 else pd.Series(0.0, index=event.features.index)
                             )
+                            if episode["task"] == "dynamic_execution":
+                                target = PolicyExecution(
+                                    target,
+                                    pd.Series("wait", index=target.index),
+                                    target,
+                                )
                             event = stream.send(target)
                         else:
                             event = next(stream)
                 except StopIteration:
                     pass
+            if not observed:
+                raise ValueError("policy_episode_no_decisions")
         if not observations:
             raise ValueError("policy_episode_no_decisions")
         feature_scaler = ModelMatrixScaler.fit(
-            pd.concat(observations, ignore_index=True), missing="impute", scaling=False
+            pd.DataFrame(
+                np.concatenate(observations), columns=episodes[0]["feature_columns"]
+            ),
+            missing="impute",
+            scaling=False,
         )
         del observations
         factories = [
             partial(TradingEnv, episodes, feature_scaler=feature_scaler)
             for _ in range(config["n_envs"])
         ]
-        with closing_iterator(
-            VecNormalize(
-                (DummyVecEnv if len(factories) == 1 else SubprocVecEnv)(factories),
-                norm_reward=False,
-            )
-        ) as environment:
+        with (
+            TemporaryDirectory() as checkpoint_directory,
+            closing_iterator(ExitStack()) as resources,
+            closing_iterator(
+                VecNormalize(
+                    (DummyVecEnv if len(factories) == 1 else SubprocVecEnv)(factories),
+                    norm_reward=False,
+                )
+            ) as environment,
+        ):
             model = PPO(
                 "MlpPolicy",
                 environment,
@@ -173,17 +241,97 @@ def train_policy(config):
                 device=config["device"],
                 **parameters,
             )
-            model.learn(total_timesteps=config["timesteps"])
+            callback = None
+            best = {}
+            if validation_episodes:
+                from stable_baselines3.common.callbacks import (
+                    BaseCallback,
+                    EvalCallback,
+                    StopTrainingOnNoModelImprovement,
+                )
+                from stable_baselines3.common.monitor import Monitor
+
+                def validation_environment(episode):
+                    return Monitor(TradingEnv([episode], feature_scaler=feature_scaler))
+
+                validation = resources.enter_context(
+                    closing_iterator(
+                        VecNormalize(
+                            DummyVecEnv(
+                                [
+                                    partial(validation_environment, episode)
+                                    for episode in validation_episodes
+                                ]
+                            ),
+                            training=False,
+                            norm_reward=False,
+                        )
+                    )
+                )
+                checkpoint = Path(checkpoint_directory)
+
+                class SaveNormalization(BaseCallback):
+                    def _on_step(self):
+                        environment.save(checkpoint / "normalization.pkl")
+                        best["selected_timesteps"] = self.num_timesteps
+                        return True
+
+                callback = EvalCallback(
+                    validation,
+                    callback_on_new_best=SaveNormalization(),
+                    callback_after_eval=StopTrainingOnNoModelImprovement(
+                        max_no_improvement_evals=stopping["patience"],
+                        min_evals=stopping["min_evals"],
+                    ),
+                    n_eval_episodes=len(validation_episodes),
+                    eval_freq=max(1, stopping["eval_freq"] // config["n_envs"]),
+                    best_model_save_path=checkpoint_directory,
+                    log_path=checkpoint_directory,
+                    deterministic=True,
+                    verbose=0,
+                )
+            model.learn(total_timesteps=config["timesteps"], callback=callback)
+            if callback is not None:
+                # Also select the final update when the budget is below eval_freq.
+                callback.eval_freq = 1
+                callback.on_step()
+                best.update(
+                    best_validation_reward=float(callback.best_mean_reward),
+                    stopped_early=model.num_timesteps < config["timesteps"],
+                    evaluations=[
+                        {
+                            "timesteps": int(stamp),
+                            "episode_rewards": [float(value) for value in values],
+                        }
+                        for stamp, values in zip(
+                            callback.evaluations_timesteps,
+                            callback.evaluations_results,
+                            strict=True,
+                        )
+                    ],
+                )
             facts = {
                 "kind": "ppo_policy",
                 "config": config,
                 "actual_timesteps": model.num_timesteps,
                 "device": str(model.device),
+                "validation": best or None,
+                "training_decisions": {
+                    "start": decision_start.isoformat(),
+                    "end": decision_end.isoformat(),
+                    "count": decision_count,
+                },
             }
 
             def write(staging):
-                model.save(staging / "policy.zip")
-                environment.save(staging / "normalization.pkl")
+                if callback is None:
+                    model.save(staging / "policy.zip")
+                    environment.save(staging / "normalization.pkl")
+                else:
+                    copyfile(checkpoint / "best_model.zip", staging / "policy.zip")
+                    copyfile(
+                        checkpoint / "normalization.pkl", staging / "normalization.pkl"
+                    )
                 (staging / "feature_scaler.pkl").write_bytes(
                     pickle.dumps(feature_scaler)
                 )
@@ -308,6 +456,9 @@ def backtest_policy(config, *, portfolio_context=None):
         normalization.training = False
         normalization.norm_reward = False
         model = PPO.load(root / "policy.zip", device=config.get("device", "cpu"))
+    elif episode["task"] == "dynamic_execution":
+        if strategy != "immediate":
+            raise ValueError("policy_baseline_task_mismatch")
     elif (strategy in {"immediate", "twap", "vwap", "almgren_chriss", "signal_ac"}) != (
         episode["task"] == "execution"
     ):
@@ -421,6 +572,8 @@ def backtest_policy(config, *, portfolio_context=None):
                         )
                     observation, _, done, _, info = env.step_targets(target)
                     continue
+                elif episode["task"] == "dynamic_execution":
+                    action = np.full(len(env.assets), 7, dtype=np.int64)
                 elif episode["task"] == "execution":
                     lower, upper, _ = time_window_timestamp_interval(
                         TimeWindow(**episode["window"])
@@ -495,6 +648,36 @@ def backtest_policy(config, *, portfolio_context=None):
                 "window": episode["window"],
                 "policy": config,
                 "execution": "native_account",
+                **(
+                    {
+                        "dynamic_execution": {
+                            "target_policy": episode["inventory_parameters"],
+                            "forecast_horizon_seconds": episode["prediction"][
+                                "horizon_seconds"
+                            ],
+                            "decision_interval_seconds": episode["prediction"][
+                                "decision_interval_seconds"
+                            ],
+                            "reward_unit": "bps_of_initial_nav",
+                            "economic_reward": "native_nav_change_after_fees",
+                            "target_deviation_bps": episode["target_deviation_bps"],
+                            "inventory_risk_bps": episode["risk_aversion"],
+                            "actions": [
+                                "wait",
+                                "cancel",
+                                "maker_25pct",
+                                "maker_50pct",
+                                "maker_100pct",
+                                "taker_25pct",
+                                "taker_50pct",
+                                "taker_100pct",
+                            ],
+                            "holding_period": "realized_inventory_path",
+                        }
+                    }
+                    if episode["task"] == "dynamic_execution"
+                    else {}
+                ),
                 **(
                     {
                         "inventory_policy": {

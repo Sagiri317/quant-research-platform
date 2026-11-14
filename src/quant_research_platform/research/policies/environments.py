@@ -5,6 +5,7 @@ Actions request inventory or portfolio targets; fills, fees, and tradeability
 remain the account engine's responsibility. Rewards use its realized ledger.
 """
 
+from datetime import time
 from math import fsum
 
 import gymnasium as gym
@@ -12,12 +13,28 @@ import numpy as np
 import pandas as pd
 from gymnasium import spaces
 
-from quant_research_platform.contracts.policies import PolicyDecision
+from quant_research_platform.contracts.policies import PolicyDecision, PolicyExecution
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
 from quant_research_platform.research.policies.accounts import _episode, _stream
+from quant_research_platform.research.policies.inventory_policy import inventory_targets
+
+
+def _trading_seconds(start, end):
+    """Integrate the two continuous trading segments, excluding lunch and overnight."""
+    seconds = 0.0
+    for day in dict.fromkeys((start.normalize(), end.normalize())):
+        for lower, upper in ((1.5, 3.5), (5, 7)):
+            seconds += max(
+                0.0,
+                (
+                    min(end, day + pd.Timedelta(hours=upper))
+                    - max(start, day + pd.Timedelta(hours=lower))
+                ).total_seconds(),
+            )
+    return seconds
 
 
 class TradingEnv(gym.Env):
@@ -49,11 +66,19 @@ class TradingEnv(gym.Env):
             if self.task == "execution"
             else len(self.assets) + (self.task == "portfolio")
         )
-        self.action_space = spaces.Box(0.0, 1.0, (n_actions,), dtype=np.float32)
+        self.action_space = (
+            spaces.MultiDiscrete([8] * len(self.assets))
+            if self.task == "dynamic_execution"
+            else spaces.Box(0.0, 1.0, (n_actions,), dtype=np.float32)
+        )
         self.observation_space = spaces.Box(
             -np.inf,
             np.inf,
-            (len(self.assets) * (len(self.columns) + 2) + 3,),
+            (
+                len(self.assets)
+                * (len(self.columns) + (11 if self.task == "dynamic_execution" else 2))
+                + (5 if self.task == "dynamic_execution" else 3),
+            ),
             dtype=np.float32,
         )
         self.on_batch = on_batch
@@ -81,6 +106,9 @@ class TradingEnv(gym.Env):
         self.nav = None
         self.done = False
         self.decision = None
+        self._last_valuations = None
+        self.target = None
+        self.reward_total = self.economic_reward_total = 0.0
         self._advance(None)
         if self.done:
             if "prediction" not in self.episode:
@@ -109,6 +137,10 @@ class TradingEnv(gym.Env):
                 if self.on_batch is not None:
                     self.on_batch(event)
                 ends = [row for row in event.valuations if row.phase == "end"]
+                if self.task == "dynamic_execution" and self.decision is not None:
+                    before = [row for row in event.valuations if row.phase == "before"]
+                    self._integrate_exposure(before, pd.Timestamp(ends[0].timestamp_ns))
+                self._last_valuations = ends
                 self.nav = fsum(row.value for row in ends)
                 self.fees += -fsum(
                     row.amount
@@ -145,11 +177,51 @@ class TradingEnv(gym.Env):
                 event = next(self.stream)
             if set(event.features.index) - set(self.assets):
                 raise ValueError("policy_observed_asset_outside_universe")
+            if self.task == "dynamic_execution" and self.decision is not None:
+                self._integrate_exposure(self._last_valuations, event.timestamp)
             self.decision = event
             self.nav = event.nav
+            if self.task == "dynamic_execution":
+                self.target = inventory_targets(
+                    event,
+                    self.episode["account"]["parameters"]["maximum_inventory"],
+                    self.episode["inventory_parameters"],
+                )
+                restore_at = self.episode["account"]["parameters"]["restore_at"]
+                if restore_at is not None and (
+                    event.timestamp + pd.Timedelta(hours=8)
+                ).time() >= time.fromisoformat(restore_at):
+                    self.target = event.opening_quantities.clip(
+                        upper=pd.Series(
+                            self.episode["account"]["parameters"]["maximum_inventory"]
+                        )
+                    )
         except StopIteration:
+            if self.task == "dynamic_execution" and self.decision is not None:
+                _, end, _ = time_window_timestamp_interval(
+                    TimeWindow(**self.episode["window"])
+                )
+                session_end = pd.Timestamp(
+                    self._last_valuations[0].timestamp_ns
+                ).normalize() + pd.Timedelta(hours=7)
+                self._integrate_exposure(
+                    self._last_valuations, min(pd.Timestamp(end), session_end)
+                )
             self.done = True
             self.close()
+
+    def _integrate_exposure(self, rows, end):
+        start = max(pd.Timestamp(rows[0].timestamp_ns), self.decision.timestamp)
+        elapsed = _trading_seconds(start, end) / 14400
+        for row in rows:
+            if row.asset_id not in self.assets:
+                continue
+            holding = row.quantity * row.mark_price / self.initial_nav
+            self._inventory_integral += holding * holding * elapsed
+            target = self.target[row.asset_id]
+            if pd.notna(target):
+                deviation = (row.quantity - target) * row.mark_price / self.initial_nav
+                self._deviation_integral += deviation * deviation * elapsed
 
     def _observation(self):
         if self.done:
@@ -196,12 +268,56 @@ class TradingEnv(gym.Env):
                 [decision.cash / denominator, 1 - elapsed, remaining],
             )
         ).astype(np.float32)
+        if self.task == "dynamic_execution":
+            maximum = pd.Series(
+                self.episode["account"]["parameters"]["maximum_inventory"]
+            ).reindex(self.assets)
+            state = decision.order_state.reindex(self.assets)
+            marks = decision.marks.reindex(self.assets)
+            result = np.r_[
+                result,
+                (
+                    self.target.fillna(decision.quantities).reindex(self.assets)
+                    * marks
+                    / denominator
+                ).fillna(0),
+                (
+                    decision.pending_quantities.reindex(self.assets)
+                    * marks
+                    / denominator
+                ).fillna(0),
+                (state.quantity * marks / denominator).fillna(0),
+                state.queue_ahead.divide(maximum.where(maximum > 0)).fillna(0),
+                state.age_seconds / 14400,
+                state.cancel_seconds,
+                (
+                    decision.pending_targets.reindex(self.assets).fillna(
+                        decision.quantities
+                    )
+                    * marks
+                    / denominator
+                ).fillna(0),
+                state["mode"],
+                state.replacement_mode,
+                decision.reserved_cash / denominator,
+                (
+                    (decision.timestamp + pd.Timedelta(hours=8)).hour * 3600
+                    + decision.timestamp.minute * 60
+                    + decision.timestamp.second
+                )
+                / 86400,
+            ].astype(np.float32)
         if np.isinf(result).any() or not np.isfinite(result[values.size :]).all():
             raise ValueError("policy_observation_nonfinite")
         return result
 
     def _info(self):
         result = {"nav": self.nav, "fees": self.fees}
+        if self.task == "dynamic_execution":
+            result.update(
+                reward_bps=self.reward_total,
+                economic_reward_bps=self.economic_reward_total,
+            )
         if self.task == "execution" and self.arrival_price is not None:
             order = self.episode["order"]
             quantity = abs(order["quantity"])
@@ -259,6 +375,41 @@ class TradingEnv(gym.Env):
         if self.done:
             raise RuntimeError("policy_episode_finished")
         action = np.asarray(action, dtype=np.float64)
+        if self.task == "dynamic_execution":
+            if (
+                action.shape != self.action_space.shape
+                or not np.isfinite(action).all()
+                or not np.equal(action, np.floor(action)).all()
+                or not self.action_space.contains(action.astype(np.int64))
+            ):
+                raise ValueError("policy_action_invalid")
+            action = action.astype(np.int64)
+            modes = pd.Series(
+                np.array(
+                    [
+                        "wait",
+                        "cancel",
+                        "maker",
+                        "maker",
+                        "maker",
+                        "taker",
+                        "taker",
+                        "taker",
+                    ]
+                )[action],
+                index=self.assets,
+            )
+            modes.loc[self.target.reindex(self.assets).isna() & modes.ne("cancel")] = (
+                "wait"
+            )
+            quantities = self.decision.quantities.reindex(self.assets)
+            fraction = np.array([0, 0, 0.25, 0.5, 1, 0.25, 0.5, 1])[action]
+            target = (
+                quantities
+                + (self.target.reindex(self.assets).fillna(quantities) - quantities)
+                * fraction
+            )
+            return self.step_targets(PolicyExecution(target, modes, self.target))
         if (
             action.shape != self.action_space.shape
             or not np.isfinite(action).all()
@@ -298,10 +449,12 @@ class TradingEnv(gym.Env):
             raise RuntimeError("policy_episode_finished")
         decision = self.decision
         before_nav, before_shortfall, before_fees = self.nav, self.shortfall, self.fees
+        self._inventory_integral = self._deviation_integral = 0.0
         if self.task == "execution":
             order = self.episode["order"]
             remaining = max(0, abs(order["quantity"]) - self.filled)
-        target = target.reindex(decision.features.index, fill_value=0)
+        if self.task != "dynamic_execution":
+            target = target.reindex(decision.features.index, fill_value=0)
         self._advance(target)
         if self.task == "execution":
             notional = abs(self.episode["order"]["quantity"]) * self.arrival_price
@@ -327,6 +480,15 @@ class TradingEnv(gym.Env):
                     / 10000
                     * (1 - self._info()["completion_rate"])
                 )
+        elif self.task == "dynamic_execution":
+            economic = float(10000 * (self.nav - before_nav) / self.initial_nav)
+            reward = (
+                economic
+                - self.episode["risk_aversion"] * self._inventory_integral
+                - self.episode["target_deviation_bps"] * self._deviation_integral
+            )
+            self.economic_reward_total += economic
+            self.reward_total += float(reward)
         else:
             change = (self.nav - before_nav) / self.initial_nav
             reward = change - self.episode["risk_aversion"] * change * change

@@ -35,14 +35,25 @@ def _episode(value):
             "risk_aversion",
             "unfinished_penalty_bps",
         },
-        {"order", "prediction", "capital_scale"},
+        {
+            "order",
+            "prediction",
+            "capital_scale",
+            "inventory_parameters",
+            "target_deviation_bps",
+        },
     )
     assets, columns = tuple(config["asset_ids"]), tuple(config["feature_columns"])
     _validate_column_tuple(assets, "policy_assets")
     _validate_column_tuple(columns, "policy_features")
     if PORTFOLIO_CASH_ASSET_ID in assets or config["kind"] not in {"hft", "daily"}:
         raise ValueError("policy_episode_kind_invalid")
-    if config["task"] not in {"execution", "inventory", "portfolio"}:
+    if config["task"] not in {
+        "execution",
+        "inventory",
+        "portfolio",
+        "dynamic_execution",
+    }:
         raise ValueError("policy_task_invalid")
     if config["kind"] == "daily" and config["task"] != "portfolio":
         raise ValueError("daily_policy_requires_portfolio_task")
@@ -68,22 +79,32 @@ def _episode(value):
         raise ValueError("policy_unfinished_penalty_unused")
     if "prediction" in config:
         from quant_research_platform.research.policies.inventory_policy import (
+            inventory_policy_parameters,
             prediction_parameters,
         )
 
         if (
             config["kind"] != "hft"
-            or config["task"] not in {"inventory", "portfolio"}
-            or columns != ("prediction_score",)
+            or config["task"] not in {"inventory", "portfolio", "dynamic_execution"}
+            or "prediction_score" not in columns
+            or (
+                config["task"] != "dynamic_execution"
+                and columns != ("prediction_score",)
+            )
         ):
             raise ValueError("inventory_prediction_episode_invalid")
         config["prediction"] = prediction_parameters(config["prediction"])
-        scale = strict_finite_float(
-            config.get("capital_scale", 1), error="inventory_capital_scale_invalid"
-        )
-        if scale <= 0:
-            raise ValueError("inventory_capital_scale_invalid")
-        config["capital_scale"] = scale
+        scale = 1.0
+        if config["task"] == "dynamic_execution":
+            if "capital_scale" in config:
+                raise ValueError("dynamic_execution_uses_initial_capital")
+        else:
+            scale = strict_finite_float(
+                config.get("capital_scale", 1), error="inventory_capital_scale_invalid"
+            )
+            if scale <= 0:
+                raise ValueError("inventory_capital_scale_invalid")
+            config["capital_scale"] = scale
         account = {
             **config["account"],
             "parameters": dict(config["account"]["parameters"]),
@@ -91,12 +112,15 @@ def _episode(value):
         parameters = account["parameters"]
         capital = (
             1_000_000.0 * len(assets)
-            if config["task"] == "inventory"
+            if config["task"] in {"inventory", "dynamic_execution"}
             else 1_000_000_000.0
         ) * scale
-        if parameters.setdefault("initial_capital", capital) != capital:
+        if (
+            parameters.setdefault("initial_capital", capital) != capital
+            and config["task"] != "dynamic_execution"
+        ):
             raise ValueError("inventory_capital_scale_mismatch")
-        if config["task"] == "inventory":
+        if config["task"] in {"inventory", "dynamic_execution"}:
             if parameters.setdefault("restore_at", "14:50:00") not in {
                 "14:50",
                 "14:50:00",
@@ -105,8 +129,25 @@ def _episode(value):
         elif parameters.setdefault("restore_at", None) is not None:
             raise ValueError("stock_portfolio_restoration_unused")
         config["account"] = account
+        if config["task"] == "dynamic_execution":
+            if "passive" not in parameters or "trades" not in account:
+                raise ValueError("dynamic_execution_order_input_required")
+            config["inventory_parameters"] = inventory_policy_parameters(
+                config.get("inventory_parameters")
+            )
+            config["target_deviation_bps"] = strict_finite_float(
+                config.get("target_deviation_bps", 10.0), error="policy_penalty_invalid"
+            )
+            if config["target_deviation_bps"] < 0:
+                raise ValueError("policy_penalty_invalid")
     elif "capital_scale" in config:
         raise ValueError("inventory_capital_scale_unused")
+    if config["task"] == "dynamic_execution" and "prediction" not in config:
+        raise ValueError("dynamic_execution_prediction_required")
+    if config["task"] != "dynamic_execution" and (
+        "inventory_parameters" in config or "target_deviation_bps" in config
+    ):
+        raise ValueError("dynamic_execution_parameters_unused")
     return config
 
 
@@ -143,7 +184,11 @@ def _stream(episode):
         sessions, schedule, trade_session, max_quote_gap_seconds = inventory_inputs(
             account,
             window,
-            decision_columns=() if prediction is not None else columns,
+            decision_columns=tuple(
+                column for column in columns if column != "prediction_score"
+            )
+            if prediction is not None
+            else columns,
             prediction_paths=prediction["paths"] if prediction is not None else (),
             prediction_validator=partial(
                 validate_inventory_prediction, parameters=prediction

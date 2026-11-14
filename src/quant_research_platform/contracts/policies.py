@@ -13,7 +13,8 @@ class PolicyDecision:
 
     Features are indexed by asset ID. Quantities and sellable balances are shares;
     marks are currency per share, while cash and NAV are account currency amounts.
-    The account consumes a target Series sent back to the yielding iterator.
+    The account consumes a target Series or dynamic PolicyExecution request sent
+    back to the yielding iterator.
     """
 
     timestamp: pd.Timestamp
@@ -33,6 +34,20 @@ class PolicyDecision:
     estimate_trade_cost_gradient: (
         Callable[[str, float, str], tuple[float, float]] | None
     ) = None
+    order_state: pd.DataFrame | None = None
+
+
+@dataclass(frozen=True)
+class PolicyExecution:
+    """Execution destinations and per-asset wait/cancel/maker/taker instructions.
+
+    Destinations are shares, not a replacement portfolio mandate. Waiting preserves
+    live orders; cancellation releases their reservations only on acknowledgement.
+    """
+
+    targets: pd.Series
+    modes: pd.Series
+    strategy_targets: pd.Series
 
 
 def policy_target(value, assets, *, maximum=None, weights=False, allow_missing=False):

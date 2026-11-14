@@ -55,6 +55,7 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 | `execution` | `kind=hft`；`order` 指定股票和有符号股数，正数买入、负数卖出；动作是剩余母单的提交比例 | 负的增量执行短缺与费用，除以母单到达中价名义金额；另扣剩余比例平方的时间积分和终局未完成惩罚 |
 | `inventory` | `kind=hft`；每只股票的动作映射为 `maximum_inventory` 的比例 | 本步净值变动除以 episode 初始净值，再减 `risk_aversion × 本步收益²` |
 | `portfolio` | `kind=daily` 或 `hft`；股票与现金的非负动作归一化为目标权重 | 同库存任务，以原生账本的净值变化计奖 |
+| `dynamic_execution` | `kind=hft`；透明库存策略给出目标，PPO 只选等待、撤单、挂单或主动成交及缺口数量档 | 原生扣费后净值增量（初始净值的 bps），另扣交易时间内的目标偏离与库存暴露惩罚 |
 
 执行短缺采用成交有符号金额减成交股数乘到达中价，再加真实费用；报告单位为 bps。
 原 `implementation_shortfall_bps` 继续只计已成交部分；终局另存未完成量、末次已观察中价、
@@ -152,6 +153,87 @@ maker/taker 使用同一目标算法与预测输入；比较时使用相同的�
 或披露各自基于报价方式的成本估计。maker 增加原生 `passive` 和 `trades` 配置，
 两者使用相同参与率可作为对照，但不强行配平成交量，也不保证队列成交或收盘恢复完成。
 
+## ETF 预测驱动的 PPO 执行
+
+`task="dynamic_execution"` 把目标库存与执行分开。`inventory_targets` 继续独占目标选择，
+`episode.inventory_parameters` 使用上节同一透明效用；动态执行的目标成本采用可见主动侧报价，
+不会因为 PPO 当步选择 maker 或 taker 而换目标。14:50 起目标改为当日开盘底仓，
+PPO 仍只决定执行方式和数量。30 秒是预测期限，没有 30 秒到期回转；股票 ETF 的当日买入
+继续受 T+1 约束，黄金 ETF 使用 T+0，恢复失败如实保留库存。
+
+阶段接口沿用现有原生操作，不绑定数据集名称：
+
+| 阶段 | 显式输入与参数 | 输出 |
+|---|---|---|
+| 上游预测 | 调用者选择滚动模型发布的 `prediction.paths`；声明预测期限、3 秒决策及报价可见延迟 | 原生 PRED；不由 PPO 重新训练预测模型 |
+| 目标与执行环境 | `TradingEnv(episodes)`；episode 明确资产顺序、特征列、窗口、原始盘口、逐笔、日频账户事实、费用和交易参数 | `PolicyDecision`；动作经 `PolicyExecution(targets,modes,strategy_targets)` 进入原 `inventory_batches` |
+| PPO 训练与历史验证 | `train_policy(config)`；独立 `episodes`、`validation_episodes`、`fit_cutoff`、PPO 参数、预算与 `early_stopping` | 最佳 `policy.zip`、配对 `normalization.pkl`、训练插补 `feature_scaler.pkl`、`policy.json` |
+| 冻结回放 | `backtest_policy(config)`；明确 `policy`、新的 `episode` 和 `output` | 原生 `ledger/` 与 `summary.json` |
+
+PRED 只检查本次使用的数值收益、单位与时钟定义，以及消费行晚于其模型拟合/选型截止的新关系。
+不消费标签，不以 `data_id` 字面相等、整表范围或未使用字段准入。外部调用者可以换路径、
+证券、窗口和数量参数；同一网络的资产与特征顺序仍须与训练一致。
+
+每只 ETF 动作为 `MultiDiscrete(8)`：0 等待；1 撤单；2/3/4 以 maker 执行当前库存到策略目标
+缺口的 25%/50%/100%；5/6/7 以 taker 执行相同比例。账户决定可申报的整手数量与实际成交，
+小于一手的请求不虚构成交。等待保留原单；撤单保留确认前的冻结与可能成交；切换到 taker
+须先完成原 maker 撤单，随后才在延迟已满的真实报价尝试一次 IOC。未成交量不会自动变成新的
+主动单。maker 的部分成交沿原订单累计计费，撤后重下与主动 IOC 各自属于新订单。
+
+状态复用所选原始盘口和已观察订单流，加上当前预测、实际持仓、可卖量、策略目标、
+在途与待替换目标、原单/替换单方式、活单剩余量/队前量/订单龄/撤单余时、可用与冻结现金、窗口余时和交易时钟。
+市场特征及估值只取 `T−quote_visibility_delay_ms` 之前的可见报价；本账户已经发生的订单事件
+按原事件时钟更新，不把在途量当库存。没有预测时不补零收益，PPO 可等待或撤销旧单，
+不提交新的信号订单。报价与本账户事件均未另加不存在的接收时间数据。
+
+奖励单位为初始净值的 bps。经济项为 `10000 × (NAV_after−NAV_before)/NAV_initial`，
+实际价差、部分成交、费用、持有损益和跨日权益均来自同一个原生账户。
+`target_deviation_bps` 乘各资产 `((实际股数−策略目标)×估值/初始净值)²` 的交易时间积分；
+`risk_aversion` 乘各资产实际市值占初始净值比例平方的同一积分。
+时间积分采用北京时间 09:30—11:30、13:00—15:00 的共同观察时钟，后段覆盖收盘竞价时段，
+以 14400 秒为一单位。只沿原生账户已证明的会话推进，排除午休、隔夜及非交易日；
+窗口尾部不会延长到最后实际会话之后，同日盘中截止仍积分至给定时刻。
+缺失目标不施加偏离惩罚。不重复扣成交费用，也不把捕获价差、订单数、撤单或成交量另计奖励。
+账本 `inventory_target` 保存透明策略的完整目标，`execution_destination` 保存本次数量档的提交目标，
+两者不会因部分执行而混淆。
+`summary.json` 分别保存累计 `economic_reward_bps` 与 `reward_bps`，账户绩效始终从账本计算。
+
+历史验证必须完全晚于训练、结束不晚于 `fit_cutoff`。特征中位数仅从训练 episode 的真实决策
+拟合；每次验证同步当时训练观测统计，但验证自身不更新归一化。每个声明的验证 episode
+都完整回放一次，以 episode 奖励总和的等权均值选最佳 checkpoint，同时保存该时点的训练
+归一化。`early_stopping={eval_freq,patience,min_evals}` 使用 SB3 的 `EvalCallback` 和
+`StopTrainingOnNoModelImprovement`：经过最少评估次数后，连续无提升次数**超过** patience
+才结束整个 `learn`。`eval_freq` 按总环境步数折算，末次更新也评价；`policy.json.validation`
+保存评估成绩、选中步数与是否早停，`training_decisions` 保存实际首末决策和数量。
+`ppo.target_kl` 只限制单轮策略更新，不代替整段训练早停。
+
+[训练配置](../configs/research-learning/train-policy-etf-execution.json)和
+[冻结回放配置](../configs/research-learning/backtest-policy-etf-execution.json)以 518880 单 ETF
+账户为权威示例，其他证券由调用者替换，不复制四套配置。默认 CPU、小型两层 64 单元 MLP、
+2048 步 rollout、256 batch、学习率 0.0003；训练预算 200 万步并允许历史验证早停。
+参数是起点，不声称已经实证最优。保留同一任务的 `strategy="immediate"` 作为固定目标
+taker 基线：使用同一输入与目标策略，每次提交全部缺口；调用方仅更换策略、候选身份和输出。
+
+首轮真实链路研究明确使用 LASSO 已发布的样本外预测：训练 2024-01-08—01-19，
+验证 01-22—01-26，冻结回放 01-29—02-02。PPO 历史从实际可得的首个 PRED 决策开始，
+这次为 2024-01-08，不能从 ETF raw 起点假造预测。该窗口服务原生全链验证，
+不代表已经完成截至 2026-10-30 的全期研究。后续由调用者按季度更新 PPO，使用当时可得
+PRED 的扩窗历史并留最近历史会话验证；频率独立于上游每 20 会话预测折，无须每折重训，
+也不固定某年为训练/验证。上游仍使用自己的至少 60 会话训练、最近 20 成熟会话验证及随后
+20 会话预测协议；137 个适用 raw 因子及预测模型训练不由此修改。
+
+示例依赖服务器的结构化账户事实 `data/interim/etf-execution/*`，包括真实上市/市场/交易状态、
+权益与 ETF 费用；这些事实必须先由已有结构化来源准备。股票费率和缺失上市/停牌信息
+不能当作 ETF 事实或正常状态。ETF 高频数据与逐行产物保留服务器；本地测试使用独立合成
+价格、成交和费用手算，不把测试结果冒称实际市场收益。
+
+实现依据为 [PPO 原论文](https://arxiv.org/abs/1707.06347)、
+[SB3 PPO 参数](https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html)、
+[历史评价与早停回调](https://stable-baselines3.readthedocs.io/en/master/guide/callbacks.html)、
+[VecNormalize](https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html#vecnormalize)
+及 [Gymnasium Env API](https://gymnasium.farama.org/api/env/)。本项目的市场环境与奖励是执行研究
+适配，论文基准结果不构成本项目策略收益证据。
+
 ## 股票高频全市场组合
 
 `strategy="stock_portfolio"`、`episode.kind="hft"`、`task="portfolio"` 接入同一账户。
@@ -170,7 +252,8 @@ T+1 不可卖部分，再分配剩余预算；数量上限截断后的剩余资�
 
 可显式选择 `construction="absolute_risk"`，`risk_limits` 使用 `AbsoluteRiskConfig`：
 单票、行业、风格、总波动率和换手上限均默认 `null`，表示未设置，不表示风险已受控。
-与相对风险优化复用同一个 SLSQP 核，不需要 benchmark 或日 ADV。
+与相对风险优化复用同一个优化器，不需要 benchmark 或日 ADV，
+算法见 [A 股组合优化器](a-share.md#520-组合优化器)。
 输入可卖股数与 `maximum_inventory` 在求解内变成边界，不在求解后裁剪并假称仍满足风险。
 总波动率沿风险模型的年化单位，只作独立约束，不与 30 秒 alpha 直接相加。
 返回的总波动率不是 tracking error；未提供完整风险事实时诊断保持未定义，
