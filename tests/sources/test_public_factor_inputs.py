@@ -87,47 +87,68 @@ def test_exchange_contract_expiry_and_csf_units_are_source_facts(tmp_path):
     )
     assert frame.asset_id.tolist() == ["IF2401"]
     assert frame.expiry_date.tolist() == ["20240119"]
-    path = tmp_path / "csf.json"
-    path.write_text(
-        json.dumps(
-            {
-                "data": {
-                    "list": [
-                        {
-                            "date": "2024-01-02",
-                            "a2": "1",
-                            "b2": "000001",
-                            "c2": "2",
-                            "i2": "3",
-                            "l2": "4",
-                            "m2": "5",
-                        },
-                        {
-                            "date": "2024-01-02",
-                            "a2": "2",
-                            "b2": "合计",
-                            "c2": "2",
-                            "i2": "3",
-                            "l2": "4",
-                            "m2": "5",
-                        },
-                    ]
-                }
-            }
-        ),
-        encoding="utf-8",
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    records, clocks = [], []
+    sources = (
+        "csf_securities_refinancing_summary",
+        "csf_market_making_borrowing_summary",
     )
-    frame = next(
-        normalize(
-            "public_refinancing_balances",
-            path,
-            {"source": "csf_securities_refinancing_summary"},
+    for source in sources:
+        path = tmp_path / f"{source}.csv.gz"
+        pd.DataFrame(
+            [
+                dict(date="2024-01-02", b2="000001", c2="2", i2="3", l2="4", m2="5"),
+                dict(
+                    date="2024-01-02", b2="000002", c2="-", i2="0", l2="", m2="1,234.5"
+                ),
+                dict(date="2024-01-02", b2="合计", c2="2", i2="3", l2="4", m2="5"),
+            ]
+        ).assign(
+            source_sha256="original-response", source_url="https://example.org/original"
+        ).to_csv(path, index=False)
+        records.append(dict(path=path.name, source=source, sha256="combined-table"))
+        clocks.append(
+            dict(
+                source=source,
+                observation_date="2024-01-02",
+                estimated_available_at="2024-01-03T09:30:00+08:00",
+                availability_basis="current_policy_historical_backcast",
+                evidence_url="https://example.org/official-disclosure-rule",
+            )
+        )
+    write_source_manifest(tmp_path, {"records": records})
+    clock = tmp_path / "release-clocks.csv"
+    pd.DataFrame(clocks).to_csv(clock, index=False)
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(clock),
+            outputs={"public_refinancing_balances": str(output)},
         )
     )
-    assert frame.asset_id.tolist() == ["000001"]
-    assert frame.lent_quantity.tolist() == [30000]
-    assert frame.ending_balance.tolist() == [50000]
-    assert "publication_date" not in frame
+    frame = read_dataset(output)
+    assert len(frame) == 4
+    for source, scope in zip(
+        sources, ("securities_refinancing", "market_maker"), strict=True
+    ):
+        selected = frame.loc[frame.source.eq(source)].sort_values("asset_id")
+        assert selected.asset_id.tolist() == ["000001", "000002"]
+        assert selected.scope.tolist() == [scope, scope]
+        assert selected.lent_quantity.tolist() == [30000, 0]
+        assert selected.ending_balance.tolist() == [50000, 12345000]
+        assert selected.beginning_quantity.iloc[0] == 20000
+        assert pd.isna(selected.beginning_quantity.iloc[1])
+        assert selected.ending_quantity.iloc[0] == 40000
+        assert pd.isna(selected.ending_quantity.iloc[1])
+    assert frame.source_sha256.eq("original-response").all()
+    assert frame.source_url.eq("https://example.org/original").all()
+    assert frame.publication_date.isna().all() and frame.published_at.isna().all()
+    assert frame.available_at.eq(pd.Timestamp("2024-01-03T01:30:00Z")).all()
+    assert frame.availability_basis.eq("current_policy_historical_backcast").all()
 
 
 def test_extracted_13f_values_are_already_usd(tmp_path):

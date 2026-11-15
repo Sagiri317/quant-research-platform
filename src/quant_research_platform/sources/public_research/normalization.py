@@ -401,7 +401,7 @@ def accepts(data_id, record):
     if data_id == "public_futures_member_positions":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_refinancing_balances":
-        return path.endswith(".json")
+        return path.endswith((".csv", ".csv.gz"))
     if record["source"].startswith("etf_pcf_"):
         return path.endswith(".csv")
     if (
@@ -826,43 +826,37 @@ def normalize(data_id, path, record):
                 result["publication_date"] = result.timestamp
                 yield result
     elif source in SOURCES["public_refinancing_balances"]:
-        payload = json.loads(path.read_bytes())
-        rows = payload["data"]["list"]
-        frame = pd.DataFrame(rows)
-        if frame.empty:
-            return
-        result = _rename(
-            frame,
-            {
-                "date": "timestamp",
-                "b2": "asset_id",
-                "c2": "beginning_quantity",
-                "i2": "lent_quantity",
-                "l2": "ending_quantity",
-                "m2": "ending_balance",
-            },
-        )
-        result = result.loc[
-            result.asset_id.astype("str").str.fullmatch(r"\d{6}")
-        ].copy()
-        _numbers(
-            result,
-            (
-                "beginning_quantity",
-                "lent_quantity",
-                "ending_quantity",
-                "ending_balance",
-            ),
-        )
-        result[
-            ["beginning_quantity", "lent_quantity", "ending_quantity", "ending_balance"]
-        ] *= 10000
-        result["scope"] = (
-            "market_maker"
-            if source == "csf_market_making_borrowing_summary"
-            else "securities_refinancing"
-        )
-        yield result
+        mapping = {
+            "date": "timestamp",
+            "b2": "asset_id",
+            "c2": "beginning_quantity",
+            "i2": "lent_quantity",
+            "l2": "ending_quantity",
+            "m2": "ending_balance",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                result = result.loc[
+                    result.asset_id.str.fullmatch(r"\d{6}", na=False)
+                ].copy()
+                result["scope"] = (
+                    "market_maker"
+                    if source == "csf_market_making_borrowing_summary"
+                    else "securities_refinancing"
+                )
+                yield result
     elif source == "eastmoney_fund_history_extracted":
         payload = json.loads(path.read_text(encoding="utf-8"))
         fields = payload["fields"]
@@ -1312,6 +1306,15 @@ def normalize_selected_facts(frame, *, source):
     if source == "sse_etf_shares":
         _numbers(frame, ("shares_outstanding",))
         frame["shares_outstanding"] *= 10000
+    elif source in SOURCES["public_refinancing_balances"]:
+        fields = [
+            "beginning_quantity",
+            "lent_quantity",
+            "ending_quantity",
+            "ending_balance",
+        ]
+        _numbers(frame, fields)
+        frame[fields] *= 10000
     elif source == "sec_13f":
         _numbers(frame, ("value_usd",))
         frame["value_usd"] *= frame.publication_date.lt("2023-01-03").map(
