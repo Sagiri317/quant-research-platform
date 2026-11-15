@@ -14,6 +14,9 @@ from quant_research_platform.contracts.models import (
     sequence_parameters,
 )
 from quant_research_platform.research.models.deeplob import complete_book_rows
+from quant_research_platform.research.models.scaler import (
+    equal_timestamp_sample_weights,
+)
 
 
 def _network(algorithm, width, parameters):
@@ -48,10 +51,14 @@ def _network(algorithm, width, parameters):
                     dim_feedforward=hidden * 2,
                     dropout=parameters["dropout"],
                     batch_first=True,
+                    norm_first=parameters.get("norm_first", False),
                 )
                 self.encoder = nn.TransformerEncoder(
                     nn.TransformerEncoderLayer(**layer_parameters),
                     parameters["num_layers"],
+                    norm=nn.LayerNorm(hidden, eps=1e-5)
+                    if layer_parameters["norm_first"]
+                    else None,
                     enable_nested_tensor=False,
                 )
                 if parameters.get("independent_layer_initialization", False):
@@ -318,6 +325,7 @@ def fit_sequence(prepared, spec, validation=None):
     device = get_device(parameters["device"])
     input_device = device if parameters["preload_inputs"] else "cpu"
     weights, scaler = prepared.preprocessing
+    weight_sum = float(weights.sum())
     classification = spec.model_algorithm == "deeplob_classifier"
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
     matrix = torch.as_tensor(matrix, device=input_device)
@@ -367,6 +375,13 @@ def fit_sequence(prepared, spec, validation=None):
             else ((v_target - mean) / scale).astype("float32")
         )
         validation_arrays = (v_matrix, v_endpoints, v_starts, v_actual)
+        validation_weights = equal_timestamp_sample_weights(
+            validation.training.timestamp
+        )
+        validation_mass = torch.as_tensor(
+            validation_weights, dtype=torch.float64, device=device
+        )
+        validation_weight_sum = float(validation_weights.sum())
 
     def batch_errors(network, values, ends, starts, actual, selected):
         ends = ends[selected]
@@ -424,9 +439,7 @@ def fit_sequence(prepared, spec, validation=None):
                 loss_sum += (errors.detach() * mass).sum().to(torch.float64)
             point = {
                 "epoch": epoch + 1,
-                "training_loss": float(loss_sum.cpu())
-                / float(weights.sum())
-                * scale**2,
+                "training_loss": float(loss_sum.cpu()) / weight_sum * scale**2,
                 "validation_loss": None,
             }
             if validation_arrays is not None:
@@ -439,9 +452,11 @@ def fit_sequence(prepared, spec, validation=None):
                             min(offset + parameters["batch_size"], len(v_actual)),
                         )
                         errors = batch_errors(network, *validation_arrays, selected)
-                        validation_sum += errors.sum().to(torch.float64)
+                        validation_sum += (
+                            errors * validation_mass[offset : offset + len(selected)]
+                        ).sum()
                 point["validation_loss"] = (
-                    float(validation_sum.cpu()) / len(v_actual) * scale**2
+                    float(validation_sum.cpu()) / validation_weight_sum * scale**2
                 )
             if point["validation_loss"] is not None and not np.isfinite(
                 point["validation_loss"]
@@ -480,7 +495,7 @@ def fit_sequence(prepared, spec, validation=None):
         {
             "metric": "log_loss" if classification else "mse",
             "training_loss_scope": "online_epoch_weighted",
-            "validation_loss_scope": "epoch_end_row_mean",
+            "validation_loss_scope": "epoch_end_equal_timestamp_weighted",
             "epochs": curve,
             "sequence_lengths": {
                 "min": int(lengths.min()),

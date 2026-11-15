@@ -314,6 +314,7 @@ def _fit_estimator_model_result(
             "best_iteration": int(estimator.best_iteration),
             "iterations": len(next(iter(metrics.values()))),
             "validation_metrics": metrics,
+            "validation_weighting": "equal_timestamp",
         }
     result = ModelFitResult(metadata=metadata, prediction_model=predictor)
     return result
@@ -430,9 +431,11 @@ def _collect_training_rows(
                     allow_null=True,
                 )
             if spec.model_algorithm in SEQUENCE_ALGORITHMS:
-                observed = chunk.loc[:, spec.input_columns].notna().any(axis=1)
-                if context_columns:
-                    observed = pd.Series(True, index=chunk.index)
+                observed = (
+                    pd.Series(True, index=chunk.index)
+                    if context_columns
+                    else chunk.loc[:, spec.input_columns].notna().any(axis=1)
+                )
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
                 )
@@ -764,6 +767,11 @@ def _fit_lasso_gram(estimator, prepared):
 def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
     from xgboost import DataIter
 
+    weights = (
+        prepared.preprocessing[0]
+        if ref is None
+        else equal_timestamp_sample_weights(prepared.training["timestamp"])
+    )
     if external:
         import cupy
         from xgboost import ExtMemQuantileDMatrix
@@ -789,7 +797,7 @@ def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
                 label=prepared.training[prepared.target_column]
                 .iloc[start:stop]
                 .to_numpy(),
-                weight=prepared.preprocessing[0][start:stop] if ref is None else None,
+                weight=weights[start:stop],
                 feature_names=list(prepared.input_columns),
                 feature_types=estimator.feature_types,
                 feature_weights=estimator.feature_weights,

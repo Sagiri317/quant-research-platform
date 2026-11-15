@@ -114,6 +114,24 @@ def test_best_state_native_roundtrip_and_validation_maturity(
         curve = result.metadata["learning_curve"]["epochs"]
         assert len(curve) == stopped["iterations"]
         assert best == int(np.argmin([point["validation_loss"] for point in curve]))
+        observed = frame.loc[
+            frame.timestamp.between("2020-01-04", "2020-01-06") & ~late
+        ]
+        if algorithm == "deeplob_classifier":
+            probabilities = result.prediction_model.prediction_function(
+                probabilities=True
+            )(observed)
+            errors = -np.log(probabilities[:, 0])
+        else:
+            errors = (
+                result.prediction_model.predict(observed) - observed.label.to_numpy()
+            ) ** 2
+        expected_loss = (
+            pd.Series(errors, index=observed.timestamp).groupby(level=0).mean().mean()
+        )
+        assert curve[best]["validation_loss"] == pytest.approx(
+            expected_loss, rel=2e-6, abs=1e-8
+        )
 
     # A separately trained fixed-budget model is an independent checkpoint oracle.
     fixed = deepcopy(config)
@@ -304,3 +322,23 @@ def test_unbounded_boosting_continues_beyond_default_tree_budget():
     assert stopping["iterations"] > stopping["best_iteration"] + 1
     predicted = result.prediction_model.predict(validation.loc[:, ["x"]])
     assert np.mean((predicted - np.sin(validation.x)) ** 2) < 0.01
+
+
+def test_boosting_validation_rmse_gives_each_timestamp_equal_mass(tmp_path):
+    config, frame, _ = stopping_config(tmp_path, "xgboost_regressor")
+    config["model"]["hyperparameters"].update(n_estimators=1, early_stopping_rounds=1)
+    frame.loc[frame.timestamp.eq("2020-01-04"), "label"] = 2.0
+    # Different numbers of mature stocks make row and date weighting differ.
+    frame = frame.loc[~(frame.timestamp.eq("2020-01-05") & frame.asset_id.ne("a"))]
+    frame.to_parquet(config["inputs"]["path"], index=False)
+    fitted, _ = load_model(fit(config))
+    valid = frame.loc[
+        frame.timestamp.between("2020-01-04", "2020-01-06")
+        & frame.label_available_at.le(pd.Timestamp("2020-01-07"))
+    ]
+    predicted = fitted.prediction_model.predict(valid.loc[:, ["x"]])
+    squared = pd.Series((predicted - valid.label.to_numpy()) ** 2, index=valid.index)
+    expected = np.sqrt(squared.groupby(valid.timestamp).mean().mean())
+    observed = fitted.metadata["early_stopping"]["validation_metrics"]["rmse"][0]
+    assert observed == pytest.approx(expected, rel=1e-6)
+    assert not np.isclose(observed, np.sqrt(squared.mean()), rtol=1e-3)

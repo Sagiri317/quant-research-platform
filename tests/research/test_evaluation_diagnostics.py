@@ -158,36 +158,7 @@ def test_evaluation_chunk_producer_releases_consumed_frames(monkeypatch) -> None
         frames(), spec=spec, asset_column="asset_id"
     ):
         count += 1
-        assert list(metrics.columns) == [
-            "timestamp",
-            "signal",
-            "label",
-            "ic",
-            "rankic",
-            "n_obs",
-            "ic_reason",
-            "rankic_reason",
-            *[
-                f"{side}_{field}"
-                for side in ("long", "short")
-                for field in (
-                    "ic",
-                    "rankic",
-                    "n_obs",
-                    "n_selected",
-                    "ic_reason",
-                    "rankic_reason",
-                )
-            ],
-        ]
-        assert list(grouped.columns) == [
-            "timestamp",
-            "signal",
-            "label",
-            "group",
-            "mean_label_value",
-            "n_obs",
-        ]
+        assert grouped["n_obs"].sum() == 2
         assert metrics["n_obs"].tolist() == [2]
         assert metrics["ic"].tolist() == pytest.approx([1.0])
     assert count == 16

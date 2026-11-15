@@ -64,6 +64,61 @@ def test_transformer_independent_initialization_and_seed():
         )
 
 
+def test_transformer_pre_norm_matches_residual_formula_and_legacy_parameters():
+    import torch
+    from torch.nn import functional as functional
+
+    from quant_research_platform.contracts.models import sequence_parameters
+    from quant_research_platform.research.models.neural import _network
+
+    parameters = sequence_parameters(
+        "transformer_regressor",
+        dict(hidden_size=4, n_heads=2, num_layers=2, sequence_length=3),
+    )
+    legacy = {key: value for key, value in parameters.items() if key != "norm_first"}
+
+    def build(options):
+        with torch.random.fork_rng():
+            torch.manual_seed(19)
+            return _network("transformer_regressor", 2, options).double().eval()
+
+    old, default = build(legacy), build(parameters)
+    values = torch.arange(12, dtype=torch.float64).reshape(2, 3, 2) / 12
+    lengths = torch.tensor([3, 1])
+    torch.testing.assert_close(
+        old(values, lengths), default(values, lengths), rtol=0, atol=0
+    )
+    assert old.encoder.norm is None
+
+    model = build(
+        {**parameters, "norm_first": True, "independent_layer_initialization": True}
+    )
+    encoded = model.projection(values) + model.position(torch.arange(3))
+    padding = torch.arange(3)[None, :] >= lengths[:, None]
+
+    def normalize(value, layer):
+        return functional.layer_norm(value, (4,), layer.weight, layer.bias, 1e-5)
+
+    for layer in model.encoder.layers:
+        normalized = normalize(encoded, layer.norm1)
+        attended = layer.self_attn(
+            normalized,
+            normalized,
+            normalized,
+            key_padding_mask=padding,
+            need_weights=False,
+        )[0]
+        encoded = encoded + attended
+        encoded = encoded + layer.linear2(
+            functional.relu(layer.linear1(normalize(encoded, layer.norm2)))
+        )
+    final = normalize(encoded, model.encoder.norm)[torch.arange(2), lengths - 1]
+    expected = model.output(final).squeeze(-1)
+    torch.testing.assert_close(model(values, lengths), expected, rtol=1e-10, atol=1e-12)
+    with pytest.raises(ValueError, match="sequence_parameter_invalid: norm_first"):
+        sequence_parameters("transformer_regressor", {"norm_first": "true"})
+
+
 def test_lstm_input_initialization_preserves_other_parameters_and_seed():
     import torch
 
@@ -296,7 +351,11 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
             "sequence_length": 4,
             "sequence_group_columns": ["episode"] if grouped else [],
             **(
-                {"num_layers": 2, "independent_layer_initialization": True}
+                {
+                    "num_layers": 2,
+                    "independent_layer_initialization": True,
+                    "norm_first": True,
+                }
                 if algorithm == "transformer_regressor"
                 else {"input_gate_xavier_initialization": True}
             ),
@@ -313,6 +372,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     assert result.metadata["resolved_hyperparameters"]["device"] == "cuda"
     assert result.metadata["resolved_hyperparameters"]["preload_inputs"] is False
     if algorithm == "transformer_regressor":
+        assert result.metadata["resolved_hyperparameters"]["norm_first"] is True
         assert (
             result.metadata["resolved_hyperparameters"][
                 "independent_layer_initialization"
@@ -382,8 +442,13 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     valid = future.x.notna() & future.eligible
     curve = result.metadata["learning_curve"]
     assert curve["sequence_lengths"]["max"] == (1 if grouped else 3)
+    errors = pd.Series(
+        (expected[valid] - future.loc[valid, "label"].to_numpy()) ** 2,
+        index=future.loc[valid, "timestamp"],
+    )
+    assert curve["validation_loss_scope"] == "epoch_end_equal_timestamp_weighted"
     assert curve["epochs"][-1]["validation_loss"] == pytest.approx(
-        np.mean((expected[valid] - future.loc[valid, "label"].to_numpy()) ** 2),
+        errors.groupby(level=0).mean().mean(),
         rel=1e-6,
     )
     window = {"start": "2020-01-05", "end": "2020-01-09"}

@@ -71,13 +71,13 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 `research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。[A 股季度配置](../configs/quarterly-a-share.json)从 2014 年积累历史；[ETF 会话配置](../configs/high-frequency/rolling-etf.json)以 518880 为一份示例，其他 ETF 由调用者替换输入、证券和真实训练起点。两份配置均包含 LASSO、XGBoost、LSTM、Transformer 及其历史验证候选，研究窗截至 2026-10-30。特征列、目标、窗口和输出都由配置显式提供，算法不根据数据集名称选择研究规则。
 
-每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions=20` 个用于验证。验证段按所选标签的实际成熟时点前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。最早预测季度由合法训练样本决定，不能为补齐首折消费未成熟标签。
+每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions` 个用于验证；股票季度配置为120，ETF会话配置为20。股票从2014年积累历史，优先预测2022Q1至2026Q4，每季只有一次训练／验证划分。验证段按所选标签的实际成熟时点前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。末季度只覆盖实际数据日期。
 
 A股低频新研究默认使用 `forward_return_5d`，在唯一目标变换入口按合格截面生成 `model_target`：`date_zscore`、`target_clip=none`，目标单位为 `dimensionless`；原5日、20日等收益及成熟列继续保留。日频和周频调仓使用相同5日预测目标，每日可产生新预测，5日预测期限不强制持有五日。原训练样本加权和expanding历史保持，未启用半衰衰减。已有20日模型、PRED、EVAL和报告保留当时事实；新默认不会重写旧存档。迁移只需用已有5日收益派生新目标及成熟列，再对原全滚动窗重选参和重拟合；原始因子及其它已存收益标签不重算，最早有效折由新成熟规则决定。
 
 ETF高频默认共同决策间隔3秒，对应原始 `future_mid_return_30s`；30秒决策对应 `future_mid_return_60s`，均为 `raw`、`decimal_return`。默认映射由高频协议唯一维护，采样声明及下游组装从实际决策时钟派生，不按数据集名称判断。ModelSpec仍显式指定单个 `target_column`，可取采样产物声明的默认源标签；显式选择其它已声明期限仍有效，不被默认覆盖。标签从决策时点的可见中价出发，成熟钟仍为实际未来报价时刻加可见延迟，不跨连续交易段补标签。
 
-正式A股组合使用既有 `robust_long_only` 和同一风险约束配置，[backtest-robust.json](../configs/backtest-robust.json) 以日频为例。调用方读一次配置后分别调用原生 `backtest`，仅更换调仓日历和输出；风险参数不复制成两份配置：
+风险约束组合比较使用既有 `robust_long_only` 和同一风险约束配置，[backtest-robust.json](../configs/backtest-robust.json) 以日频为例。调用方读一次配置后分别调用原生 `backtest`，仅更换调仓日历和输出；风险参数不复制成两份配置：
 
 ```python
 from copy import deepcopy
@@ -96,9 +96,9 @@ for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")
 
 调用前由研究caller替换真实输入、预测窗及新输出。观察日T的日频输入已带T+1盘前决策时钟，账户按保留的 `signal_session` 对齐调度，在T+1开盘执行，不再移到T+2；周频按真实相邻交易会话跨周选择信号，在其下一交易日开盘执行，节假日不压缩会话轴。预测5会话收益的价格端点为T+1与T+6，退出日复权开盘依赖当日收盘事实，因此成熟不能提前到退出日开盘；尾部未知保留NaT。
 
-`parameter_candidates` 是以 `model_id` 为键的参数字典列表，各字典覆盖该模型的 `hyperparameters`；省略时只比较配置中这一组参数。所有候选在相同历史验证窗口的成熟共同样本上计算 MSE，先按会话求平均，再等权平均各会话。LASSO 用 `max_iter=null` 收敛求解；XGBoost、LSTM、Transformer 可用无上限迭代及历史验证早停。选择同一模型的最低验证 MSE 候选；若有早停，以学得的最佳迭代编号加一作为最终重拟合轮数，移除早停参数，重拟合至预测前全部成熟历史。序列保留验证起点前的真实历史，以及最后成熟标签之后、预测截止之前可观察的特征上下文；上下文不增加损失样本。
+`parameter_candidates` 是以 `model_id` 为键的参数字典列表，各字典覆盖该模型的 `hyperparameters`；省略时只比较配置中这一组参数。候选使用相同历史验证窗口的成熟共同样本。`selection_metric` 默认 `daily_mse`，按日等权MSE最小选优；股票配置使用 `daily_rank_ic`，在同一家族候选共同有定义的日期上按日均RankIC最大选优，全期无定义的候选不参与选择，全部无定义或共同日期为空时失败，并列按原候选顺序。MSE始终保存供诊断。LASSO 用 `max_iter=null` 收敛求解；XGBoost、LSTM、Transformer 可用无上限迭代及历史验证早停。NN的早停MSE和XGBoost的早停RMSE按时间戳等质量加权，股票即日期等权。若有早停，以学得的最佳迭代编号加一作为最终重拟合轮数，移除早停参数，重拟合至预测前全部成熟历史；插补和缩放重新在该训练历史估计。序列保留验证起点前的真实历史，以及最后成熟标签之后、预测截止之前可观察的特征上下文；上下文不增加损失样本。
 
-[低频季度配置](../configs/quarterly-a-share.json) 的新5日研究维持 Lasso／XGBoost／LSTM／Transformer 各3／4／2／2组候选：Lasso 的 α 为0.03、0.01、0.001；两种神经网络的原两组架构保持，学习率分别改为0.0003和0.0001。XGBoost网格、早停、批量、样本加权和完整expanding历史保持；ETF配置不变。该固定网格参考旧20日研究结果设计，因此新5日全段回放属于回看研究，不能称为完全未见的独立确认；每折选参仍只使用当时已成熟的历史。旧神经网络常在首轮取得最佳验证值只是下调学习率的诊断线索，尚不能据此断定代码错误或过拟合，新网格效果须由5日历史验证实际确定。
+[低频季度配置](../configs/quarterly-a-share.json) 保留四家族各3／4／2／2组候选，两种神经网络均保留20日／64维／1层与60日／128维／2层，Transformer使用Pre-LayerNorm和末端LayerNorm。参数及研究依据统一见[低频模型设置](low-frequency-models.md)。每季候选选优后，各家族独立重拟合和预测；旧研究结果保持当时参数与验证口径，不随当前配置改写。
 
 普通模型按输入组与筛选模式，共用只根据候选拟合期合法观测确定的列集合：排除全缺失或常数列，不以验证、未来表现或 IC 选列，不将全缺失补零。最终重拟合沿用该折列集合；下折可纳入随后出现的新信息。DeepLOB 保留固定顺序的40列盘口，不做常量筛列，盘口有效性由原生拟合入口判断。模型原生 `training_selection` 记录保留列、历史窗口、共同样本数、候选验证误差、早停事实与选中参数；普通模型另记全缺失与常数列。训练与预测是否筛选 `eligible` 由显式 `sample_filter_mode` 决定；ETF 使用 `unfiltered` 时不要求该列。
 
@@ -110,9 +110,11 @@ for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")
 
 训练阶段只加载最终冻结模型，按原 `fit_windows`、`fit_cutoff`、筛选、输入观察和标签成熟规则前向，使用冻结插补及缩放；按自然月分块读取特征，块内按日聚合，并保持跨块的因果序列状态。它输出原拟合样本的日等权 MSE、RMSE、MAE、IC、RankIC 及相对同域零预测的 R²，不重新拟合，也不保存逐行训练 PRED。这是最终重拟合模型的回代误差，不是样本外表现或原优化器加权损失。
 
-验证阶段仅消费 `training_selection` 保存的选中候选 `validation_daily_mse`，并取平方根得到 RMSE；历史 MAE、IC、RankIC、R² 和 CV 曲线没有保存时明确为 `not_saved`，不能用包含验证段的最终重拟合模型补算。历史选择的 MSE 是先按日汇总全部共同样本行，再等权平均各日，输出以 `pooled_daily_rows` 标明其口径。预测阶段按显式每期窗口聚合原生日表，保持原截止时点、未成熟及缺失会话。跨截面轴每时点截面等权汇总到日，单资产时间轴在各资产日内计算；RMSE 是日等权 MSE 的平方根，R² 是同域日等权误差之比，均不平均每日平方根或每日 R²。
+验证阶段消费 `training_selection` 实际保存的全部候选日表，并标明所选候选；选型分数及共同有效日期计数直接沿用原选择记录。历史只有MSE等标量时，仅导出实际已存指标，缺失的MAE、IC、RankIC、R²或CV曲线明确为 `not_saved`，不能用包含验证段的最终重拟合模型补算。MSE先按日汇总全部共同样本行，再等权平均各日；旧标量记录以 `pooled_daily_rows` 标明口径。预测阶段按显式每期窗口聚合原生日表，保持原截止时点、未成熟及缺失会话。跨截面轴每时点截面等权汇总到日，单资产时间轴在各资产日内计算；RMSE是日等权MSE的平方根，R²是同域日等权误差之比，均不平均每日平方根或每日R²。
 
-输出是原生 STAT 的 `model_period_metrics.parquet` 与 `model_epoch_curves.parquet`。前者记录来源、口径、窗口、cutoff、目标及单位、实际有效会话范围、样本和会话数、参数及已保存的迭代数；完整原拟合窗、目标定义和历史选型事实保存在元数据中。`valid_session_count` 及 `session_count` 同时保留，部分未成熟会话不补零。后者只复制实际保存的最终拟合 epoch 曲线，保留 `online_epoch_weighted` 训练损失及 `epoch_end_row_mean` 验证损失的来源；曲线值沿用目标平方单位，不冒充冻结模型误差。标准化 `model_target` 的误差是该标准化目标单位，不能解释为基点。报告和趋势图直接消费这些小表，统计不改训练、选参或早停流程。
+输出沿原生STAT保留三张表：`model_period_metrics.parquet`记录最终模型三阶段及全部候选验证汇总，含candidate_id、参数、是否选中、selection_metric与selection_score；`model_daily_metrics.parquet`保留同一计算的逐日值、缺失原因和样本计数；`model_epoch_curves.parquet`保存所有实际已有的候选NN训练／验证曲线、XGBoost逐树验证曲线和最终NN重训曲线。NN使用epoch，XGBoost使用boosting_round，二者不混作同一单位；曲线stage区分candidate_fit与final_fit。完整原拟合窗、目标定义和历史选型事实仍保存在模型元数据中，统计只消费实际已存CV，不重新构造历史验证模型。
+
+`valid_session_count`及`session_count`同时保留，未成熟会话不补零。在线优化损失与冻结模型训练误差分别报告，旧的行均验证损失不会被改写为新的时间戳等权损失。标准化`model_target`的误差不能解释为基点。`top_quantile`可选参数沿用因子的相关系数与分位边界owner，增加两端IC/RankIC及标签均值；股票取0.2，ETF未声明时不增加尾部指标。收益差保留标签单位，原始收益另由季度EVAL的`forward_return_5d`提供，不把重叠标签复利成账户净值。图表直接消费这些表，不改训练、选参或早停流程。
 
 截面日表的资产域须与请求相同；单资产时间轴的日表可包含更多证券，操作仅投影请求证券，训练阶段仍保留原 MDL 的完整拟合证券域。同一冻结模型的分段或开放终点 PRED 可复用原生日表。若原评价没有保存零预测基准，R² 行保留为 `UNDEFINED/not_saved`，其余指标继续产出。
 

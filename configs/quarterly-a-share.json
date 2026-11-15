@@ -80,6 +80,7 @@
         "hidden_size": 64,
         "num_layers": 1,
         "n_heads": 4,
+        "norm_first": true,
         "independent_layer_initialization": true,
         "batch_size": 2048,
         "learning_rate": 0.0003,
@@ -98,11 +99,12 @@
   ],
   "training_start": "2014-01-01",
   "rolling_window": {
-    "start": "2014-01-01",
+    "start": "2022-01-01",
     "end": "2026-10-30"
   },
   "trading_calendar": "data/interim/csmar-20261110/trading_calendar",
-  "validation_sessions": 20,
+  "validation_sessions": 120,
+  "selection_metric": "daily_rank_ic",
   "evaluation_cutoff": "2026-10-31T00:00:00",
   "label_unit": "dimensionless",
   "evaluation": {
@@ -117,7 +119,8 @@
       }
     ],
     "label_columns": [
-      "model_target"
+      "model_target",
+      "forward_return_5d"
     ],
     "evaluation_axis": "cross_sectional",
     "correlation_clock": "trading_day",

@@ -140,6 +140,7 @@ def sequence_parameters(algorithm, parameters):
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
         defaults["independent_layer_initialization"] = False
+        defaults["norm_first"] = False
     if algorithm == "lstm_regressor":
         defaults["input_gate_xavier_initialization"] = False
     if algorithm in DEEPLOB_ALGORITHMS:
@@ -208,10 +209,9 @@ def sequence_parameters(algorithm, parameters):
     ):
         raise ValueError("model_device_invalid")
     if algorithm == "transformer_regressor":
-        if type(defaults["independent_layer_initialization"]) is not bool:
-            raise ValueError(
-                "sequence_parameter_invalid: independent_layer_initialization"
-            )
+        for name in ("independent_layer_initialization", "norm_first"):
+            if type(defaults[name]) is not bool:
+                raise ValueError(f"sequence_parameter_invalid: {name}")
         heads = defaults["n_heads"]
         if type(heads) is not int or heads < 1 or defaults["hidden_size"] % heads:
             raise ValueError("transformer_heads_invalid")

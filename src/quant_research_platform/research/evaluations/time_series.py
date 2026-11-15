@@ -8,7 +8,7 @@ import pandas as pd
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.compute.classification import classification_metrics
 from quant_research_platform.compute.dataframe.cross_section import (
-    _pearson_correlation_result,
+    _correlation_records,
 )
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.evaluations import (
@@ -21,6 +21,7 @@ from quant_research_platform.contracts.models import (
     PROBABILITY_COLUMNS,
     _prediction_target_reason,
 )
+from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.statistics import (
     _validate_bootstrap_configuration,
@@ -107,9 +108,12 @@ def _signal_metric_blocks(
     regression=False,
     baseline_columns=(),
     prediction_column="signal",
+    top_quantile=None,
 ):
     """Compute each timestamp cross section or asset-day exactly once."""
     sessions, asset_ids = _evaluation_axes(evaluation_axis, sessions, asset_ids)
+    if top_quantile is not None:
+        top_quantile = resolve_top_quantile(top_quantile)
     baselines = tuple(baseline_columns)
     if len(set(baselines)) != len(baselines):
         raise ValueError("evaluation_baselines_invalid")
@@ -118,21 +122,51 @@ def _signal_metric_blocks(
         frame, evaluation_axis=evaluation_axis, sessions=sessions, asset_ids=asset_ids
     ):
         for part in parts or [block]:
-            usable = part.loc[np.isfinite(part.signal) & np.isfinite(part.label)]
-            x = usable.signal.to_numpy(dtype=float)
-            y = usable.label.to_numpy(dtype=float)
             metrics = {}
-            for metric, left, right in (
-                ("ic", x, y),
-                (
-                    "rank_ic",
-                    usable.signal.rank().to_numpy(),
-                    usable.label.rank().to_numpy(),
-                ),
-            ):
-                value, reason = _pearson_correlation_result(left, right)
-                metrics[metric] = (value, reason, len(y))
+            timestamp = (
+                part.timestamp.iloc[0]
+                if len(part) and evaluation_axis == "cross_sectional"
+                else day
+            )
+            records, _ = _correlation_records(
+                part,
+                signal_columns=("signal",),
+                label_columns=("label",),
+                timestamp=timestamp,
+                top_quantile=top_quantile,
+                include_groups=False,
+            )
+            record = records[0]
+            prefixes = ("",) if top_quantile is None else ("", "long_", "short_")
+            for prefix in prefixes:
+                count = record[f"{prefix}n_obs"]
+                for name, source in (("ic", "ic"), ("rank_ic", "rankic")):
+                    metrics[f"{prefix}{name}"] = (
+                        record[f"{prefix}{source}"],
+                        record[f"{prefix}{source}_reason"],
+                        count,
+                    )
+                if top_quantile is not None:
+                    metrics[f"{prefix}mean_label"] = (
+                        record[f"{prefix}mean_label"],
+                        None if count else "no_observations",
+                        count,
+                    )
+            if top_quantile is not None:
+                long = metrics["long_mean_label"]
+                for name, reference in (
+                    ("long_short_spread", "short_mean_label"),
+                    ("long_excess_label", "mean_label"),
+                ):
+                    other = metrics[reference]
+                    reason = long[1] or other[1]
+                    metrics[name] = (
+                        long[0] - other[0] if reason is None else np.nan,
+                        reason,
+                        long[2] + other[2],
+                    )
             if regression:
+                usable = part.loc[np.isfinite(part.signal) & np.isfinite(part.label)]
                 economic = usable.loc[np.isfinite(usable[prediction_column])]
                 x = economic[prediction_column].to_numpy(dtype=float)
                 y = economic.label.to_numpy(dtype=float)
@@ -162,11 +196,6 @@ def _signal_metric_blocks(
                             reason,
                             int(paired.sum()),
                         )
-            timestamp = (
-                part.timestamp.iloc[0]
-                if len(part) and evaluation_axis == "cross_sectional"
-                else day
-            )
             for metric, (value, reason, count) in metrics.items():
                 rows.append(
                     dict(
@@ -218,7 +247,7 @@ def _daily_signal_metrics_from_blocks(blocks):
             reason = (
                 reasons.iloc[0] if reasons.nunique() == 1 else "no_valid_observations"
             )
-        if metric not in {"ic", "rank_ic"} and reasons.eq("nonfinite_result").any():
+        if not metric.endswith("ic") and reasons.eq("nonfinite_result").any():
             value, reason = np.nan, "nonfinite_result"
         rows.append(
             dict(
@@ -283,6 +312,7 @@ def daily_signal_metrics(
     regression=False,
     baseline_columns=(),
     prediction_column="signal",
+    top_quantile=None,
 ):
     """Reduce finite signal/label pairs on the declared daily axis.
 
@@ -292,6 +322,8 @@ def daily_signal_metrics(
     affects only matched errors. Cross-sectional blocks are timestamps and
     time-series blocks are asset-days. RMSE and R-squared derive from mean
     squared errors, never from means of block ratios or square roots.
+    Optional tails use signal-only quantile boundaries, including ties, before
+    label pairing. Tail means and their spread retain the label's units.
     """
     return _daily_signal_metrics_from_blocks(
         _signal_metric_blocks(
@@ -302,6 +334,7 @@ def daily_signal_metrics(
             regression=regression,
             baseline_columns=baseline_columns,
             prediction_column=prediction_column,
+            top_quantile=top_quantile,
         )
     )
 
@@ -576,7 +609,7 @@ def evaluate_time_series(config):
             "statistics",
             "output",
         },
-        {"comparisons", "evaluation_axis", "r2_baselines"},
+        {"comparisons", "evaluation_axis", "r2_baselines", "top_quantile"},
     )
     config.setdefault("evaluation_axis", "single_asset_time_series")
     config.setdefault("r2_baselines", ["zero"])
@@ -678,7 +711,7 @@ def evaluate_time_series(config):
     score_frame = pd.DataFrame(scores, index=base.index)
     if np.isinf(score_frame.to_numpy(dtype=float)).any():
         raise ValueError("evaluation_signal_nonfinite")
-    valid = np.isfinite(score_frame).mul(np.isfinite(base[label]), axis=0)
+    valid = np.isfinite(score_frame).mul(base.eligible.fillna(False), axis=0)
     scopes = {"own": names, **config["comparison_groups"]}
     if "own" in config["comparison_groups"]:
         raise ValueError("evaluation_scope_reserved")
@@ -719,6 +752,7 @@ def evaluate_time_series(config):
                 **kwargs,
                 regression=candidate in candidates and candidate not in thresholds,
                 baseline_columns=tuple(baseline_columns.values()),
+                top_quantile=config.get("top_quantile"),
             )
             metrics["metric"] = metrics.metric.map(
                 lambda name: baseline_metrics.get(name, name)
@@ -735,7 +769,9 @@ def evaluate_time_series(config):
                     classified.assign(candidate_id=candidate, sample_scope=scope)
                 )
             if candidate in loss_reasons:
-                affected = ~metrics.metric.isin(["ic", "rank_ic"])
+                affected = metrics.metric.isin(
+                    ["mse", "mae"]
+                ) | metrics.metric.str.startswith("matched_")
                 metrics.loc[affected, "value"] = np.nan
                 metrics.loc[affected, "reason"] = loss_reasons[candidate]
                 metrics.loc[affected, "valid_block_count"] = 0
@@ -772,6 +808,21 @@ def evaluate_time_series(config):
             metric_candidates = {
                 "ic": members,
                 "rank_ic": members,
+                **{
+                    metric: members
+                    for metric in (
+                        "long_ic",
+                        "long_rank_ic",
+                        "short_ic",
+                        "short_rank_ic",
+                        "mean_label",
+                        "long_mean_label",
+                        "short_mean_label",
+                        "long_short_spread",
+                        "long_excess_label",
+                    )
+                    if config.get("top_quantile") is not None
+                },
                 "mse": regression_members,
                 "mae": regression_members,
                 **{

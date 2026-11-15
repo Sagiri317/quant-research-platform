@@ -81,6 +81,7 @@ def _sides(metrics):
                 "n_selected",
                 "ic_reason",
                 "rankic_reason",
+                "mean_label",
             )
         }
         rows.append(
@@ -205,6 +206,7 @@ def test_default_native_sides_match_hand_domains_before_missing_labels(
             row = side_metrics.loc[(side, label)]
             assert row.n_selected == len(selected)
             assert row.n_obs == len(paired)
+            assert row.mean_label == pytest.approx(sum(y) / len(y))
             for metric, expected in (
                 ("ic", _pearson(x, y)),
                 ("rankic", _pearson(_ranks(x), _ranks(y))),

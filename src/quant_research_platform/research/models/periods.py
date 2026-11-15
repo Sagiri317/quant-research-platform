@@ -63,7 +63,9 @@ def _window_days(sessions, windows):
     return sessions[selected]
 
 
-def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
+def _training_daily(
+    inputs, result, facts, *, sessions, evaluation_axis, top_quantile=None
+):
     """Replay calendar-month feature blocks with one prediction closure."""
     metadata = result.metadata
     windows = tuple(TimeWindow(**item) for item in facts["fit_windows"])
@@ -155,7 +157,7 @@ def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
                 yield (
                     frame.loc[:, ["timestamp", "asset_id"]]
                     .assign(
-                        signal=frame.prediction_score.where(mature),
+                        signal=frame.prediction_score,
                         label=frame[target].where(mature),
                         session=frame.timestamp.dt.normalize(),
                     )
@@ -175,6 +177,7 @@ def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
                     asset_ids=assets,
                     regression=True,
                     baseline_columns=("zero",),
+                    top_quantile=top_quantile,
                 )
             )
     dates = _window_days(sessions, windows)
@@ -199,6 +202,7 @@ def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
                 asset_ids=assets,
                 regression=True,
                 baseline_columns=("zero",),
+                top_quantile=top_quantile,
             )
         )
     daily = pd.concat(parts, ignore_index=True)
@@ -284,8 +288,6 @@ def _summary_rows(daily, common):
         observation_count=None,
     )
     for row in pd.concat([summary, missing_zero], ignore_index=True).to_dict("records"):
-        if row["metric"] not in _METRICS:
-            continue
         observed = daily.loc[
             daily.asset_id.eq(row["asset_id"])
             & daily.metric.eq(row["metric"])
@@ -319,38 +321,30 @@ def _summary_rows(daily, common):
     return rows
 
 
-def _validation_rows(selection, common):
-    winner = (
-        None
-        if selection is None
-        else next(
-            item
-            for item in selection["candidates"]
-            if item["hyperparameters"] == selection["selected_hyperparameters"]
-        )
-    )
+def _validation_rows(selection, common, winner):
     window = None if selection is None else TimeWindow(**selection["validation_window"])
     stopping = None if winner is None else winner.get("early_stopping")
     mse = np.nan if winner is None else winner["validation_daily_mse"]
+    values = {"mse": mse, "rmse": np.sqrt(mse)}
+    if winner is not None and "validation_daily_rank_ic" in winner:
+        values["rank_ic"] = winner["validation_daily_rank_ic"]
     return [
         {
             **common,
             "stage": "validation",
             "asset_id": "__common_validation__",
             "metric": metric,
-            "value": mse
-            if metric == "mse"
-            else np.sqrt(mse)
-            if metric == "rmse"
-            else np.nan,
-            "status": "DEFINED"
-            if winner is not None and metric in ("mse", "rmse")
-            else "UNDEFINED",
+            "value": values.get(metric, np.nan),
+            "status": "DEFINED" if pd.notna(values.get(metric)) else "UNDEFINED",
             "reason": None
-            if winner is not None and metric in ("mse", "rmse")
+            if pd.notna(values.get(metric))
+            else winner["validation_rank_ic_reason"]
+            if metric == "rank_ic" and metric in values
             else "not_saved",
             "source": "saved_common_validation",
-            "evaluation_axis": "pooled_daily_rows",
+            "evaluation_axis": selection["rank_ic_evaluation_axis"]
+            if metric == "rank_ic" and metric in values
+            else "pooled_daily_rows",
             "aggregation": "sqrt_daily_equal_weight_mse"
             if metric == "rmse"
             else "daily_equal_weight_mean",
@@ -370,21 +364,136 @@ def _validation_rows(selection, common):
             "session_count": None
             if selection is None
             else selection["common_sessions"],
-            "valid_session_count": selection["common_sessions"]
+            "valid_session_count": selection["rank_ic_common_sessions"]
+            if metric == "rank_ic" and metric in values
+            else selection["common_sessions"]
             if winner is not None and metric in ("mse", "rmse")
             else None,
             "observation_count": None
             if selection is None
+            else selection["rank_ic_common_rows"]
+            if metric == "rank_ic" and metric in values
             else selection["common_rows"],
             "first_valid_session": None,
             "last_valid_session": None,
             "parameters_json": None
             if selection is None
-            else render_qrp_json_object(selection["selected_hyperparameters"]),
+            else render_qrp_json_object(winner["hyperparameters"]),
             "iterations": None if stopping is None else stopping["best_iteration"] + 1,
         }
         for metric in _METRICS
     ]
+
+
+def _daily_rows(daily, common):
+    identity = {
+        key: common[key]
+        for key in (
+            "period_id",
+            "model_id",
+            "candidate_id",
+            "selected",
+            "stage",
+            "label",
+            "label_unit",
+            "evaluation_axis",
+        )
+    }
+    return [
+        {**identity, **row} for row in daily[list(_DAILY_DTYPES)].to_dict("records")
+    ]
+
+
+def _curve_rows(record, common, *, stage):
+    identity = {
+        key: common[key]
+        for key in (
+            "period_id",
+            "model_id",
+            "candidate_id",
+            "selected",
+            "label_unit",
+            "parameters_json",
+        )
+    }
+    curve = record.get("learning_curve")
+    rows = []
+    if curve is not None:
+        rows.extend(
+            {
+                **identity,
+                "stage": stage,
+                "metric": curve["metric"],
+                "training_loss_scope": curve["training_loss_scope"],
+                "validation_loss_scope": curve["validation_loss_scope"],
+                **point,
+            }
+            for point in curve["epochs"]
+        )
+    stopping = record.get("early_stopping", {})
+    for metric, values in stopping.get("validation_metrics", {}).items():
+        rows.extend(
+            {
+                **identity,
+                "stage": stage,
+                "metric": metric,
+                "boosting_round": index + 1,
+                "validation_loss": value,
+                "validation_loss_scope": "round_end_"
+                + stopping.get("validation_weighting", "row_mean"),
+            }
+            for index, value in enumerate(values)
+        )
+    return rows
+
+
+def _validation_outputs(selection, common):
+    if selection is None:
+        return _validation_rows(None, common, None), [], []
+    metrics, days, curves = [], [], []
+    selected_index = next(
+        index
+        for index, candidate in enumerate(selection["candidates"])
+        if candidate["hyperparameters"] == selection["selected_hyperparameters"]
+    )
+    for index, candidate in enumerate(selection["candidates"]):
+        identity = {
+            **common,
+            "candidate_id": candidate.get(
+                "candidate_id", f"{common['model_id']}:{index}"
+            ),
+            "selected": candidate.get("selected", index == selected_index),
+            "selection_metric": selection["metric"],
+            "selection_score": candidate[f"validation_{selection['metric']}"],
+            "parameters_json": render_qrp_json_object(candidate["hyperparameters"]),
+            "iterations": candidate["early_stopping"]["best_iteration"] + 1
+            if "early_stopping" in candidate
+            else None,
+            "stage": "validation",
+        }
+        if "validation_daily" in candidate:
+            daily = pd.DataFrame(candidate["validation_daily"]).astype(_DAILY_DTYPES)
+            daily = daily.assign(
+                candidate_id=identity["candidate_id"], sample_scope="validation"
+            )
+            scope = {
+                **identity,
+                "source": "saved_candidate_validation_daily",
+                "window_start": time_window_inclusive_bounds(
+                    TimeWindow(**selection["validation_window"])
+                )[0],
+                "window_end": time_window_inclusive_bounds(
+                    TimeWindow(**selection["validation_window"])
+                )[1],
+                "cutoff": selection["validation_cutoff"],
+                "evaluation_axis": selection["evaluation_axis"],
+            }
+            metrics.extend(_summary_rows(daily, scope))
+            days.extend(_daily_rows(daily, scope))
+        else:
+            metrics.extend(_validation_rows(selection, identity, candidate))
+        curves.extend(_curve_rows(candidate, identity, stage="candidate_fit"))
+    return metrics, days, curves
 
 
 def _fit_iterations(result):
@@ -416,7 +525,7 @@ def evaluate_model_periods(config: Mapping) -> Path:
             "evaluation_axis",
             "output",
         },
-        set(),
+        {"top_quantile"},
     )
     reject_if_exists(Path(config["output"]))
     dates, _ = _evaluation_axes(
@@ -431,7 +540,7 @@ def evaluate_model_periods(config: Mapping) -> Path:
     ):
         raise ValueError("model_period_ids_invalid")
     sources = {}
-    records, epochs, lineage = [], [], []
+    records, daily_records, epochs, lineage = [], [], [], []
     for period in periods:
         period = _strict_config(
             period, {"period_id", "prediction_window", "models"}, set()
@@ -469,6 +578,8 @@ def evaluate_model_periods(config: Mapping) -> Path:
             common = {
                 "period_id": period["period_id"],
                 "model_id": model_id,
+                "candidate_id": f"{model_id}:final",
+                "selected": True,
                 "label": metadata["target_column"],
                 "label_unit": facts["label_unit"],
                 "evaluation_axis": config["evaluation_axis"],
@@ -483,8 +594,10 @@ def evaluate_model_periods(config: Mapping) -> Path:
                 facts,
                 sessions=dates,
                 evaluation_axis=config["evaluation_axis"],
+                top_quantile=config.get("top_quantile"),
             )
             daily = daily.assign(candidate_id=model_id, sample_scope="fit_sample")
+            daily_records.extend(_daily_rows(daily, {**common, "stage": "training"}))
             records.extend(
                 _summary_rows(
                     daily,
@@ -502,7 +615,15 @@ def evaluate_model_periods(config: Mapping) -> Path:
                     },
                 )
             )
-            records.extend(_validation_rows(selection, common))
+            validation_metrics, validation_daily, validation_curves = (
+                _validation_outputs(selection, common)
+            )
+            records.extend(validation_metrics)
+            daily_records.extend(validation_daily)
+            epochs.extend(validation_curves)
+            daily_records.extend(
+                _daily_rows(prediction_daily, {**common, "stage": "prediction"})
+            )
             records.extend(
                 _summary_rows(
                     prediction_daily,
@@ -516,20 +637,22 @@ def evaluate_model_periods(config: Mapping) -> Path:
                     },
                 )
             )
-            curve = metadata.get("learning_curve")
-            if curve is not None:
-                epochs.extend(
-                    {
-                        "period_id": period["period_id"],
-                        "model_id": model_id,
-                        "label_unit": facts["label_unit"],
-                        "metric": curve["metric"],
-                        "training_loss_scope": curve["training_loss_scope"],
-                        "validation_loss_scope": curve["validation_loss_scope"],
-                        **row,
-                    }
-                    for row in curve["epochs"]
-                )
+            final_curves = _curve_rows(metadata, common, stage="final_fit")
+            epochs.extend(final_curves)
+            selection_lineage = None
+            if selection is not None:
+                selection_lineage = {**selection, "candidates": []}
+                for candidate in selection["candidates"]:
+                    saved = dict(candidate)
+                    saved.pop("validation_daily", None)
+                    saved.pop("learning_curve", None)
+                    if "early_stopping" in saved:
+                        saved["early_stopping"] = {
+                            key: value
+                            for key, value in saved["early_stopping"].items()
+                            if key != "validation_metrics"
+                        }
+                    selection_lineage["candidates"].append(saved)
             lineage.append(
                 {
                     "period_id": period["period_id"],
@@ -545,9 +668,12 @@ def evaluate_model_periods(config: Mapping) -> Path:
                     "label_availability_column": metadata["label_availability_column"],
                     "label_available_max": metadata["label_available_max"],
                     "target_definition": facts["target_definition"],
-                    "training_selection": selection,
-                    "final_fit_curve": "saved" if curve is not None else "not_saved",
-                    "historical_cv_curves": "not_saved",
+                    "training_selection": selection_lineage,
+                    "final_fit_curve": "saved" if final_curves else "not_saved",
+                    "historical_cv_curves": "saved"
+                    if validation_curves
+                    else "not_saved",
+                    "historical_cv_daily": "saved" if validation_daily else "not_saved",
                     "final_fit_early_stopping": metadata.get("early_stopping"),
                 }
             )
@@ -561,6 +687,7 @@ def evaluate_model_periods(config: Mapping) -> Path:
             )
             for name, rows in (
                 ("model_period_metrics", records),
+                ("model_daily_metrics", daily_records),
                 ("model_epoch_curves", epochs),
             )
         },

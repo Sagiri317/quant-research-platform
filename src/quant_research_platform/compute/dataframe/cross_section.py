@@ -11,6 +11,7 @@ from quant_research_platform.compute.panels import validate_compute_panel
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     EVALUATION_METRICS_COLUMNS,
+    EVALUATION_SIDE_FIELDS,
 )
 from quant_research_platform.contracts.signals import DEFAULT_N_GROUPS
 
@@ -183,6 +184,9 @@ def _correlation_records(
                 )
                 if prefix:
                     record[f"{prefix}n_selected"] = n_selected
+                record[f"{prefix}mean_label"] = (
+                    float(label_values[valid_mask].mean()) if n_obs else np.nan
+                )
             ic_records.append(record)
             if include_groups:
                 predicted_labels = label_values[predicted]
@@ -208,14 +212,7 @@ def _correlation_metrics_frame(records, *, side_reason="not_applicable"):
     """Materialize one shared schema for cross-sectional and time-series results."""
     metrics = pd.DataFrame.from_records(records)
     for side in ("long", "short"):
-        for name in (
-            "ic",
-            "rankic",
-            "n_obs",
-            "n_selected",
-            "ic_reason",
-            "rankic_reason",
-        ):
+        for name in EVALUATION_SIDE_FIELDS:
             column = f"{side}_{name}"
             if column not in metrics:
                 metrics[column] = (

@@ -125,6 +125,156 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path, implicit):
     assert counts == [9, 18]
 
 
+@pytest.mark.parametrize("selection_metric", [None, "daily_rank_ic", "undefined"])
+def test_rank_selection_compares_common_defined_days_then_refits(
+    tmp_path, selection_metric
+):
+    from quant_research_platform.research.models.periods import _validation_outputs
+
+    train_days = pd.to_datetime(["2021-10-01", "2021-11-01"])
+    records = [
+        (day, f"s{i}{j}", x, z, x + 0.1 * z, day + pd.Timedelta(days=1))
+        for day in train_days
+        for i, x in enumerate((-1.0, 0.0, 1.0))
+        for j, z in enumerate((-1.0, 0.0, 1.0))
+    ]
+    # Small alpha reverses the first day's ranks but is the only varying
+    # candidate on day two. Averaging its own two days would be incomparable.
+    for day, xs, zs in [
+        ("2021-12-15", [-1.0, 0.0, 1.0], [30.0, 0.0, -30.0]),
+        ("2021-12-16", [0.0] * 5, [-2.0, -1.0, 0.0, 1.0, 2.0]),
+        ("2022-01-03", [-1.0, 0.0, 1.0], [0.0] * 3),
+    ]:
+        for i, (x, z) in enumerate(zip(xs, zs, strict=True)):
+            timestamp = pd.Timestamp(day)
+            label = (z if day == "2021-12-16" else x) * 0.01
+            records.append(
+                (timestamp, f"s{i}", x, z, label, timestamp + pd.Timedelta(days=1))
+            )
+    records.append(
+        (
+            pd.Timestamp("2021-12-15"),
+            "late",
+            10.0,
+            0.0,
+            1000.0,
+            pd.Timestamp("2030-01-01"),
+        )
+    )
+    frame = pd.DataFrame(
+        records,
+        columns=["timestamp", "asset_id", "x", "z", "label", "label_available_at"],
+    ).assign(eligible=True)
+    path = tmp_path / "inputs.parquet"
+    frame.to_parquet(path, index=False)
+    declared = input_spec()
+    declared["column_roles"]["z"] = "feature"
+    model = {
+        "model_id": "lasso",
+        "model_algorithm": "lasso_regression",
+        "input_feature_columns": ["x", "z"],
+        "target_column": "label",
+        "hyperparameters": {"max_iter": None, "tol": 1e-10},
+    }
+    config = {
+        "inputs": {"path": str(path), "spec": declared},
+        "output": str(tmp_path / "rolling"),
+        "market_id": "a_share",
+        "models": [model],
+        "parameter_candidates": {
+            "lasso": [{"alpha": alpha} for alpha in (0.001, 0.2, 100.0)]
+        },
+        "training_start": "2021-10-01",
+        "sessions": frame.timestamp.drop_duplicates().dt.strftime("%Y-%m-%d").tolist(),
+        "validation_sessions": 2,
+        "rolling_window": {"start": "2022-01-01", "end": "2022-01-04"},
+        "evaluation_cutoff": "2022-01-05",
+        "label_unit": "decimal_return",
+        "evaluation": {
+            "evaluation_id": "rank-selection",
+            "market_id": "a_share",
+            "research_dataset_id": "toy",
+            "signals": [
+                {
+                    "signal_id": "model",
+                    "source_kind": "prediction",
+                    "source_column": "score",
+                }
+            ],
+            "label_columns": ["label"],
+            "evaluation_axis": "cross_sectional",
+            "top_quantile": 0.2,
+        },
+    }
+    if selection_metric is not None:
+        config["selection_metric"] = "daily_rank_ic"
+    if selection_metric == "undefined":
+        config["parameter_candidates"]["lasso"] = [{"alpha": 100.0}]
+        with pytest.raises(ValueError, match="rolling_validation_metric_undefined"):
+            run_quarterly(config)
+        return
+    (item,) = run_quarterly(config)
+    fitted, facts = load_model(item["model"])
+    selection = facts["training_selection"]
+    assert selection["common_rows"] == 8
+    assert selection["common_sessions"] == 2
+    assert selection["fit_window"]["end"] == "2021-11-01"
+    assert selection["validation_window"] == {
+        "start": "2021-12-15",
+        "end": "2021-12-16",
+    }
+    assert fitted.metadata["rows_after_input_label_dropna"] == 26
+    assert fitted.metadata["train_end"].startswith("2021-12-16")
+    assert read_predictions(item["predictions"])[0].timestamp.min() == pd.Timestamp(
+        "2022-01-03"
+    )
+    if selection_metric is None:
+        assert selection["metric"] == "daily_mse"
+        assert fitted.metadata["hyperparameters"]["alpha"] == 100.0
+        return
+    assert selection["metric"] == "daily_rank_ic"
+    assert fitted.metadata["hyperparameters"]["alpha"] == 0.2
+    assert selection["rank_ic_common_sessions"] == 1
+    assert selection["rank_ic_common_rows"] == 3
+    scores = selection["candidates"]
+    assert [row["validation_rank_ic_defined_sessions"] for row in scores] == [2, 1, 0]
+    assert scores[0]["validation_daily_rank_ic"] == pytest.approx(-1.0)
+    assert scores[1]["validation_daily_rank_ic"] == pytest.approx(1.0)
+    assert scores[2]["validation_daily_rank_ic"] is None
+    assert scores[2]["validation_rank_ic_reason"] is not None
+    assert scores[2]["validation_daily_mse"] < scores[1]["validation_daily_mse"]
+    # Diagnostics retain the full candidate domain; selection above uses only
+    # common defined days. The constant day still has five paired observations.
+    summary, daily, _ = _validation_outputs(
+        selection,
+        {
+            "period_id": item["fold_id"],
+            "model_id": "lasso",
+            "label": "label",
+            "label_unit": "decimal_return",
+            "evaluation_axis": "cross_sectional",
+        },
+    )
+    metrics = {row["metric"]: row for row in summary if row["selected"]}
+    assert metrics["rank_ic"]["value"] == pytest.approx(1.0)
+    assert metrics["rank_ic"]["valid_session_count"] == 1
+    assert metrics["rank_ic"]["observation_count"] == 8
+    assert metrics["rank_ic"]["evaluation_axis"] == "cross_sectional"
+    assert metrics["mse"]["value"] == scores[1]["validation_daily_mse"]
+    assert metrics["mse"]["observation_count"] == 8
+    # The highest score has an immature label. It still owns the top quantile,
+    # so dropping it before selection must not promote the next stock.
+    top = next(
+        row
+        for row in daily
+        if row["selected"]
+        and row["metric"] == "long_mean_label"
+        and row["timestamp"] == pd.Timestamp("2021-12-15")
+    )
+    assert pd.isna(top["value"])
+    assert top["observation_count"] == 0
+
+
 @pytest.mark.parametrize(
     "periods,parameters,indices",
     [
@@ -428,7 +578,7 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
         assert result.metadata["learning_curve"]["epochs"][best][
             "validation_loss"
         ] == pytest.approx(
-            errors.mean(),
+            errors.groupby(validation.timestamp).mean().mean(),
             rel=2e-5,
             abs=1e-10,
         )
@@ -698,7 +848,9 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
             },
         )
     ]
-    selected = _select({"market_id": "a_share"}, fold, session, candidates, None)
+    selected = _select(
+        {"market_id": "a_share", "evaluation": {}}, fold, session, candidates, None
+    )
     scores = selected[0][2]["candidates"]
     held = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
     scoring = frame.loc[frame.timestamp.between("2020-01-03", "2020-01-06")]

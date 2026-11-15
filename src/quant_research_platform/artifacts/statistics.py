@@ -149,6 +149,7 @@ _ARROW_SCHEMAS = {
                 for name in (
                     "period_id",
                     "model_id",
+                    "candidate_id",
                     "stage",
                     "asset_id",
                     "metric",
@@ -160,8 +161,11 @@ _ARROW_SCHEMAS = {
                     "label",
                     "label_unit",
                     "parameters_json",
+                    "selection_metric",
                 )
             ],
+            pa.field("selected", pa.bool_()),
+            pa.field("selection_score", pa.float64()),
             pa.field("value", pa.float64()),
             *[
                 pa.field(name, pa.timestamp("ns"))
@@ -184,6 +188,37 @@ _ARROW_SCHEMAS = {
             ],
         ]
     ),
+    "model_daily_metrics.parquet": pa.schema(
+        [
+            *[
+                pa.field(name, pa.string())
+                for name in (
+                    "period_id",
+                    "model_id",
+                    "candidate_id",
+                    "stage",
+                    "label",
+                    "label_unit",
+                    "evaluation_axis",
+                    "asset_id",
+                    "metric",
+                    "reason",
+                )
+            ],
+            pa.field("selected", pa.bool_()),
+            pa.field("timestamp", pa.timestamp("ns")),
+            pa.field("value", pa.float64()),
+            *[
+                pa.field(name, pa.int64())
+                for name in (
+                    "observation_count",
+                    "input_count",
+                    "block_count",
+                    "valid_block_count",
+                )
+            ],
+        ]
+    ),
     "model_epoch_curves.parquet": pa.schema(
         [
             *[
@@ -191,13 +226,18 @@ _ARROW_SCHEMAS = {
                 for name in (
                     "period_id",
                     "model_id",
+                    "candidate_id",
+                    "stage",
+                    "parameters_json",
                     "metric",
                     "label_unit",
                     "training_loss_scope",
                     "validation_loss_scope",
                 )
             ],
+            pa.field("selected", pa.bool_()),
             pa.field("epoch", pa.int64()),
+            pa.field("boosting_round", pa.int64()),
             pa.field("training_loss", pa.float64()),
             pa.field("validation_loss", pa.float64()),
         ]
@@ -514,6 +554,7 @@ for _member in _COMPARISON_MEMBERS:
 STATISTICS_TABLE_GROUPS = {
     "model_periods": (
         "model_period_metrics.parquet",
+        "model_daily_metrics.parquet",
         "model_epoch_curves.parquet",
     ),
     "factor": (
@@ -621,6 +662,8 @@ _COUNT_COLUMNS = {
 def _nullable_count(member, column):
     return (
         member == "model_period_metrics.parquet"
+        or member == "model_epoch_curves.parquet"
+        and column in {"epoch", "boosting_round"}
         or member
         in {
             "prediction_diagnostics.parquet",

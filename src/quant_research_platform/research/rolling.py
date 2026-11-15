@@ -28,10 +28,16 @@ from quant_research_platform.contracts.time import (
     _window_payload,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.evaluations.time_series import (
+    daily_signal_metrics,
+)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.fitting import (
     model_training_read_columns,
     prediction_callable,
+)
+from quant_research_platform.research.models.trial_selection import (
+    select_best_validation_trial,
 )
 from quant_research_platform.research.predictions.outputs import prediction_input_mask
 from quant_research_platform.storage.datasets.reading import (
@@ -120,7 +126,7 @@ def session_folds(
 
 
 def _config(config, *, session_mode):
-    return _strict_config(
+    config = _strict_config(
         config,
         {
             "inputs",
@@ -139,9 +145,16 @@ def _config(config, *, session_mode):
             "sessions",
             "validation_sessions",
             "parameter_candidates",
+            "selection_metric",
             *({"min_train_sessions", "prediction_sessions"} if session_mode else ()),
         },
     )
+    if config.get("selection_metric", "daily_mse") not in (
+        "daily_mse",
+        "daily_rank_ic",
+    ):
+        raise ValueError("rolling_selection_metric_invalid")
+    return config
 
 
 def _sessions(config):
@@ -421,11 +434,12 @@ def _select(config, fold, session, candidates, calendar):
         availability_column=availability,
         target_column=target,
     ).to_numpy()
+    signal_domain = np.ones(len(validation), dtype=bool)
     for mode in dict.fromkeys(spec.sample_filter_mode for _, spec in candidates):
         filtered, _ = apply_filter_mode(
             validation, mode=mode, metadata_key="sample_filter_mode"
         )
-        common = common & validation.index.isin(filtered.index)
+        signal_domain &= validation.index.isin(filtered.index)
     predictions, rows = [], []
     for _, family in groupby(
         candidates,
@@ -479,10 +493,9 @@ def _select(config, fold, session, candidates, calendar):
                 )(scoring_context)[-len(validation) :]
                 if values.shape != (len(validation),):
                     raise ValueError("invalid_prediction_values")
-                common = (
-                    common
-                    & prediction_input_mask(validation, result.metadata).to_numpy()
-                )
+                signal_domain &= prediction_input_mask(
+                    validation, result.metadata
+                ).to_numpy()
                 predictions.append(values)
                 rows.append(
                     {
@@ -506,21 +519,48 @@ def _select(config, fold, session, candidates, calendar):
             if prepared_validation is not None:
                 prepared_validation.close()
         del prepared, prepared_validation
+    common = common & signal_domain
     if not common.any():
         raise ValueError("rolling_validation_sample_empty")
     actual = validation[target].to_numpy(dtype=float)[common]
     dates = validation.timestamp.loc[common].dt.normalize().reset_index(drop=True)
+    metric = config.get("selection_metric", "daily_mse")
+    rank_daily = {}
+    evaluation = config["evaluation"]
+    axis = evaluation.get("evaluation_axis", "cross_sectional")
     for values, row in zip(predictions, rows, strict=True):
-        if not np.isfinite(values[common]).all():
+        if not np.isfinite(values[signal_domain]).all():
             raise ValueError("invalid_prediction_values")
         losses = pd.Series((values[common] - actual) ** 2).groupby(dates).mean()
         row["validation_daily_mse"] = float(losses.mean())
+        daily = daily_signal_metrics(
+            validation.loc[signal_domain, ["timestamp", "asset_id"]].assign(
+                signal=values[signal_domain],
+                label=validation[target].where(common).loc[signal_domain],
+            ),
+            evaluation_axis=axis,
+            sessions=validation.timestamp.dt.normalize().drop_duplicates(),
+            asset_ids=tuple(validation.asset_id.loc[signal_domain].unique()),
+            regression=True,
+            baseline_columns=("zero",),
+            top_quantile=evaluation.get("top_quantile"),
+        )
+        row["validation_daily"] = (
+            daily.assign(timestamp=daily.timestamp.map(pd.Timestamp.isoformat))
+            .astype(object)
+            .where(daily.notna(), None)
+            .to_dict("records")
+        )
+        rank = daily.loc[daily.metric.eq("rank_ic")].set_index("timestamp")
+        rank_daily[len(rank_daily)] = rank
+        row["validation_rank_ic_defined_sessions"] = int(rank.value.notna().sum())
     selection = {
         "fit_window": _window_payload(fold.train),
         "validation_window": _window_payload(fold.validation),
         "validation_cutoff": cutoff.isoformat(),
         "validation_rule": "latest_mature_signal_sessions",
-        "metric": "daily_mse",
+        "metric": metric,
+        "evaluation_axis": axis,
         "common_rows": int(common.sum()),
         "common_sessions": int(dates.nunique()),
         "label_available_max": pd.Timestamp(
@@ -530,8 +570,52 @@ def _select(config, fold, session, candidates, calendar):
     selected = []
     for model_id in dict.fromkeys(model_id for model_id, _ in candidates):
         spec = next(spec for name, spec in candidates if name == model_id)
-        scores = [row for row in rows if row["model_id"] == model_id]
-        winner = min(scores, key=lambda row: row["validation_daily_mse"])
+        indices = [i for i, row in enumerate(rows) if row["model_id"] == model_id]
+        scores = [rows[i] for i in indices]
+        rank_selection = {}
+        if metric == "daily_rank_ic":
+            # Constant candidates cannot erase the defined candidates' domain.
+            defined = [i for i in indices if rank_daily[i].value.notna().any()]
+            shared = (
+                pd.concat(
+                    [rank_daily[i].value.rename(i) for i in defined], axis=1
+                ).dropna()
+                if defined
+                else pd.DataFrame()
+            )
+            rank_selection = {
+                "rank_ic_common_sessions": len(shared),
+                "rank_ic_common_rows": int(dates.isin(shared.index).sum()),
+                "rank_ic_evaluation_axis": axis,
+            }
+            for i in indices:
+                value = float(shared[i].mean()) if i in shared and len(shared) else None
+                reasons = rank_daily[i].reason.dropna().unique()
+                rows[i]["validation_daily_rank_ic"] = value
+                rows[i]["validation_rank_ic_reason"] = (
+                    None
+                    if value is not None
+                    else "no_common_defined_sessions"
+                    if i in defined
+                    else str(reasons[0])
+                    if len(reasons) == 1
+                    else "no_defined_rank_ic"
+                )
+        score_column = f"validation_{metric}"
+        trial = select_best_validation_trial(
+            pd.DataFrame(scores).assign(candidate_id=[str(i) for i in indices]),
+            trial_id_column="candidate_id",
+            selection_metric=score_column,
+            maximize=metric == "daily_rank_ic",
+            validation_metric_columns=(score_column,),
+            test_metric_columns=(),
+        )
+        if trial is None:
+            raise ValueError("rolling_validation_metric_undefined")
+        winner = rows[int(trial)]
+        for index, row in enumerate(scores):
+            row["candidate_id"] = f"{model_id}:{index}"
+            row["selected"] = row is winner
         parameters = dict(winner["hyperparameters"])
         if "early_stopping" in winner:
             parameters[
@@ -546,6 +630,7 @@ def _select(config, fold, session, candidates, calendar):
                 parameters,
                 {
                     **selection,
+                    **rank_selection,
                     "candidates": scores,
                     "selected_hyperparameters": winner["hyperparameters"],
                     "inputs": input_groups[model_id],

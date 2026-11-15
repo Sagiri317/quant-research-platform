@@ -29,12 +29,21 @@ def _declaration():
 
 
 def _future_daily(
-    tmp_path, source, predictions, *, dates, assets, axis, baselines=("zero",)
+    tmp_path,
+    source,
+    predictions,
+    *,
+    dates,
+    assets,
+    axis,
+    baselines=("zero",),
+    top_quantile=None,
 ):
     return (
         evaluate_time_series(
             {
                 "inputs": source,
+                "top_quantile": top_quantile,
                 "predictions": predictions,
                 "factor_columns": [],
                 "label": "label",
@@ -68,6 +77,87 @@ def _tables(output):
         metrics = metrics.copy()
     with artifact.table("model_epoch_curves.parquet") as epochs:
         return metrics, epochs.copy(), artifact.metadata
+
+
+def test_training_tails_select_predictions_before_missing_labels(tmp_path):
+    from quant_research_platform.research.models.periods import _training_daily
+
+    dates = pd.date_range("2020-01-01", periods=2)
+    frame = pd.DataFrame(
+        [
+            (day, f"s{i:02d}", float(i), i / 100, True, day)
+            for day in dates
+            for i in range(11)
+        ],
+        columns=[
+            "timestamp",
+            "asset_id",
+            "x",
+            "label",
+            "eligible",
+            "label_available_at",
+        ],
+    )
+    frame.loc[frame.index[-1], "label"] = np.nan
+    path = tmp_path / "input.parquet"
+    frame.to_parquet(path, index=False)
+    source = {"path": str(path), "spec": _declaration()}
+    config = {
+        **fit_config(tmp_path, path),
+        "inputs": source,
+        "fit_windows": [{"start": "2020-01-01", "end": "2020-01-02"}],
+    }
+    result, facts = load_model(fit(config))
+    daily = _training_daily(
+        source,
+        result,
+        facts,
+        sessions=dates,
+        evaluation_axis="cross_sectional",
+        top_quantile=0.2,
+    )
+    second = daily.loc[daily.timestamp.eq(dates[1])].set_index("metric")
+    # The tail contains s09/s10; s10's missing label must not admit s08.
+    assert second.loc["long_mean_label", "value"] == pytest.approx(0.09)
+    assert second.loc["long_ic", "observation_count"] == 1
+    assert pd.isna(second.loc["long_ic", "value"])
+    assert daily.loc[daily.metric.eq("mse"), "observation_count"].sum() == 21
+
+
+def test_historical_candidates_export_only_their_saved_validation_facts():
+    from quant_research_platform.research.models.periods import _validation_outputs
+
+    selection = {
+        "metric": "daily_mse",
+        "validation_window": {"start": "2020-01-01", "end": "2020-01-02"},
+        "validation_cutoff": "2020-01-03",
+        "common_rows": 6,
+        "common_sessions": 2,
+        "candidates": [
+            {"hyperparameters": {"alpha": 0.01}, "validation_daily_mse": 0.4},
+            {"hyperparameters": {"alpha": 0.1}, "validation_daily_mse": 0.6},
+        ],
+        "selected_hyperparameters": {"alpha": 0.01},
+    }
+    metrics, daily, curves = _validation_outputs(
+        selection,
+        {
+            "period_id": "2020Q1",
+            "model_id": "lasso",
+            "label_unit": "dimensionless",
+        },
+    )
+    assert not daily and not curves
+    mse = [row for row in metrics if row["metric"] == "mse"]
+    assert [row["value"] for row in mse] == [0.4, 0.6]
+    assert [row["selected"] for row in mse] == [True, False]
+    assert [row["selection_score"] for row in mse] == [0.4, 0.6]
+    assert len({row["parameters_json"] for row in mse}) == 2
+    assert all(
+        row["reason"] == "not_saved"
+        for row in metrics
+        if row["metric"] in {"mae", "ic", "rank_ic"}
+    )
 
 
 def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monkeypatch):
@@ -158,7 +248,7 @@ def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monke
     assert first.loc[("training", "mse"), "observation_count"] == 9
     assert first.loc[("validation", "mse"), "value"] == pytest.approx(2.25)
     assert first.loc[("validation", "rmse"), "value"] == pytest.approx(1.5)
-    assert first.loc[("validation", "mae"), "reason"] == "not_saved"
+    assert first.loc[("validation", "mae"), "value"] == pytest.approx(1.5)
     for metric, expected in {
         "mse": 29 / 3,
         "mae": 3,
@@ -300,6 +390,7 @@ def test_frozen_native_month_stream_and_four_regressors(
                 ],
                 "label_columns": ["label"],
                 "evaluation_axis": axis,
+                "top_quantile": None if single else 0.5,
             },
         }
     )
@@ -311,6 +402,7 @@ def test_frozen_native_month_stream_and_four_regressors(
         dates=sessions[3:],
         assets=assets,
         axis=axis,
+        top_quantile=None if single else 0.5,
     )
     import quant_research_platform.research.models.fitting as fitting
 
@@ -321,6 +413,7 @@ def test_frozen_native_month_stream_and_four_regressors(
         {
             "inputs": source,
             "evaluation_axis": axis,
+            "top_quantile": None if single else 0.5,
             "sessions": sessions,
             "asset_ids": assets,
             "prediction_daily": {name: str(future)},
@@ -389,23 +482,56 @@ def test_frozen_native_month_stream_and_four_regressors(
         row = metrics.loc[
             metrics.period_id.eq(item["fold_id"])
             & metrics.stage.eq("validation")
+            & metrics.selected
             & metrics.metric.eq("mse")
         ].iloc[0]
-        assert row.value == winner["validation_daily_mse"]
+        assert row.value == pytest.approx(
+            winner["validation_daily_mse"], rel=1e-12, abs=1e-14
+        )
         assert row.observation_count == cv["common_rows"]
-        assert row.evaluation_axis == "pooled_daily_rows"
+        assert row.evaluation_axis == axis
         if algorithm != "lasso_regression":
             assert row.iterations == winner["early_stopping"]["best_iteration"] + 1
     future_rows = metrics.loc[metrics.stage.eq("prediction") & metrics.metric.eq("mse")]
     assert future_rows.valid_session_count.tolist() == [3, 2]
     if algorithm in {"lstm_regressor", "transformer_regressor"}:
-        assert not epochs.empty and epochs.validation_loss.isna().all()
+        final = epochs.loc[epochs.stage.eq("final_fit")]
+        candidate = epochs.loc[epochs.stage.eq("candidate_fit")]
+        assert not final.empty and final.validation_loss.isna().all()
+        assert not candidate.empty and candidate.validation_loss.notna().all()
         assert epochs.training_loss_scope.eq("online_epoch_weighted").all()
+    elif algorithm == "xgboost_regressor":
+        assert epochs.epoch.isna().all()
+        assert epochs.boosting_round.notna().all()
+        assert epochs.validation_loss.notna().all()
+        assert epochs.stage.eq("candidate_fit").all()
     else:
         assert epochs.empty
     assert all(
-        item["historical_cv_curves"] == "not_saved" for item in lineage["models"]
+        item["historical_cv_curves"]
+        == ("not_saved" if algorithm == "lasso_regression" else "saved")
+        for item in lineage["models"]
     )
+    artifact = read_statistics_artifact(output)
+    with artifact.table("model_daily_metrics.parquet") as daily:
+        assert set(daily.stage) == {"training", "validation", "prediction"}
+        for item in results:
+            candidates = daily.loc[
+                daily.period_id.eq(item["fold_id"]) & daily.stage.eq("validation")
+            ]
+            assert candidates.candidate_id.nunique() == (
+                2 if algorithm == "lasso_regression" else 1
+            )
+            assert candidates.loc[candidates.selected, "candidate_id"].nunique() == 1
+        frozen = daily.loc[daily.stage.eq("training") & daily.metric.eq("mse")]
+        for period, values in frozen.groupby("period_id"):
+            expected = metrics.loc[
+                metrics.period_id.eq(period)
+                & metrics.stage.eq("training")
+                & metrics.metric.eq("mse"),
+                "value",
+            ].iloc[0]
+            assert values.value.mean() == pytest.approx(expected)
 
 
 def test_explicit_fit_has_unsaved_cv_and_rejects_truncated_training_input(tmp_path):
@@ -530,7 +656,8 @@ def test_explicit_fit_has_unsaved_cv_and_rejects_truncated_training_input(tmp_pa
         )
     )
     forecast = empty_metrics.loc[empty_metrics.stage.eq("prediction")]
-    assert len(forecast) == 6 and forecast.status.eq("UNDEFINED").all()
+    assert {"mse", "rmse", "mae", "ic", "rank_ic", "r2_vs_zero"} <= set(forecast.metric)
+    assert forecast.status.eq("UNDEFINED").all()
     assert forecast.observation_count.eq(0).all() and forecast.session_count.eq(3).all()
     with pytest.raises(ValueError, match="training_sample_mismatch"):
         evaluate_model_periods(

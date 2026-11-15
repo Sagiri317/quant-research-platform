@@ -60,6 +60,7 @@ EVALUATION_BASE_METRICS_COLUMNS = (
     "n_obs",
     "ic_reason",
     "rankic_reason",
+    "mean_label",
 )
 EVALUATION_SIDE_FIELDS = (
     "ic",
@@ -68,6 +69,7 @@ EVALUATION_SIDE_FIELDS = (
     "n_selected",
     "ic_reason",
     "rankic_reason",
+    "mean_label",
 )
 EVALUATION_METRICS_COLUMNS = (
     *EVALUATION_BASE_METRICS_COLUMNS,

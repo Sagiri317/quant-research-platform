@@ -218,6 +218,77 @@ def test_cross_section_daily_errors_and_matched_r2_use_two_stage_weights():
     assert summary.valid_session_count.eq(2).all()
 
 
+def test_daily_tails_use_prediction_boundaries_and_preserve_label_units():
+    from tests.research.test_side_evaluation import _pearson, _ranks
+
+    scores = [0, 1, 1, *range(2, 15)]
+    labels = [2, 1, 4, 5, 3, 7, 2, 1, 3, 5, 7, 10, 12, 8, 6, np.nan]
+    frame = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": pd.Timestamp(f"2020-01-04 09:{minute}"),
+                    "asset_id": [f"a{i}" for i in range(len(scores))],
+                    "signal": np.asarray(scores) * sign,
+                    "label": labels,
+                }
+            )
+            for minute, sign in ((30, 1), (31, -1))
+        ],
+        ignore_index=True,
+    )
+    expected = {}
+    for _, part in frame.groupby("timestamp"):
+        ordered = sorted(part.signal)
+        domains = {
+            "": part,
+            "long_": part.loc[part.signal.ge(ordered[-3])],
+            "short_": part.loc[part.signal.le(ordered[2])],
+        }
+        block = {}
+        for prefix, selected in domains.items():
+            paired = selected.dropna(subset=["label"])
+            x, y = paired.signal.tolist(), paired.label.tolist()
+            block[f"{prefix}ic"] = _pearson(x, y)
+            block[f"{prefix}rank_ic"] = _pearson(_ranks(x), _ranks(y))
+            block[f"{prefix}mean_label"] = sum(y) / len(y)
+        block["long_short_spread"] = (
+            block["long_mean_label"] - block["short_mean_label"]
+        )
+        block["long_excess_label"] = block["long_mean_label"] - block["mean_label"]
+        for metric, value in block.items():
+            expected.setdefault(metric, []).append(value)
+    daily = daily_signal_metrics(
+        frame,
+        evaluation_axis="cross_sectional",
+        sessions=["2020-01-04", "2020-01-06"],
+        asset_ids=frame.asset_id.unique(),
+        top_quantile=0.2,
+    )
+    observed = daily.loc[daily.timestamp.eq("2020-01-04")].set_index("metric")
+    for metric, values in expected.items():
+        assert observed.loc[metric, "value"] == pytest.approx(np.mean(values))
+    assert observed.loc["long_ic", "observation_count"] == 5
+    assert observed.loc["short_ic", "observation_count"] == 5
+    assert observed.valid_block_count.eq(2).all()
+    empty = daily.loc[daily.timestamp.eq("2020-01-06")]
+    assert empty.value.isna().all() and empty.observation_count.eq(0).all()
+    summary = daily_metric_summary(
+        daily.assign(candidate_id="model", sample_scope="own")
+    ).set_index("metric")
+    assert set(summary.index) == set(expected)
+    for metric, values in expected.items():
+        assert summary.loc[metric, "value"] == pytest.approx(np.mean(values))
+    with pytest.raises(ValueError, match="evaluation_top_quantile_invalid"):
+        daily_signal_metrics(
+            frame,
+            evaluation_axis="cross_sectional",
+            sessions=["2020-01-04"],
+            asset_ids=frame.asset_id.unique(),
+            top_quantile=0,
+        )
+
+
 def test_intraday_correlations_are_per_asset_day_and_keep_declared_gaps():
     frame = pd.DataFrame(
         {
@@ -315,6 +386,98 @@ def _factor_evaluation_config(tmp_path, frame):
         },
         "output": str(tmp_path / "evaluation"),
     }
+
+
+def test_native_prediction_tails_keep_missing_labels_out_of_selection(tmp_path):
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from tests.helpers.output_frames import _price_volume_prediction_metadata
+
+    scores = [0, 1, 1, *range(2, 15), 1000]
+    labels = np.asarray([2, 1, 4, 5, 3, 7, 2, 1, 3, 5, 7, 10, 12, 8, 6, 20, 20]) / 100
+    frame = pd.concat(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": pd.Timestamp(day),
+                    "asset_id": [f"a{i}" for i in range(len(scores))],
+                    "x": scores,
+                    "peer": -np.asarray(scores),
+                    "label": labels * scale,
+                    "label_available_at": pd.Timestamp(day),
+                    "eligible": [True] * 16 + [False],
+                }
+            )
+            for day, scale in (("2020-01-04", 1), ("2020-01-08", 2))
+        ],
+        ignore_index=True,
+    )
+    # The highest eligible prediction is unobserved on one day and immature
+    # on the other. Neither case may promote the next stock into the top 20%.
+    frame.loc[frame.asset_id.eq("a15") & frame.timestamp.eq("2020-01-04"), "label"] = (
+        np.nan
+    )
+    frame.loc[
+        frame.asset_id.eq("a15") & frame.timestamp.eq("2020-01-08"),
+        "label_available_at",
+    ] = pd.Timestamp("2030-01-01")
+    config = _factor_evaluation_config(tmp_path, frame)
+    metadata = _price_volume_prediction_metadata()
+    metadata.update(prediction_window=config["window"])
+    metadata.pop("prediction_rows")
+    metadata.pop("effective_prediction_end")
+    metadata["model_facts"]["model"]["target_column"] = "label"
+    predictions = frame[["timestamp", "asset_id"]].assign(
+        prediction_score=frame.x / 100, prediction_rank_score=0.0
+    )
+    root = write_prediction_outputs(
+        output_path=tmp_path / "predictions",
+        output_chunks=[predictions],
+        metadata=metadata,
+    )
+    config.update(
+        predictions={"model": [str(root)]},
+        factor_columns=["x"],
+        comparison_groups={"paired": ["model", "x"]},
+        inference_groups={"models": ["model"]},
+        top_quantile=0.2,
+    )
+    output = evaluate_time_series(config)
+    daily = read_dataset(output / "daily")
+    for scope in ("own", "paired"):
+        observed = daily.loc[
+            daily.candidate_id.eq("model") & daily.sample_scope.eq(scope)
+        ]
+        for metric, expected in (
+            ("long_mean_label", [0.07, 0.14]),
+            ("short_mean_label", [0.07 / 3, 0.14 / 3]),
+            ("long_short_spread", [0.14 / 3, 0.28 / 3]),
+            ("long_ic", [-1, -1]),
+            ("long_rank_ic", [-1, -1]),
+        ):
+            np.testing.assert_allclose(
+                observed.loc[observed.metric.eq(metric), "value"], expected
+            )
+        assert (
+            observed.loc[observed.metric.eq("long_ic"), "observation_count"].eq(2).all()
+        )
+    summary = read_dataset(output / "summary")
+    summary = summary.loc[
+        summary.candidate_id.eq("model") & summary.sample_scope.eq("own")
+    ].set_index("metric")
+    assert summary.loc["long_short_spread", "value"] == pytest.approx(0.07)
+    inference = read_dataset(output / "inference")
+    inference = inference.loc[inference.sample_scope.eq("own")].set_index("metric")
+    assert inference.loc["long_short_spread", "mean"] == pytest.approx(0.07)
+    assert {
+        "long_ic",
+        "short_ic",
+        "long_rank_ic",
+        "short_rank_ic",
+        "long_excess_label",
+        "mean_label",
+    } <= set(inference.index)
 
 
 def test_paired_comparison_config_establishes_its_output_identity(tmp_path):
