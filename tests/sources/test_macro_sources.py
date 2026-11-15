@@ -71,6 +71,67 @@ def test_date_end_upper_bound_uses_source_dst():
     ]
 
 
+@pytest.mark.parametrize(
+    "name,code,old,new",
+    (
+        ("us_reserves_weekly_mean", "WRESBAL", "2862.569", "2855030"),
+        ("us_tga_weekly_mean", "WTREGEN", "940.979", "953816"),
+    ),
+)
+def test_archive_unit_change_uses_vintage_and_persists_canonical_millions(
+    tmp_path, name, code, old, new
+):
+    raw, output = tmp_path / "raw", tmp_path / "interim"
+    raw.mkdir()
+    table = pa.table(
+        {
+            "period_start_date": ["2025-11-05"] * 2 + ["2025-11-12", "2025-11-19"],
+            code: [old, str(round(float(old) * 1000)), new, "."],
+            "realtime_start_date": [
+                "2025-11-12",
+                "2025-11-13",
+                "2025-11-13",
+                "2025-11-20",
+            ],
+            "realtime_end_date": ["2025-11-12"] + ["9999-12-31"] * 3,
+        }
+    )
+    filename = f"{code}.parquet"
+    pq.write_table(table, raw / filename)
+    write_source_manifest(
+        raw,
+        {
+            "sources": {
+                name: {
+                    "status": "downloaded",
+                    "source": "alfred",
+                    "series_ids": [name],
+                    "responses": [
+                        {
+                            "file": filename,
+                            "row_group": 0,
+                            "retrieved_at": "2026-11-05T00:00:00Z",
+                            "url": f"https://alfred.stlouisfed.org/series?seid={code}",
+                        }
+                    ],
+                }
+            }
+        },
+        name="download.json",
+    )
+    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
+    result = read_dataset(output).sort_values(["observation_date", "vintage_date"])
+    prior = round(float(old) * 1000)
+    assert result.value.iloc[:3].tolist() == [prior, prior, float(new)]
+    assert result.unit.eq("USD_million").all()
+    assert pd.isna(result.value.iloc[3])
+    assert result.timestamp.iloc[1] == pd.Timestamp("2025-11-14T06:00:00")
+    assert result.timestamp.iloc[2] == pd.Timestamp("2025-11-13T22:30:00")
+    assert result.value.iloc[2] / result.value.iloc[0] - 1 == pytest.approx(
+        float(new) / prior - 1
+    )
+
+
 def test_policy_surprise_keeps_units_and_declares_historical_snapshot_assumption(
     tmp_path,
 ):

@@ -96,6 +96,10 @@ def _frame(
     output = _select_observation_window(
         output, start_date=start_date, end_date=end_date
     )
+    if series.code in {"WRESBAL", "WTREGEN"}:
+        # ALFRED changed these releases from billions to millions on this vintage.
+        billions = pd.to_datetime(output.vintage_date).lt("2025-11-13")
+        output["value"] = pd.to_numeric(output.value) * np.where(billions, 1000, 1)
     output["series_id"] = name
     output["unit"] = series.unit
     output["frequency"] = series.frequency

@@ -26,6 +26,10 @@ ALFRED raw 按供应商 Series ID 合并为 `alfred/<Series ID>.parquet`，保�
 
 HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山联储政策冲击的当前下载均不提供本接口已核实的历史版本链，因此按 `inferred_snapshot_release` 导入。BIS 信贷单位为百万美元，BOJ 为亿日元；美国 ON RRP 为十亿美元，Fed 资产与 TGA 为百万美元。
 
+[ALFRED 单位历史](https://alfred.stlouisfed.org/release?rid=20&ob=pv&od=desc&t=balance)显示，WRESBAL（准备金周均）与 WTREGEN（TGA 周均）的发布版本在2025-11-12及以前使用十亿美元，2025-11-13起改用百万美元。
+适配层按每行 `vintage_date` 换算为 `USD_million`；早期版本乘1000，之后版本保持原量级。
+同一观察日可以有两种历史单位，不能按 `observation_date` 判断。原始值、修订日期与发布时间不改写，历史报告保留当时结果；使用修正值的研究另行重建对应派生列。
+
 [旧金山联储政策冲击](https://www.frbsf.org/research-and-insights/data-and-indicators/monetary-policy-surprises/)采用官方图表 CSV 的 `Surprise`，单位为基点。它是公告附近期货变化的主成分，包含事后估计权重；当前研究近似在事件日收盘后使用现有快照，这不证明 PCA 权重或该数值当时已经冻结。工作簿和图表可能属于不同数值版本，不自动拼接或替换。
 
 上述推断是已声明的研究假设，不能消除当前修订快照或事后估计造成的潜在前视偏差。它不改变真实数值，不伪造历史版本。时间规则由 `sources/macro/publication.py` 统一负责：H.4.1 下一工作日17:30、H.10 下一周一17:15、美国隔夜利率下一工作日、M2次月第四个公布周收盘；ECB周表缓冲到下一周五18:00；中国月报次月20日18:00、香港当日末、日本月末资产次月10日、当座账户次月20日、BIS季度首日后第7个月末。已取得的逐期公告/目录可替换通用估计，但当前修订值配历史发布日期仍标推断。
