@@ -579,42 +579,16 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
     from quant_research_platform.research.portfolios.daily import backtest_a_share
     from tests.helpers.portfolio_inputs import closed_market_inputs
 
-    inputs, roots, calendar, _ = closed_market_inputs(
+    inputs, _, calendar, _ = closed_market_inputs(
         tmp_path, fault="closed_only_axis" if case == "closed_only" else None
     )
-    extra = calendar.iloc[-len(calendar.source_market_type.unique()) :].copy()
-    extra["calendar_date"] = pd.Timestamp("2023-01-09")
-    extra["timestamp"] = pd.Timestamp("2023-01-09")
-    extra["is_trading_day"] = True
-    closed = []
-    for day in ("2023-01-07", "2023-01-08"):
-        row = extra.copy()
-        row["calendar_date"] = pd.Timestamp(day)
-        row["timestamp"] = pd.Timestamp(day)
-        row["is_trading_day"] = False
-        closed.append(row)
-    calendar = pd.concat([calendar, *closed, extra], ignore_index=True)
-    source_spec = inspect_dataset(roots["trading_calendar"]).spec
-    from quant_research_platform.contracts.data import InterimDataSpec
-
-    calendar_spec = InterimDataSpec(
-        data_id=source_spec["data_id"],
-        source_id=source_spec["source_id"],
-        frequency=source_spec["frequency"],
-        grain=source_spec["grain"],
-        primary_key=tuple(source_spec["primary_key"]),
-        partition_columns=("year",),
-        column_roles=source_spec["column_roles"],
-    )
-    calendar_path = tmp_path / "extended_calendar"
-    write_dataset(calendar_path, calendar, spec=calendar_spec)
     decisions = prepare(
         {
             "market_id": "a_share",
             "data_id": "decision_panel",
             "inputs": {
                 "daily_dataset": str(inputs["dataset"]),
-                "trading_calendar": str(calendar_path),
+                "trading_calendar": str(inputs["calendar"]),
             },
             "time_window": {
                 "start": "2022-12-30" if case == "late_predictions" else "2022-12-01",
@@ -651,7 +625,7 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
             top_quantile=0.5,
             benchmark_id=None,
         ),
-        inputs={**inputs, "dataset": decisions, "calendar": calendar_path},
+        inputs={**inputs, "dataset": decisions},
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
         formal_dataset_window=TimeWindow("2022-12-01", "2023-01-06"),
@@ -668,7 +642,7 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
         trades
         and pd.Timestamp(trades[0].timestamp_ns).date().isoformat() == "2023-01-02"
     )
-    assert pd.Timestamp("2023-01-09") in unified_trading_sessions(calendar)
+    assert unified_trading_sessions(calendar)[-1] == pd.Timestamp("2023-01-06")
     from quant_research_platform.contracts.policies import PolicyDecision
 
     policy_times = []

@@ -941,7 +941,6 @@ def test_declared_ledger_family_preserves_descriptive_inference(
         configuration["portfolios"][0]["candidate_id"] = candidate_id
         configuration["primary_portfolio_id"] = candidate_id
     candidates, config = portfolio_statistics_config(configuration=configuration)
-    config["statistics"]["bootstrap_repetitions"] = 99
     qualified = tuple(
         item for item in candidates if item.selection_group == "quarterly"
     )

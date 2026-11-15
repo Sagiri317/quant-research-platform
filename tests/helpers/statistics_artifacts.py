@@ -189,7 +189,7 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
         execution_assumptions=asdict(EXECUTION_ASSUMPTIONS),
         benchmark_total_return_indices={"csi500": "H00905", "csi1000": "H00852"},
     )
-    config["statistics"]["cscv_blocks"] = 10
+    config["statistics"] = {"cscv_blocks": 10}
     return candidates, config
 
 

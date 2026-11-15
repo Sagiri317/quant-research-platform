@@ -279,18 +279,6 @@ def test_source_models_reach_paired_native_test_statistics(source_chain, tmp_pat
 def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp_path):
     case = source_chain
     _, defaults = portfolio_statistics_config(sample_role="test")
-    policy = {
-        key: value
-        for key, value in defaults["statistics"].items()
-        if key
-        in {
-            "cscv_blocks",
-            "hac_lag",
-            "bootstrap_block",
-            "bootstrap_repetitions",
-        }
-    }
-    policy["bootstrap_repetitions"] = 32
     inputs = {
         **case.portfolio_config["inputs"],
         "index_market": str(case.paths["index_market"]),
@@ -322,7 +310,7 @@ def test_source_accounts_reconcile_native_portfolio_statistics(source_chain, tmp
             "adv_sensitivities": case.portfolio_config["assumptions"][
                 "adv_sensitivities"
             ],
-            "statistics": policy,
+            "statistics": defaults["statistics"],
         }
     )
     statistics = read_statistics_artifact(output)

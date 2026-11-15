@@ -481,15 +481,6 @@ def backtest_a_share(
     research_marks = ResearchValuationMarks()
     with ExitStack() as input_channels:
         history = TimeWindow(sessions[0], sessions[-1])
-        dataset_history = history
-        if explicit_decisions:
-            successor = trading_sessions.searchsorted(sessions[-1], side="right")
-            if successor == len(trading_sessions):
-                raise ValueError("portfolio_decision_clock_requires_successor_session")
-            dataset_history = TimeWindow(
-                sessions[0],
-                trading_sessions[successor] + pd.Timedelta(hours=1, minutes=25),
-            )
         panel_columns = (
             (*_ENHANCED_PANEL_COLUMNS, factor_risk.config.weight_column)
             if enhanced
@@ -529,7 +520,7 @@ def backtest_a_share(
                 _iter_input_sessions(
                     dataset_root,
                     dataset_input_columns,
-                    dataset_history,
+                    history,
                     business_columns=dataset_business_columns,
                     session=dataset_session,
                 )

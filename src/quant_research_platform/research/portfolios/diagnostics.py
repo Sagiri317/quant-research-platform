@@ -1310,8 +1310,11 @@ def portfolio_statistics(config):
         raise ValueError("portfolio_statistics_ledgers_required")
     policy = config.get("statistics", {})
     expected = {"cscv_blocks"} if "cscv" in analyses else set()
-    known = {"cscv_blocks", "hac_lag", "bootstrap_block", "bootstrap_repetitions"}
-    if not isinstance(policy, dict) or expected - set(policy) or set(policy) - known:
+    if (
+        not isinstance(policy, dict)
+        or expected - set(policy)
+        or set(policy) - {"cscv_blocks"}
+    ):
         raise ValueError("portfolio_statistics_policy_invalid")
     if "cscv" in analyses:
         _validate_cscv_slice_count(policy["cscv_blocks"])
