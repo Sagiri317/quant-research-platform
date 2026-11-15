@@ -466,34 +466,40 @@ def _select(config, fold, session, candidates, calendar):
                 else {}
             ),
         )
-        for model_id, spec in family:
-            result = _fit_prepared(
-                prepared,
-                spec,
-                validation=prepared_validation,
-                validation_cutoff=prepared_cutoff,
-            )
-            values = prediction_callable(spec.input_columns, result.prediction_model)(
-                scoring_context
-            )[-len(validation) :]
-            if values.shape != (len(validation),):
-                raise ValueError("invalid_prediction_values")
-            common = (
-                common & prediction_input_mask(validation, result.metadata).to_numpy()
-            )
-            predictions.append(values)
-            rows.append(
-                {
-                    "model_id": model_id,
-                    "hyperparameters": dict(spec.hyperparameters),
-                    **(
-                        {"early_stopping": result.metadata["early_stopping"]}
-                        if patience is not None
-                        else {}
-                    ),
-                }
-            )
-            del result
+        try:
+            for model_id, spec in family:
+                result = _fit_prepared(
+                    prepared,
+                    spec,
+                    validation=prepared_validation,
+                    validation_cutoff=prepared_cutoff,
+                )
+                values = prediction_callable(
+                    spec.input_columns, result.prediction_model
+                )(scoring_context)[-len(validation) :]
+                if values.shape != (len(validation),):
+                    raise ValueError("invalid_prediction_values")
+                common = (
+                    common
+                    & prediction_input_mask(validation, result.metadata).to_numpy()
+                )
+                predictions.append(values)
+                rows.append(
+                    {
+                        "model_id": model_id,
+                        "hyperparameters": dict(spec.hyperparameters),
+                        **(
+                            {"early_stopping": result.metadata["early_stopping"]}
+                            if patience is not None
+                            else {}
+                        ),
+                    }
+                )
+                del result
+        finally:
+            prepared.close()
+            if prepared_validation is not None:
+                prepared_validation.close()
         del prepared, prepared_validation
     if not common.any():
         raise ValueError("rolling_validation_sample_empty")
@@ -559,6 +565,13 @@ def _run(config, folds, days):
         raise ValueError("quarterly_models_invalid")
     root = Path(config["output"])
     reject_if_exists(root)
+    options = _dataset_input_options(
+        config["inputs"],
+        row_filters=(("asset_id", "in", tuple(config["asset_ids"])),)
+        if config.get("asset_ids") is not None
+        else (),
+    )
+    session = open_dataset_session(**options)
     grids = config.get("parameter_candidates", {})
     candidates = [
         (
@@ -570,7 +583,8 @@ def _run(config, folds, days):
                         **model.get("hyperparameters", {}),
                         **parameters,
                     },
-                }
+                },
+                declared=session.spec,
             ),
         )
         for model in models
@@ -584,13 +598,6 @@ def _run(config, folds, days):
         or any(spec.model_algorithm == "deeplob_classifier" for _, spec in candidates)
     ):
         raise ValueError("rolling_regression_candidates_invalid")
-    options = _dataset_input_options(
-        config["inputs"],
-        row_filters=(("asset_id", "in", tuple(config["asset_ids"])),)
-        if config.get("asset_ids") is not None
-        else (),
-    )
-    session = open_dataset_session(**options)
     calendar = None
     if any(
         spec.training_weighting.half_life_periods is not None for _, spec in candidates

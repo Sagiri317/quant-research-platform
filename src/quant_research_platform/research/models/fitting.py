@@ -7,9 +7,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import count
+from tempfile import TemporaryFile
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 
 import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
@@ -31,7 +33,7 @@ from quant_research_platform.contracts.time import (
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
+    _finite_numeric_series,
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -52,18 +54,31 @@ class ModelFitResult:
 
 @dataclass
 class PreparedTraining:
-    """First tabular matrix access consumes raw features, preserving loss rows."""
+    """Mapped numeric inputs and narrow metadata for legal loss rows."""
 
     training: pd.DataFrame
     row_counts: dict[str, object]
     filter_metadata: dict[str, object]
     input_columns: tuple[str, ...]
     training_weighting: TrainingWeighting
+    target_column: str
+    features: pd.DataFrame
+    feature_file: object
+    feature_mapping: np.memmap | None
+    training_rows: np.ndarray
     native_missing: bool = False
     trading_sessions: object = None
     training_scaling: bool = True
     sequence_context: pd.DataFrame | None = None
     complete_inputs: bool = False
+    context_valid: np.ndarray | None = None
+
+    def close(self):
+        self.features = None
+        if self.feature_mapping is not None:
+            self.feature_mapping._mmap.close()
+            self.feature_mapping = None
+        self.feature_file.close()
 
     @cached_property
     def preprocessing(self):
@@ -72,9 +87,8 @@ class PreparedTraining:
             self.training_weighting,
             trading_sessions=self.trading_sessions,
         )
-        matrix = self.training.loc[:, self.input_columns]
         scaler = ModelMatrixScaler.fit(
-            matrix,
+            self.features,
             sample_weight=weights,
             missing=None
             if self.complete_inputs
@@ -82,17 +96,56 @@ class PreparedTraining:
             if self.native_missing
             else "impute",
             scaling=self.training_scaling,
+            rows=self.training_rows,
         )
         return weights, scaler
 
     @cached_property
     def matrix(self):
-        matrix = self.preprocessing[1].transform(
-            self.training.loc[:, self.input_columns]
-        )
-        if self.sequence_context is None:
-            self.training = self.training.drop(columns=list(self.input_columns)).copy()
-        return matrix
+        values = np.empty((len(self.training), len(self.input_columns)), order="F")
+        for start, stop, block in self.blocks(self.preprocessing[1]):
+            values[start:stop] = block
+        return pd.DataFrame(values, columns=self.input_columns, copy=False)
+
+    def blocks(self, scaler, *, dtype="float64"):
+        for start in range(0, len(self.training), 16384):
+            stop = min(start + 16384, len(self.training))
+            values = self.feature_rows(self.training_rows[start:stop]).to_numpy(
+                dtype="float64", copy=True
+            )
+            values = scaler._transform_numeric(values, dtype=dtype)
+            yield start, stop, values
+
+    def feature_rows(self, rows):
+        # Slice before Arrow take so a small batch does not combine the whole column.
+        if not len(rows):
+            return self.features.iloc[:0]
+        lower, upper = int(np.min(rows)), int(np.max(rows)) + 1
+        return self.features.iloc[lower:upper].iloc[rows - lower]
+
+    @cached_property
+    def lasso_gram(self):
+        """Reuse weighted sufficient statistics across precomputed Lasso candidates."""
+        weights, scaler = self.preprocessing
+        weights = weights * (len(weights) / weights.sum())
+        target = self.training[self.target_column].to_numpy(dtype="float64", copy=True)
+        target_mean = float(np.average(target, weights=weights))
+        root_weight = np.sqrt(weights)
+        centered_target = (target - target_mean) * root_weight
+        width = len(self.input_columns)
+        mean = np.zeros(width)
+
+        for start, stop, values in self.blocks(scaler):
+            mean += weights[start:stop] @ values
+        mean /= weights.sum()
+        gram = np.zeros((width, width))
+        cross = np.zeros(width)
+        for start, stop, values in self.blocks(scaler):
+            values -= mean
+            values *= root_weight[start:stop, None]
+            gram += values.T @ values
+            cross += values.T @ centered_target[start:stop]
+        return gram, cross, mean, centered_target, target_mean, root_weight
 
 
 def prediction_callable(input_columns: tuple[str, ...], prediction_model: object):
@@ -273,14 +326,6 @@ def _legal_training_rows(
     availability_column: str,
 ):
     """Select all legal rows without learning preprocessing."""
-    columns = spec.input_columns
-    missing = sorted(set(columns).difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_model_columns: {', '.join(missing)}")
-    for column in columns:
-        strict_finite_numeric_series(
-            frame[column], error=f"invalid_training_value: {column}", allow_null=True
-        )
     keep = label_maturity_mask(
         frame,
         fitting_cutoff=fitting_cutoff,
@@ -294,10 +339,37 @@ def _legal_training_rows(
     return filtered.loc[keep.loc[filtered.index]], metadata
 
 
-def _collect_training_frame(
+def _collect_training_frame(frames, spec, **kwargs):
+    feature_file = TemporaryFile()
+    try:
+        with pa.ipc.new_file(
+            feature_file,
+            pa.schema((column, pa.float64()) for column in spec.input_columns),
+        ) as writer:
+            return _collect_training_rows(
+                frames, spec, feature_file=feature_file, writer=writer, **kwargs
+            )
+    except BaseException:
+        feature_file.close()
+        raise
+
+
+def _write_features(frame, columns, destination):
+    for start in range(0, len(frame), 16384):
+        block = frame.iloc[start : start + 16384]
+        arrays = []
+        for column in columns:
+            values = block[column].to_numpy(dtype="float64")
+            arrays.append(pa.array(values, type=pa.float64(), from_pandas=True))
+        destination.write_batch(pa.RecordBatch.from_arrays(arrays, names=columns))
+
+
+def _collect_training_rows(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
     *,
+    feature_file,
+    writer,
     fitting_cutoff: object,
     availability_column: str | None = None,
     trading_calendar=None,
@@ -341,6 +413,8 @@ def _collect_training_frame(
     filter_definition = ""
     retained: list[pd.DataFrame] = []
     sequence_context = []
+    context_valid = []
+    context_size = 0
     with closing_iterator(
         iter(
             iter_model_work_frames(frames, required=required, work_columns=work_columns)
@@ -348,6 +422,12 @@ def _collect_training_frame(
     ) as work_frames:
         for chunk in work_frames:
             chunk = chunk.reset_index(drop=True)
+            for column in spec.input_columns:
+                chunk[column] = _finite_numeric_series(
+                    chunk[column],
+                    error=f"invalid_training_value: {column}",
+                    allow_null=True,
+                )
             if spec.model_algorithm in SEQUENCE_ALGORITHMS:
                 observed = chunk.loc[:, spec.input_columns].notna().any(axis=1)
                 if context_columns:
@@ -355,6 +435,11 @@ def _collect_training_frame(
                 observed &= pd.to_datetime(chunk.timestamp).le(
                     pd.Timestamp(fitting_cutoff)
                 )
+                context_positions = pd.Series(
+                    np.arange(context_size, context_size + int(observed.sum())),
+                    index=chunk.index[observed],
+                )
+                context_size += int(observed.sum())
                 sequence_context.append(
                     chunk.loc[
                         observed,
@@ -363,13 +448,24 @@ def _collect_training_frame(
                                 (
                                     "asset_id",
                                     "timestamp",
-                                    *spec.input_columns,
                                     *context_columns,
                                 )
                             )
                         ),
                     ]
                 )
+                context = chunk.loc[observed]
+                _write_features(context, spec.input_columns, writer)
+                if spec.model_algorithm in DEEPLOB_ALGORITHMS:
+                    from quant_research_platform.research.models.deeplob import (
+                        complete_book_rows,
+                    )
+
+                    valid = complete_book_rows(context)
+                else:
+                    valid = context.loc[:, spec.input_columns].notna().any(axis=1)
+                context_valid.append(valid.to_numpy())
+                del context
             if sample_windows is not None:
                 selected = pd.Series(False, index=chunk.index)
                 for window in sample_windows:
@@ -395,11 +491,16 @@ def _collect_training_frame(
                 "timestamp",
                 *(("asset_id",) if "asset_id" in filtered.columns else ()),
                 *(("market_type",) if "market_type" in filtered.columns else ()),
-                *spec.input_columns,
                 spec.target_column,
                 availability_columns[0],
             ]
             usable = filtered.loc[:, selected_columns].copy()
+            if sequence_context:
+                usable.index = context_positions.loc[filtered.index].to_numpy()
+            else:
+                _write_features(filtered, spec.input_columns, writer)
+                usable.index = np.arange(context_size, context_size + len(filtered))
+                context_size += len(filtered)
             del chunk, filtered
             if usable.empty:
                 del usable
@@ -409,12 +510,11 @@ def _collect_training_frame(
     training = (
         retained[0]
         if len(retained) == 1
-        else pd.concat(retained, ignore_index=True)
+        else pd.concat(retained)
         if retained
         else pd.DataFrame()
     )
     retained.clear()
-    training.index = pd.RangeIndex(len(training))
     train_start = train_end = None
     if not training.empty:
         timestamps = strict_timestamp_series(
@@ -424,7 +524,6 @@ def _collect_training_frame(
         training = training.sort_values(
             ["timestamp", *(("asset_id",) if "asset_id" in training else ())],
             kind="stable",
-            ignore_index=True,
         )
         train_start = time_value_isoformat(pd.Timestamp(timestamps.min()))
         train_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
@@ -489,17 +588,33 @@ def _collect_training_frame(
             state = observed
         assert state is not None
         sessions = state.index[state.to_numpy(dtype=bool)]
+    training_rows = training.index.to_numpy(dtype="int64")
+    training = training.reset_index(drop=True)
+    writer.close()
+    feature_file.flush()
+    mapping = np.memmap(feature_file, dtype="uint8", mode="r")
+    features = (
+        pa.ipc.open_file(pa.BufferReader(pa.py_buffer(mapping)))
+        .read_all()
+        .to_pandas(types_mapper=pd.ArrowDtype)
+    )
     return PreparedTraining(
         training,
         row_counts,
         filter_metadata,
         spec.input_columns,
         spec.training_weighting,
+        spec.target_column,
+        features,
+        feature_file,
+        mapping,
+        training_rows,
         spec.model_algorithm == "xgboost_regressor",
         sessions,
         spec.training_scaling,
         pd.concat(sequence_context, ignore_index=True) if sequence_context else None,
         spec.model_algorithm in DEEPLOB_ALGORITHMS,
+        np.concatenate(context_valid) if context_valid else None,
     )
 
 
@@ -513,60 +628,36 @@ def _fit_predictor(
     weights, scaler = prepared_training.preprocessing
     from sklearn.exceptions import ConvergenceWarning
 
+    if spec.model_algorithm == "lasso_regression" and estimator.precompute is True:
+        _fit_lasso_gram(estimator, prepared_training)
+        return ScaledPredictor(estimator, scaler)
+    if spec.model_algorithm == "xgboost_regressor":
+        from xgboost import config_context
+
+        with config_context(
+            **(
+                {"use_cuda_async_pool": True}
+                if spec.hyperparameters.get("external_memory", False)
+                else {}
+            )
+        ):
+            _fit_booster(estimator, prepared_training, spec, validation)
+        return ScaledPredictor(estimator, scaler)
     scaled_matrix = prepared_training.matrix
     y = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
-    fit_options = {}
-    patience = spec.hyperparameters.get("early_stopping_rounds")
-    if validation is not None:
-        fit_options = {
-            "eval_set": [
-                (
-                    scaler.transform(validation.training.loc[:, spec.input_columns]),
-                    validation.training[spec.target_column].to_numpy(dtype="float64"),
-                )
-            ],
-            "verbose": False,
-        }
-    callback = None
-    if patience is not None:
-        from xgboost.callback import EarlyStopping
-
-        # Native save_best discards later trees for prediction and explanations.
-        callback = EarlyStopping(rounds=patience, save_best=True)
-        estimator.set_params(
-            early_stopping_rounds=None,
-            callbacks=[callback],
-        )
     try:
         if spec.model_algorithm == "lasso_regression" and estimator.max_iter is None:
             _fit_lasso_until_converged(estimator, scaled_matrix, y, weights)
-        elif (
-            spec.model_algorithm == "xgboost_regressor"
-            and "n_estimators" in spec.hyperparameters
-            and spec.hyperparameters["n_estimators"] is None
-        ):
-            _fit_booster_until_stopped(
-                estimator,
-                scaled_matrix,
-                y,
-                weights,
-                fit_options["eval_set"][0],
-                callback,
-            )
         else:
             with warnings.catch_warnings():
                 warnings.simplefilter("error", ConvergenceWarning)
-                matrix = (
-                    _sklearn_fit_matrix(scaled_matrix, estimator)
-                    if spec.model_algorithm in {"lasso_regression", "ridge_regression"}
-                    else scaled_matrix
+                estimator.fit(
+                    _sklearn_fit_matrix(scaled_matrix, estimator),
+                    y,
+                    sample_weight=weights,
                 )
-                estimator.fit(matrix, y, sample_weight=weights, **fit_options)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
-    finally:
-        if patience is not None:
-            estimator.set_params(early_stopping_rounds=patience, callbacks=None)
     return ScaledPredictor(estimator, scaler)
 
 
@@ -610,37 +701,166 @@ def _fit_lasso_until_converged(estimator, matrix, target, weights):
     estimator.n_iter_ = iterations
 
 
-def _fit_booster_until_stopped(
-    estimator, matrix, target, weights, validation, callback
-):
-    from xgboost import Booster
+def _fit_lasso_gram(estimator, prepared):
+    # Lasso.fit and public lasso_path still require the full X. Use their same
+    # native Gram solver without materializing X solely to provide its shape.
+    from sklearn.exceptions import ConvergenceWarning
+    from sklearn.linear_model._cd_fast import enet_coordinate_descent_gram
+    from sklearn.utils import check_random_state
 
-    options = {
-        "missing": estimator.missing,
-        "enable_categorical": estimator.enable_categorical,
-        "feature_types": estimator.feature_types,
-    }
-    training = estimator._create_dmatrix(
-        ref=None, data=matrix, label=target, weight=weights, **options
+    limit = estimator.max_iter
+    block = 1000 if limit is None else limit
+    estimator.set_params(max_iter=block)
+    try:
+        estimator._validate_params()
+    finally:
+        estimator.set_params(max_iter=limit)
+    gram, cross, mean, target, target_mean, root_weight = prepared.lasso_gram
+    count = len(target)
+    if not estimator.fit_intercept:
+        gram = gram + count * np.outer(mean, mean)
+        cross = cross + count * mean * target_mean
+        target = target + target_mean * root_weight
+    coefficient = (
+        estimator.coef_.copy()
+        if estimator.warm_start and hasattr(estimator, "coef_")
+        else np.zeros(len(mean))
     )
-    held = estimator._create_dmatrix(
-        ref=training, data=validation[0], label=validation[1], **options
-    )
-    booster = Booster(estimator.get_xgb_params(), cache=[training, held])
-    booster = callback.before_training(booster)
-    history = {"validation_0": {}}
-    for iteration in count():
-        booster.update(training, iteration)
-        for measurement in booster.eval_set(
-            [(held, "validation_0")], iteration
-        ).split()[1:]:
-            name, value = measurement.split(":", 1)
-            metric = name.removeprefix("validation_0-")
-            history["validation_0"].setdefault(metric, []).append(float(value))
-        if callback.after_iteration(booster, iteration, history):
+    iterations = 0
+    tolerance = estimator.tol * (target @ target)
+    while True:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConvergenceWarning)
+            coefficient, gap, _, used = enet_coordinate_descent_gram(
+                coefficient,
+                estimator.alpha * count,
+                0.0,
+                gram,
+                cross,
+                target,
+                block,
+                estimator.tol,
+                check_random_state(estimator.random_state),
+                estimator.selection == "random",
+                estimator.positive,
+            )
+        iterations += used
+        if gap <= tolerance:
             break
-    estimator._Booster = callback.after_training(booster)
-    estimator.evals_result_ = history
+        if estimator.max_iter is not None:
+            raise ValueError("model_fit_non_converged")
+        block *= 2
+    estimator.coef_ = np.asarray(coefficient)
+    estimator.intercept_ = (
+        target_mean - mean @ estimator.coef_ if estimator.fit_intercept else 0.0
+    )
+    estimator.n_features_in_ = len(mean)
+    estimator.feature_names_in_ = np.asarray(prepared.input_columns, dtype=object)
+    estimator.n_iter_ = iterations
+    estimator.dual_gap_ = gap / count
+
+
+def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
+    from xgboost import DataIter
+
+    if external:
+        import cupy
+        from xgboost import ExtMemQuantileDMatrix
+
+    class Batches(DataIter):
+        def __init__(self):
+            super().__init__(release_data=True)
+            self.reset()
+
+        def reset(self):
+            self.blocks = iter(prepared.blocks(scaler))
+
+        def next(self, input_data):
+            block = next(self.blocks, None)
+            if block is None:
+                return False
+            start, stop, values = block
+            if external:
+                with cupy.cuda.Device(int(estimator.device.partition(":")[2] or "0")):
+                    values = cupy.asarray(values)
+            input_data(
+                data=values,
+                label=prepared.training[prepared.target_column]
+                .iloc[start:stop]
+                .to_numpy(),
+                weight=prepared.preprocessing[0][start:stop] if ref is None else None,
+                feature_names=list(prepared.input_columns),
+                feature_types=estimator.feature_types,
+                feature_weights=estimator.feature_weights,
+            )
+            return True
+
+    if external:
+        return ExtMemQuantileDMatrix(
+            Batches(),
+            ref=ref,
+            missing=estimator.missing,
+            nthread=estimator.n_jobs,
+            max_bin=estimator.max_bin,
+            enable_categorical=estimator.enable_categorical,
+        )
+    return estimator._create_dmatrix(
+        ref=ref,
+        data=Batches(),
+        missing=estimator.missing,
+        enable_categorical=estimator.enable_categorical,
+    )
+
+
+def _fit_booster(estimator, prepared, spec, validation):
+    from xgboost import Booster
+    from xgboost.callback import EarlyStopping
+
+    scaler = prepared.preprocessing[1]
+    external = spec.hyperparameters.get("external_memory", False)
+    training = _booster_matrix(estimator, prepared, scaler, external=external)
+    held = (
+        None
+        if validation is None
+        else _booster_matrix(
+            estimator, validation, scaler, ref=training, external=external
+        )
+    )
+    booster = Booster(
+        estimator.get_xgb_params(),
+        cache=[training] if held is None else [training, held],
+    )
+    patience = spec.hyperparameters.get("early_stopping_rounds")
+    callback = (
+        None if patience is None else EarlyStopping(rounds=patience, save_best=True)
+    )
+    if callback is not None:
+        booster = callback.before_training(booster)
+    history = {"validation_0": {}}
+    iterations = (
+        count()
+        if "n_estimators" in spec.hyperparameters
+        and spec.hyperparameters["n_estimators"] is None
+        else range(estimator.get_num_boosting_rounds())
+    )
+    for iteration in iterations:
+        booster.update(training, iteration)
+        if held is not None:
+            for measurement in booster.eval_set(
+                [(held, "validation_0")], iteration
+            ).split()[1:]:
+                name, value = measurement.split(":", 1)
+                metric = name.removeprefix("validation_0-")
+                history["validation_0"].setdefault(metric, []).append(float(value))
+        if callback is not None and callback.after_iteration(
+            booster, iteration, history
+        ):
+            break
+    estimator._Booster = (
+        booster if callback is None else callback.after_training(booster)
+    )
+    if held is not None:
+        estimator.evals_result_ = history
 
 
 def iter_model_work_frames(

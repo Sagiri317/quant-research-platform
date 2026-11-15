@@ -81,20 +81,22 @@ def test_actual_fit_preserves_thread_configuration_and_metadata(
 
         monkeypatch.setattr(np.linalg, "lstsq", fit)
     else:
-        original = estimator.fit
+        from xgboost import Booster
+
+        original = Booster.update
 
         def fit(*args, **kwargs):
             observed.append(threadpool_info())
             return original(*args, **kwargs)
 
-        monkeypatch.setattr(estimator, "fit", fit)
+        monkeypatch.setattr(Booster, "update", fit)
     before = threadpool_info()
     result = fitting._fit_model_result(
         fitting._collect_training_frame([frame], spec, fitting_cutoff="2024-01-08"),
         spec,
         estimator=estimator,
     )
-    assert observed == [before]
+    assert observed and all(configuration == before for configuration in observed)
     assert threadpool_info() == before
     assert result.metadata["resolved_hyperparameters"] == (
         {**params, "device": "cuda", "tree_method": "hist"}

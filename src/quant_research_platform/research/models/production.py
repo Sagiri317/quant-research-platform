@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 
@@ -93,43 +94,47 @@ def _prepare_fit(
                     mask |= prediction_window_mask(timestamps, window)
                 yield frame.loc[mask]
 
-    prepared = fitting._collect_training_frame(
-        scoped(),
-        spec,
-        fitting_cutoff=cutoff,
-        availability_column=label_availability_column,
-        trading_calendar=trading_calendar,
-        sample_windows=windows if sequence else None,
-    )
-    if prepared.training.empty:
-        raise ValueError("model_training_sample_empty")
-    validation = None
-    if validation_frames is not None:
-        if spec.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}:
-            raise ValueError("model_validation_algorithm_unsupported")
-        validation_cutoff = strict_timestamp_series(
-            pd.Series([validation_cutoff]), error="invalid_validation_cutoff"
-        ).iloc[0]
-        validation = fitting._collect_training_frame(
-            validation_frames,
+    with ExitStack() as cleanup:
+        prepared = fitting._collect_training_frame(
+            scoped(),
             spec,
-            fitting_cutoff=validation_cutoff,
+            fitting_cutoff=cutoff,
             availability_column=label_availability_column,
             trading_calendar=trading_calendar,
-            sample_windows=_fit_windows(validation_windows, validation_cutoff)
-            if validation_windows is not None
-            else None,
+            sample_windows=windows if sequence else None,
         )
-        if validation.training.empty:
-            raise ValueError("model_validation_sample_empty")
-        validation_start = validation.training.timestamp.min()
-        if (
-            cutoff >= validation_start
-            or pd.Timestamp(prepared.row_counts["label_available_max"])
-            >= validation_start
-        ):
-            raise ValueError("model_validation_training_overlap")
-    return prepared, validation, validation_cutoff
+        cleanup.callback(prepared.close)
+        if prepared.training.empty:
+            raise ValueError("model_training_sample_empty")
+        validation = None
+        if validation_frames is not None:
+            if spec.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}:
+                raise ValueError("model_validation_algorithm_unsupported")
+            validation_cutoff = strict_timestamp_series(
+                pd.Series([validation_cutoff]), error="invalid_validation_cutoff"
+            ).iloc[0]
+            validation = fitting._collect_training_frame(
+                validation_frames,
+                spec,
+                fitting_cutoff=validation_cutoff,
+                availability_column=label_availability_column,
+                trading_calendar=trading_calendar,
+                sample_windows=_fit_windows(validation_windows, validation_cutoff)
+                if validation_windows is not None
+                else None,
+            )
+            cleanup.callback(validation.close)
+            if validation.training.empty:
+                raise ValueError("model_validation_sample_empty")
+            validation_start = validation.training.timestamp.min()
+            if (
+                cutoff >= validation_start
+                or pd.Timestamp(prepared.row_counts["label_available_max"])
+                >= validation_start
+            ):
+                raise ValueError("model_validation_training_overlap")
+        cleanup.pop_all()
+        return prepared, validation, validation_cutoff
 
 
 def _fit_prepared(prepared, spec, *, validation=None, validation_cutoff=None):
@@ -190,16 +195,21 @@ def fit_model(
         validation_cutoff=validation_cutoff,
         validation_windows=validation_windows,
     )
-    if candidate_parameters is not None:
-        spec = replace(
-            spec,
-            hyperparameters=_resolve_candidate_parameters(
-                spec.model_algorithm, candidate_parameters, len(prepared.training)
-            ),
+    try:
+        if candidate_parameters is not None:
+            spec = replace(
+                spec,
+                hyperparameters=_resolve_candidate_parameters(
+                    spec.model_algorithm, candidate_parameters, len(prepared.training)
+                ),
+            )
+        return _fit_prepared(
+            prepared, spec, validation=validation, validation_cutoff=validation_cutoff
         )
-    return _fit_prepared(
-        prepared, spec, validation=validation, validation_cutoff=validation_cutoff
-    )
+    finally:
+        prepared.close()
+        if validation is not None:
+            validation.close()
 
 
 def fit(config: Mapping) -> Path:
@@ -227,11 +237,9 @@ def fit(config: Mapping) -> Path:
     )
     output = Path(config["output"])
     reject_if_exists(output)
-    spec = _model_spec(config["model"])
-    recipe = model_spec_payload(spec)
-    parameters = config.get("candidate_parameters")
-    if parameters is None:
-        parameters = _thaw_model_hyperparameters(spec.hyperparameters)
+    model = config["model"]
+    if not isinstance(model, Mapping):
+        raise ValueError("model_spec_required")
     source = config["inputs"]
     cutoff = strict_timestamp_series(
         pd.Series([config["fit_cutoff"]]), error="invalid_fit_cutoff"
@@ -245,11 +253,12 @@ def fit(config: Mapping) -> Path:
             validation["windows"], pd.Timestamp(validation["cutoff"])
         )
         if (
-            spec.model_algorithm not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}
+            model.get("model_algorithm")
+            not in {*SEQUENCE_ALGORITHMS, "xgboost_regressor"}
             or pd.Timestamp(validation_windows[0].start) <= cutoff
         ):
             raise ValueError("model_validation_training_overlap")
-    sequence = spec.model_algorithm in SEQUENCE_ALGORITHMS
+    sequence = model.get("model_algorithm") in SEQUENCE_ALGORITHMS
     read_windows = tuple(_fit_read_windows(windows, sequence=sequence))
     validation_read_windows = tuple(
         _fit_read_windows(
@@ -277,6 +286,11 @@ def fit(config: Mapping) -> Path:
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
     declared = session.spec
+    spec = _model_spec(model, declared=declared)
+    recipe = model_spec_payload(spec)
+    parameters = config.get("candidate_parameters")
+    if parameters is None:
+        parameters = _thaw_model_hyperparameters(spec.hyperparameters)
     validate_model_input_roles(
         declared,
         recipe,

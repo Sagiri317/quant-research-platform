@@ -64,6 +64,53 @@ def test_transformer_independent_initialization_and_seed():
         )
 
 
+def test_lstm_input_initialization_preserves_other_parameters_and_seed():
+    import torch
+
+    from quant_research_platform.contracts.models import sequence_parameters
+    from quant_research_platform.research.models.neural import _network
+
+    def build(enabled=None):
+        parameters = dict(hidden_size=16, num_layers=2)
+        if enabled is not None:
+            parameters["input_gate_xavier_initialization"] = enabled
+        with torch.random.fork_rng():
+            torch.manual_seed(42)
+            return _network(
+                "lstm_regressor", 128, sequence_parameters("lstm_regressor", parameters)
+            )
+
+    baseline, disabled, configured, repeated = (
+        build(),
+        build(False),
+        build(True),
+        build(True),
+    )
+    for name, value in baseline.state_dict().items():
+        torch.testing.assert_close(value, disabled.state_dict()[name], rtol=0, atol=0)
+        torch.testing.assert_close(
+            configured.state_dict()[name], repeated.state_dict()[name], rtol=0, atol=0
+        )
+        if name != "encoder.weight_ih_l0":
+            torch.testing.assert_close(
+                value, configured.state_dict()[name], rtol=0, atol=0
+            )
+    # Each gate has fan_in=128 and fan_out=16, rather than the packed 64 rows.
+    bound = (6 / (128 + 16)) ** 0.5
+    for gate in configured.encoder.weight_ih_l0.chunk(4, dim=0):
+        assert float(gate.detach().abs().max()) <= bound
+        assert float(gate.detach().square().mean()) == pytest.approx(
+            2 / (128 + 16), rel=0.1
+        )
+    assert not torch.equal(
+        baseline.encoder.weight_ih_l0, configured.encoder.weight_ih_l0
+    )
+    with pytest.raises(ValueError, match="input_gate_xavier_initialization"):
+        sequence_parameters(
+            "lstm_regressor", {"input_gate_xavier_initialization": "true"}
+        )
+
+
 @pytest.mark.parametrize(
     "layers,dropout,training", [(1, 0.4, True), (2, 0.0, True), (2, 0.4, False)]
 )
@@ -251,7 +298,7 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
             **(
                 {"num_layers": 2, "independent_layer_initialization": True}
                 if algorithm == "transformer_regressor"
-                else {}
+                else {"input_gate_xavier_initialization": True}
             ),
         },
     )
@@ -269,6 +316,13 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
         assert (
             result.metadata["resolved_hyperparameters"][
                 "independent_layer_initialization"
+            ]
+            is True
+        )
+    else:
+        assert (
+            result.metadata["resolved_hyperparameters"][
+                "input_gate_xavier_initialization"
             ]
             is True
         )
@@ -309,9 +363,9 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     transformed_rows = []
     transform = type(model.scaler).transform
 
-    def measured_transform(self, values):
+    def measured_transform(self, values, **kwargs):
         transformed_rows.append(len(values))
-        return transform(self, values)
+        return transform(self, values, **kwargs)
 
     with monkeypatch.context() as measured:
         measured.setattr(type(model.scaler), "transform", measured_transform)

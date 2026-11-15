@@ -11,6 +11,302 @@ from quant_research_platform.research.models.estimators import (
 )
 
 
+def test_default_native_inputs_freeze_one_representation_and_preserve_explicit_choice(
+    tmp_path,
+):
+    from copy import deepcopy
+
+    from quant_research_platform.research.models.persisted import load_model
+    from quant_research_platform.research.models.production import fit
+    from tests.correctness.test_direct_model_operations import data, fit_config
+
+    path = data(tmp_path)
+    frame = pd.read_parquet(path)
+    frame["z"] = np.sin(frame.timestamp.dt.day + frame.x)
+    frame["feature_x"] = frame.x**2
+    frame["feature_x_other"] = frame.label * 100
+    frame.to_parquet(path, index=False)
+    explicit = fit_config(tmp_path, path)
+    explicit["inputs"]["spec"]["column_roles"].update(
+        x="factor", z="factor", feature_x="feature", feature_x_other="feature"
+    )
+    explicit["model"].update(
+        input_factor_columns=["z"], input_feature_columns=["feature_x"]
+    )
+    reference, reference_facts = load_model(fit(explicit))
+    default = deepcopy(explicit)
+    default["output"] = str(tmp_path / "default")
+    default["model"].pop("input_factor_columns")
+    default["model"].pop("input_feature_columns")
+    actual, facts = load_model(fit(default))
+    assert facts["model"] == reference_facts["model"]
+    assert actual.metadata["input_columns"] == ["z", "feature_x"]
+    np.testing.assert_array_equal(
+        actual.prediction_model.predict(frame[["z", "feature_x"]]),
+        reference.prediction_model.predict(frame[["z", "feature_x"]]),
+    )
+    subset = deepcopy(default)
+    subset["output"] = str(tmp_path / "subset")
+    subset["model"]["input_feature_columns"] = ["feature_x"]
+    selected, _ = load_model(fit(subset))
+    assert selected.metadata["input_columns"] == ["feature_x"]
+    subset["output"] = str(tmp_path / "empty")
+    subset["model"]["input_feature_columns"] = []
+    with pytest.raises(ValueError, match="model_input_columns_required"):
+        fit(subset)
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"external_memory": 1},
+        {"external_memory": True, "device": "cpu"},
+        {"external_memory": True, "tree_method": "exact"},
+    ],
+)
+def test_external_memory_requires_an_explicit_gpu_hist_protocol(parameters):
+    with pytest.raises(ValueError, match="model_external_memory"):
+        ModelSpec(
+            model_id="external",
+            model_algorithm="xgboost_regressor",
+            input_factor_columns=("x",),
+            target_column="label",
+            hyperparameters=parameters,
+        )
+
+
+def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.research.models.persisted import load_model, save_model
+    from quant_research_platform.research.models.production import fit_model
+
+    cupy = pytest.importorskip("cupy")
+    if cupy.cuda.runtime.getDeviceCount() == 0:
+        pytest.skip("CUDA device unavailable")
+    rng = np.random.default_rng(81)
+    training_rows = 16403
+    x = rng.integers(-3, 4, size=(training_rows + 32, 3)).astype(float)
+    y = 0.7 * x[:, 0] - 0.2 * x[:, 2]
+    x[::7, 1] = np.nan
+    frame = pd.DataFrame(x, columns=["x", "y", "z"])
+    frame["timestamp"] = pd.to_datetime(
+        ["2020-01-01"] * 4000
+        + ["2020-01-02"] * (training_rows - 4000)
+        + ["2020-01-04"] * 32
+    )
+    frame["label_available_at"] = frame.timestamp
+    frame["label"] = y
+    frame["asset_id"] = [str(index) for index in range(len(frame))]
+    frame["eligible"] = True
+    spec = ModelSpec(
+        model_id="external",
+        model_algorithm="xgboost_regressor",
+        input_factor_columns=("x", "y", "z"),
+        target_column="label",
+        hyperparameters={
+            "device": "cuda:0",
+            "tree_method": "hist",
+            "n_estimators": 8,
+            "early_stopping_rounds": 2,
+            "max_depth": 2,
+            "max_bin": 16,
+            "colsample_bytree": 0.8,
+            "feature_weights": [1.0, 0.0, 1.0],
+            "n_jobs": 2,
+        },
+    )
+    results = []
+    for external in (False, True):
+        candidate = replace(
+            spec, hyperparameters={**spec.hyperparameters, "external_memory": external}
+        )
+        result = fit_model(
+            [frame.iloc[:training_rows]],
+            candidate,
+            fit_windows=[{"start": "2020-01-01", "end": "2020-01-02"}],
+            fit_cutoff="2020-01-03",
+            validation_frames=[frame.iloc[training_rows:]],
+            validation_cutoff="2020-01-05",
+        )
+        assert (
+            result.metadata["resolved_hyperparameters"]["external_memory"] is external
+        )
+        results.append(result)
+    inputs = frame.loc[:, spec.input_columns]
+    np.testing.assert_allclose(
+        results[0].prediction_model.predict(inputs),
+        results[1].prediction_model.predict(inputs),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    save_model(tmp_path / "external", results[1], facts={}, trial_id="external")
+    restored, _ = load_model(tmp_path / "external")
+    np.testing.assert_array_equal(
+        restored.prediction_model.predict(inputs),
+        results[1].prediction_model.predict(inputs),
+    )
+
+
+@pytest.mark.parametrize("failure", [None, "source", "imputation", "validation"])
+def test_fit_closes_temporary_inputs_on_success_and_failure(monkeypatch, failure):
+    from quant_research_platform.research.models.production import fit_model
+
+    handles = []
+    original = fitting.TemporaryFile
+
+    def opened():
+        handle = original()
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(fitting, "TemporaryFile", opened)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2020-01-01", "2020-01-02"]),
+            "asset_id": "a",
+            "x": [1.0, 2.0],
+            "z": [1.0, 3.0],
+            "label": [0.1, 0.2],
+            "eligible": True,
+            "label_available_at": pd.Timestamp("2020-01-03"),
+        }
+    )
+    if failure == "imputation":
+        frame["z"] = np.nan
+    spec = ModelSpec(
+        model_id="closed",
+        model_algorithm="xgboost_regressor"
+        if failure == "validation"
+        else "linear_regression",
+        input_factor_columns=("x", "z"),
+        target_column="label",
+    )
+
+    def source():
+        yield frame
+        if failure == "source":
+            raise RuntimeError("source_read_failed")
+
+    options = dict(
+        fit_windows=[{"start": "2020-01-01", "end": "2020-01-03"}],
+        fit_cutoff="2020-01-03",
+    )
+    if failure == "validation":
+        options.update(validation_frames=[frame], validation_cutoff="2020-01-04")
+    if failure is None:
+        result = fit_model(source(), spec, **options)
+        assert np.isfinite(result.prediction_model.predict(frame[["x", "z"]])).all()
+    else:
+        error = {
+            "source": "source_read_failed",
+            "imputation": "model_training_feature_all_missing",
+            "validation": "model_validation_training_overlap",
+        }[failure]
+        with pytest.raises((RuntimeError, ValueError), match=error):
+            fit_model(source(), spec, **options)
+    assert handles and all(handle.closed for handle in handles)
+
+
+@pytest.mark.parametrize(
+    "scaling,intercept,positive,selection",
+    [
+        (True, True, False, "cyclic"),
+        (False, True, True, "random"),
+        (False, False, False, "cyclic"),
+    ],
+)
+def test_precomputed_lasso_reuses_statistics_and_matches_native_weighted_fit(
+    tmp_path, scaling, intercept, positive, selection
+):
+    from dataclasses import replace
+
+    from sklearn.linear_model import Lasso
+
+    from quant_research_platform.research.models.persisted import load_model, save_model
+
+    rng = np.random.default_rng(79)
+    count = 16403
+    values = rng.normal(size=(count, 3)) + [2, 3, 4]
+    target = 3 + values @ [0.7, -0.4, 0.2] + rng.normal(0, 0.1, count)
+    values[::17, 1] = np.nan
+    frame = pd.DataFrame(values, columns=["x", "y", "z"])
+    frame["label"] = target
+    frame["timestamp"] = pd.Timestamp("2020-01-01") + pd.to_timedelta(
+        np.sqrt(np.arange(count)).astype(int), unit="D"
+    )
+    frame["asset_id"] = [str(index) for index in range(count)]
+    frame["eligible"] = True
+    frame["label_available_at"] = frame.timestamp
+    spec = ModelSpec(
+        model_id="gram",
+        model_algorithm="lasso_regression",
+        input_factor_columns=("x", "y", "z"),
+        target_column="label",
+        training_scaling=scaling,
+        hyperparameters={
+            "precompute": True,
+            "max_iter": None,
+            "tol": 1e-9,
+            "fit_intercept": intercept,
+            "positive": positive,
+            "selection": selection,
+            "warm_start": True,
+        },
+    )
+    prepared = fitting._collect_training_frame(
+        [frame], spec, fitting_cutoff="2021-01-01"
+    )
+    raw = prepared.features.iloc[prepared.training_rows].to_numpy(
+        dtype="float64", copy=True
+    )
+    weights = prepared.preprocessing[0]
+    target = prepared.training.label.to_numpy(copy=True)
+    medians = np.nanmedian(raw, axis=0)
+    np.copyto(raw, medians, where=np.isnan(raw))
+    if scaling:
+        mean = np.average(raw, axis=0, weights=weights)
+        raw -= mean
+        raw /= np.sqrt(np.average(raw**2, axis=0, weights=weights))
+    statistics = None
+    for alpha in (0.03, 0.01, 0.001):
+        candidate = replace(
+            spec, hyperparameters={**spec.hyperparameters, "alpha": alpha}
+        )
+        result = fitting._fit_model_result(
+            prepared, candidate, estimator=build_estimator_from_model_spec(candidate)
+        )
+        expected = Lasso(
+            alpha=alpha,
+            max_iter=100000,
+            tol=1e-9,
+            fit_intercept=intercept,
+            positive=positive,
+            selection=selection,
+            random_state=spec.random_seed,
+            precompute=True,
+        ).fit(raw, target, sample_weight=weights)
+        actual = result.prediction_model.estimator
+        np.testing.assert_allclose(actual.coef_, expected.coef_, rtol=2e-7, atol=2e-9)
+        assert actual.intercept_ == pytest.approx(
+            expected.intercept_, rel=2e-7, abs=2e-9
+        )
+        assert actual.dual_gap_ <= 1e-9 * np.average(
+            (target - (np.average(target, weights=weights) if intercept else 0)) ** 2,
+            weights=weights,
+        )
+        if statistics is None:
+            statistics = prepared.lasso_gram
+        assert prepared.lasso_gram is statistics
+        assert "matrix" not in prepared.__dict__
+    save_model(tmp_path / "model", result, facts={}, trial_id="gram")
+    restored, _ = load_model(tmp_path / "model")
+    np.testing.assert_array_equal(
+        restored.prediction_model.predict(frame.loc[:, spec.input_columns]),
+        result.prediction_model.predict(frame.loc[:, spec.input_columns]),
+    )
+
+
 def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
     spec = ModelSpec(
         model_id="linear",
@@ -104,16 +400,36 @@ def test_training_retention_preserves_all_legal_rows_in_canonical_key_order():
     )
     pd.testing.assert_frame_equal(
         prepared.training,
-        expected.sort_values(["timestamp", "asset_id"], ignore_index=True),
+        expected.drop(columns=list(spec.input_columns)).sort_values(
+            ["timestamp", "asset_id"], ignore_index=True
+        ),
         check_exact=True,
     )
+    np.testing.assert_array_equal(
+        prepared.features.iloc[prepared.training_rows].to_numpy(dtype="float64"),
+        expected.sort_values(["timestamp", "asset_id"])
+        .loc[:, spec.input_columns]
+        .to_numpy(),
+    )
+    prepared.close()
 
 
 @pytest.mark.parametrize(
     "algorithm,parameters",
     [("lasso_regression", {"alpha": 0.01, "copy_X": copy}) for copy in (True, False)]
     + [("ridge_regression", {"alpha": 0.1, "copy_X": copy}) for copy in (True, False)]
-    + [("xgboost_regressor", {"device": "cpu", "n_estimators": 3, "max_depth": 2})],
+    + [
+        (
+            "xgboost_regressor",
+            {
+                "device": "cpu",
+                "n_estimators": 3,
+                "max_depth": 2,
+                "feature_weights": [1.0, 0.0],
+                "colsample_bytree": 0.5,
+            },
+        )
+    ],
 )
 def test_real_estimators_consume_prepared_matrix_without_changing_source(
     algorithm, parameters
@@ -164,9 +480,7 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
         np.average(training.label, weights=original_weights)
     )
     pd.testing.assert_frame_equal(frame, source)
-    pd.testing.assert_frame_equal(
-        prepared.training, training.drop(columns=list(spec.input_columns))
-    )
+    pd.testing.assert_frame_equal(prepared.training, training)
     pd.testing.assert_frame_equal(prepared.matrix, original_matrix, check_exact=True)
     np.testing.assert_array_equal(weights, original_weights)
 
@@ -209,7 +523,7 @@ def test_shared_training_keeps_mutating_candidates_on_the_original_scale(
         [frame], spec, windows=windows, cutoff=pd.Timestamp("2020-01-06")
     )
     source = frame.copy(deep=True)
-    loss_rows = prepared.training.drop(columns=list(spec.input_columns)).copy(deep=True)
+    loss_rows = prepared.training.copy(deep=True)
     matrix = prepared.matrix
     original = matrix.copy(deep=True)
     weights, scaler = prepared.preprocessing

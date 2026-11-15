@@ -1,7 +1,7 @@
 """Sequence regressors with causal histories and CPU fallback when CUDA is absent."""
 
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from itertools import count
 
 import numpy as np
@@ -60,6 +60,11 @@ def _network(algorithm, width, parameters):
                             **layer_parameters
                         )
             self.output = nn.Linear(hidden, 1)
+            if algorithm == "lstm_regressor" and parameters.get(
+                "input_gate_xavier_initialization", False
+            ):
+                for gate in self.encoder.weight_ih_l0.chunk(4, dim=0):
+                    nn.init.xavier_uniform_(gate)
 
         def forward(self, values, lengths):
             if algorithm == "lstm_regressor":
@@ -115,9 +120,12 @@ def _observed_rows(frame, columns, deep):
 
 def _matrix(scaler, frame, columns, valid):
     matrix = np.zeros((len(frame), len(scaler.columns)), dtype="float32")
-    matrix[valid] = scaler.transform(frame.loc[valid, columns]).to_numpy(
-        dtype="float32"
-    )
+    for start in range(0, len(frame), 16384):
+        block = frame.iloc[start : start + 16384]
+        selected = valid[start : start + len(block)]
+        matrix[start : start + len(block)][selected] = scaler.transform(
+            block.loc[selected, columns], dtype="float32"
+        ).to_numpy(copy=False)
     return matrix
 
 
@@ -249,18 +257,50 @@ def _sequence_starts(context, valid, groups, deep):
     return np.maximum.accumulate(np.where(boundary, np.arange(len(context)), 0))
 
 
-def _sequence_arrays(prepared, spec, scaler):
+def _sequence_arrays(prepared, spec, scaler, history=None):
     deep = spec.model_algorithm in DEEPLOB_ALGORITHMS
     boundaries = sequence_context_columns(spec.model_algorithm, spec.hyperparameters)
     groups = boundaries
-    context = _ordered_context(
-        prepared.sequence_context, spec.input_columns, boundaries
-    )
-    valid = _observed_rows(context, spec.input_columns, deep)
+    prefix = 0 if history is None else len(history)
+    metadata = prepared.sequence_context
+    observed = prepared.context_valid
+    if prefix:
+        metadata = pd.concat(
+            [history.loc[:, metadata.columns], metadata], ignore_index=True
+        )
+        observed = np.r_[_observed_rows(history, spec.input_columns, deep), observed]
+    context = _ordered_context(metadata, (), boundaries)
+    valid = observed[context.index]
+    if boundaries and (context.loc[:, boundaries].isna().any(axis=1) & valid).any():
+        raise ValueError("sequence_context_missing")
     if not (groups or deep):
-        context = context.loc[valid].reset_index(drop=True)
+        context = context.loc[valid]
         valid = valid[valid]
-    matrix = _matrix(scaler, context, spec.input_columns, valid)
+    matrix = np.zeros((len(context), len(spec.input_columns)), dtype="float32")
+    for start in range(0, len(context), 16384):
+        rows = context.index[start : start + 16384].to_numpy()
+        selected = valid[start : start + len(rows)]
+        rows = rows[selected]
+        values = (
+            prepared.feature_rows(rows - prefix)
+            if not prefix
+            else pd.concat(
+                [
+                    history.loc[:, spec.input_columns].iloc[rows[rows < prefix]],
+                    prepared.feature_rows(rows[rows >= prefix] - prefix),
+                ],
+                ignore_index=True,
+            )
+        )
+        if prefix:
+            # Prefix and observed rows can interleave after sorting by asset.
+            order = np.argsort(
+                np.r_[np.flatnonzero(rows < prefix), np.flatnonzero(rows >= prefix)]
+            )
+            values = values.iloc[order]
+        matrix[start : start + len(selected)][selected] = scaler._transform_numeric(
+            values.to_numpy(dtype="float64", copy=True), dtype="float32"
+        )
     keys = ["asset_id", "timestamp"]
     endpoints = pd.MultiIndex.from_frame(context[keys]).get_indexer(
         pd.MultiIndex.from_frame(prepared.training[keys])
@@ -281,6 +321,23 @@ def fit_sequence(prepared, spec, validation=None):
     classification = spec.model_algorithm == "deeplob_classifier"
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
     matrix = torch.as_tensor(matrix, device=input_device)
+    history_rows = context.groupby("asset_id", sort=False).tail(
+        parameters["sequence_length"] - 1
+    )
+    history = pd.concat(
+        [
+            history_rows.loc[
+                :, ~history_rows.columns.isin(spec.input_columns)
+            ].reset_index(drop=True),
+            pd.DataFrame(
+                prepared.feature_rows(history_rows.index.to_numpy()).to_numpy(
+                    dtype="float64", copy=True
+                ),
+                columns=spec.input_columns,
+            ),
+        ],
+        axis=1,
+    )
     target = prepared.training[spec.target_column].to_numpy(dtype="float64")
     mean = float(np.average(target, weights=weights))
     scale = float(np.sqrt(np.average((target - mean) ** 2, weights=weights))) or 1.0
@@ -291,25 +348,17 @@ def fit_sequence(prepared, spec, validation=None):
         normalized = ((target - mean) / scale).astype("float32")
     validation_arrays = None
     if validation is not None:
-        history = context.groupby("asset_id", sort=False).tail(
-            parameters["sequence_length"] - 1
-        )
         keys = ["asset_id", "timestamp"]
         # The context read can include the final training date. Keep its actual
         # observations once, without masking duplicates within either input.
-        history = history.loc[
+        validation_history = history.loc[
             ~pd.MultiIndex.from_frame(history[keys]).isin(
                 pd.MultiIndex.from_frame(validation.sequence_context[keys])
             )
         ]
-        validation = replace(
-            validation,
-            sequence_context=pd.concat(
-                [history, validation.sequence_context],
-                ignore_index=True,
-            ),
+        _, v_matrix, v_endpoints, v_starts = _sequence_arrays(
+            validation, spec, scaler, validation_history
         )
-        _, v_matrix, v_endpoints, v_starts = _sequence_arrays(validation, spec, scaler)
         v_matrix = torch.as_tensor(v_matrix, device=input_device)
         v_target = validation.training[spec.target_column].to_numpy(dtype="float64")
         v_actual = (
@@ -415,9 +464,6 @@ def fit_sequence(prepared, spec, validation=None):
         }
     if not all(torch.isfinite(value).all() for value in state.values()):
         raise ValueError("model_state_nonfinite")
-    history = context.groupby("asset_id", sort=False).tail(
-        parameters["sequence_length"] - 1
-    )
     predictor = SequencePredictor(
         spec.model_algorithm, parameters, scaler, state, history, mean, scale
     )

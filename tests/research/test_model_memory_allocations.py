@@ -167,12 +167,12 @@ def test_scaler_peak_scratch_reduction_is_bounded_by_column():
             tracemalloc.stop()
 
     optimized = peak(ModelMatrixScaler.fit)
-    # Keep one owned input matrix and reuse the centered/squared work buffer.
-    assert optimized < frame.size * 8 * 3.5
+    # Fitting keeps column-sized work arrays, independent of feature width.
+    assert optimized < frame.size * 8 * 0.8
 
 
 @pytest.mark.parametrize("operation", ["fit", "transform"])
-def test_nullable_imputation_keeps_one_dense_work_matrix(operation):
+def test_nullable_imputation_bounds_scratch_and_preserves_values(operation):
     frame = pd.DataFrame(
         np.random.default_rng(29).normal(size=(8192, 32)), dtype="Float64"
     )
@@ -208,8 +208,8 @@ def test_nullable_imputation_keeps_one_dense_work_matrix(operation):
         ("xgboost_regressor", {"device": "cpu", "n_estimators": 2, "max_depth": 1}),
     ],
 )
-def test_tabular_fit_releases_raw_feature_buffers_before_solver(
-    algorithm, parameters, monkeypatch
+def test_tabular_fit_uses_mapped_features_without_a_second_raw_table(
+    algorithm, parameters
 ):
     columns = tuple(f"x{index}" for index in range(335))
     frame = pd.DataFrame(
@@ -234,34 +234,26 @@ def test_tabular_fit_releases_raw_feature_buffers_before_solver(
     prepared = fitting._collect_training_frame(
         [frame], spec, fitting_cutoff="2024-01-02"
     )
-    expected = prepared.training.drop(columns=list(columns)).copy(deep=True)
-    raw_frame = weakref.ref(prepared.training)
-    values = prepared.training.label.to_numpy(copy=False)
-    while isinstance(values.base, np.ndarray):
-        values = values.base
-    assert values.nbytes > len(frame) * 8
-    raw_values = weakref.ref(values)
-    del values
-    raw_nullable = [
-        weakref.ref(prepared.training[column].array) for column in columns[-7:]
-    ]
+    expected = prepared.training.copy(deep=True)
+    assert not set(columns).intersection(prepared.training.columns)
+    assert isinstance(prepared.feature_mapping, np.memmap)
+    assert prepared.features.dtypes.astype(str).eq("double[pyarrow]").all()
+    np.testing.assert_allclose(
+        prepared.features.iloc[prepared.training_rows].to_numpy(dtype="float64"),
+        frame.loc[:, columns].to_numpy(dtype="float64"),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
     estimator = fitting.estimators.build_estimator_from_model_spec(spec)
-    native_fit = np.linalg.lstsq if estimator is None else estimator.fit
-
-    def fit(*args, **kwargs):
-        assert raw_frame() is None
-        assert raw_values() is None
-        assert all(reference() is None for reference in raw_nullable)
-        return native_fit(*args, **kwargs)
-
-    if estimator is None:
-        monkeypatch.setattr(np.linalg, "lstsq", fit)
-    else:
-        monkeypatch.setattr(estimator, "fit", fit)
     result = fitting._fit_model_result(prepared, spec, estimator=estimator)
     pd.testing.assert_frame_equal(prepared.training, expected, check_exact=True)
     pd.testing.assert_frame_equal(frame, before, check_exact=True)
     assert result.metadata["rows_after_input_label_dropna"] == len(frame)
+    if algorithm in {"lasso_regression", "xgboost_regressor"}:
+        assert "matrix" not in prepared.__dict__
+    prepared.close()
+    assert prepared.feature_file.closed
 
 
 def test_linear_lstsq_receives_the_fresh_design_without_an_extra_copy(monkeypatch):
@@ -328,19 +320,20 @@ def test_collected_training_releases_chunks_and_preserves_source(
         .astype({"timestamp": "datetime64[ns]"})
         .reset_index(drop=True)
     )
-    pd.testing.assert_frame_equal(prepared.training, expected, check_exact=True)
-    for column in ("x", "z"):
-        pd.testing.assert_extension_array_equal(
-            prepared.training[column].array, expected[column].array, check_exact=True
-        )
+    pd.testing.assert_frame_equal(
+        prepared.training, expected.drop(columns=["x", "z"]), check_exact=True
+    )
+    np.testing.assert_allclose(
+        prepared.features.iloc[prepared.training_rows].to_numpy(dtype="float64"),
+        expected[["x", "z"]].to_numpy(dtype="float64"),
+        rtol=0,
+        atol=0,
+        equal_nan=True,
+    )
     assert prepared.row_counts["rows_input"] == len(source)
     assert prepared.row_counts["rows_after_input_label_dropna"] == len(expected)
-    prepared.training.loc[0, "x"] = -999.0
+    prepared.close()
     pd.testing.assert_frame_equal(source, before, check_exact=True)
-    for column in ("x", "z"):
-        pd.testing.assert_extension_array_equal(
-            source[column].array, before[column].array, check_exact=True
-        )
 
 
 @pytest.mark.parametrize("missing", [None, "impute", "native"])
@@ -351,13 +344,13 @@ def test_scaler_parses_each_source_column_once(missing, monkeypatch):
     if missing is not None:
         frame.loc[0, "0"] = np.nan
     calls = []
-    parse = scaling.strict_finite_numeric_series
+    parse = scaling._finite_numeric_series
 
     def counted(values, **kwargs):
         calls.append(values.name)
         return parse(values, **kwargs)
 
-    monkeypatch.setattr(scaling, "strict_finite_numeric_series", counted)
+    monkeypatch.setattr(scaling, "_finite_numeric_series", counted)
     scaler = ModelMatrixScaler.fit(frame, missing=missing, scaling=True)
     assert calls == list(frame.columns)
     calls.clear()
@@ -390,19 +383,47 @@ def test_sequence_fit_only_materializes_its_context_matrix(monkeypatch):
         },
     )
     prepared = fitting._collect_training_frame(
-        [frame], spec, fitting_cutoff="2024-01-04"
+        [frame.iloc[4:], frame.iloc[:4]], spec, fitting_cutoff="2024-01-04"
+    )
+    assert "x" not in prepared.training
+    assert len(prepared.sequence_context) == len(frame)
+    assert prepared.preprocessing[1].mean_[0] == pytest.approx(
+        frame.loc[frame.eligible].groupby("timestamp").x.mean().mean()
     )
     rows = []
-    transform = ModelMatrixScaler.transform
+    transform = ModelMatrixScaler._transform_numeric
 
-    def counted(self, inputs):
+    def counted(self, inputs, **kwargs):
         rows.append(len(inputs))
-        return transform(self, inputs)
+        return transform(self, inputs, **kwargs)
 
-    monkeypatch.setattr(ModelMatrixScaler, "transform", counted)
+    monkeypatch.setattr(ModelMatrixScaler, "_transform_numeric", counted)
     result = fitting._fit_model_result(prepared, spec, estimator=None)
     assert rows == [len(frame)]
     assert "matrix" not in prepared.__dict__
     assert result.metadata["training_target_mean"] == pytest.approx(
         frame.loc[frame.eligible].groupby("timestamp").label.mean().mean()
     )
+    future = frame.iloc[:4].copy()
+    future["timestamp"] += pd.Timedelta(days=4)
+    expected = result.prediction_model.predict(future)
+    prepared.close()
+    np.testing.assert_array_equal(result.prediction_model.predict(future), expected)
+
+
+def test_sequence_matrix_float32_conversion_preserves_float64_preprocessing():
+    from quant_research_platform.research.models.neural import _matrix
+
+    rng = np.random.default_rng(19)
+    frame = pd.DataFrame(rng.normal(size=(16401, 7)), columns=list("abcdefg"))
+    frame["a"] += 1e9
+    frame.loc[frame.index % 17 == 0, "b"] = np.nan
+    frame.loc[16380:16390, :] = np.nan
+    valid = frame.notna().any(axis=1).to_numpy()
+    scaler = ModelMatrixScaler.fit(frame.loc[valid], missing="impute")
+    expected = np.zeros(frame.shape, dtype="float32")
+    expected[valid] = scaler.transform(frame.loc[valid]).to_numpy(dtype="float32")
+    original = frame.copy(deep=True)
+    actual = _matrix(scaler, frame, tuple(frame.columns), valid)
+    np.testing.assert_array_equal(actual, expected)
+    pd.testing.assert_frame_equal(frame, original)

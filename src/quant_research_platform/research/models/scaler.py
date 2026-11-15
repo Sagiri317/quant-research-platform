@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.models import TrainingWeighting
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import _finite_numeric_series
 
 
 @dataclass(frozen=True)
@@ -31,6 +31,7 @@ class ModelMatrixScaler:
         sample_weight: object | None = None,
         missing: str | None = None,
         scaling: bool | None = None,
+        rows: np.ndarray | None = None,
     ) -> ModelMatrixScaler:
         if missing not in {None, "native", "impute"}:
             raise ValueError("model_missing_strategy_invalid")
@@ -41,55 +42,65 @@ class ModelMatrixScaler:
         columns = tuple(str(column) for column in frame.columns)
         if frame.empty or not columns or frame.columns.has_duplicates:
             raise ValueError("model_scaler_columns_invalid")
-        weights = _weights(sample_weight, len(frame))
+        weights = _weights(sample_weight, len(frame) if rows is None else len(rows))
         mean, scale = np.zeros(len(columns)), np.ones(len(columns))
-        medians = ()
-        if missing == "native":
-            for index, column in enumerate(columns):
-                parsed = strict_finite_numeric_series(
-                    frame[column],
-                    error=f"invalid_model_scaler_column: {column}",
-                    allow_null=True,
-                )
-                if scaling:
-                    values = parsed.to_numpy(dtype="float64")
+        medians = []
+        for index, column in enumerate(columns):
+            values = _numeric_column(
+                frame, column, allow_null=missing is not None, rows=rows
+            )
+            if missing == "impute":
+                if np.isnan(values).all():
+                    raise ValueError("model_training_feature_all_missing")
+                median = float(np.nanmedian(values))
+                medians.append(median)
+                np.copyto(values, median, where=np.isnan(values))
+            if scaling:
+                if missing == "native":
                     observed = ~np.isnan(values)
                     # An all-missing native column has no fitted moments.
-                    if observed.any():
-                        mean[index], scale[index] = _weighted_moments(
-                            values[observed], weights[observed]
-                        )
-        else:
-            values = _numeric_matrix(frame, columns, allow_null=missing == "impute")
-            if missing == "impute":
-                if np.isnan(values).all(axis=0).any():
-                    raise ValueError("model_training_feature_all_missing")
-                medians = tuple(float(value) for value in np.nanmedian(values, axis=0))
-                np.copyto(values, medians, where=np.isnan(values))
-            if scaling:
-                mean, scale = _weighted_moments(values, weights)
+                    if not observed.any():
+                        continue
+                    mean[index], scale[index] = _weighted_moments(
+                        values[observed], weights[observed]
+                    )
+                else:
+                    mean[index], scale[index] = _weighted_moments(values, weights)
         return cls(
             columns=columns,
             mean_=tuple(float(value) for value in mean),
             scale_=tuple(float(value) for value in scale),
-            medians=medians,
+            medians=tuple(medians),
             native_missing=missing == "native",
             scaling=scaling,
         )
 
-    def transform(self, frame: pd.DataFrame) -> pd.DataFrame:
+    def transform(self, frame: pd.DataFrame, *, dtype="float64") -> pd.DataFrame:
         if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
-        values = _numeric_matrix(
-            frame, self.columns, allow_null=self.native_missing or bool(self.medians)
-        )
+        values = np.empty((len(frame), len(self.columns)), dtype=dtype, order="F")
+        for index, column in enumerate(self.columns):
+            column_values = _numeric_column(
+                frame, column, allow_null=self.native_missing or bool(self.medians)
+            )
+            self._transform_column(column_values, index)
+            # Keep preprocessing in float64, including float32 neural inputs.
+            values[:, index] = column_values
+        return pd.DataFrame(values, index=frame.index, columns=self.columns, copy=False)
+
+    def _transform_column(self, values, index):
         if self.medians:
-            np.copyto(values, self.medians, where=np.isnan(values))
+            np.copyto(values, self.medians[index], where=np.isnan(values))
         if self.scaling:
             with np.errstate(over="ignore", invalid="ignore"):
-                values -= self.mean_
-                values /= self.scale_
-        return pd.DataFrame(values, index=frame.index, columns=self.columns, copy=False)
+                values -= self.mean_[index]
+                values /= self.scale_[index]
+
+    def _transform_numeric(self, values, *, dtype="float64"):
+        """Scale owned float64 inputs already validated by the fit collector."""
+        for index in range(len(self.columns)):
+            self._transform_column(values[:, index], index)
+        return values.astype(dtype, copy=False)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -204,17 +215,12 @@ def equal_timestamp_sample_weights(
     return weights
 
 
-def _numeric_matrix(
-    frame: pd.DataFrame, columns: tuple[str, ...], *, allow_null: bool = False
-) -> np.ndarray:
-    values = np.empty((len(frame), len(columns)), dtype="float64", order="F")
-    for index, column in enumerate(columns):
-        values[:, index] = strict_finite_numeric_series(
-            frame[column],
-            error=f"invalid_model_scaler_column: {column}",
-            allow_null=allow_null,
-        ).to_numpy(dtype="float64", copy=False)
-    return values
+def _numeric_column(frame, column, *, allow_null, rows=None):
+    return _finite_numeric_series(
+        frame[column] if rows is None else frame[column].iloc[rows],
+        error=f"invalid_model_scaler_column: {column}",
+        allow_null=allow_null,
+    ).to_numpy(dtype="float64", copy=True)
 
 
 def _weighted_moments(values: np.ndarray, weights: np.ndarray):

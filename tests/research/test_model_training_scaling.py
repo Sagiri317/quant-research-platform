@@ -92,6 +92,17 @@ def test_actual_estimator_inputs_and_native_roundtrip(
             return original(design, target, **kwargs)
 
         monkeypatch.setattr(np.linalg, "lstsq", spy)
+    elif algorithm == "xgboost_regressor":
+        from quant_research_platform.research.models.fitting import PreparedTraining
+
+        original = PreparedTraining.blocks
+
+        def spy(self, *args, **kwargs):
+            for start, stop, values in original(self, *args, **kwargs):
+                captured.append(values.copy())
+                yield start, stop, values
+
+        monkeypatch.setattr(PreparedTraining, "blocks", spy)
     else:
         cls = type(estimators.build_estimator_from_model_spec(spec))
         original = cls.fit
@@ -102,7 +113,11 @@ def test_actual_estimator_inputs_and_native_roundtrip(
 
         monkeypatch.setattr(cls, "fit", spy)
     case = fit_frame(tmp_path / "fit", data, spec)
-    assert len(captured) == 1
+    assert (
+        len(captured) >= 1 if algorithm == "xgboost_regressor" else len(captured) == 1
+    )
+    for repeated in captured[1:]:
+        np.testing.assert_array_equal(repeated, captured[0])
     actual = captured[0]
     if algorithm == "linear_regression":
         actual = actual[:, 1:] / actual[:, :1]

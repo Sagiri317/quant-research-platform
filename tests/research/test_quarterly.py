@@ -43,7 +43,8 @@ def test_quarterly_windows_expand_and_first_quarter_supplies_initial_training():
         assert fold.train.end < fold.validation.start < fold.prediction.start
 
 
-def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
+@pytest.mark.parametrize("implicit", [False, True])
+def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path, implicit):
     inputs = data(tmp_path)
     frame = pd.read_parquet(inputs)
     frame["timestamp"] = frame.timestamp.map(
@@ -69,12 +70,17 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
     )
     frame["label_available_at"] = frame.timestamp + pd.Timedelta(days=1)
     frame.to_parquet(inputs, index=False)
+    declared = input_spec()
+    model = fit_config(tmp_path, inputs)["model"]
+    if implicit:
+        declared["column_roles"]["x"] = "factor"
+        model.pop("input_feature_columns")
     results = run_quarterly(
         {
-            "inputs": {"path": str(inputs), "spec": input_spec()},
+            "inputs": {"path": str(inputs), "spec": declared},
             "output": str(tmp_path / "rolling"),
             "market_id": "a_share",
-            "models": [fit_config(tmp_path, inputs)["model"]],
+            "models": [model],
             "training_start": "2020-01-01",
             "sessions": frame.timestamp.drop_duplicates()
             .dt.strftime("%Y-%m-%d")
@@ -103,6 +109,7 @@ def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path):
     counts = []
     for item in results:
         model, facts = load_model(item["model"])
+        assert model.metadata["input_columns"] == ["x"]
         counts.append(model.metadata["rows_after_input_label_dropna"])
         predictions, _ = read_predictions(item["predictions"])
         assert len(predictions) == 9
@@ -336,7 +343,10 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
             ],
         ],
         "parameter_candidates": {
-            "lasso": [{"alpha": 1e-6}, {"alpha": 0.1}],
+            "lasso": [
+                {"alpha": 1e-6, "precompute": True},
+                {"alpha": 0.1, "precompute": False},
+            ],
             "xgb": [{"max_depth": 1}, {"max_depth": 2}],
             "lstm": [{}, {"sequence_length": 3}],
             "transformer": [{}, {"sequence_length": 3}],

@@ -140,6 +140,8 @@ def sequence_parameters(algorithm, parameters):
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
         defaults["independent_layer_initialization"] = False
+    if algorithm == "lstm_regressor":
+        defaults["input_gate_xavier_initialization"] = False
     if algorithm in DEEPLOB_ALGORITHMS:
         defaults.update(
             sequence_length=100, hidden_size=64, conv_channels=32, inception_channels=64
@@ -177,6 +179,11 @@ def sequence_parameters(algorithm, parameters):
             raise ValueError(f"sequence_parameter_invalid: {name}")
     if type(defaults["preload_inputs"]) is not bool:
         raise ValueError("sequence_parameter_invalid: preload_inputs")
+    if (
+        algorithm == "lstm_regressor"
+        and type(defaults["input_gate_xavier_initialization"]) is not bool
+    ):
+        raise ValueError("sequence_parameter_invalid: input_gate_xavier_initialization")
     epochs = defaults["epochs"]
     if epochs is None:
         if defaults.get("early_stopping_rounds") is None:
@@ -330,6 +337,20 @@ class ModelSpec:
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
+        if "external_memory" in hyperparameters:
+            external = hyperparameters["external_memory"]
+            if (
+                self.model_algorithm != "xgboost_regressor"
+                or type(external) is not bool
+            ):
+                raise ValueError("model_external_memory_invalid")
+            device = hyperparameters.get("device", "cuda")
+            if external and (
+                not isinstance(device, str)
+                or not (device == "cuda" or device.startswith("cuda:"))
+                or hyperparameters.get("tree_method", "hist") != "hist"
+            ):
+                raise ValueError("model_external_memory_requires_cuda_hist")
         if "early_stopping_rounds" in hyperparameters:
             patience = hyperparameters["early_stopping_rounds"]
             if (
@@ -447,10 +468,23 @@ def model_spec_payload(spec: object) -> dict[str, object]:
     }
 
 
-def _model_spec(value):
+def _model_spec(value, *, declared=None):
     if not isinstance(value, Mapping):
         raise ValueError("model_spec_required")
     value = dict(value)
+    if declared is not None and not {
+        "input_factor_columns",
+        "input_feature_columns",
+    }.intersection(value):
+        roles = declared["column_roles"]
+        factors, features = [], []
+        for column in sorted(name for name, role in roles.items() if role == "factor"):
+            transformed = f"feature_{column}"
+            if roles.get(transformed) == "feature":
+                features.append(transformed)
+            else:
+                factors.append(column)
+        value.update(input_factor_columns=factors, input_feature_columns=features)
     for name in ("input_factor_columns", "input_feature_columns"):
         if name in value:
             if not isinstance(value[name], (list, tuple)):
