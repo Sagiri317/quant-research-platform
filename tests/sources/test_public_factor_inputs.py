@@ -8,7 +8,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from quant_research_platform.sources.public_research.normalization import normalize
-from tests.helpers.public_sources import write_sec_tables, write_source_manifest
+from tests.helpers.public_sources import write_source_manifest, write_source_tables
 
 
 def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path):
@@ -90,7 +90,7 @@ def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
     tables["FUND_REPORTED_INFO.tsv"] = pd.DataFrame([fund]).to_csv(
         sep="\t", index=False
     )
-    sec_record = write_sec_tables(path, tables)
+    sec_record = write_source_tables(path, tables)
     fund_path = path / "FUND_REPORTED_INFO.parquet"
     fund_table = pq.read_table(fund_path)
     with pq.ParquetWriter(fund_path, fund_table.schema) as writer:

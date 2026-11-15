@@ -14,9 +14,10 @@ from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
 from tests.helpers.public_sources import (
-    write_sec_tables,
+    write_fund_records,
     write_source_csv,
     write_source_manifest,
+    write_source_tables,
 )
 
 
@@ -319,64 +320,65 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
         source_path="report.html",
         report_declared_send_date="2024-08-20",
     )
-    positions = tmp_path / "holdings.csv.gz"
-    pd.DataFrame(
+    positions = tmp_path / "positions"
+    positions_record = write_source_tables(
+        positions,
+        {
+            "holdings.tsv": pd.DataFrame(
+                [
+                    dict(
+                        shared,
+                        stock_code="000002",
+                        stock_market="CN_MAINLAND",
+                        shares_held="1234",
+                        fair_value_cny="10000",
+                        nav_weight_percent="1.25",
+                        published_date="2024-08-19",
+                        source_row_index="2",
+                        html_section_anchor=anchor,
+                        source_leaf_table_index=str(leaf),
+                    )
+                    for leaf in (0, 1)
+                ]
+            ).to_csv(sep="\t", index=False)
+        },
+    )
+    headers = tmp_path / "headers.jsonl.gz"
+    write_fund_records(headers, [{"other_source": True}])
+    headers_record = write_fund_records(
+        headers,
         [
             dict(
                 shared,
-                stock_code="000002",
-                stock_market="CN_MAINLAND",
-                shares_held="1234",
-                fair_value_cny="10000",
-                nav_weight_percent="1.25",
-                published_date="2024-08-19",
-                source_row_index="2",
-                html_section_anchor=anchor,
-                source_leaf_table_index=str(leaf),
-            )
-            for leaf in (0, 1)
-        ]
-    ).to_csv(positions, index=False)
-    headers = tmp_path / "headers.json"
-    headers.write_text(
-        json.dumps(
+                report_version_identity="empty-report",
+                source_sha256="b" * 64,
+                publication_date="2024-08-19",
+                stock_rows=0,
+                stock_disclosure_status="explicit_no_stock_reported",
+                explicit_no_stock_statement_in_official_report=True,
+            ),
             dict(
-                records=[
-                    dict(
-                        shared,
-                        report_version_identity="empty-report",
-                        source_sha256="b" * 64,
-                        publication_date="2024-08-19",
-                        stock_rows=0,
-                        stock_disclosure_status="explicit_no_stock_reported",
-                        explicit_no_stock_statement_in_official_report=True,
-                    ),
-                    dict(
-                        shared,
-                        report_version_identity="unknown-report",
-                        source_sha256="c" * 64,
-                        publication_date=None,
-                        report_declared_send_date=None,
-                        stock_rows=None,
-                        stock_disclosure_status="unresolved",
-                        explicit_no_stock_statement_in_official_report=None,
-                    ),
-                ]
-            )
-        )
+                shared,
+                report_version_identity="unknown-report",
+                source_sha256="c" * 64,
+                publication_date=None,
+                report_declared_send_date=None,
+                stock_rows=None,
+                stock_disclosure_status="unresolved",
+                explicit_no_stock_statement_in_official_report=None,
+            ),
+        ],
     )
     records = []
-    for path, source in [
-        (positions, "cn_fund_report_full_holdings_csv_evidence"),
-        (headers, "cn_fund_report_descriptors_extracted"),
+    for fields, source in [
+        (positions_record, "cn_fund_report_full_holdings_csv_evidence"),
+        (headers_record, "cn_fund_report_descriptors_extracted"),
     ]:
         records.append(
             dict(
-                path=path.name,
+                **fields,
                 source=source,
                 status="downloaded",
-                sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-                bytes=path.stat().st_size,
             )
         )
     write_source_manifest(tmp_path, dict(schema_version=1, records=records))
@@ -432,42 +434,42 @@ def test_cn_full_holdings_and_empty_report_headers_keep_identity_and_release(
     )
 
 
-@pytest.mark.parametrize("suffix", (".csv", ".csv.gz"))
-def test_report_cell_identity_does_not_require_known_economic_portfolio(
-    tmp_path, suffix
-):
-    path = tmp_path / ("cells" + suffix)
-    pd.DataFrame(
-        [
-            dict(
-                primary_fund_code="001001",
-                economic_portfolio_id=None,
-                share_class_header_as_provided=None,
-                report_period_end="2024-06-30",
-                value_observation_date=None,
-                table_kind="balance_sheet",
-                field="net_assets",
-                unit="CNY",
-                denominator=None,
-                value_decimal="100",
-                report_version_identity="report1",
-                leaf_table_index="1",
-                source_row_index="2",
-                expanded_column_index="3",
-                source_url="https://example.org/report",
-                source_sha256="a" * 64,
-                published_at=None,
-                publication_date="2024-08-20",
-                report_declared_send_date="2024-08-20",
-            )
-        ]
-    ).to_csv(path, index=False)
+def test_report_cell_identity_does_not_require_known_economic_portfolio(tmp_path):
+    path = tmp_path / "cells"
+    path_record = write_source_tables(
+        path,
+        {
+            "financial_cells.tsv": pd.DataFrame(
+                [
+                    dict(
+                        primary_fund_code="001001",
+                        economic_portfolio_id=None,
+                        share_class_header_as_provided=None,
+                        report_period_end="2024-06-30",
+                        value_observation_date=None,
+                        table_kind="balance_sheet",
+                        field="net_assets",
+                        unit="CNY",
+                        denominator=None,
+                        value_decimal="100",
+                        report_version_identity="report1",
+                        leaf_table_index="1",
+                        source_row_index="2",
+                        expanded_column_index="3",
+                        source_url="https://example.org/report",
+                        source_sha256="a" * 64,
+                        published_at=None,
+                        publication_date="2024-08-20",
+                        report_declared_send_date="2024-08-20",
+                    )
+                ]
+            ).to_csv(sep="\t", index=False)
+        },
+    )
     record = dict(
         source="csrc_official_fund_financial_cells_extracted",
-        path=path.name,
+        **path_record,
         status="downloaded",
-        sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
-        bytes=path.stat().st_size,
     )
     write_source_manifest(tmp_path, dict(schema_version=1, records=[record]))
     output = tmp_path / "native"
@@ -488,33 +490,40 @@ def test_report_cell_identity_does_not_require_known_economic_portfolio(
 def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
     tmp_path,
 ):
-    cells = tmp_path / "cells.csv"
-    pd.DataFrame(
-        [
-            dict(
-                primary_fund_code="001001",
-                economic_portfolio_id="portfolio",
-                share_class_header_as_provided=None,
-                report_period_end="2023-06-30",
-                value_observation_date=date,
-                table_kind="balance_sheet",
-                field="net_assets",
-                unit="CNY",
-                denominator=None,
-                value_decimal=str(100 + row),
-                report_version_identity="report",
-                leaf_table_index="1",
-                source_row_index=str(row),
-                expanded_column_index="3",
-                source_url="https://example.org/report",
-                source_sha256="a" * 64,
-                published_at=None,
-                publication_date=None,
-                report_declared_send_date=None,
-            )
-            for row, date in enumerate(["2023-06-30", "2023-05-26", "2022-12-31"])
-        ]
-    ).to_csv(cells, index=False)
+    cells = tmp_path / "cells"
+    cells_record = write_source_tables(
+        cells,
+        {
+            "financial_cells.tsv": pd.DataFrame(
+                [
+                    dict(
+                        primary_fund_code="001001",
+                        economic_portfolio_id="portfolio",
+                        share_class_header_as_provided=None,
+                        report_period_end="2023-06-30",
+                        value_observation_date=date,
+                        table_kind="balance_sheet",
+                        field="net_assets",
+                        unit="CNY",
+                        denominator=None,
+                        value_decimal=str(100 + row),
+                        report_version_identity="report",
+                        leaf_table_index="1",
+                        source_row_index=str(row),
+                        expanded_column_index="3",
+                        source_url="https://example.org/report",
+                        source_sha256="a" * 64,
+                        published_at=None,
+                        publication_date=None,
+                        report_declared_send_date=None,
+                    )
+                    for row, date in enumerate(
+                        ["2023-06-30", "2023-05-26", "2022-12-31"]
+                    )
+                ]
+            ).to_csv(sep="\t", index=False)
+        },
+    )
     metadata = tmp_path / "metadata.json"
     metadata.write_text(
         json.dumps(
@@ -543,6 +552,8 @@ def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
         ]
     ).to_csv(corrections, index=False)
     records = [
+        dict(source="csrc_official_fund_financial_cells_extracted", **cells_record)
+    ] + [
         dict(
             path=path.name,
             source=source,
@@ -551,7 +562,6 @@ def test_structured_report_date_corrections_keep_comparatives_and_release_clock(
             bytes=path.stat().st_size,
         )
         for path, source in [
-            (cells, "csrc_official_fund_financial_cells_extracted"),
             (metadata, "cn_fund_report_observation_metadata_extracted"),
             (corrections, "cn_fund_financial_observation_date_corrections_extracted"),
         ]
@@ -950,7 +960,7 @@ def test_nport_public_form_date_is_not_a_private_filing_clock(tmp_path, filing_t
     tables["FUND_REPORTED_HOLDING.tsv"] = (
         "ACCESSION_NUMBER\tISSUER_CUSIP\tCURRENCY_VALUE\tCURRENCY_CODE\tBALANCE\tUNIT\tASSET_CAT\tPERCENTAGE\tHOLDING_ID\nA\t012345678\t100\tUSD\t2\tNS\tEC\t5\t1\n"
     )
-    sec_record = write_sec_tables(path, tables)
+    sec_record = write_source_tables(path, tables)
     record = {
         **sec_record,
         "source": "sec_nport",
@@ -987,36 +997,31 @@ def test_structured_fund_reports_preserve_scope_shares_and_china_clock(
 ):
     source = tmp_path / "raw"
     source.mkdir()
-    path = source / "holdings.json"
-    path.write_text(
-        json.dumps(
+    path = source / "holdings.jsonl.gz"
+    path_record = write_fund_records(
+        path,
+        [
             {
-                "records": [
-                    {
-                        "fund_code": "000001",
-                        "stock_code": "000002",
-                        "shares_held": "1234",
-                        "fair_value_cny": "10000.50",
-                        "nav_weight_percent": "1.25",
-                        "disclosure_scope": "FULL",
-                        "source_path": "outside/report.pdf",
-                        "source_sha256": "a" * 64,
-                        "source_url": "https://example.org/report",
-                        "report_period_end": "2023-12-31",
-                        "published_date": "2024-03-29",
-                        "published_at": None,
-                    }
-                ]
+                "fund_code": "000001",
+                "stock_code": "000002",
+                "shares_held": "1234",
+                "fair_value_cny": "10000.50",
+                "nav_weight_percent": "1.25",
+                "disclosure_scope": "FULL",
+                "source_path": "outside/report.pdf",
+                "source_sha256": "a" * 64,
+                "source_url": "https://example.org/report",
+                "report_period_end": "2023-12-31",
+                "published_date": "2024-03-29",
+                "published_at": None,
             }
-        )
+        ],
     )
     record = {
-        "path": path.name,
+        **path_record,
         "source": source_id,
         "status": "downloaded",
         "url": "https://example.org/report",
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "bytes": path.stat().st_size,
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
@@ -1232,7 +1237,7 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
         header + "old\t1\t012345678\t7\t30\tSH\t\tSOLE\n"
         "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n"
     )
-    sec_record = write_sec_tables(path, tables)
+    sec_record = write_source_tables(path, tables)
     write_source_manifest(
         tmp_path,
         {

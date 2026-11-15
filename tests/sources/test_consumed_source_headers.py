@@ -13,9 +13,9 @@ from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.tabular import read_csv
 from quant_research_platform.storage.datasets import read_dataset
 from tests.helpers.public_sources import (
-    write_sec_tables,
     write_source_csv,
     write_source_manifest,
+    write_source_tables,
 )
 
 
@@ -215,7 +215,7 @@ def test_public_sec_tsv_join_checks_only_consumed_headers(tmp_path, duplicate):
         separator="\t",
     )
     tables["INFOTABLE.tsv"] = _csv(holdings, holding_values, separator="\t")
-    sec_record = write_sec_tables(path, tables)
+    sec_record = write_source_tables(path, tables)
     config = _public_config(
         tmp_path, path, "sec_13f", "public_13f_holdings", sec_record
     )

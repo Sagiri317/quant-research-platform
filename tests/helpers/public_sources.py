@@ -1,6 +1,7 @@
 """Construct public-source collection fixtures."""
 
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -10,7 +11,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 
-def write_sec_tables(path, tables):
+def write_source_tables(path, tables):
     path.mkdir()
     metadata = {}
     identity = hashlib.sha256()
@@ -30,6 +31,20 @@ def write_sec_tables(path, tables):
         pq.write_table(table, path / (name + ".parquet"))
         metadata[name] = {"row_groups": [0], "columns": fields}
     return {"path": path.name, "sha256": identity.hexdigest(), "tables": metadata}
+
+
+def write_fund_records(path, rows):
+    payload = b"".join(json.dumps(row).encode() + b"\n" for row in rows)
+    compressed = gzip.compress(payload)
+    with path.open("ab") as stream:
+        offset = stream.tell()
+        stream.write(compressed)
+    return {
+        "path": path.name,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "gzip_member": {"offset": offset, "length": len(compressed)},
+        "columns": list(dict.fromkeys(key for row in rows for key in row)),
+    }
 
 
 def write_source_manifest(root, manifest, *, name="manifest.json"):

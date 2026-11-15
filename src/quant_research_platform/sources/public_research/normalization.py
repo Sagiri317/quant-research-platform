@@ -1,7 +1,9 @@
 """Source-specific schemas; NAV, market prices and trading activity stay distinct."""
 
 import gzip
+import io
 import json
+from itertools import islice
 
 import numpy as np
 import pandas as pd
@@ -393,7 +395,7 @@ def accepts(data_id, record):
     }:
         return path.endswith(".csv")
     if data_id == "public_fund_financial_cells":
-        return path.endswith((".csv", ".csv.gz"))
+        return True
     if data_id == "public_futures_contracts":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_futures_member_positions":
@@ -419,13 +421,11 @@ def accepts(data_id, record):
     if data_id == "public_option_put_call":
         return path.endswith(".csv")
     if data_id == "public_fund_holdings":
-        return (
-            path.endswith((".csv", ".csv.gz"))
-            if record["source"] == "cn_fund_report_full_holdings_csv_evidence"
-            else path.endswith(".json")
-        )
+        return record[
+            "source"
+        ] == "cn_fund_report_full_holdings_csv_evidence" or path.endswith(".jsonl.gz")
     if data_id == "public_fund_holdings_reports":
-        return path.endswith(".json")
+        return path.endswith(".jsonl.gz")
     if data_id == "public_cftc_positions":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_futures_daily":
@@ -763,8 +763,10 @@ def normalize(data_id, path, record):
             "published_at": "published_at",
         }
         with closing_iterator(
-            _read_csv(
+            _source_table(
                 path,
+                record,
+                "financial_cells",
                 columns=(
                     *mapping,
                     "publication_date",
@@ -773,7 +775,6 @@ def normalize(data_id, path, record):
                     "source_row_index",
                     "expanded_column_index",
                 ),
-                dtype="str",
                 chunksize=50000,
             )
         ) as source_frames:
@@ -1060,8 +1061,10 @@ def normalize(data_id, path, record):
                 }
             )
         if data_id == "public_fund_holdings":
-            frames = _read_csv(
+            frames = _source_table(
                 path,
+                record,
+                "holdings",
                 columns=(
                     *mapping,
                     "published_date",
@@ -1070,13 +1073,10 @@ def normalize(data_id, path, record):
                     "source_row_index",
                 ),
                 optional_columns=("source_leaf_table_index",),
-                dtype="str",
                 chunksize=50000,
             )
         else:
-            frames = (
-                pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"]),
-            )
+            frames = _fund_frames(path, record)
         with closing_iterator(frames) as source_frames:
             for frame in source_frames:
                 if frame.empty:
@@ -1114,32 +1114,33 @@ def normalize(data_id, path, record):
                     )
                 yield result
     elif source in {"chinaamc_extracted_holdings", "cn_fund_report_holdings_extracted"}:
-        frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["records"])
-        result = _rename(
-            frame,
-            {
-                "fund_code": "fund_code",
-                "stock_code": "stock_code",
-                "shares_held": "shares_held",
-                "fair_value_cny": "fair_value_cny",
-                "nav_weight_percent": "nav_weight_percent",
-                "disclosure_scope": "disclosure_scope",
-                "source_path": "report_path",
-                "source_sha256": "source_sha256",
-                "source_url": "source_url",
-                "report_period_end": "timestamp",
-                "published_date": "publication_date",
-                "published_at": "published_at",
-            },
-        )
-        result["asset_id"] = result.fund_code + ":" + result.stock_code
-        for field in (
-            "economic_portfolio_id",
-            "report_version_identity",
-            "stock_market",
-        ):
-            result[field] = frame[field] if field in frame else pd.NA
-        yield result
+        with closing_iterator(_fund_frames(path, record)) as frames:
+            for frame in frames:
+                result = _rename(
+                    frame,
+                    {
+                        "fund_code": "fund_code",
+                        "stock_code": "stock_code",
+                        "shares_held": "shares_held",
+                        "fair_value_cny": "fair_value_cny",
+                        "nav_weight_percent": "nav_weight_percent",
+                        "disclosure_scope": "disclosure_scope",
+                        "source_path": "report_path",
+                        "source_sha256": "source_sha256",
+                        "source_url": "source_url",
+                        "report_period_end": "timestamp",
+                        "published_date": "publication_date",
+                        "published_at": "published_at",
+                    },
+                )
+                result["asset_id"] = result.fund_code + ":" + result.stock_code
+                for field in (
+                    "economic_portfolio_id",
+                    "report_version_identity",
+                    "stock_market",
+                ):
+                    result[field] = frame[field] if field in frame else pd.NA
+                yield result
     elif source in {"sec_13f", "sec_nport"}:
         yield from _sec(path, source, record, data_id=data_id)
     elif source in EXCHANGE_FIELDS:
@@ -1388,7 +1389,21 @@ def normalize_selected_facts(frame, *, source):
         raise ValueError("yahoo_price_currency_not_usd")
 
 
-def _sec_table(path, record, name, *, columns, optional_columns=(), chunksize=None):
+def _fund_frames(path, record):
+    member = record["gzip_member"]
+    with path.open("rb") as source:
+        source.seek(member["offset"])
+        payload = source.read(member["length"])
+    with (
+        io.BytesIO(payload) as buffer,
+        gzip.GzipFile(fileobj=buffer, mode="rb") as stream,
+    ):
+        rows = (json.loads(line) for line in stream)
+        while batch := list(islice(rows, 50000)):
+            yield pd.DataFrame.from_records(batch, columns=record["columns"])
+
+
+def _source_table(path, record, name, *, columns, optional_columns=(), chunksize=None):
     metadata = record["tables"][name]
     fields = metadata["columns"]
     selected = set(columns) | (set(optional_columns) & set(fields))
@@ -1397,7 +1412,7 @@ def _sec_table(path, record, name, *, columns, optional_columns=(), chunksize=No
     selected = [field for field in fields if field in selected]
 
     def frame(table):
-        # Preserve the TSV parser's missing markers on consumed string columns.
+        # Preserve CSV/TSV missing markers on consumed string columns.
         return table.to_pandas().astype("str").replace(list(STR_NA_VALUES), np.nan)
 
     if chunksize is None:
@@ -1428,7 +1443,7 @@ def _sec(path, source, record, *, data_id):
     )
     if source == "sec_nport":
         submission_columns.add("REPORT_DATE")
-    submission = _sec_table(
+    submission = _source_table(
         path,
         record,
         "SUBMISSION",
@@ -1437,7 +1452,7 @@ def _sec(path, source, record, *, data_id):
     if submission.ACCESSION_NUMBER.duplicated().any():
         raise ValueError("sec_submission_accession_duplicate")
     if source == "sec_13f":
-        covers = _sec_table(
+        covers = _source_table(
             path,
             record,
             "COVERPAGE",
@@ -1461,7 +1476,7 @@ def _sec(path, source, record, *, data_id):
                     for month in (1, 2, 3)
                 ),
             ]
-        funds = _sec_table(
+        funds = _source_table(
             path,
             record,
             "FUND_REPORTED_INFO",
@@ -1502,7 +1517,7 @@ def _sec(path, source, record, *, data_id):
         return
     identifiers = None
     if data_id == "public_security_identifiers":
-        identifiers = _sec_table(
+        identifiers = _source_table(
             path,
             record,
             "IDENTIFIERS",
@@ -1540,7 +1555,7 @@ def _sec(path, source, record, *, data_id):
         }
     )
     with closing_iterator(
-        _sec_table(
+        _source_table(
             path,
             record,
             member,

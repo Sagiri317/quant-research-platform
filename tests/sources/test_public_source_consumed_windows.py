@@ -1,14 +1,17 @@
 """Source business checks follow corrected observation selection, not file scope."""
 
 import hashlib
-import json
 
 import pandas as pd
 import pytest
 
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets.reading import read_dataset
-from tests.helpers.public_sources import write_sec_tables, write_source_manifest
+from tests.helpers.public_sources import (
+    write_fund_records,
+    write_source_manifest,
+    write_source_tables,
+)
 
 
 def _manifest(raw, path, source, record=None):
@@ -107,12 +110,15 @@ def test_fund_report_release_dates_are_parsed_after_window_selection(
         row["published_date"] = row["publication_date"]
         rows.append(row)
     if data_id == "public_fund_holdings_reports":
-        path = tmp_path / "reports.json"
-        path.write_text(json.dumps({"records": rows}))
+        path = tmp_path / "reports.jsonl.gz"
+        record = write_fund_records(path, rows)
     else:
-        path = tmp_path / "reports.csv"
-        pd.DataFrame(rows).to_csv(path, index=False)
-    _manifest(tmp_path, path, source)
+        path = tmp_path / "reports"
+        table = "holdings" if data_id == "public_fund_holdings" else "financial_cells"
+        record = write_source_tables(
+            path, {table + ".tsv": pd.DataFrame(rows).to_csv(sep="\t", index=False)}
+        )
+    _manifest(tmp_path, path, source, record)
     result = _assert_window_locality(tmp_path, data_id, "Unknown datetime string")
     assert result.publication_date.tolist() == [pd.Timestamp("2024-03-02")]
     assert result.available_at.tolist() == [pd.Timestamp("2024-03-02T16:00:00Z")]
@@ -159,7 +165,7 @@ def test_sec_release_and_form_checks_only_consume_selected_reports(
             "a\t012345678\t100\tUSD\t2\tNS\tEC\t5\t1\n"
             "b\t012345678\t100\tUSD\t2\tNS\tEC\t5\t2\n"
         )
-    sec_record = write_sec_tables(path, tables)
+    sec_record = write_source_tables(path, tables)
     _manifest(tmp_path, path, source, sec_record)
     data_id = "public_13f_holdings" if source == "sec_13f" else "public_nport_holdings"
     result = _assert_window_locality(
@@ -215,13 +221,14 @@ def test_source_business_facts_do_not_gate_other_observation_windows(tmp_path, s
             }
         )
     if source == "cn_fund_report_descriptors_extracted":
-        path = tmp_path / "rows.json"
-        path.write_text(json.dumps({"records": rows}))
+        path = tmp_path / "rows.jsonl.gz"
+        record = write_fund_records(path, rows)
         data_id, error = (
             "public_fund_holdings_reports",
             "public_fund_no_stock_flag_invalid",
         )
     else:
+        record = None
         path = tmp_path / "rows.csv"
         pd.DataFrame(rows).to_csv(path, index=False)
         data_id, error = (
@@ -229,7 +236,7 @@ def test_source_business_facts_do_not_gate_other_observation_windows(tmp_path, s
             if source == "yahoo_chart_extracted"
             else ("public_index_weights", "public_index_weight_percent_invalid")
         )
-    _manifest(tmp_path, path, source)
+    _manifest(tmp_path, path, source, record)
     result = _assert_window_locality(tmp_path, data_id, error)
     if source == "public_index_weight_history_extracted":
         assert result.weight.tolist() == [0.02]

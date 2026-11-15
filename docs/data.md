@@ -534,7 +534,9 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 
 中国公募报告可用 `source=cn_fund_report:<report_version_identity>` 指定逐报告时钟，观察日使用报告期末，不能用财务单元格的比较期替代。明确选择的结构化 `cn_fund_report_observation_metadata_extracted` 修正该原件哈希对应的实际报告期末；`cn_fund_financial_observation_date_corrections_extracted` 按报告、表、行和列坐标修正财务单元格日期，比较期及数值保持原样。目录中的半年末、年末标签不能覆盖提前终止报告的实际期末。日期上界或合规期限假设只填可用时刻与依据，不补造真实发布时间；清盘事件也不证明股票持仓已经归零。
 
-A 股持仓计算只要求境内股票消费域完整。全基金无条件声明未持有境内股票时，报告头可用 `disclosure_scope=mainland_stock_holdings`、`stock_disclosure_status=explicit_no_mainland_stock_reported`、`stock_rows=0` 表达，不把全球 `explicit_no_stock` 改成真。海外持仓未知不阻碍该境内零仓事实；只针对某行业或流通受限股票的声明不足以清除全部境内仓位。结构化财务与完整持仓 CSV 均支持 `.csv.gz`，直接分块读取，不要求先落地解压副本。
+A 股持仓计算只要求境内股票消费域完整。全基金无条件声明未持有境内股票时，报告头可用 `disclosure_scope=mainland_stock_holdings`、`stock_disclosure_status=explicit_no_mainland_stock_reported`、`stock_rows=0` 表达，不把全球 `explicit_no_stock` 改成真。海外持仓未知不阻碍该境内零仓事实；只针对某行业或流通受限股票的声明不足以清除全部境内仓位。
+
+公募原始事实集中在 `funds/reports`：完整持仓和财务单元格分别为 `holdings.parquet`、`financial_cells.parquet`，沿用上述来源条目中的原字段和row groups。原JSON记录按业务合并为JSONL gzip，保留布尔值、空值、列表及嵌套事实；原提取文件各占一个独立gzip成员，其压缩偏移和长度直接记在来源条目，读取只解压本次选择的成员并分块解释。报告描述、明确无股票、历史修订和原字段缺失各自保留；来源摘要及失败状态保存在 `source_descriptions.jsonl.gz`，不由文件名或“最新版本”覆盖旧事实。
 
 完整披露范围不表示每个持仓数值已知。已披露行的数量或金额缺失时，依赖该值的汇总、集中度、持仓变化及流量压力保持未知；只有完整报告中不存在该证券才按零持仓处理。后续已知报告替换未知持仓后，相关指标恢复。
 
