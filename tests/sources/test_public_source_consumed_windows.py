@@ -2,18 +2,17 @@
 
 import hashlib
 import json
-import zipfile
 
 import pandas as pd
 import pytest
 
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.storage.datasets.reading import read_dataset
-from tests.helpers.public_sources import write_source_manifest
+from tests.helpers.public_sources import write_sec_tables, write_source_manifest
 
 
-def _manifest(raw, path, source):
-    payload = path.read_bytes()
+def _manifest(raw, path, source, record=None):
+    payload = path.read_bytes() if record is None else b""
     write_source_manifest(
         raw,
         {
@@ -25,6 +24,7 @@ def _manifest(raw, path, source):
                     "status": "downloaded",
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
+                    **(record or {}),
                 }
             ],
         },
@@ -125,49 +125,42 @@ def test_fund_report_release_dates_are_parsed_after_window_selection(
 def test_sec_release_and_form_checks_only_consume_selected_reports(
     tmp_path, source, bad_clock
 ):
-    path = tmp_path / "reports.zip"
-    with zipfile.ZipFile(path, "w") as archive:
-        if source == "sec_13f":
-            archive.writestr(
-                "SUBMISSION.tsv",
-                "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\n"
-                "a\t2024-03-01\t13F-HR\t1\t2024-01-02\n"
-                "b\tinvalid date\t13F-HR\t1\t2024-02-02\n",
+    path = tmp_path / "filings"
+    tables = {}
+    if source == "sec_13f":
+        tables["SUBMISSION.tsv"] = (
+            "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\n"
+            "a\t2024-03-01\t13F-HR\t1\t2024-01-02\n"
+            "b\tinvalid date\t13F-HR\t1\t2024-02-02\n"
+        )
+        tables["COVERPAGE.tsv"] = (
+            "ACCESSION_NUMBER\tISAMENDMENT\tAMENDMENTTYPE\na\tN\t\nb\tN\t\n"
+        )
+        tables["INFOTABLE.tsv"] = (
+            "ACCESSION_NUMBER\tINFOTABLE_SK\tCUSIP\tVALUE\tSSHPRNAMT\t"
+            "SSHPRNAMTTYPE\tPUTCALL\tINVESTMENTDISCRETION\n"
+            "a\t1\t012345678\t7000\t30\tSH\t\tSOLE\n"
+            "b\t2\t012345678\t7000\t30\tSH\t\tSOLE\n"
+        )
+    else:
+        tables["SUBMISSION.tsv"] = (
+            "ACCESSION_NUMBER\tFILING_DATE\tSUB_TYPE\tREPORT_DATE\n"
+            "a\t2024-03-01\tNPORT-P\t2024-01-02\n"
+            + (
+                "b\tinvalid date\tNPORT-P\t2024-02-02\n"
+                if bad_clock
+                else "b\t2024-03-01\tNPORT-NP\t2024-02-02\n"
             )
-            archive.writestr(
-                "COVERPAGE.tsv",
-                "ACCESSION_NUMBER\tISAMENDMENT\tAMENDMENTTYPE\na\tN\t\nb\tN\t\n",
-            )
-            archive.writestr(
-                "INFOTABLE.tsv",
-                "ACCESSION_NUMBER\tINFOTABLE_SK\tCUSIP\tVALUE\tSSHPRNAMT\t"
-                "SSHPRNAMTTYPE\tPUTCALL\tINVESTMENTDISCRETION\n"
-                "a\t1\t012345678\t7000\t30\tSH\t\tSOLE\n"
-                "b\t2\t012345678\t7000\t30\tSH\t\tSOLE\n",
-            )
-        else:
-            archive.writestr(
-                "SUBMISSION.tsv",
-                "ACCESSION_NUMBER\tFILING_DATE\tSUB_TYPE\n"
-                "a\t2024-03-01\tNPORT-P\n"
-                + (
-                    "b\tinvalid date\tNPORT-P\n"
-                    if bad_clock
-                    else "b\t2024-03-01\tNPORT-NP\n"
-                ),
-            )
-            archive.writestr(
-                "FUND_REPORTED_INFO.tsv",
-                "ACCESSION_NUMBER\tSERIES_ID\na\tS1\nb\tS2\n",
-            )
-            archive.writestr(
-                "FUND_REPORTED_HOLDING.tsv",
-                "ACCESSION_NUMBER\tISSUER_CUSIP\tREPORT_DATE\tCURRENCY_VALUE\t"
-                "CURRENCY_CODE\tBALANCE\tUNIT\tASSET_CAT\tPERCENTAGE\tHOLDING_ID\n"
-                "a\t012345678\t2024-01-02\t100\tUSD\t2\tNS\tEC\t5\t1\n"
-                "b\t012345678\t2024-02-02\t100\tUSD\t2\tNS\tEC\t5\t2\n",
-            )
-    _manifest(tmp_path, path, source)
+        )
+        tables["FUND_REPORTED_INFO.tsv"] = "ACCESSION_NUMBER\tSERIES_ID\na\tS1\nb\tS2\n"
+        tables["FUND_REPORTED_HOLDING.tsv"] = (
+            "ACCESSION_NUMBER\tISSUER_CUSIP\tCURRENCY_VALUE\t"
+            "CURRENCY_CODE\tBALANCE\tUNIT\tASSET_CAT\tPERCENTAGE\tHOLDING_ID\n"
+            "a\t012345678\t100\tUSD\t2\tNS\tEC\t5\t1\n"
+            "b\t012345678\t100\tUSD\t2\tNS\tEC\t5\t2\n"
+        )
+    sec_record = write_sec_tables(path, tables)
+    _manifest(tmp_path, path, source, sec_record)
     data_id = "public_13f_holdings" if source == "sec_13f" else "public_nport_holdings"
     result = _assert_window_locality(
         tmp_path,

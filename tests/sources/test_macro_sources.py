@@ -1,11 +1,11 @@
 """Public macro imports preserve vintages, missing values, and source clocks."""
 
 import hashlib
-import io
 import json
-import zipfile
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.sources.macro.interim import (
@@ -15,6 +15,7 @@ from quant_research_platform.sources.macro.interim import (
     normalize_alfred,
     read_release_csv,
     resolve_source_conflicts,
+    validate_observations,
 )
 from quant_research_platform.sources.macro.publication import (
     estimate_initial_archive_times,
@@ -24,28 +25,33 @@ from quant_research_platform.storage.datasets.reading import read_dataset
 from tests.helpers.public_sources import write_source_manifest
 
 
-def _vintage_zip():
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr(
-            "obs._by_real-time_period.csv",
-            "period_start_date,WALCL,realtime_start_date,realtime_end_date\n"
-            "2014-01-01,100,2014-01-02,2014-02-05\n"
-            "2014-01-01,110,2014-02-06,9999-12-31\n"
-            "2014-01-08,.,2014-01-09,9999-12-31\n",
-        )
-        archive.writestr("README.txt", "Source: Federal Reserve; Units: Millions USD")
-    return buffer.getvalue()
-
-
-def test_archive_versions_are_not_backdated_or_zero_filled():
-    frame = normalize_alfred(
-        _vintage_zip(),
-        "us_fed_assets",
+def _vintage_table():
+    return pa.table(
         {
-            "retrieved_at": "2026-11-05T00:00:00Z",
-            "url": "https://alfred.stlouisfed.org/",
-        },
+            "period_start_date": ["2014-01-01", "2014-01-01", "2014-01-08"],
+            "WALCL": ["100", "110", "."],
+            "realtime_start_date": ["2014-01-02", "2014-02-06", "2014-01-09"],
+            "realtime_end_date": ["2014-02-05", "9999-12-31", "9999-12-31"],
+        }
+    )
+
+
+def test_archive_versions_are_not_backdated_or_zero_filled(tmp_path):
+    path = tmp_path / "WALCL.parquet"
+    pq.write_table(_vintage_table(), path)
+    frame = validate_observations(
+        normalize_alfred(
+            path,
+            "us_fed_assets",
+            {
+                "retrieved_at": "2026-11-05T00:00:00Z",
+                "url": "https://alfred.stlouisfed.org/",
+                "row_group": 0,
+            },
+        )
+    )
+    frame = frame.sort_values(["observation_date", "vintage_date"]).reset_index(
+        drop=True
     )
     assert frame.value.iloc[:2].tolist() == [100, 110]
     assert pd.isna(frame.value.iloc[2])
@@ -182,14 +188,18 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
     source = raw / "us_fed_assets"
     source.mkdir(parents=True)
     records = []
-    for day in (4, 5):
-        filename = f"vintages-{day}.zip"
-        (source / filename).write_bytes(_vintage_zip())
+    filename = "WALCL.parquet"
+    table = _vintage_table()
+    with pq.ParquetWriter(source / filename, table.schema) as writer:
+        writer.write_table(table)
+        writer.write_table(table.set_column(1, "WALCL", pa.array(["101", "110", "."])))
+    for row_group, day in enumerate((4, 5)):
         records.append(
             {
                 "file": "us_fed_assets/" + filename,
                 "retrieved_at": f"2026-11-0{day}T00:00:00Z",
                 "url": "https://alfred.stlouisfed.org/",
+                "row_group": row_group,
                 "sha256": hashlib.sha256((source / filename).read_bytes()).hexdigest(),
                 "bytes": (source / filename).stat().st_size,
             }
@@ -211,7 +221,7 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
     materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
     frame = read_dataset(output).sort_values(["observation_date", "timestamp"])
     assert len(frame) == 3
-    assert frame.value.iloc[:2].tolist() == [100, 110]
+    assert frame.value.iloc[:2].tolist() == [101, 110]
     assert pd.isna(frame.value.iloc[2])
     assert frame.timestamp.iloc[:2].tolist() == [
         pd.Timestamp("2014-01-02T22:30"),
@@ -240,14 +250,22 @@ def test_buffered_publication_rules_use_history_holidays_and_local_clocks(
     )
 
 
-def test_initial_archive_estimate_preserves_later_revision_and_missing_value():
-    frame = normalize_alfred(
-        _vintage_zip(),
-        "us_fed_assets",
-        {
-            "retrieved_at": "2026-11-05T00:00Z",
-            "url": "https://alfred.stlouisfed.org/",
-        },
+def test_initial_archive_estimate_preserves_later_revision_and_missing_value(tmp_path):
+    path = tmp_path / "WALCL.parquet"
+    pq.write_table(_vintage_table(), path)
+    frame = validate_observations(
+        normalize_alfred(
+            path,
+            "us_fed_assets",
+            {
+                "retrieved_at": "2026-11-05T00:00Z",
+                "url": "https://alfred.stlouisfed.org/",
+                "row_group": 0,
+            },
+        )
+    )
+    frame = frame.sort_values(["observation_date", "vintage_date"]).reset_index(
+        drop=True
     )
     actual = estimate_initial_archive_times(frame)
     assert actual.timestamp.iloc[0] == pd.Timestamp("2014-01-02T22:30Z")
@@ -412,17 +430,21 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
     filename, series = "daily.csv", "us_vvix"
     payload = b"DATE,VVIX\n01/02/2024,20.0\n02/02/2024,invalid\n"
     if provider == "alfred":
-        filename, series = "vintages.zip", "us_fed_assets"
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr(
-                "obs._by_real-time_period.csv",
-                "period_start_date,WALCL,realtime_start_date,realtime_end_date\n"
-                "2024-01-02,20.0,2024-01-04,9999-12-31\n"
-                "2024-02-02,30.0,invalid,9999-12-31\n",
-            )
-        payload = buffer.getvalue()
-    (source / filename).write_bytes(payload)
+        filename, series = "WALCL.parquet", "us_fed_assets"
+        pq.write_table(
+            pa.table(
+                {
+                    "period_start_date": ["2024-01-02", "2024-02-02"],
+                    "WALCL": ["20.0", "30.0"],
+                    "realtime_start_date": ["2024-01-04", "invalid"],
+                    "realtime_end_date": ["9999-12-31", "9999-12-31"],
+                }
+            ),
+            source / filename,
+        )
+        payload = (source / filename).read_bytes()
+    else:
+        (source / filename).write_bytes(payload)
     write_source_manifest(
         raw,
         {
@@ -438,6 +460,7 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
                             "url": "https://example.org/vix",
                             "bytes": len(payload),
                             "sha256": hashlib.sha256(payload).hexdigest(),
+                            **({"row_group": 0} if provider == "alfred" else {}),
                         }
                     ],
                 }

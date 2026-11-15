@@ -479,10 +479,10 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 
 ## 宏观源补充
 
-`prepare-source`的`source_id=public_research`接收各来源声明的结构化JSON／JSONL、CSV、XLSX或ZIP内的表格；JSONL和CSV可按来源使用gzip。
+`prepare-source`的`source_id=public_research`接收各来源声明的结构化JSON／JSONL、CSV、XLSX或Parquet表格；JSONL和CSV可按来源使用gzip。
 读取raw根下唯一的`manifest.json`，`manifests`选择其中`collections`的集合标识；
 文件路径相对于其中的`source_root`，只读取当前研究所需来源，保留清单中的来源身份，不复验原件字节或计数。
-CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
+CSV、XLSX和SEC Parquet先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
 可定位的坏数字／非有限业务单元格在唯一数值解释边界保留为NA，并按字段累计
 `source_invalid_numeric_cells`，其他字段及记录继续规范化；不补零。主键、来源结构、
 单位与可用时钟错误仍明确失败，不以数值缺失规则掩盖。
@@ -507,6 +507,8 @@ CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头�
 | `public_option_prices` | 深交所逐合约日线OHLC为CNY/基金份额，成交量为期权合约数、成交额为CNY；`asset_id`是数值合约编码，`contract_id`是交易代码，另保留标的代码 |
 | `public_etf_prices`／`public_etf_actions` | 市场OHLCV、调整收盘和企业行动分别保存；Yahoo的拆股调整收盘与含分配调整收盘不同，当前复权版本不等于历史冻结版本 |
 | `public_etf_nav` | SSGA官方NAV、份额和净资产，不能用NAV代替市场收盘价 |
+
+SEC raw按`sec/13f`和`sec/nport`下的监管业务表名保存Parquet，保留原TSV全部字段与字符串缺失标记；原申报包的schema事实另存`sec/source_schemas.json`。每个来源记录用`tables`保留其原始列和对应row groups，入口只读该来源及该业务表的消费字段。原包SHA／URL、accession、修订、报告期和申报期各自保留；不把目标证券提取表当作整个来源包，也不把不同来源包的同名持仓编号混接。N-PORT持仓的报告日期从`SUBMISSION.REPORT_DATE`按申报编号关联，持仓原表没有这个日期列。ZIP解包和HTML说明的采集侧归档在仓库外完成。
 
 这些表的`timestamp`是观察／报告坐标；`published_at`是真实发布时间，`available_at`是可用时间，
 `availability_basis`说明实际时间或保守推断依据。仅有公布日期时按发布地当天结束处理；

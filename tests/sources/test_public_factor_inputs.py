@@ -3,12 +3,12 @@
 import gzip
 import hashlib
 import json
-import zipfile
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.sources.public_research.normalization import normalize
-from tests.helpers.public_sources import write_source_manifest
+from tests.helpers.public_sources import write_sec_tables, write_source_manifest
 
 
 def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path):
@@ -59,7 +59,7 @@ def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path
 
 
 def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
-    path = tmp_path / "nport.zip"
+    path = tmp_path / "nport"
     submission = pd.DataFrame(
         [
             {
@@ -85,12 +85,20 @@ def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
             for month in (1, 2, 3)
         }
     )
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("SUBMISSION.tsv", submission.to_csv(sep="\t", index=False))
-        archive.writestr(
-            "FUND_REPORTED_INFO.tsv", pd.DataFrame([fund]).to_csv(sep="\t", index=False)
-        )
-    result = next(normalize("public_nport_funds", path, {"source": "sec_nport"}))
+    tables = {}
+    tables["SUBMISSION.tsv"] = submission.to_csv(sep="\t", index=False)
+    tables["FUND_REPORTED_INFO.tsv"] = pd.DataFrame([fund]).to_csv(
+        sep="\t", index=False
+    )
+    sec_record = write_sec_tables(path, tables)
+    fund_path = path / "FUND_REPORTED_INFO.parquet"
+    fund_table = pq.read_table(fund_path)
+    with pq.ParquetWriter(fund_path, fund_table.schema) as writer:
+        writer.write_table(fund_table)
+        writer.write_table(fund_table)
+    result = next(
+        normalize("public_nport_funds", path, {"source": "sec_nport", **sec_record})
+    )
     assert result.asset_id.tolist() == ["one"]
     assert result.net_assets_usd.tolist() == ["100"]
     assert result.cash_outside_holdings_usd.tolist() == ["8"]

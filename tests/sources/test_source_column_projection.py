@@ -1,9 +1,8 @@
 """External source extensions must not alter consumed observations."""
 
-import io
-import zipfile
-
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.sources.macro.interim import materialize_interim_data
@@ -18,13 +17,14 @@ def _publish(tmp_path, provider, columns, values, *, name):
     csv = pd.DataFrame([values], columns=columns).to_csv(index=False).encode()
     series = "us_fed_assets" if provider == "alfred" else "cn_treasury_3y"
     if provider == "alfred":
-        buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w") as archive:
-            archive.writestr("obs._by_real-time_period.csv", csv)
-        payload, filename = buffer.getvalue(), "vintages.zip"
+        filename = "WALCL.parquet"
+        table = pa.Table.from_arrays(
+            [pa.array([str(value)]) for value in values], names=columns
+        )
+        pq.write_table(table, source / filename)
     else:
-        payload, filename = csv, "curve.csv"
-    (source / filename).write_bytes(payload)
+        filename = "curve.csv"
+        (source / filename).write_bytes(csv)
     write_source_manifest(
         raw,
         {
@@ -37,6 +37,7 @@ def _publish(tmp_path, provider, columns, values, *, name):
                             "file": f"input/{filename}",
                             "retrieved_at": "2026-11-05T00:00Z",
                             "url": "https://example.org/source",
+                            **({"row_group": 0} if provider == "alfred" else {}),
                         }
                     ],
                 }

@@ -1,8 +1,35 @@
 """Construct public-source collection fixtures."""
 
+import csv
+import hashlib
+import io
 import json
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+
+def write_sec_tables(path, tables):
+    path.mkdir()
+    metadata = {}
+    identity = hashlib.sha256()
+    for name, payload in tables.items():
+        text = payload.decode() if isinstance(payload, bytes) else payload
+        identity.update(text.encode())
+        rows = list(csv.reader(io.StringIO(text), delimiter="\t"))
+        fields, values = rows[0], rows[1:]
+        table = pa.Table.from_arrays(
+            [
+                pa.array([row[i] for row in values], type=pa.string())
+                for i in range(len(fields))
+            ],
+            names=fields,
+        )
+        name = name.removesuffix(".tsv")
+        pq.write_table(table, path / (name + ".parquet"))
+        metadata[name] = {"row_groups": [0], "columns": fields}
+    return {"path": path.name, "sha256": identity.hexdigest(), "tables": metadata}
 
 
 def write_source_manifest(root, manifest, *, name="manifest.json"):

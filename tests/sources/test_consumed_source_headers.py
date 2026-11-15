@@ -12,7 +12,11 @@ import pytest
 from quant_research_platform.sources.prepare import prepare_source
 from quant_research_platform.sources.tabular import read_csv
 from quant_research_platform.storage.datasets import read_dataset
-from tests.helpers.public_sources import write_source_csv, write_source_manifest
+from tests.helpers.public_sources import (
+    write_sec_tables,
+    write_source_csv,
+    write_source_manifest,
+)
 
 
 def _csv(columns, values, *, separator=","):
@@ -23,8 +27,8 @@ def _csv(columns, values, *, separator=","):
     return text.getvalue().encode()
 
 
-def _public_config(raw, path, source, data_id):
-    payload = path.read_bytes()
+def _public_config(raw, path, source, data_id, record=None):
+    payload = path.read_bytes() if record is None else b""
     write_source_manifest(
         raw,
         {
@@ -36,6 +40,7 @@ def _public_config(raw, path, source, data_id):
                     "status": "downloaded",
                     "bytes": len(payload),
                     "sha256": hashlib.sha256(payload).hexdigest(),
+                    **(record or {}),
                 }
             ],
         },
@@ -201,23 +206,19 @@ def test_public_sec_tsv_join_checks_only_consumed_headers(tmp_path, duplicate):
     elif duplicate == "VALUE":
         holdings.append(duplicate)
         holding_values.append("9000")
-    path = tmp_path / "filings.zip"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(
-            "SUBMISSION.tsv", _csv(submission, submission_values, separator="\t")
-        )
-        archive.writestr(
-            "COVERPAGE.tsv",
-            _csv(
-                ["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
-                ["a", "N", ""],
-                separator="\t",
-            ),
-        )
-        archive.writestr(
-            "INFOTABLE.tsv", _csv(holdings, holding_values, separator="\t")
-        )
-    config = _public_config(tmp_path, path, "sec_13f", "public_13f_holdings")
+    path = tmp_path / "filings"
+    tables = {}
+    tables["SUBMISSION.tsv"] = _csv(submission, submission_values, separator="\t")
+    tables["COVERPAGE.tsv"] = _csv(
+        ["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
+        ["a", "N", ""],
+        separator="\t",
+    )
+    tables["INFOTABLE.tsv"] = _csv(holdings, holding_values, separator="\t")
+    sec_record = write_sec_tables(path, tables)
+    config = _public_config(
+        tmp_path, path, "sec_13f", "public_13f_holdings", sec_record
+    )
     if duplicate:
         with pytest.raises(ValueError, match="source_columns_invalid"):
             prepare_source(config)

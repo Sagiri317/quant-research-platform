@@ -4,6 +4,8 @@
 
 ## 来源、版本和时间
 
+ALFRED raw 按供应商 Series ID 合并为 `alfred/<Series ID>.parquet`，保留原始观测列、缺失标记及完整 vintage/end 区间。目录中的每条来源响应用 `row_group` 指向该文件内对应的原始观察，保留原 URL、获取时间和来源身份；选取来源集合不会顺带读入其他修订。来源说明另存结构化 JSON，包含原归档的历史单位、频率、调整方式及 vintage 选择。规范化入口只读这些结构化表，ZIP 解包在仓库外完成。
+
 `sources.macro.catalog` 映射供应商代码，`contracts.macro.MACRO_VARIABLES` 定义源无关变量、单位和频率。美国数据优先使用 ALFRED 历史版本；其他适配包括 HKMA、BIS、BOJ、旧金山联储和东方财富的公开接口。具体来源 URL、响应原文、获取时间及 SHA256 保存在原始目录。失败来源单独记录，其他来源继续；香港分页中已成功收到的页可独立保留，但明确标记不完整。
 
 波动率扩展使用 ALFRED 的 VXVCLS（VIX3M）、VXNCLS、VXEEMCLS、DFII10（10 年期实际国债利率），以及 Cboe 官方 VVIX、VIX9D、SKEW、OVX、GVZ 历史 CSV。VIX9D 取 `CLOSE`，其余指数取同名列，不用开高低价格代替日终指数。Cboe 原始响应保留完整，规范表按请求观测窗口裁剪。

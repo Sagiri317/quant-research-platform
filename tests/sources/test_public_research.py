@@ -3,7 +3,6 @@
 import gzip
 import hashlib
 import json
-import zipfile
 
 import pandas as pd
 import pytest
@@ -14,7 +13,11 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     read_dataset,
 )
-from tests.helpers.public_sources import write_source_csv, write_source_manifest
+from tests.helpers.public_sources import (
+    write_sec_tables,
+    write_source_csv,
+    write_source_manifest,
+)
 
 
 def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
@@ -938,26 +941,21 @@ def test_szse_margin_keeps_observation_date_and_unknown_repayments(tmp_path):
 def test_nport_public_form_date_is_not_a_private_filing_clock(tmp_path, filing_type):
     source = tmp_path / "raw"
     source.mkdir()
-    path = source / "nport.zip"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(
-            "SUBMISSION.tsv",
-            f"ACCESSION_NUMBER\tFILING_DATE\tSUB_TYPE\nA\t2024-08-29\t{filing_type}\n",
-        )
-        archive.writestr(
-            "FUND_REPORTED_INFO.tsv", "ACCESSION_NUMBER\tSERIES_ID\nA\tS1\n"
-        )
-        archive.writestr(
-            "FUND_REPORTED_HOLDING.tsv",
-            "ACCESSION_NUMBER\tISSUER_CUSIP\tREPORT_DATE\tCURRENCY_VALUE\tCURRENCY_CODE\tBALANCE\tUNIT\tASSET_CAT\tPERCENTAGE\tHOLDING_ID\nA\t012345678\t2024-06-30\t100\tUSD\t2\tNS\tEC\t5\t1\n",
-        )
+    path = source / "nport"
+    tables = {}
+    tables["SUBMISSION.tsv"] = (
+        f"ACCESSION_NUMBER\tFILING_DATE\tSUB_TYPE\tREPORT_DATE\nA\t2024-08-29\t{filing_type}\t2024-06-30\n"
+    )
+    tables["FUND_REPORTED_INFO.tsv"] = "ACCESSION_NUMBER\tSERIES_ID\nA\tS1\n"
+    tables["FUND_REPORTED_HOLDING.tsv"] = (
+        "ACCESSION_NUMBER\tISSUER_CUSIP\tCURRENCY_VALUE\tCURRENCY_CODE\tBALANCE\tUNIT\tASSET_CAT\tPERCENTAGE\tHOLDING_ID\nA\t012345678\t100\tUSD\t2\tNS\tEC\t5\t1\n"
+    )
+    sec_record = write_sec_tables(path, tables)
     record = {
-        "path": path.name,
+        **sec_record,
         "source": "sec_nport",
         "status": "downloaded",
         "url": "https://example.org/nport",
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "bytes": path.stat().st_size,
     }
     write_source_manifest(source, {"schema_version": 1, "records": [record]})
     output = tmp_path / "interim"
@@ -1218,26 +1216,23 @@ def test_extracted_source_release_has_the_same_chronology_boundary(
 
 
 def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
-    path = tmp_path / "13f.zip"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(
-            "SUBMISSION.tsv",
-            "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\nold\t2022-12-30\t13F-HR\t1\t2022-09-30\nnew\t2023-01-03\t13F-HR/A\t1\t2022-09-30\n",
-        )
-        archive.writestr(
-            "COVERPAGE.tsv",
-            "ACCESSION_NUMBER\tISAMENDMENT\tAMENDMENTTYPE\nold\tN\t\nnew\tY\tRESTATEMENT\n",
-        )
-        header = (
-            "ACCESSION_NUMBER\tINFOTABLE_SK\tCUSIP\tVALUE\tSSHPRNAMT\t"
-            "SSHPRNAMTTYPE\tPUTCALL\tINVESTMENTDISCRETION\n"
-        )
-        archive.writestr(
-            "INFOTABLE.tsv",
-            header + "old\t1\t012345678\t7\t30\tSH\t\tSOLE\n"
-            "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n",
-        )
-    payload = path.read_bytes()
+    path = tmp_path / "13f"
+    tables = {}
+    tables["SUBMISSION.tsv"] = (
+        "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\nold\t2022-12-30\t13F-HR\t1\t2022-09-30\nnew\t2023-01-03\t13F-HR/A\t1\t2022-09-30\n"
+    )
+    tables["COVERPAGE.tsv"] = (
+        "ACCESSION_NUMBER\tISAMENDMENT\tAMENDMENTTYPE\nold\tN\t\nnew\tY\tRESTATEMENT\n"
+    )
+    header = (
+        "ACCESSION_NUMBER\tINFOTABLE_SK\tCUSIP\tVALUE\tSSHPRNAMT\t"
+        "SSHPRNAMTTYPE\tPUTCALL\tINVESTMENTDISCRETION\n"
+    )
+    tables["INFOTABLE.tsv"] = (
+        header + "old\t1\t012345678\t7\t30\tSH\t\tSOLE\n"
+        "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n"
+    )
+    sec_record = write_sec_tables(path, tables)
     write_source_manifest(
         tmp_path,
         {
@@ -1245,10 +1240,8 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
             "records": [
                 {
                     "source": "sec_13f",
-                    "path": path.name,
+                    **sec_record,
                     "status": "downloaded",
-                    "bytes": len(payload),
-                    "sha256": hashlib.sha256(payload).hexdigest(),
                 }
             ],
         },

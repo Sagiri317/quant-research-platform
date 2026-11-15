@@ -4,13 +4,13 @@ import hashlib
 import io
 import json
 import xml.etree.ElementTree as ET
-import zipfile
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import InterimDataSpec
@@ -120,7 +120,7 @@ def _frame(
     return output
 
 
-def normalize_alfred(payload, name, record, *, start_date=None, end_date=None):
+def normalize_alfred(path, name, record, *, start_date=None, end_date=None):
     """Retain each new or revised value at its archive vintage's conservative cutoff."""
     series = SERIES[name]
     required = {
@@ -129,22 +129,20 @@ def normalize_alfred(payload, name, record, *, start_date=None, end_date=None):
         "realtime_start_date",
         "realtime_end_date",
     }
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        data = _read_selected_csv(
-            archive.open("obs._by_real-time_period.csv"),
-            required,
-            error="alfred_observation_columns_invalid",
-            na_values=["."],
-            dtype={"realtime_end_date": "str"},
-        )
+    with pq.ParquetFile(path) as source:
+        if any(source.schema_arrow.names.count(column) != 1 for column in required):
+            raise ValueError("alfred_observation_columns_invalid")
+        data = source.read_row_group(
+            record["row_group"], columns=list(required)
+        ).to_pandas()
     return _frame(
         name,
-        data[series.code],
+        data[series.code].replace(".", None),
         data.period_start_date,
         record=record,
         timezone="America/Chicago",
         vintage=data.realtime_start_date,
-        end_dates=data.realtime_end_date,
+        end_dates=data.realtime_end_date.replace("", None),
         start_date=start_date,
         end_date=end_date,
     )
@@ -152,12 +150,6 @@ def normalize_alfred(payload, name, record, *, start_date=None, end_date=None):
 
 def _normalize_response(payload, names, record, *, start_date=None, end_date=None):
     source = SERIES[names[0]].source
-    if source == "alfred":
-        return [
-            normalize_alfred(
-                payload, names[0], record, start_date=start_date, end_date=end_date
-            )
-        ]
     frame = partial(_frame, start_date=start_date, end_date=end_date)
     if source == "cboe":
         name = names[0]
@@ -481,15 +473,26 @@ def materialize_interim_data(
                     member = source_root / record["file"]
                     if not member.resolve().is_relative_to(source_root):
                         raise ValueError("macro_source_member_outside_root")
-                    chunks.extend(
-                        _normalize_response(
-                            member.read_bytes(),
-                            metadata["series_ids"],
-                            record,
-                            start_date=start_date,
-                            end_date=end_date,
+                    if metadata["source"] == "alfred":
+                        chunks.append(
+                            normalize_alfred(
+                                member,
+                                metadata["series_ids"][0],
+                                record,
+                                start_date=start_date,
+                                end_date=end_date,
+                            )
                         )
-                    )
+                    else:
+                        chunks.extend(
+                            _normalize_response(
+                                member.read_bytes(),
+                                metadata["series_ids"],
+                                record,
+                                start_date=start_date,
+                                end_date=end_date,
+                            )
+                        )
                 if chunks:
                     frames.append(pd.concat(chunks, ignore_index=True))
                 sources[f"{name}:{key}"] = metadata

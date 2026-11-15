@@ -2,10 +2,11 @@
 
 import gzip
 import json
-import zipfile
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
+from pandas._libs.parsers import STR_NA_VALUES
 
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -412,7 +413,7 @@ def accepts(data_id, record):
         "public_nport_funds",
         "public_security_identifiers",
     }:
-        return path.endswith(".zip")
+        return True
     if data_id == "public_fund_nav":
         return path.endswith(".jsonl.gz")
     if data_id == "public_option_put_call":
@@ -1140,7 +1141,7 @@ def normalize(data_id, path, record):
             result[field] = frame[field] if field in frame else pd.NA
         yield result
     elif source in {"sec_13f", "sec_nport"}:
-        yield from _sec(path, source, data_id=data_id)
+        yield from _sec(path, source, record, data_id=data_id)
     elif source in EXCHANGE_FIELDS:
         mapping = {
             **EXCHANGE_FIELDS[source],
@@ -1387,225 +1388,249 @@ def normalize_selected_facts(frame, *, source):
         raise ValueError("yahoo_price_currency_not_usd")
 
 
-def _sec(path, source, *, data_id):
+def _sec_table(path, record, name, *, columns, optional_columns=(), chunksize=None):
+    metadata = record["tables"][name]
+    fields = metadata["columns"]
+    selected = set(columns) | (set(optional_columns) & set(fields))
+    if any(fields.count(column) != 1 for column in selected):
+        raise ValueError("source_columns_invalid")
+    selected = [field for field in fields if field in selected]
+
+    def frame(table):
+        # Preserve the TSV parser's missing markers on consumed string columns.
+        return table.to_pandas().astype("str").replace(list(STR_NA_VALUES), np.nan)
+
+    if chunksize is None:
+        with pq.ParquetFile(path / (name + ".parquet")) as source:
+            return frame(
+                source.read_row_groups(metadata["row_groups"], columns=selected)
+            )
+
+    def frames():
+        with pq.ParquetFile(path / (name + ".parquet")) as source:
+            for batch in source.iter_batches(
+                batch_size=chunksize,
+                row_groups=metadata["row_groups"],
+                columns=selected,
+            ):
+                yield frame(batch)
+
+    return frames()
+
+
+def _sec(path, source, record, *, data_id):
     """Keep filings separate; amendments are not independent aggregate positions."""
-    with zipfile.ZipFile(path) as archive:
-        submission_columns = {"ACCESSION_NUMBER", "FILING_DATE"}
-        submission_columns |= (
-            {"CIK", "PERIODOFREPORT", "SUBMISSIONTYPE"}
-            if source == "sec_13f"
-            else {"SUB_TYPE"}
+    submission_columns = {"ACCESSION_NUMBER", "FILING_DATE"}
+    submission_columns |= (
+        {"CIK", "PERIODOFREPORT", "SUBMISSIONTYPE"}
+        if source == "sec_13f"
+        else {"SUB_TYPE"}
+    )
+    if source == "sec_nport":
+        submission_columns.add("REPORT_DATE")
+    submission = _sec_table(
+        path,
+        record,
+        "SUBMISSION",
+        columns=submission_columns,
+    )
+    if submission.ACCESSION_NUMBER.duplicated().any():
+        raise ValueError("sec_submission_accession_duplicate")
+    if source == "sec_13f":
+        covers = _sec_table(
+            path,
+            record,
+            "COVERPAGE",
+            columns=["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
         )
-        if data_id in {"public_nport_funds", "public_security_identifiers"}:
-            submission_columns.add("REPORT_DATE")
-        submission = _read_csv(
-            archive.open("SUBMISSION.tsv"),
-            columns=submission_columns,
-            sep="\t",
-            dtype="str",
+        submission = submission.merge(
+            covers, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
         )
-        if submission.ACCESSION_NUMBER.duplicated().any():
-            raise ValueError("sec_submission_accession_duplicate")
-        if source == "sec_13f":
-            covers = _read_csv(
-                archive.open("COVERPAGE.tsv"),
-                sep="\t",
-                dtype="str",
-                columns=["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
-            )
-            submission = submission.merge(
-                covers, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
-            )
-            member = "INFOTABLE.tsv"
-        else:
-            fund_columns = ["ACCESSION_NUMBER", "SERIES_ID"]
-            if data_id == "public_nport_funds":
-                fund_columns += [
-                    "TOTAL_ASSETS",
-                    "NET_ASSETS",
-                    "TOTAL_LIABILITIES",
-                    "CASH_NOT_RPTD_IN_C_OR_D",
-                    *(
-                        f"{prefix}_FLOW_MON{month}"
-                        for prefix in ("SALES", "REINVESTMENT", "REDEMPTION")
-                        for month in (1, 2, 3)
-                    ),
-                ]
-            funds = _read_csv(
-                archive.open("FUND_REPORTED_INFO.tsv"),
-                sep="\t",
-                dtype="str",
-                columns=fund_columns,
-            )
-            submission = submission.merge(
-                funds, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
-            )
-            member = "FUND_REPORTED_HOLDING.tsv"
+        member = "INFOTABLE"
+    else:
+        fund_columns = ["ACCESSION_NUMBER", "SERIES_ID"]
         if data_id == "public_nport_funds":
-            result = _rename(
-                submission,
-                {
-                    "ACCESSION_NUMBER": "accession",
-                    "SERIES_ID": "series_id",
-                    "REPORT_DATE": "report_date",
-                    "SUB_TYPE": "filing_type",
-                    "FILING_DATE": "publication_date",
-                    "TOTAL_ASSETS": "total_assets_usd",
-                    "NET_ASSETS": "net_assets_usd",
-                    "TOTAL_LIABILITIES": "liabilities_usd",
-                    "CASH_NOT_RPTD_IN_C_OR_D": "cash_outside_holdings_usd",
-                    **{
-                        f"{prefix}_FLOW_MON{month}": f"{flow}_month_{month}_usd"
-                        for prefix, flow in (
-                            ("SALES", "sales"),
-                            ("REINVESTMENT", "reinvestment"),
-                            ("REDEMPTION", "redemption"),
-                        )
-                        for month in (1, 2, 3)
-                    },
+            fund_columns += [
+                "TOTAL_ASSETS",
+                "NET_ASSETS",
+                "TOTAL_LIABILITIES",
+                "CASH_NOT_RPTD_IN_C_OR_D",
+                *(
+                    f"{prefix}_FLOW_MON{month}"
+                    for prefix in ("SALES", "REINVESTMENT", "REDEMPTION")
+                    for month in (1, 2, 3)
+                ),
+            ]
+        funds = _sec_table(
+            path,
+            record,
+            "FUND_REPORTED_INFO",
+            columns=fund_columns,
+        )
+        submission = submission.merge(
+            funds, on="ACCESSION_NUMBER", how="left", validate="one_to_one"
+        )
+        member = "FUND_REPORTED_HOLDING"
+    if data_id == "public_nport_funds":
+        result = _rename(
+            submission,
+            {
+                "ACCESSION_NUMBER": "accession",
+                "SERIES_ID": "series_id",
+                "REPORT_DATE": "report_date",
+                "SUB_TYPE": "filing_type",
+                "FILING_DATE": "publication_date",
+                "TOTAL_ASSETS": "total_assets_usd",
+                "NET_ASSETS": "net_assets_usd",
+                "TOTAL_LIABILITIES": "liabilities_usd",
+                "CASH_NOT_RPTD_IN_C_OR_D": "cash_outside_holdings_usd",
+                **{
+                    f"{prefix}_FLOW_MON{month}": f"{flow}_month_{month}_usd"
+                    for prefix, flow in (
+                        ("SALES", "sales"),
+                        ("REINVESTMENT", "reinvestment"),
+                        ("REDEMPTION", "redemption"),
+                    )
+                    for month in (1, 2, 3)
                 },
+            },
+        )
+        result["asset_id"] = result.accession
+        result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
+        result["report_date"] = result.timestamp
+        yield result
+        return
+    identifiers = None
+    if data_id == "public_security_identifiers":
+        identifiers = _sec_table(
+            path,
+            record,
+            "IDENTIFIERS",
+            columns=[
+                "HOLDING_ID",
+                "IDENTIFIERS_ID",
+                "IDENTIFIER_ISIN",
+                "IDENTIFIER_TICKER",
+            ],
+        )
+    holding_columns = (
+        {"ACCESSION_NUMBER", "HOLDING_ID", "ISSUER_CUSIP"}
+        if data_id == "public_security_identifiers"
+        else {
+            "ACCESSION_NUMBER",
+            "CUSIP",
+            "VALUE",
+            "SSHPRNAMT",
+            "SSHPRNAMTTYPE",
+            "PUTCALL",
+            "INVESTMENTDISCRETION",
+            "INFOTABLE_SK",
+        }
+        if source == "sec_13f"
+        else {
+            "ACCESSION_NUMBER",
+            "ISSUER_CUSIP",
+            "CURRENCY_VALUE",
+            "CURRENCY_CODE",
+            "BALANCE",
+            "UNIT",
+            "ASSET_CAT",
+            "PERCENTAGE",
+            "HOLDING_ID",
+        }
+    )
+    with closing_iterator(
+        _sec_table(
+            path,
+            record,
+            member,
+            chunksize=100000,
+            columns=holding_columns,
+            optional_columns=("PAYOFF_PROFILE", "DERIVATIVE_CAT")
+            if source != "sec_13f" and data_id != "public_security_identifiers"
+            else (),
+        )
+    ) as source_frames:
+        for chunk in source_frames:
+            joined = chunk.merge(
+                submission,
+                on="ACCESSION_NUMBER",
+                how="left",
+                validate="many_to_one",
+                indicator=True,
             )
-            result["asset_id"] = result.accession
+            if not joined._merge.eq("both").all():
+                raise ValueError("sec_holding_submission_missing")
+            if data_id == "public_security_identifiers":
+                joined = joined.merge(
+                    identifiers,
+                    on="HOLDING_ID",
+                    how="inner",
+                    validate="one_to_many",
+                )
+                result = _rename(
+                    joined,
+                    {
+                        "ACCESSION_NUMBER": "accession",
+                        "HOLDING_ID": "holding_id",
+                        "SERIES_ID": "series_id",
+                        "ISSUER_CUSIP": "cusip",
+                        "IDENTIFIER_ISIN": "isin",
+                        "IDENTIFIER_TICKER": "ticker",
+                        "REPORT_DATE": "report_date",
+                        "SUB_TYPE": "filing_type",
+                        "FILING_DATE": "publication_date",
+                        "IDENTIFIERS_ID": "_holding_id",
+                    },
+                )
+            elif source == "sec_13f":
+                result = _rename(
+                    joined,
+                    {
+                        "ACCESSION_NUMBER": "accession",
+                        "CIK": "manager_cik",
+                        "CUSIP": "cusip",
+                        "PERIODOFREPORT": "report_date",
+                        "SUBMISSIONTYPE": "filing_type",
+                        "ISAMENDMENT": "is_amendment",
+                        "AMENDMENTTYPE": "amendment_type",
+                        "VALUE": "value_usd",
+                        "SSHPRNAMT": "shares_or_principal",
+                        "SSHPRNAMTTYPE": "share_type",
+                        "PUTCALL": "put_call",
+                        "INVESTMENTDISCRETION": "investment_discretion",
+                        "FILING_DATE": "publication_date",
+                        "INFOTABLE_SK": "_holding_id",
+                    },
+                )
+            else:
+                result = _rename(
+                    joined,
+                    {
+                        "ACCESSION_NUMBER": "accession",
+                        "SERIES_ID": "series_id",
+                        "ISSUER_CUSIP": "cusip",
+                        "REPORT_DATE": "report_date",
+                        "SUB_TYPE": "filing_type",
+                        "CURRENCY_VALUE": "value",
+                        "CURRENCY_CODE": "currency",
+                        "BALANCE": "balance",
+                        "UNIT": "balance_unit",
+                        "ASSET_CAT": "asset_category",
+                        "PERCENTAGE": "portfolio_weight_percent",
+                        "FILING_DATE": "publication_date",
+                        "HOLDING_ID": "_holding_id",
+                    },
+                )
+                result["payoff_profile"] = (
+                    joined["PAYOFF_PROFILE"] if "PAYOFF_PROFILE" in joined else pd.NA
+                )
+                result["derivative_category"] = (
+                    joined["DERIVATIVE_CAT"] if "DERIVATIVE_CAT" in joined else pd.NA
+                )
+            result["asset_id"] = result.accession + ":" + result._holding_id
+            if source == "sec_13f":
+                result["_clock_source"] = "sec_13f:" + result.accession
             result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
             result["report_date"] = result.timestamp
             yield result
-            return
-        identifiers = None
-        if data_id == "public_security_identifiers":
-            identifiers = _read_csv(
-                archive.open("IDENTIFIERS.tsv"),
-                sep="\t",
-                dtype="str",
-                columns=[
-                    "HOLDING_ID",
-                    "IDENTIFIERS_ID",
-                    "IDENTIFIER_ISIN",
-                    "IDENTIFIER_TICKER",
-                ],
-            )
-        holding_columns = (
-            {"ACCESSION_NUMBER", "HOLDING_ID", "ISSUER_CUSIP"}
-            if data_id == "public_security_identifiers"
-            else {
-                "ACCESSION_NUMBER",
-                "CUSIP",
-                "VALUE",
-                "SSHPRNAMT",
-                "SSHPRNAMTTYPE",
-                "PUTCALL",
-                "INVESTMENTDISCRETION",
-                "INFOTABLE_SK",
-            }
-            if source == "sec_13f"
-            else {
-                "ACCESSION_NUMBER",
-                "ISSUER_CUSIP",
-                "REPORT_DATE",
-                "CURRENCY_VALUE",
-                "CURRENCY_CODE",
-                "BALANCE",
-                "UNIT",
-                "ASSET_CAT",
-                "PERCENTAGE",
-                "HOLDING_ID",
-            }
-        )
-        with closing_iterator(
-            _read_csv(
-                archive.open(member),
-                sep="\t",
-                dtype="str",
-                chunksize=100000,
-                columns=holding_columns,
-                optional_columns=("PAYOFF_PROFILE", "DERIVATIVE_CAT")
-                if source != "sec_13f" and data_id != "public_security_identifiers"
-                else (),
-            )
-        ) as source_frames:
-            for chunk in source_frames:
-                joined = chunk.merge(
-                    submission,
-                    on="ACCESSION_NUMBER",
-                    how="left",
-                    validate="many_to_one",
-                    indicator=True,
-                )
-                if not joined._merge.eq("both").all():
-                    raise ValueError("sec_holding_submission_missing")
-                if data_id == "public_security_identifiers":
-                    joined = joined.merge(
-                        identifiers,
-                        on="HOLDING_ID",
-                        how="inner",
-                        validate="one_to_many",
-                    )
-                    result = _rename(
-                        joined,
-                        {
-                            "ACCESSION_NUMBER": "accession",
-                            "HOLDING_ID": "holding_id",
-                            "SERIES_ID": "series_id",
-                            "ISSUER_CUSIP": "cusip",
-                            "IDENTIFIER_ISIN": "isin",
-                            "IDENTIFIER_TICKER": "ticker",
-                            "REPORT_DATE": "report_date",
-                            "SUB_TYPE": "filing_type",
-                            "FILING_DATE": "publication_date",
-                            "IDENTIFIERS_ID": "_holding_id",
-                        },
-                    )
-                elif source == "sec_13f":
-                    result = _rename(
-                        joined,
-                        {
-                            "ACCESSION_NUMBER": "accession",
-                            "CIK": "manager_cik",
-                            "CUSIP": "cusip",
-                            "PERIODOFREPORT": "report_date",
-                            "SUBMISSIONTYPE": "filing_type",
-                            "ISAMENDMENT": "is_amendment",
-                            "AMENDMENTTYPE": "amendment_type",
-                            "VALUE": "value_usd",
-                            "SSHPRNAMT": "shares_or_principal",
-                            "SSHPRNAMTTYPE": "share_type",
-                            "PUTCALL": "put_call",
-                            "INVESTMENTDISCRETION": "investment_discretion",
-                            "FILING_DATE": "publication_date",
-                            "INFOTABLE_SK": "_holding_id",
-                        },
-                    )
-                else:
-                    result = _rename(
-                        joined,
-                        {
-                            "ACCESSION_NUMBER": "accession",
-                            "SERIES_ID": "series_id",
-                            "ISSUER_CUSIP": "cusip",
-                            "REPORT_DATE": "report_date",
-                            "SUB_TYPE": "filing_type",
-                            "CURRENCY_VALUE": "value",
-                            "CURRENCY_CODE": "currency",
-                            "BALANCE": "balance",
-                            "UNIT": "balance_unit",
-                            "ASSET_CAT": "asset_category",
-                            "PERCENTAGE": "portfolio_weight_percent",
-                            "FILING_DATE": "publication_date",
-                            "HOLDING_ID": "_holding_id",
-                        },
-                    )
-                    result["payoff_profile"] = (
-                        joined["PAYOFF_PROFILE"]
-                        if "PAYOFF_PROFILE" in joined
-                        else pd.NA
-                    )
-                    result["derivative_category"] = (
-                        joined["DERIVATIVE_CAT"]
-                        if "DERIVATIVE_CAT" in joined
-                        else pd.NA
-                    )
-                result["asset_id"] = result.accession + ":" + result._holding_id
-                if source == "sec_13f":
-                    result["_clock_source"] = "sec_13f:" + result.accession
-                result["timestamp"] = pd.to_datetime(result.report_date, format="mixed")
-                result["report_date"] = result.timestamp
-                yield result
