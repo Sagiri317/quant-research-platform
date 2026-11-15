@@ -375,6 +375,7 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
         held = pd.Series({assets[-1]: 1.0})
         values, reasons, _exposures = holding_attribution(
             inputs,
+            known_empty_stock_leg=False,
             after_notionals=held,
             nav_before=1.0,
             nav_post=1.0,

@@ -181,6 +181,7 @@ def test_joint_risk_fit_uses_per_style_domain_then_complete_cases_and_reconciles
             entry_open=pd.Series(10.0, index=fit.exposures.index),
             benchmark_weights=pd.DataFrame(),
         ),
+        known_empty_stock_leg=False,
         after_notionals=notionals,
         nav_before=100.0,
         nav_post=100.0,

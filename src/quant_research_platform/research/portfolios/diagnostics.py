@@ -727,24 +727,22 @@ def _portfolio_statistics_tables(
                 if valuation is not None:
                     valuation_by_candidate[candidate_id].append(valuation)
                 if "attribution" in analyses:
-                    after = pd.Series(
-                        {
-                            value.asset_id: value.share_value
-                            for value in batch.valuations
-                            if value.phase == "after"
+                    stock_notionals = {"after": {}, "end": {}}
+                    known_empty_stock_leg = True
+                    for value in batch.valuations:
+                        if (
+                            value.phase in stock_notionals
                             and value.asset_id != PORTFOLIO_CASH_ASSET_ID
-                        }
-                    )
-                    endpoint = pd.Series(
-                        {
-                            value.asset_id: value.share_value
-                            for value in batch.valuations
-                            if value.phase == "end"
-                            and value.asset_id != PORTFOLIO_CASH_ASSET_ID
-                        }
-                    )
+                        ):
+                            stock_notionals[value.phase][value.asset_id] = (
+                                value.share_value
+                            )
+                            known_empty_stock_leg &= value.quantity == 0
+                    after = pd.Series(stock_notionals["after"])
+                    endpoint = pd.Series(stock_notionals["end"])
                     held_returns = endpoint.div(after.where(after.ne(0))) - 1.0
                     if valuation is not None and valuation["estimated_held_assets"]:
+                        known_empty_stock_leg = False
                         holding_input = replace(
                             holding_input,
                             fitted=None,
@@ -756,6 +754,7 @@ def _portfolio_statistics_tables(
                         adjustment.kind != "registration"
                         for adjustment in batch.rights_adjustments
                     ):
+                        known_empty_stock_leg = False
                         holding_input = replace(
                             holding_input,
                             fitted=None,
@@ -768,11 +767,13 @@ def _portfolio_statistics_tables(
                         )
                         or ((after == 0) & (endpoint > 0)).any()
                     ):
+                        known_empty_stock_leg = False
                         holding_input = replace(
                             holding_input, fitted=None, reason="zero_valuation_recovery"
                         )
                     components, reasons, exposures = holding_attribution(
                         holding_input,
+                        known_empty_stock_leg=known_empty_stock_leg,
                         after_notionals=after,
                         nav_before=row["nav_before"],
                         nav_post=row["nav_post"],

@@ -3322,6 +3322,7 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
         )
         values, reasons, _ = holding_attribution(
             inputs,
+            known_empty_stock_leg=False,
             after_notionals=pd.Series({"held_st": 100.0}),
             nav_before=100.0,
             nav_post=100.0,

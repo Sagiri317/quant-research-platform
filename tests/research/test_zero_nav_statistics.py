@@ -24,6 +24,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.attribution import (
     HoldingFactorInputs,
+    holding_attribution,
 )
 from quant_research_platform.research.portfolios.diagnostics import (
     _portfolio_statistics_tables,
@@ -268,6 +269,54 @@ def test_zero_nav_rights_recovery_persists_amounts_and_undefined_returns(
     with artifact.table("portfolio_daily.parquet") as persisted:
         assert len(persisted) == 4 * len(candidates)
         assert persisted.loc[persisted.nav_before.eq(0), "net_return"].isna().all()
+    if is_cash:
+        stock_components = {
+            "industry",
+            "style",
+            "stock_residual_difference",
+            "benchmark_replication_gap",
+            "residual_unexplained",
+        }
+        with artifact.table("portfolio_attribution.parquet") as persisted:
+            for candidate in candidates:
+                last = persisted.loc[
+                    persisted.candidate_id.eq(candidate.candidate_id)
+                    & persisted.entry_at.eq(dates[-2])
+                    & persisted.component_id.isin(stock_components)
+                ]
+                assert len(last) == 5
+                if recovery == "cash_cancelled" and candidate.benchmark_id is None:
+                    assert last.value.eq(0).all()
+                    assert last.status.eq("DEFINED").all()
+                    assert last.reason.eq("").all()
+                else:
+                    assert last.value.isna().all()
+                    assert last.status.eq("UNDEFINED").all()
+                    assert last.reason.eq("holding_factor_fit_unidentified").all()
+
+
+def test_empty_stock_leg_does_not_define_a_zero_nav_rate():
+    inputs = HoldingFactorInputs(
+        *pd.date_range("2024-01-02", periods=3),
+        None,
+        pd.Series(dtype="float64"),
+        pd.Series(dtype="float64"),
+        pd.DataFrame(),
+    )
+    values, reasons, exposures = holding_attribution(
+        inputs,
+        known_empty_stock_leg=True,
+        after_notionals=pd.Series(dtype="float64"),
+        nav_before=0.0,
+        nav_post=0.0,
+        benchmark_id=None,
+        benchmark_return=None,
+        holding_returns=pd.Series(dtype="float64"),
+    )
+    assert values["benchmark"] == 0.0
+    assert all(value is None for key, value in values.items() if key != "benchmark")
+    assert set(reasons.values()) == {"nonpositive_start_nav"}
+    assert exposures.empty
 
 
 def test_zero_value_retained_units_are_counted_in_valuation_diagnostics():

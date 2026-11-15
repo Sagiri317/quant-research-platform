@@ -256,6 +256,7 @@ def test_identified_open_factor_domain_does_not_invent_closed_exposures(tmp_path
     def reasons_for(value, asset="a0"):
         return holding_attribution(
             value,
+            known_empty_stock_leg=False,
             after_notionals=pd.Series({asset: 1.0}),
             nav_before=1.0,
             nav_post=1.0,
@@ -322,6 +323,7 @@ def test_closed_endpoints_do_not_hide_missing_decision_risk_facts(tmp_path):
     assert inputs.fitted is not None and "a0" not in inputs.closed_assets
     reasons = holding_attribution(
         inputs,
+        known_empty_stock_leg=False,
         after_notionals=pd.Series({"a0": 1.0}),
         nav_before=1.0,
         nav_post=1.0,

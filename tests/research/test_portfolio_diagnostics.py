@@ -714,6 +714,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
 
         values, reasons, exposure = holding_attribution(
             first,
+            known_empty_stock_leg=False,
             after_notionals=pd.Series({assets[0]: 100.0}),
             nav_before=100.0,
             nav_post=100.0,

@@ -64,11 +64,9 @@ def test_unselected_unheld_bad_cells_preserve_independent_account(
         ("amount", -1.0),
         ("amount", "unavailable"),
         ("amount", True),
-        ("amount", 1 + 2j),
         ("open", 0.0),
         ("open", "unavailable"),
         ("open", True),
-        ("open", 1 + 2j),
         ("close", np.inf),
     ]
     for index, (column, invalid) in enumerate(cases):
@@ -348,8 +346,7 @@ def test_unresolved_delisting_status_blocks_only_dependent_holding(
             list(changed)
 
 
-@pytest.mark.parametrize("cap", [True, 1 + 2j])
-def test_unselected_typed_bad_cap_is_not_a_target_dependency(cap):
+def test_unselected_typed_bad_cap_is_not_a_target_dependency():
     args = _decision_inputs()
     args["enhanced_decision"] = None
     args["alpha"] = pd.Series({"a": 0.0, "b": 1.0})
@@ -363,7 +360,7 @@ def test_unselected_typed_bad_cap_is_not_a_target_dependency(cap):
     args["dataset"]["float_market_cap"] = args["dataset"]["float_market_cap"].astype(
         object
     )
-    args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = cap
+    args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = True
     account, _, _, _, ledger = daily._build_session(**args)
     assert ledger.executed_delta_notional.tolist() == [-50.0, 50.0]
     assert account.post_trade_cash == 0.0

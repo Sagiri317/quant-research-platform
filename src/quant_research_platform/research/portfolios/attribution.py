@@ -24,6 +24,7 @@ class HoldingFactorInputs:
 def holding_attribution(
     inputs: HoldingFactorInputs,
     *,
+    known_empty_stock_leg: bool,
     after_notionals: pd.Series,
     nav_before: float,
     nav_post: float,
@@ -31,7 +32,10 @@ def holding_attribution(
     benchmark_return: float | None,
     holding_returns: pd.Series,
 ) -> tuple[dict[str, float | None], dict[str, str], pd.Series]:
-    """Ex-post relative-factor decomposition with an explicit replication gap."""
+    """Decompose realized returns with an explicit replication gap.
+
+    Empty stock ownership is a quantity fact, not inferred from zero marks.
+    """
     components = (
         "benchmark",
         "industry",
@@ -47,6 +51,8 @@ def holding_attribution(
         reason = "nonpositive_start_nav" if nav_before <= 0 else "nonpositive_post_nav"
         reasons.update({name: reason for name in components if name != "benchmark"})
         return values, reasons, pd.Series(dtype="float64")
+    if benchmark_id is None and known_empty_stock_leg:
+        return dict.fromkeys(components, 0.0), reasons, pd.Series(dtype="float64")
     fitted = inputs.fitted
     if fitted is None:
         reasons.update(
@@ -372,6 +378,7 @@ def inventory_risk_attribution(
             )
             values, reasons, realized = holding_attribution(
                 inputs,
+                known_empty_stock_leg=False,
                 after_notionals=pd.Series(
                     {asset: row.share_value for asset, row in held.items()}
                 ),
