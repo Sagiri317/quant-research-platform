@@ -276,7 +276,6 @@ def test_physical_filter_rejects_nonfinite_or_schema_incompatible_scalar(
 @pytest.mark.parametrize(
     ("data_type", "value"),
     (
-        (pa.float64(), 1),
         (pa.decimal128(12, 2), 1),
         (pa.decimal128(12, 2), 1.0),
         (pa.int64(), 1.0),
@@ -289,6 +288,18 @@ def test_physical_filter_requires_exact_scalar_family(
         dataset_reading._validated_physical_filter_value(
             pa.field("value", data_type), value
         )
+
+
+@pytest.mark.parametrize("value", (1, 1.0))
+def test_json_numeric_filter_matches_float_column(tmp_path, value):
+    root = make_dataset_artifact_root(tmp_path, "numeric_filter")
+    frame = make_default_dataset_frame().assign(value=[1.0, 2.0, 1.0])
+    write_dataset(root, frame, spec=make_processed_dataset_spec("numeric_filter"))
+    options = dataset_reading._dataset_input_options(
+        {"path": str(root), "row_filters": [["value", "==", value]]}
+    )
+    actual = read_dataset(**options)
+    assert actual.value.tolist() == [1.0, 1.0]
 
 
 @pytest.mark.parametrize(

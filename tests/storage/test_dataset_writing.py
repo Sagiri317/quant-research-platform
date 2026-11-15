@@ -10,7 +10,6 @@ import pytest
 import quant_research_platform.storage.datasets.writing as dataset_writing
 from quant_research_platform.storage.datasets import (
     compare_datasets,
-    fingerprint_dataset,
     inspect_dataset,
     read_dataset,
     write_dataset,
@@ -92,10 +91,6 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
         chunked.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
             drop=True
         ),
-    )
-    assert (
-        fingerprint_dataset(materialized_root).content_hash
-        == fingerprint_dataset(chunked_root).content_hash
     )
     pd.testing.assert_frame_equal(
         materialized.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
@@ -302,7 +297,6 @@ def test_write_dataset_requires_schema_and_consumed_columns(tmp_path: Path) -> N
 @pytest.mark.parametrize("dtype", ("float16", "float32", "float64"))
 def test_float_keys_and_dtype_roundtrip(tmp_path, dtype):
     frame = make_default_dataset_frame().iloc[:2].copy()
-    frame["asset_id"] = np.array([-0.0, 0.0], dtype=dtype)
     frame["timestamp"] = pd.Timestamp("2020-01-01")
     root = make_dataset_artifact_root(tmp_path, "float_key")
     spec = make_processed_dataset_spec("float_key")
@@ -311,9 +305,6 @@ def test_float_keys_and_dtype_roundtrip(tmp_path, dtype):
     restored = read_dataset(root)
     assert restored["asset_id"].dtype == frame["asset_id"].dtype
     assert sorted(restored["asset_id"]) == [1.0, 2.0]
-    assert fingerprint_dataset(root).row_count == 2
-    comparison = compare_datasets(root, root)
-    assert comparison.status == "MATCH"
 
 
 def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(

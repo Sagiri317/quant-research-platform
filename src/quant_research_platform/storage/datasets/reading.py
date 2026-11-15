@@ -874,7 +874,7 @@ def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:
     elif pa.types.is_integer(data_type):
         valid = type(value) is int
     elif pa.types.is_floating(data_type):
-        valid = type(value) is float
+        valid = type(value) in (int, float)
     elif pa.types.is_decimal(data_type):
         valid = type(value) is Decimal
     elif pa.types.is_string(data_type) or pa.types.is_large_string(data_type):

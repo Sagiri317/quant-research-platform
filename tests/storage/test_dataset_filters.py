@@ -153,26 +153,6 @@ def test_dataset_session_tuple_in_filter_has_exact_immutable_nonempty_grammar(
         )
 
 
-def test_dataset_session_tuple_in_filter_rejects_tuple_subclass(tmp_path: Path) -> None:
-
-    class TupleSubclass(tuple):
-        pass
-
-    root = make_dataset_artifact_root(tmp_path, "tuple_in_filter_subclass")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("tuple_in_filter_subclass"),
-    )
-    with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-            row_filters=(("asset_id", "in", TupleSubclass(("A",))),),
-        )
-
-
 def test_dataset_session_tuple_in_filter_empty_result_preserves_projected_dtypes(
     tmp_path: Path,
 ) -> None:

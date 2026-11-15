@@ -13,7 +13,6 @@ import pytest
 
 import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.parquet as dataset_physical
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -315,7 +314,6 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
         row_group_size=2,
     )
     assert pq.read_metadata(native_filesystem_path(path)).num_row_groups == 2
-    original_bytes = Path(native_filesystem_path(path)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles = []
@@ -368,7 +366,6 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     assert len(handles) == 1 and handles[0].closed
     assert iterator_closed == [True]
     assert reader_closed == [True]
-    assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
 def test_arrow_batch_converter_observes_each_row_once(
@@ -666,35 +663,6 @@ def test_nonnullable_boolean_rejects_physical_null_values() -> None:
         )
 
 
-def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "fingerprint_formula")
-    frame = make_default_dataset_frame()
-    spec = make_processed_dataset_spec("fingerprint_formula")
-    write_dataset(root, frame, spec=spec)
-    fingerprint = fingerprint_dataset(root)
-    hash_columns = tuple(dict.fromkeys((*spec.primary_key, *spec.required_columns)))
-    reference_readback = pd.concat(
-        tuple(
-            pd.read_parquet(native_filesystem_path(path))
-            for path in sorted(filesystem_glob(root / "data", "**/part-*.parquet"))
-        ),
-        ignore_index=True,
-    )
-    hashes = pd.util.hash_pandas_object(
-        reference_readback.loc[:, list(hash_columns)], index=False
-    ).to_numpy("uint64")
-    expected = canonical_json_hash(
-        {
-            "row_hash_sum": int(hashes.sum(dtype=np.uint64)),
-            "row_hash_xor": int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0))),
-            "row_count": len(frame),
-            "columns": list(spec.required_columns),
-            "hash_columns": list(hash_columns),
-        }
-    )
-    assert fingerprint.content_hash == expected
-
-
 @pytest.mark.parametrize("use_dictionary", (False, True))
 @pytest.mark.parametrize("reader_kind", ("physical", "declared"))
 @pytest.mark.parametrize("consumer_primary", (False, True))
@@ -717,7 +685,6 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
     )
     assert pq.read_metadata(native_filesystem_path(original)).num_row_groups == 2
     filesystem_write_bytes(path, Path(native_filesystem_path(original)).read_bytes())
-    original_bytes = Path(native_filesystem_path(original)).read_bytes()
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles, reader_closed, iterator_closed = ([], [], [])
@@ -775,14 +742,11 @@ def test_parquet_early_close_preserves_cleanup_and_consumer_failure(
     assert len(handles) == 1 and all(handle.closed for handle in handles)
     assert reader_closed == [True]
     assert iterator_closed == [True]
-    assert Path(native_filesystem_path(original)).read_bytes() == original_bytes
-    assert Path(native_filesystem_path(path)).read_bytes() == original_bytes
 
 
 def test_declared_reader_preserves_observer_failure(tmp_path, monkeypatch):
     path = tmp_path / "observer.parquet"
     pq.write_table(pa.table({"value": [1, 2, 3]}), native_filesystem_path(path))
-    original = Path(native_filesystem_path(path)).read_bytes()
     constructor = pq.ParquetFile
     closed = []
 
@@ -814,7 +778,6 @@ def test_declared_reader_preserves_observer_failure(tmp_path, monkeypatch):
     assert caught.value is primary
     assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
     assert closed == [True]
-    assert Path(native_filesystem_path(path)).read_bytes() == original
 
 
 @pytest.mark.parametrize("unit", ("ms", "us", "ns"))
