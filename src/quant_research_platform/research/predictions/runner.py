@@ -38,6 +38,57 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 
+def iter_frozen_predictions(frames, result, *, read_window, output_window):
+    """Forward one ordered stream, retaining sequence state and input context."""
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    metadata = result.metadata
+    sequence = metadata["model_algorithm"] in SEQUENCE_ALGORITHMS
+    classification = metadata["model_algorithm"] == "deeplob_classifier"
+    predict_values = (
+        result.prediction_model.prediction_function(probabilities=True)
+        if classification
+        else prediction_callable(
+            tuple(metadata["input_columns"]), result.prediction_model
+        )
+    )
+    with closing_iterator(iter(frames)) as source:
+        for frame in source:
+            usable = prediction_rows(
+                frame, metadata, read_window, include_context=sequence
+            )
+            if usable.empty:
+                continue
+            values = predict_values(usable)
+            if sequence:
+                valid = prediction_input_mask(usable, metadata).to_numpy()
+                usable, values = usable.loc[valid], values[valid]
+            if classification:
+                if values.shape != (len(usable), 3):
+                    raise ValueError("invalid_prediction_probabilities")
+                probabilities = values
+                if not np.isfinite(probabilities).all():
+                    raise ValueError("invalid_prediction_probabilities")
+                values = probabilities[:, 2] - probabilities[:, 0]
+            if values.shape != (len(usable),) or not np.isfinite(values).all():
+                raise ValueError("invalid_prediction_values")
+            output = usable.assign(prediction_score=values)
+            if classification:
+                output[list(PROBABILITY_COLUMNS)] = probabilities
+            if sequence:
+                output, _ = apply_filter_mode(
+                    output,
+                    mode=metadata["sample_filter_mode"],
+                    metadata_key="sample_filter_mode",
+                )
+                output = output.loc[
+                    output.timestamp.ge(pd.Timestamp(output_window.start))
+                ]
+                if output.empty:
+                    continue
+            yield output
+
+
 def predict(config: Mapping) -> Path:
     config = _strict_config(
         config,
@@ -60,7 +111,6 @@ def predict(config: Mapping) -> Path:
     result, facts = load_model(Path(config["model"]))
     _validate_model_prediction_window(facts, window)
     algorithm = result.metadata["model_algorithm"]
-    sequence = algorithm in SEQUENCE_ALGORITHMS
     classification = algorithm == "deeplob_classifier"
     read_window = model_context_window(facts, window)
     from quant_research_platform.contracts.filtering import required_filter_columns
@@ -95,48 +145,12 @@ def predict(config: Mapping) -> Path:
     from quant_research_platform.policy.lifecycle import closing_iterator
 
     def outputs():
-        predict_values = (
-            result.prediction_model.prediction_function(probabilities=True)
-            if classification
-            else prediction_callable(
-                tuple(result.metadata["input_columns"]), result.prediction_model
+        with closing_iterator(
+            iter_frozen_predictions(
+                frames, result, read_window=read_window, output_window=window
             )
-        )
-        with closing_iterator(frames) as source:
-            for frame in source:
-                usable = prediction_rows(
-                    frame,
-                    result.metadata,
-                    read_window,
-                    include_context=sequence,
-                )
-                if usable.empty:
-                    continue
-                values = predict_values(usable)
-                if sequence:
-                    valid = prediction_input_mask(usable, result.metadata).to_numpy()
-                    usable, values = usable.loc[valid], values[valid]
-                if classification:
-                    if values.shape != (len(usable), 3):
-                        raise ValueError("invalid_prediction_probabilities")
-                    probabilities = values
-                    if not np.isfinite(probabilities).all():
-                        raise ValueError("invalid_prediction_probabilities")
-                    values = probabilities[:, 2] - probabilities[:, 0]
-                if values.shape != (len(usable),) or not np.isfinite(values).all():
-                    raise ValueError("invalid_prediction_values")
-                output = usable.assign(prediction_score=values)
-                if classification:
-                    output[list(PROBABILITY_COLUMNS)] = probabilities
-                if sequence:
-                    output, _ = apply_filter_mode(
-                        output,
-                        mode=result.metadata["sample_filter_mode"],
-                        metadata_key="sample_filter_mode",
-                    )
-                    output = output.loc[output.timestamp.ge(pd.Timestamp(window.start))]
-                    if output.empty:
-                        continue
+        ) as predictions:
+            for output in predictions:
                 output = output.loc[
                     :,
                     [

@@ -1,0 +1,19 @@
+{
+  "inputs": "data/research/a_share/stock/daily/factors",
+  "evaluation_axis": "cross_sectional",
+  "sessions": ["2020-01-02", "2020-01-03", "2020-01-06"],
+  "asset_ids": ["000001"],
+  "periods": [
+    {
+      "period_id": "2020Q1",
+      "prediction_window": {"start": "2020-01-06", "end": "2020-01-06"},
+      "models": {
+        "lasso": "results/a_share/stock/daily/models/2020Q1/lasso/model"
+      }
+    }
+  ],
+  "prediction_daily": {
+    "lasso": "results/a_share/stock/daily/model-evaluation/lasso/daily"
+  },
+  "output": "results/a_share/stock/daily/model-periods"
+}

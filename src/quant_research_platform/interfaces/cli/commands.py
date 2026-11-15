@@ -131,6 +131,14 @@ def evaluate_time_series(config: Config) -> None:
     _echo_result(evaluate_time_series(read_qrp_json_file(config)[1]))
 
 
+@app.command("evaluate-model-periods")
+def evaluate_model_periods(config: Config) -> None:
+    """Summarize frozen training, saved CV, and future metrics by period."""
+    from quant_research_platform.research.models.periods import evaluate_model_periods
+
+    _echo_result(evaluate_model_periods(read_qrp_json_file(config)[1]))
+
+
 @app.command("analyze-inventory")
 def analyze_inventory(config: Config) -> None:
     """Decompose inventory P&L against an explicit holding benchmark."""

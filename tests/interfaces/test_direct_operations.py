@@ -32,6 +32,11 @@ CONFIG_OPERATIONS = (
         "evaluate_time_series",
     ),
     (
+        "evaluate-model-periods",
+        "research.models.periods",
+        "evaluate_model_periods",
+    ),
+    (
         "analyze-inventory",
         "research.portfolios.inventory_analysis",
         "analyze_inventory",

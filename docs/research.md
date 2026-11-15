@@ -81,6 +81,18 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 会话扩窗默认 `min_train_sessions=60`、`validation_sessions=20`、`prediction_sessions=20`，三项由调用者配置为正整数，末块可以不足预测块长度；标签成熟仍按每折真实时点决定，不能以名义会话数代替成熟样本数。正式研究的模型、参数候选、目标单位和窗口属于本次运行配置，示例值不代表通用最优参数。该流程按时间反复选择和重拟合，研究结果应如实说明这种使用方式。
 
+`research.models.periods.evaluate_model_periods(config)` 及薄 CLI `qrp evaluate-model-periods --config ...` 独立汇总每个滚动期的训练、验证和预测指标，配置结构见 [model-periods.json](../configs/model-periods.json)。调用者替换结构示例的路径、证券及完整会话轴，`sessions` 须覆盖原拟合窗、序列真实前文和预测窗，应取原 rolling 配置的完整时钟；只含样本外日期的评价时钟不够，也不加入拟合起点之前的因子预热。不能用有记录的日期推断休市。`periods` 显式映射每期覆盖完整日的预测窗及各模型的冻结 MDL，日表不能恢复半日区间；`prediction_daily` 指向同一模型原生 `evaluate-time-series` 的 `daily`。已有全期评价可直接复用；尚无误差日表时，先用现有 `evaluate-time-series` 评价保存的 PRED，不重新生成未来预测。日表的证券域、会话、目标及轴须对应本次请求和冻结模型；操作不依赖数据集名称。
+
+训练阶段只加载最终冻结模型，按原 `fit_windows`、`fit_cutoff`、筛选、输入观察和标签成熟规则前向，使用冻结插补及缩放；按自然月分块读取特征，块内按日聚合，并保持跨块的因果序列状态。它输出原拟合样本的日等权 MSE、RMSE、MAE、IC、RankIC 及相对同域零预测的 R²，不重新拟合，也不保存逐行训练 PRED。这是最终重拟合模型的回代误差，不是样本外表现或原优化器加权损失。
+
+验证阶段仅消费 `training_selection` 保存的选中候选 `validation_daily_mse`，并取平方根得到 RMSE；历史 MAE、IC、RankIC、R² 和 CV 曲线没有保存时明确为 `not_saved`，不能用包含验证段的最终重拟合模型补算。历史选择的 MSE 是先按日汇总全部共同样本行，再等权平均各日，输出以 `pooled_daily_rows` 标明其口径。预测阶段按显式每期窗口聚合原生日表，保持原截止时点、未成熟及缺失会话。跨截面轴每时点截面等权汇总到日，单资产时间轴在各资产日内计算；RMSE 是日等权 MSE 的平方根，R² 是同域日等权误差之比，均不平均每日平方根或每日 R²。
+
+输出是原生 STAT 的 `model_period_metrics.parquet` 与 `model_epoch_curves.parquet`。前者记录来源、口径、窗口、cutoff、目标及单位、实际有效会话范围、样本和会话数、参数及已保存的迭代数；完整原拟合窗、目标定义和历史选型事实保存在元数据中。`valid_session_count` 及 `session_count` 同时保留，部分未成熟会话不补零。后者只复制实际保存的最终拟合 epoch 曲线，保留 `online_epoch_weighted` 训练损失及 `epoch_end_row_mean` 验证损失的来源；曲线值沿用目标平方单位，不冒充冻结模型误差。标准化 `model_target` 的误差是该标准化目标单位，不能解释为基点。报告和趋势图直接消费这些小表，统计不改训练、选参或早停流程。
+
+截面日表的资产域须与请求相同；单资产时间轴的日表可包含更多证券，操作仅投影请求证券，训练阶段仍保留原 MDL 的完整拟合证券域。同一冻结模型的分段或开放终点 PRED 可复用原生日表。若原评价没有保存零预测基准，R² 行保留为 `UNDEFINED/not_saved`，其余指标继续产出。
+
+`iterations` 在最终模型行分别为 LASSO 保存的坐标下降次数、XGBoost 保存的树轮数或神经网络所用的 epoch 数；历史 CV 行为已保存最佳迭代编号加一，未保存时为 NULL。实际早停总轮数和最佳编号保留在原生选型或最终拟合元数据中。它们是不同算法的迭代单位，不横向当作相同计算量。
+
 候选范围参考以下原始资料，再由本次历史验证段选择。论文中的数据、目标和架构与本项目不同，其表现不作为本项目结果。
 
 - [Gu、Kelly、Xiu 的资产定价研究](https://www.nber.org/system/files/working_papers/w25398/w25398.pdf)采用保持时间顺序的训练、验证和随后预测：参数由训练段估计，复杂度由验证误差选择。本项目按季度或会话块重复这一过程。

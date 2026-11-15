@@ -142,6 +142,66 @@ _ARROW_SCHEMAS = {
             pa.field("selection_status", pa.string()),
         ]
     ),
+    "model_period_metrics.parquet": pa.schema(
+        [
+            *[
+                pa.field(name, pa.string())
+                for name in (
+                    "period_id",
+                    "model_id",
+                    "stage",
+                    "asset_id",
+                    "metric",
+                    "status",
+                    "reason",
+                    "source",
+                    "aggregation",
+                    "evaluation_axis",
+                    "label",
+                    "label_unit",
+                    "parameters_json",
+                )
+            ],
+            pa.field("value", pa.float64()),
+            *[
+                pa.field(name, pa.timestamp("ns"))
+                for name in (
+                    "window_start",
+                    "window_end",
+                    "cutoff",
+                    "first_valid_session",
+                    "last_valid_session",
+                )
+            ],
+            *[
+                pa.field(name, pa.int64())
+                for name in (
+                    "session_count",
+                    "valid_session_count",
+                    "observation_count",
+                    "iterations",
+                )
+            ],
+        ]
+    ),
+    "model_epoch_curves.parquet": pa.schema(
+        [
+            *[
+                pa.field(name, pa.string())
+                for name in (
+                    "period_id",
+                    "model_id",
+                    "metric",
+                    "label_unit",
+                    "training_loss_scope",
+                    "validation_loss_scope",
+                )
+            ],
+            pa.field("epoch", pa.int64()),
+            pa.field("training_loss", pa.float64()),
+            pa.field("validation_loss", pa.float64()),
+        ]
+    ),
     "robustness.parquet": pa.schema(
         [
             pa.field("test_id", pa.string()),
@@ -452,6 +512,10 @@ for _member in _COMPARISON_MEMBERS:
     _ARROW_SCHEMAS[_member] = pa.schema(_fields)
 
 STATISTICS_TABLE_GROUPS = {
+    "model_periods": (
+        "model_period_metrics.parquet",
+        "model_epoch_curves.parquet",
+    ),
     "factor": (
         "factor_stratified_diagnostics.parquet",
         "factor_diagnostics.parquet",
@@ -555,10 +619,16 @@ _COUNT_COLUMNS = {
 
 
 def _nullable_count(member, column):
-    return member in {
-        "prediction_diagnostics.parquet",
-        "model_comparison.parquet",
-    } and column in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
+    return (
+        member == "model_period_metrics.parquet"
+        or member
+        in {
+            "prediction_diagnostics.parquet",
+            "model_comparison.parquet",
+        }
+        and column
+        in {"bootstrap_block_size", "bootstrap_repetitions", "bootstrap_seed"}
+    )
 
 
 def _restored_frame(table, member):
