@@ -126,7 +126,7 @@ def test_actual_limit_events_unknown_barriers_halts_and_first_observed_streak():
 
 
 def test_provider_limit_prices_persist_in_yuan_and_no_limit_event_overrides(tmp_path):
-    from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    from quant_research_platform.markets.implementations.a_share.processed.panels import (  # noqa: E501
         _apply_no_limit_exceptions,
         _canonical_bars,
     )

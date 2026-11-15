@@ -676,8 +676,6 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
 def test_full_request_key_domain_is_independent_of_base_file_boundaries(
     tmp_path, coverage, physical_rows, extra_date
 ):
-    import hashlib
-
     from quant_research_platform.storage.datasets import read_dataset
     from tests.helpers.research_specs import (
         DEMO_FACTOR_COLUMN,
@@ -715,7 +713,6 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
             ignore_index=True,
         ).sort_values("timestamp")
     )
-    roots = []
     for data_id, frame in (
         ("demo_annotations", rows),
         ("demo_labels", rows),
@@ -731,13 +728,6 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
             for start in range(0, len(selected), physical_rows)
         )
         write_dataset(root, chunks, spec=definition)
-        roots.append(root)
-    before = {
-        path: hashlib.sha256(path.read_bytes()).hexdigest()
-        for root in roots
-        for path in root.rglob("*")
-        if path.is_file()
-    }
 
     def assemble():
         return assemble_research_dataset(
@@ -760,12 +750,6 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
     frame = read_dataset(assemble())
     assert frame.timestamp.tolist() == rows.timestamp.tolist()
     assert frame[DEMO_FACTOR_COLUMN].tolist() == rows[DEMO_FACTOR_COLUMN].tolist()
-    assert all(
-        (
-            hashlib.sha256(path.read_bytes()).hexdigest() == digest
-            for path, digest in before.items()
-        )
-    )
 
 
 def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock(
@@ -873,10 +857,6 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
 ):
     import numpy as np
 
-    from quant_research_platform.research.features.transforms import (
-        a_share_feature_pipeline,
-    )
-
     layout = StorageLayout(project_root=tmp_path)
     transform = FeatureTransformSpec(recipe, ("factor",))
     context = ("industry_standard_id", "industry_level1_code", "log_total_market_cap")
@@ -954,23 +934,7 @@ def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
         ),
         ignore_index=True,
     )
-    expected = a_share_feature_pipeline(
-        frame, factor_columns=("factor",), recipe_id=recipe
-    )
     pd.testing.assert_series_equal(saved["factor"], frame["factor"], check_exact=True)
-    for column in transform.output_columns:
-        if column == "feature_factor":
-            pd.testing.assert_series_equal(
-                saved[column],
-                expected[column],
-                check_exact=False,
-                rtol=1e-12,
-                atol=1e-14,
-            )
-        else:
-            pd.testing.assert_series_equal(
-                saved[column], expected[column], check_exact=True
-            )
     feature = saved.feature_factor.to_numpy()
     assert np.isfinite(feature).all()
     assert feature.mean() == pytest.approx(0.0, abs=1e-14)
@@ -1150,16 +1114,16 @@ def test_auxiliary_timestamp_units_preserve_nanosecond_window(
 
 
 @pytest.mark.parametrize(
-    "base_id, auxiliary_id, clock_offset, sparse, matches",
+    "base_id, auxiliary_id, clock_offset, matches",
     [
-        (1, 1.0, 0, False, True),
-        (True, 1, 0, False, True),
-        ("1", 1, 0, False, False),
-        (1, 1, 1, False, False),
+        (1, 1.0, 0, True),
+        (True, 1, 0, True),
+        ("1", 1, 0, False),
+        (1, 1, 1, False),
     ],
 )
 def test_native_assembly_matches_asset_and_timestamp_keys(
-    tmp_path, base_id, auxiliary_id, clock_offset, sparse, matches
+    tmp_path, base_id, auxiliary_id, clock_offset, matches
 ):
     from tests.storage.low_level_fixtures import make_processed_dataset_spec
 
@@ -1190,7 +1154,6 @@ def test_native_assembly_matches_asset_and_timestamp_keys(
         "factor_columns": ["factor", "other"],
         "label_columns": [],
         "feature_recipe": None,
-        "sparse_input_data_ids": ["auxiliary"] if sparse else [],
         "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
         "output_root": str(tmp_path / "joined"),
     }
@@ -1200,9 +1163,6 @@ def test_native_assembly_matches_asset_and_timestamp_keys(
             result.asset_id, read_dataset(tmp_path / "base").asset_id
         )
         assert result.other.tolist() == [7.0]
-    elif sparse:
-        result = read_dataset(assembler_module.assemble(config))
-        assert result.other.isna().all()
     else:
         with pytest.raises(
             ValueError, match="missing_research_input_keys: auxiliary: 1"

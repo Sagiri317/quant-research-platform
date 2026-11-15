@@ -17,7 +17,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
-    fingerprint_dataset,
     read_dataset,
     write_dataset,
 )

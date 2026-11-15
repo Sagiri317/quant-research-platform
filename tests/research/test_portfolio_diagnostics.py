@@ -579,7 +579,6 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             "industry_level1_code": np.tile(["A01"] * 52 + ["B01"] * 53, 4),
         }
     )
-    panel["industry_level1_code"] = np.tile(["A01"] * 52 + ["B01"] * 53, 4)
     panel["is_nonfinancial_industry"] = True
     panel = panel.assign(
         is_a_share_scope=True,

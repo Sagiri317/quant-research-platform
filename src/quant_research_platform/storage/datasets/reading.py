@@ -619,7 +619,7 @@ def iter_dataset_chunks(
                 pa.types.is_floating(values.type) and pc.any(pc.is_nan(values)).as_py()
             ):
                 raise ValueError("dataset_primary_key_null")
-        # Bare inputs establish consumed-key uniqueness; native streams trust their producer.
+        # Native streams inherit key uniqueness from their producer.
         if not context.native and all(column in batch.schema.names for column in keys):
             if key_index is None:
                 from quant_research_platform.storage.exact_keys import (

@@ -382,9 +382,9 @@ def sample_hft(config):
                     else "unfiltered_observations"
                     if book_status
                     else "inherited_research_membership",
-                    "primary_comparison_horizon_seconds": protocol.DEFAULT_PREDICTION_HORIZONS[
-                        interval
-                    ],
+                    "primary_comparison_horizon_seconds": (
+                        protocol.DEFAULT_PREDICTION_HORIZONS[interval]
+                    ),
                 },
                 "label_semantics": {
                     item.output_column: {

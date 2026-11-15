@@ -34,7 +34,7 @@ def theme_panel(prices):
     return frame
 
 
-def test_return_normalizers_keep_the_first_irregular_predecessor_and_local_missingness():
+def test_return_normalizers_keep_irregular_predecessor_and_local_missingness():
     seconds = np.r_[0, np.arange(5, 606, 3)]
     frame = theme_panel(np.r_[100.0, np.full(len(seconds) - 1, 100.00005)])
     frame["timestamp"] = pd.Timestamp("2024-01-02T01:30:00") + pd.to_timedelta(

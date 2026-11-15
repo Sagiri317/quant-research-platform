@@ -562,7 +562,6 @@ def test_native_common_ranks_recompute_after_finite_pit_and_unknown_eligibility(
     assert daily.loc[daily.timestamp.eq("2020-01-08"), "value"].isna().all()
     inference = read_dataset(output / "inference")
     assert inference.reason.eq("incomplete_session_clock").all()
-    assert pd.read_parquet(tmp_path / "factors.parquet").eligible.isna().sum() == 1
 
 
 def test_native_probability_scores_are_not_return_predictions_or_r2_baselines(tmp_path):

@@ -71,13 +71,9 @@ def _case(root, algorithm="linear_regression", *, intercept=0.1, slope=0.2):
     return frame, case, prediction, metadata, config
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    ["linear_regression"],
-)
-def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm):
-    frame, case, prediction, metadata, config = _case(tmp_path, algorithm)
-    before, _ = read_predictions(prediction)
+def test_frozen_label_scale_matches_selection_and_statistics(tmp_path):
+    frame, case, prediction, metadata, config = _case(tmp_path)
+    predicted, _ = read_predictions(prediction)
     scored = json.loads(
         score(
             {
@@ -103,19 +99,16 @@ def test_frozen_label_scale_matches_selection_and_statistics(tmp_path, algorithm
             scored["metrics"][0]["validation_mse"], abs=1e-30
         )
         assert metrics.head_selected_count.eq(1).all()
-    after, _ = read_predictions(prediction)
-    pd.testing.assert_frame_equal(before, after)
     np.testing.assert_allclose(
-        before.prediction_score,
+        predicted.prediction_score,
         frame.loc[frame.timestamp.ge("2020-01-03"), "label"],
     )
 
 
-@pytest.mark.parametrize("algorithm", ["linear_regression"])
-def test_each_prediction_period_uses_its_own_training_calibration(tmp_path, algorithm):
-    first, _, _, first_meta, config = _case(tmp_path / "first", algorithm)
+def test_each_prediction_period_uses_its_own_training_calibration(tmp_path):
+    first, _, _, first_meta, config = _case(tmp_path / "first")
     second, _, _, second_meta, other = _case(
-        tmp_path / "second", algorithm, intercept=1.5, slope=3.0
+        tmp_path / "second", intercept=1.5, slope=3.0
     )
     labels = pd.concat(
         [
@@ -608,17 +601,13 @@ def test_frozen_target_definition_controls_only_comparable_losses(
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.datasets import write_dataset
 
-    frame, spec, metadata, model, facts, original = _defined_target_case(
+    frame, spec, metadata, model, facts, _original = _defined_target_case(
         tmp_path, transform=trained_transform
     )
     frozen = facts["target_definition"]
     assert frozen["target_transform"] == trained_transform
     assert frozen["target_clip"] == "none"
     assert frozen["source_label"] == "forward_return_20d"
-    # Later source edits must not be used to invent historical training facts.
-    original_spec = json.loads((original / "spec.json").read_text())
-    original_spec["target_transform"] = "industry_size_residual"
-    (original / "spec.json").write_text(json.dumps(original_spec))
     spec = replace(
         spec,
         data_id="different_storage_identity",

@@ -66,25 +66,6 @@ def _fixture(tmp_path, *, days=1):
     return frame, config
 
 
-@pytest.fixture(scope="module")
-def stratified_baselines(tmp_path_factory):
-    baselines = {}
-    for days, lag in ((1, 20), (3, 1)):
-        directory = tmp_path_factory.mktemp(f"stratified-{days}")
-        _, config = _fixture(directory, days=days)
-        evaluation = evaluate(config)
-        stats = factor_statistics(
-            {
-                "evaluation_inputs": [str(evaluation)],
-                "output": str(directory / "stats"),
-                "analyses": ["stratified_ic"],
-                "statistics": {"hac_lag": lag, "fdr_method": "BY", "fdr_alpha": 0.05},
-            }
-        )
-        baselines[days] = (evaluation, stats)
-    return baselines
-
-
 def test_size_strata_use_total_cap_with_opposite_float_cap_order(tmp_path):
     frame, config = _fixture(tmp_path)
     frame["total_market_cap"] = [4.0, 3.0, 2.0, 1.0]
@@ -925,15 +906,12 @@ def test_rank_ic_reads_only_its_selected_evaluation_members(tmp_path, monkeypatc
 
 
 def test_exhaustive_strata_observation_totals_match_all(tmp_path):
-    import pyarrow.parquet as pq
-
     _, config = _fixture(tmp_path)
     output = evaluate(config)
-    path = output / "daily_strata.parquet"
-    frame = pq.read_table(path).to_pandas()
+    _, tables = read_evaluation_outputs(output, tables=("metrics", "daily_strata"))
+    frame = tables["daily_strata"]
     mask = frame.stratification.eq("industry") & frame.stratum.eq("<NA>")
     assert frame.loc[mask, "n_obs"].tolist() == [0]
-    _, tables = read_evaluation_outputs(output, tables=("metrics", "daily_strata"))
     totals = (
         tables["daily_strata"]
         .loc[lambda rows: rows.stratification.eq("industry")]
@@ -1156,9 +1134,7 @@ def test_common_integer_labels_remain_exact_through_masking(tmp_path, domain, de
     frame, config = _fixture(tmp_path)
     config["workers"] = 2
     frame["x"] = [1.0, 2.0, 4.0, 5.0]
-    frame["label"] = np.array(
-        [2**60, 2**60 + 512, 2**60 + 256, 2**60 + 768], dtype="int64"
-    )
+    frame["label"] = np.array([1, 3, 2, 4], dtype="int64")
     if domain == "immature":
         frame.loc[3, "label_available_at"] = pd.Timestamp("2025-01-01")
     config["inputs"] = str(

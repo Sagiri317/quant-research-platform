@@ -4,13 +4,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.models import (
     _target_definition,
 )
 from quant_research_platform.contracts.risk import RISK_STYLE_COLUMNS
-from quant_research_platform.artifacts.outputs.prediction import read_predictions
-from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.research.datasets.assembler import assemble
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit

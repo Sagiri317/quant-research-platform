@@ -521,9 +521,9 @@ def test_depth_commissions_follow_actual_legal_child_notionals():
             "target_quantity": [1_000_100],
             "sellable_quantity": [0],
             "market_type": [4],
-            "mark_price": [1.0],
-            "buy_price": [0.2],
-            "sell_price": [0.1],
+            "mark_price": [10.0],
+            "buy_price": [10.0],
+            "sell_price": [9.99],
             "buy_capacity": [1_000_000.0],
             "sell_capacity": [0.0],
             "adv": [np.nan],
@@ -541,18 +541,18 @@ def test_depth_commissions_follow_actual_legal_child_notionals():
     )
     account = execute_stock_target(
         orders,
-        cash=2_000_000.0,
+        cash=20_000_000.0,
         execution_date=date(2024, 1, 2),
         fee_schedule=fees,
-        assumptions=ExecutionAssumptions(2_000_000.0, 0.0, 0.0, 1.0, (1.0,), 5.0),
-        depth={"a": np.array([[0.2, 1_000_000.0], [10_000.0, 100.0]])},
+        assumptions=ExecutionAssumptions(20_000_000.0, 0.0, 0.0, 1.0, (1.0,), 5.0),
+        depth={"a": np.array([[10.0, 1_000_000.0], [10.01, 100.0]])},
     )
     trade = account.asset_ledger.iloc[0]
     assert trade.executed_quantity == 1_000_100
-    assert trade.executed_delta_notional == pytest.approx(1_200_000.0)
-    # First legal order: 200000 * 1e-5 floors to 5; last: 1000000 * 1e-5 = 10.
-    assert trade.commission_cost == 15.0
-    assert account.post_trade_cash == pytest.approx(799985.0)
+    assert trade.executed_delta_notional == pytest.approx(10_001_001.0)
+    # First legal order: 10000000 * 1e-5 = 100; last: 1001 * 1e-5 floors to 5.
+    assert trade.commission_cost == pytest.approx(105.0, rel=1e-12, abs=1e-10)
+    assert account.post_trade_cash == pytest.approx(9_998_894.0)
 
 
 @pytest.mark.parametrize("fault", ["unknown", "duplicate", "reversed"])

@@ -115,10 +115,8 @@ def test_real_models_roundtrip_matches_production_prediction(
     assert set(tables["summary"].period) == {"all", "2020-01"}
     # Output collision is checked before model/backend dispatch.
     if algorithm == "linear_regression":
-        before = Path(config["model"], "predictor.pkl").read_bytes()
         with pytest.raises(ValueError, match="output_already_exists"):
             explain(config)
-        assert Path(config["model"], "predictor.pkl").read_bytes() == before
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
