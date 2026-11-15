@@ -32,7 +32,7 @@ from quant_research_platform.contracts.time import (
     PredictionWindow,
     TimeWindow,
     prediction_window_mask,
-    time_window_timestamp_interval,
+    time_window_inclusive_bounds,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations.time_series import (
@@ -55,17 +55,10 @@ from quant_research_platform.storage.datasets.reading import (
 _METRICS = ("mse", "rmse", "mae", "ic", "rank_ic", "r2_vs_zero")
 
 
-def _bounds(window):
-    lower, upper, closed = time_window_timestamp_interval(window)
-    return pd.Timestamp(lower), pd.Timestamp(upper) - pd.Timedelta(
-        0 if closed else 1, "ns"
-    )
-
-
 def _window_days(sessions, windows):
     selected = np.zeros(len(sessions), dtype=bool)
     for window in windows:
-        start, end = _bounds(window)
+        start, end = time_window_inclusive_bounds(window)
         selected |= (sessions >= start.normalize()) & (sessions <= end.normalize())
     return sessions[selected]
 
@@ -125,7 +118,7 @@ def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
 
     def frames():
         for read_window, context_only in read_windows:
-            first, last = _bounds(read_window)
+            first, last = time_window_inclusive_bounds(read_window)
             for month in pd.period_range(first, last, freq="M"):
                 # Bound even the chronological reader's overlapping-member sort.
                 window = TimeWindow(
@@ -171,23 +164,23 @@ def _training_daily(inputs, result, facts, *, sessions, evaluation_axis):
 
     parts = []
     with closing_iterator(
-        iter_complete_time_frames(
-            values(), timestamp_column="session", one_timestamp=True
-        )
+        iter_complete_time_frames(values(), timestamp_column="session")
     ) as days:
         for frame in days:
             parts.append(
                 daily_signal_metrics(
                     frame,
                     evaluation_axis=evaluation_axis,
-                    sessions=[frame.session.iloc[0]],
+                    sessions=frame.session.unique(),
                     asset_ids=assets,
                     regression=True,
                     baseline_columns=("zero",),
                 )
             )
     dates = _window_days(sessions, windows)
-    observed = pd.DatetimeIndex([part.timestamp.iloc[0] for part in parts])
+    observed = pd.DatetimeIndex(
+        [timestamp for part in parts for timestamp in part.timestamp.unique()]
+    )
     missing = dates.difference(observed)
     if len(missing):
         empty = pd.DataFrame(
@@ -251,7 +244,7 @@ def _prediction_daily(source, model_id, facts, window, dates):
     clock = pd.DatetimeIndex(pd.to_datetime(parameters["sessions"]))
     if not _window_days(clock, (window,)).equals(dates):
         raise ValueError("model_period_prediction_sessions_mismatch")
-    start, end = _bounds(window)
+    start, end = time_window_inclusive_bounds(window)
     for metadata in predictions:
         if metadata["prediction_rows"] == 0:
             continue
@@ -260,7 +253,7 @@ def _prediction_daily(source, model_id, facts, window, dates):
         upper = (
             pd.Timestamp(metadata["effective_prediction_end"])
             if extent.end is None
-            else _bounds(extent)[1]
+            else time_window_inclusive_bounds(extent)[1]
         )
         if lower > end or upper < start:
             continue
@@ -361,8 +354,12 @@ def _validation_rows(selection, common):
             "aggregation": "sqrt_daily_equal_weight_mse"
             if metric == "rmse"
             else "daily_equal_weight_mean",
-            "window_start": None if window is None else _bounds(window)[0],
-            "window_end": None if window is None else _bounds(window)[1],
+            "window_start": None
+            if window is None
+            else time_window_inclusive_bounds(window)[0],
+            "window_end": None
+            if window is None
+            else time_window_inclusive_bounds(window)[1],
             "cutoff": None
             if selection is None
             else pd.Timestamp(
@@ -440,7 +437,7 @@ def evaluate_model_periods(config: Mapping) -> Path:
             period, {"period_id", "prediction_window", "models"}, set()
         )
         window = TimeWindow(**period["prediction_window"])
-        start, end = _bounds(window)
+        start, end = time_window_inclusive_bounds(window)
         if start != start.normalize() or end != end.normalize() + pd.Timedelta(
             days=1
         ) - pd.Timedelta(1, "ns"):
@@ -495,12 +492,12 @@ def evaluate_model_periods(config: Mapping) -> Path:
                         **common,
                         "stage": "training",
                         "source": "frozen_model_forward",
-                        "window_start": _bounds(TimeWindow(**facts["fit_windows"][0]))[
-                            0
-                        ],
-                        "window_end": _bounds(TimeWindow(**facts["fit_windows"][-1]))[
-                            1
-                        ],
+                        "window_start": time_window_inclusive_bounds(
+                            TimeWindow(**facts["fit_windows"][0])
+                        )[0],
+                        "window_end": time_window_inclusive_bounds(
+                            TimeWindow(**facts["fit_windows"][-1])
+                        )[1],
                         "cutoff": facts["fit_cutoff"],
                     },
                 )
@@ -513,8 +510,8 @@ def evaluate_model_periods(config: Mapping) -> Path:
                         **common,
                         "stage": "prediction",
                         "source": "saved_prediction_daily",
-                        "window_start": _bounds(window)[0],
-                        "window_end": _bounds(window)[1],
+                        "window_start": time_window_inclusive_bounds(window)[0],
+                        "window_end": time_window_inclusive_bounds(window)[1],
                         "cutoff": cutoff,
                     },
                 )

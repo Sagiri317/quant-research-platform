@@ -160,7 +160,7 @@ def test_fit_save_prepare_and_assemble_only_after_cutoff(tmp_path, unknown_kind)
             "inputs": fit_paths,
             "asset_ids": ["000001.SZ"],
             "time_window": {"start": "2018-02-14", "end": "2018-02-14"},
-            "fit_cutoff": "2018-02-15T00:00:00",
+            "fit_cutoff": "2018-02-14T23:59:59.999999999",
             "initial_parameters": {
                 "baseline": [0.2, 0.2],
                 "branching": [[0.1, 0.1], [0.1, 0.1]],

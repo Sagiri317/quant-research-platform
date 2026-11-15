@@ -231,10 +231,8 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
     versions = []
     for released, snapshots, _updated in revision_snapshots(inputs):
         states = _futures_states(
-            snapshots["futures"].assign(product=product),
-            snapshots["contracts"].assign(product=product)
-            if "contracts" in snapshots
-            else contracts,
+            snapshots["futures"],
+            snapshots.get("contracts"),
             snapshots.get("index", index_prices),
             product=product,
         )
@@ -246,10 +244,7 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
 
 def _futures_states(futures, contracts, index_prices, *, product):
     index_id = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}[product]
-    f = _canonical(
-        futures.loc[futures["product"].eq(product)],
-        ("close", "volume", "open_interest"),
-    )
+    f = futures.sort_values(["asset_id", "timestamp"], kind="stable")
     if f.empty:
         return pd.DataFrame(columns=["asset_id", "timestamp", "available_at", *FUTURES])
     sessions = pd.DatetimeIndex(f.timestamp.unique()).sort_values()
@@ -270,16 +265,11 @@ def _futures_states(futures, contracts, index_prices, *, product):
     f = _quote_session_rows(f, sessions)
     # Metadata observation dates select the applicable contract facts. Their
     # publication clocks gate derived results, not inclusion of daily quotes.
-    c = (
-        contracts.loc[contracts["product"].eq(product)]
-        if contracts is not None
-        else pd.DataFrame()
-    )
+    c = contracts if contracts is not None else pd.DataFrame()
     if c.empty:
         f["expiry_date"] = f["_contract_available"] = pd.NaT
     else:
-        fields = ("expiry_date", "open_date") if "open_date" in c else ("expiry_date",)
-        c = _canonical(c, fields).rename(
+        c = c.sort_values(["asset_id", "timestamp"], kind="stable").rename(
             columns={"available_at": "_contract_available"}
         )
         f["_in_quote_span"] = True

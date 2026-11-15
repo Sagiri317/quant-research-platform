@@ -28,7 +28,7 @@ from quant_research_platform.contracts.time import (
     _window_payload,
     prediction_window_mask,
     time_value_isoformat,
-    time_window_timestamp_interval,
+    time_window_inclusive_bounds,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -49,14 +49,14 @@ def _fit_read_windows(windows, *, sequence, context_start=None):
     """Keep loss windows separate from feature-only sequence gaps."""
     previous = None if context_start is None else pd.Timestamp(context_start)
     for window in windows:
-        lower, upper, closed = time_window_timestamp_interval(window)
-        if sequence and previous is not None and previous < pd.Timestamp(lower):
+        lower, upper = time_window_inclusive_bounds(window)
+        if sequence and previous is not None and previous < lower:
             yield (
-                TimeWindow(previous, pd.Timestamp(lower) - pd.Timedelta(1, "ns")),
+                TimeWindow(previous, lower - pd.Timedelta(1, "ns")),
                 True,
             )
         yield window, False
-        previous = pd.Timestamp(upper) + pd.Timedelta(1 if closed else 0, "ns")
+        previous = upper + pd.Timedelta(1, "ns")
 
 
 def _prepare_fit(

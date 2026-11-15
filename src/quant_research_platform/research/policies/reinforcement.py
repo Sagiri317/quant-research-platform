@@ -30,6 +30,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.risk import RiskInputsUnavailable
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    time_window_inclusive_bounds,
     time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -91,18 +92,12 @@ def train_policy(config):
     validation_episodes = [
         _episode(value) for value in config.get("validation_episodes", [])
     ]
+    bounds = [
+        time_window_inclusive_bounds(TimeWindow(**item["window"]))
+        for item in (*episodes, *validation_episodes)
+    ]
     cutoff = pd.Timestamp(config["fit_cutoff"])
-    if (
-        pd.isna(cutoff)
-        or not episodes
-        or any(
-            pd.Timestamp(
-                time_window_timestamp_interval(TimeWindow(**item["window"]))[1]
-            )
-            > cutoff
-            for item in (*episodes, *validation_episodes)
-        )
-    ):
+    if pd.isna(cutoff) or not episodes or any(end > cutoff for _, end in bounds):
         raise ValueError("policy_training_after_cutoff")
     stopping = None
     if validation_episodes:
@@ -113,18 +108,8 @@ def train_policy(config):
         )
         if any(type(value) is not int or value < 1 for value in stopping.values()):
             raise ValueError("policy_early_stopping_invalid")
-        train_end = max(
-            pd.Timestamp(
-                time_window_timestamp_interval(TimeWindow(**item["window"]))[1]
-            )
-            for item in episodes
-        )
-        validation_start = min(
-            pd.Timestamp(
-                time_window_timestamp_interval(TimeWindow(**item["window"]))[0]
-            )
-            for item in validation_episodes
-        )
+        train_end = max(end for _, end in bounds[: len(episodes)])
+        validation_start = min(start for start, _ in bounds[len(episodes) :])
         if train_end >= validation_start:
             raise ValueError("policy_validation_not_after_training")
         probe = TradingEnv([*episodes, *validation_episodes])

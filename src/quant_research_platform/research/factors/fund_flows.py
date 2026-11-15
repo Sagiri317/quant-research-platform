@@ -572,17 +572,16 @@ def nport_flow_states(funds, holdings):
     )
     events = []
     for series, block in f.groupby("series_id", sort=False):
-        block = block.sort_values(["timestamp", "available_at"], kind="stable")
-        for row in block.itertuples():
-            prior = block.loc[
-                block.timestamp.le(
-                    (row.timestamp.to_period("M") - 3).end_time.normalize()
-                )
-                & block.available_at.le(row.available_at)
-            ]
+        known = {}
+        for released, versions in block.groupby("available_at", sort=True):
+            for row in versions.itertuples():
+                known[row.timestamp] = row
+            row = known[max(known)]
+            cutoff = (row.timestamp.to_period("M") - 3).end_time.normalize()
+            prior = max((period for period in known if period <= cutoff), default=None)
             vector, rate = np.zeros(n), 0.0
-            if len(prior):
-                previous = prior.iloc[-1]
+            if prior is not None:
+                previous = known[prior]
                 flow = [getattr(row, name) for name in flow_fields]
                 vector = (
                     np.maximum(positions.get(previous.accession, np.zeros(n)), 0)
@@ -592,19 +591,15 @@ def nport_flow_states(funds, holdings):
                 rate = np.nan
                 if previous.net_assets_usd > 0 and np.isfinite(flow).all():
                     rate = (sum(flow[:6]) - sum(flow[6:])) / previous.net_assets_usd
-            events.append((row.available_at, row.timestamp, series, vector, rate))
+            events.append((released, row.timestamp, series, vector, rate))
     events.sort(key=lambda row: row[:2])
     active = {}
     weight, square, pressure = (np.zeros(n) for _ in range(3))
     unknown = np.zeros(n, dtype=int)
     rows = []
-    for date, report, series, vector, rate in events:
-        old_report, old, old_rate = active.get(
-            series, (pd.Timestamp.min, np.zeros(n), 0)
-        )
-        if report < old_report:
-            continue
-        active[series] = report, vector, rate
+    for date, _report, series, vector, rate in events:
+        old, old_rate = active.get(series, (np.zeros(n), 0))
+        active[series] = vector, rate
         # Unknown flows affect held securities, not known absent positions.
         current_unknown = np.isnan(vector) | ((vector > 0) & np.isnan(rate))
         prior_unknown = np.isnan(old) | ((old > 0) & np.isnan(old_rate))

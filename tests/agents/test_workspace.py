@@ -440,7 +440,6 @@ def test_factor_mining_runs_native_source_through_local_terminal(tmp_path):
     other.mkdir()
     agent_config_template = native_config(other)
     search = agent_config_template["tools"]["search"]["config"]
-    search = agent_config_template["tools"]["search"]["config"]
     search.update(
         label="label",
         train_window=search["train_window"],

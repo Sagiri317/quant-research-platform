@@ -18,7 +18,7 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    time_window_timestamp_interval,
+    time_window_inclusive_bounds,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share.level2 import (
@@ -166,7 +166,7 @@ def fit_hawkes(config):
     ):
         raise ValueError("hawkes_asset_ids_invalid")
     window = TimeWindow(**config["time_window"])
-    lower, upper, _ = time_window_timestamp_interval(window)
+    lower, upper = time_window_inclusive_bounds(window)
     cutoff = pd.Timestamp(config["fit_cutoff"])
     if pd.isna(cutoff) or cutoff.tz is not None or pd.Timestamp(upper) > cutoff:
         raise ValueError("hawkes_training_after_cutoff")

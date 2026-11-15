@@ -706,6 +706,39 @@ def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market)
         assert len(list(ledger.iter_chunks())) == 3
 
 
+@pytest.mark.parametrize("missing_input", [None, "panel", "execution"])
+def test_public_portfolio_consumes_selected_keys_from_larger_inputs(
+    tmp_path, missing_input
+):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+    from tests.research.test_portfolio_missing_predictions import (
+        _public_prediction_config,
+    )
+
+    config = _public_prediction_config(tmp_path)
+    config["inputs"]["dataset"] = {
+        "path": config["inputs"]["dataset"],
+        "row_filters": [["asset_id", "in", ["a5"]]],
+    }
+    if missing_input is not None:
+        config["inputs"][missing_input] = {
+            "path": config["inputs"][missing_input],
+            "row_filters": [["asset_id", "in", ["a4"]]],
+        }
+        with pytest.raises(
+            PortfolioTargetBlocked, match="portfolio_session_key_missing"
+        ):
+            portfolio_production.backtest(config)
+    else:
+        ledger = read_portfolio_ledger_artifact(portfolio_production.backtest(config))
+        batches = list(ledger.iter_chunks())
+        assert len(batches) == 3
+        assert {row.asset_id for batch in batches for row in batch.trades} == {"a5"}
+
+
 @pytest.mark.parametrize("market", [None, "a_share", "other_market"])
 def test_risk_context_checks_only_consumed_declared_market(tmp_path, market):
     from contextlib import ExitStack

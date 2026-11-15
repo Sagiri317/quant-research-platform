@@ -30,12 +30,12 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    time_window_inclusive_bounds,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.statistics import (
     _statistics_input_session,
     _statistics_label_availability,
-    _statistics_window_bounds,
 )
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
@@ -108,14 +108,15 @@ def build_a_share_statistics_tables(
         for (period, family), entry in model_entries.items()
         if (cutoff := (entry.get("model_facts") or {}).get("selection_cutoff"))
         is not None
-        and pd.Timestamp(cutoff) >= _statistics_window_bounds(period_windows[period])[0]
+        and pd.Timestamp(cutoff)
+        >= time_window_inclusive_bounds(period_windows[period])[0]
     }
     retrospective_selections = {
         period
         for period, selection in selections.items()
         if selection.get("cutoff") is not None
         and pd.Timestamp(selection["cutoff"])
-        >= _statistics_window_bounds(period_windows[period])[0]
+        >= time_window_inclusive_bounds(period_windows[period])[0]
     }
     selection_reason = "selection_reuses_evaluation_window"
     inference_blocker = (
@@ -161,9 +162,10 @@ def build_a_share_statistics_tables(
     repetitions = statistics.get("bootstrap_repetitions", 2000)
     model_window = time_window
     period_bounds = {
-        key: _statistics_window_bounds(window) for key, window in period_windows.items()
+        key: time_window_inclusive_bounds(window)
+        for key, window in period_windows.items()
     }
-    model_start, model_end = _statistics_window_bounds(model_window)
+    model_start, model_end = time_window_inclusive_bounds(model_window)
     family_ids = (
         tuple(
             family["family_id"]
@@ -216,11 +218,11 @@ def build_a_share_statistics_tables(
             mature = legal_training_rows(
                 session,
                 fitting_cutoff=(
-                    _statistics_window_bounds(
+                    time_window_inclusive_bounds(
                         TimeWindow(config["label_cutoff"], config["label_cutoff"])
                     )[1]
                     if "label_cutoff" in config
-                    else _statistics_window_bounds(model_window)[1]
+                    else time_window_inclusive_bounds(model_window)[1]
                 ),
                 availability_column=availability,
                 target_column=primary_label,
@@ -240,13 +242,13 @@ def build_a_share_statistics_tables(
                     legal_training_rows(
                         session,
                         fitting_cutoff=(
-                            _statistics_window_bounds(
+                            time_window_inclusive_bounds(
                                 TimeWindow(
                                     config["label_cutoff"], config["label_cutoff"]
                                 )
                             )[1]
                             if "label_cutoff" in config
-                            else _statistics_window_bounds(model_window)[1]
+                            else time_window_inclusive_bounds(model_window)[1]
                         ),
                         availability_column=raw_availability,
                         target_column=raw_label,
@@ -605,11 +607,11 @@ def _model_target_metadata(config, spec, window, manifest):
     label = config["evaluation"]["primary_label"]
     availability = _statistics_label_availability(config["evaluation"], spec)
     cutoff = (
-        _statistics_window_bounds(
+        time_window_inclusive_bounds(
             TimeWindow(config["label_cutoff"], config["label_cutoff"])
         )[1]
         if "label_cutoff" in config
-        else _statistics_window_bounds(window)[1]
+        else time_window_inclusive_bounds(window)[1]
     )
     return {
         "selection_group": config.get("selection_group", "explicit"),
@@ -1119,8 +1121,8 @@ def model_statistics(config):
             if not isinstance(period_id, str) or not period_id or period_id in periods:
                 raise ValueError("statistics_prediction_period_id_invalid")
             period = TimeWindow(**item["window"])
-            start, end = _statistics_window_bounds(period)
-            requested_start, requested_end = _statistics_window_bounds(window)
+            start, end = time_window_inclusive_bounds(period)
+            requested_start, requested_end = time_window_inclusive_bounds(window)
             if (
                 start < requested_start
                 or end > requested_end

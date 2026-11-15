@@ -1076,6 +1076,8 @@ def test_native_passive_pressure_preserves_each_funds_unknown_contribution(
         "ambiguous",
         "ambiguous_reversed",
         "ambiguous_same_flow",
+        "prior_nav_revision",
+        "prior_holdings_revision",
     ],
 )
 def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
@@ -1121,6 +1123,19 @@ def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
             [funds, funds.loc[funds.accession.eq("a0")].assign(net_assets_usd=200.0)],
             ignore_index=True,
         )
+    elif missing.endswith("_revision"):
+        funds = pd.concat(
+            [
+                funds,
+                funds.loc[funds.accession.eq("a0")].assign(
+                    accession="revised",
+                    filing_type="NPORT-P/A",
+                    available_at=pd.Timestamp("2024-05-03"),
+                    net_assets_usd=200.0 if missing == "prior_nav_revision" else 100.0,
+                ),
+            ],
+            ignore_index=True,
+        )
     else:
         funds.loc[funds.accession.eq("a1"), "filing_type"] = "NPORT-P/A"
         amendment = funds.loc[funds.accession.eq("a1")]
@@ -1158,6 +1173,17 @@ def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
             ],
             ignore_index=True,
         )
+    elif missing.endswith("_revision"):
+        holdings = pd.concat(
+            [
+                holdings,
+                holdings.loc[holdings.accession.eq("a0")].assign(
+                    accession="revised",
+                    value=60.0 if missing == "prior_holdings_revision" else 20.0,
+                ),
+            ],
+            ignore_index=True,
+        )
     holdings["timestamp"] = holdings.accession.map(
         funds.drop_duplicates("accession").set_index("accession").timestamp
     )
@@ -1165,7 +1191,7 @@ def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
     decisions = pd.DataFrame(
         [
             (asset, pd.Timestamp(date))
-            for date in ("2024-05-02", "2024-08-02")
+            for date in ("2024-05-02", "2024-05-04", "2024-08-02")
             for asset in ("SPY", "XLK")
         ],
         columns=["asset_id", "timestamp"],
@@ -1212,13 +1238,22 @@ def test_native_nport_unknown_flow_dependencies_stay_local_and_recover(
         )
     )
     result = read_dataset(output).set_index(["timestamp", "asset_id"])[name]
-    if missing == "ambiguous_same_flow":
+    if missing == "ambiguous_same_flow" or missing.endswith("_revision"):
         assert result.loc[("2024-05-02", "SPY")] == pytest.approx(
             0.1 * (20**2 + 40**2) / 60**2
         )
     else:
         assert pd.isna(result.loc[("2024-05-02", "SPY")])
     assert result.loc[("2024-05-02", "XLK")] == pytest.approx(0.1)
+    if missing == "prior_nav_revision":
+        assert result.loc[("2024-05-04", "SPY")] == pytest.approx(
+            ((0.05 * 20 + 0.1 * 40) / 60) * (20**2 + 40**2) / 60**2
+        )
+    elif missing == "prior_holdings_revision":
+        assert result.loc[("2024-05-04", "SPY")] == pytest.approx(
+            0.1 * (60**2 + 40**2) / 100**2
+        )
+    assert result.loc[("2024-05-04", "XLK")] == pytest.approx(0.1)
     assert result.loc[("2024-08-02", "SPY")] == pytest.approx(
         0.05 * (30**2 + 40**2) / 70**2
     )

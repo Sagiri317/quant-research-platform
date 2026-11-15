@@ -924,3 +924,19 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
                 "output": str(tmp_path / "overlap"),
             }
         )
+    with pytest.raises(ValueError, match="policy_validation_not_after_training"):
+        train_policy(
+            {
+                **config,
+                "validation_episodes": [
+                    {
+                        **validation,
+                        "window": {
+                            "start": episode["window"]["end"],
+                            "end": validation["window"]["end"],
+                        },
+                    }
+                ],
+                "output": str(tmp_path / "shared-endpoint"),
+            }
+        )

@@ -69,6 +69,16 @@ def time_window_timestamp_interval(
     return start, end, False
 
 
+def time_window_inclusive_bounds(
+    time_window: TimeWindow,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Return the first and last nanosecond belonging to a bounded window."""
+    lower, upper, closed = time_window_timestamp_interval(time_window)
+    return pd.Timestamp(lower), pd.Timestamp(upper) - pd.Timedelta(
+        0 if closed else 1, "ns"
+    )
+
+
 def time_value_isoformat(
     value: date | datetime,
     *,

@@ -2540,10 +2540,8 @@ def _bool_series(values: pd.Series, error: str) -> pd.Series:
 def _validate_input_keys(dataset: pd.DataFrame, panel: pd.DataFrame) -> None:
     dataset_keys = _session_keys(dataset)
     panel_keys = _session_keys(panel)
-    if dataset_keys != panel_keys:
-        if dataset_keys.difference(panel_keys):
-            raise PortfolioTargetBlocked("portfolio_session_key_missing")
-        raise ValueError("portfolio_input_key_alignment_invalid")
+    if dataset_keys.difference(panel_keys):
+        raise PortfolioTargetBlocked("portfolio_session_key_missing")
 
 
 def _session_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:

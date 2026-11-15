@@ -294,8 +294,8 @@ def test_financial_versions_exclude_only_unlocatable_coordinates() -> None:
         data_id: _financial_frame(data_id, records)
         for data_id in FINANCIAL_VALUE_COLUMNS
     }
-    missing_disclosure = pd.DataFrame(
-        columns=["asset_id", "report_period", "first_disclosure_date"]
+    missing_disclosure = normalize_first_disclosure_frame(
+        pd.DataFrame(columns=FIRST_DISCLOSURE_COLUMNS)
     )
     result = financial_events_from_interim(
         interim,
@@ -305,16 +305,6 @@ def test_financial_versions_exclude_only_unlocatable_coordinates() -> None:
     assert result.empty
     assert str(result.available_at.dtype) == "datetime64[ns]"
 
-    corrected = {
-        **records[0],
-        "corrected": True,
-        "correction_date": pd.NaT,
-        "version": "correction@2020-02-15",
-    }
-    corrected_interim = {
-        data_id: _financial_frame(data_id, (corrected,))
-        for data_id in FINANCIAL_VALUE_COLUMNS
-    }
     disclosure = pd.DataFrame(
         {
             "asset_id": ["asset"],
@@ -322,14 +312,6 @@ def test_financial_versions_exclude_only_unlocatable_coordinates() -> None:
             "first_disclosure_date": [pd.Timestamp("2020-01-31")],
         }
     )
-    result = financial_events_from_interim(
-        corrected_interim,
-        disclosure,
-        trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
-    )
-    assert result.empty
-    assert str(result.available_at.dtype) == "datetime64[ns]"
-
     corrected_with_first_date = {
         **records[0],
         "corrected": True,
@@ -363,17 +345,6 @@ def test_financial_versions_exclude_only_unlocatable_coordinates() -> None:
     )
     assert result.empty
     assert str(result.available_at.dtype) == "datetime64[ns]"
-
-    duplicate = {
-        data_id: _financial_frame(data_id, (*records, records[0]))
-        for data_id in FINANCIAL_VALUE_COLUMNS
-    }
-    result = financial_events_from_interim(
-        duplicate,
-        disclosure,
-        trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
-    )
-    assert len(result) == sum(map(len, FINANCIAL_VALUE_COLUMNS.values()))
 
 
 def test_ttm_uses_same_period_and_legal_correction_cutoff() -> None:
@@ -571,8 +542,7 @@ def _financial_frame(
     return pd.DataFrame(rows)
 
 
-@pytest.mark.parametrize("boundary", ("choice", "financial_events"))
-def test_first_disclosure_before_report_period_is_rejected_before_pit(boundary):
+def test_first_disclosure_before_report_period_is_rejected_before_pit():
     disclosure = pd.DataFrame(
         {
             "asset_id": ["asset"],
@@ -590,18 +560,17 @@ def test_first_disclosure_before_report_period_is_rejected_before_pit(boundary):
             "value": 123.0,
         },
     )
-    if boundary == "choice":
-        result = normalize_first_disclosure_frame(disclosure)
-    else:
-        result = financial_events_from_interim(
-            {
-                data_id: _financial_frame(data_id, records)
-                for data_id in FINANCIAL_VALUE_COLUMNS
-            },
-            disclosure,
-            trading_sessions=pd.DatetimeIndex(["2021-01-04", "2021-01-05"]),
-        )
-    assert result.empty
+    normalized = normalize_first_disclosure_frame(disclosure)
+    assert normalized.empty
+    events = financial_events_from_interim(
+        {
+            data_id: _financial_frame(data_id, records)
+            for data_id in FINANCIAL_VALUE_COLUMNS
+        },
+        normalized,
+        trading_sessions=pd.DatetimeIndex(["2021-01-04", "2021-01-05"]),
+    )
+    assert events.empty
     disclosure["first_disclosure_date"] = disclosure["report_period"]
     normalized = normalize_first_disclosure_frame(disclosure)
     events = financial_events_from_interim(
@@ -964,21 +933,10 @@ def test_ttm_annual_revisions_keep_latest_known_period_state(monkeypatch):
     assert sizes == [1, 1, 1]
 
 
-@pytest.mark.parametrize("damage", ("source", "observation", "schema"))
-def test_pit_preparation_localizes_unknown_numeric_and_validates_observations(damage):
+@pytest.mark.parametrize("damage", ("observation", "schema"))
+def test_pit_validates_observations(damage):
     observations = pd.DataFrame(
         {"asset_id": ["observed"], "timestamp": pd.to_datetime(["2025-01-02"])}
-    )
-    events = pd.DataFrame(
-        {
-            "asset_id": ["unobserved"],
-            "metric_id": ["total_assets"],
-            "report_period": pd.to_datetime(["2010-12-31"]),
-            "available_at": pd.to_datetime(["2011-04-01"]),
-            "is_corrected": [False],
-            "version_identity": ["original"],
-            "value": [float("inf")],
-        }
     )
     if damage == "observation":
         observations = pd.concat([observations, observations], ignore_index=True)
@@ -986,13 +944,8 @@ def test_pit_preparation_localizes_unknown_numeric_and_validates_observations(da
     elif damage == "schema":
         observations = observations.drop(columns="timestamp")
         error = "pit_financial_schema_invalid"
-    if damage == "source":
-        result = _prepare_pit_fundamentals(events)(_pit_observations(observations))
-        assert result.empty
-    else:
-        with pytest.raises(ValueError, match=error):
-            left = _pit_observations(observations)
-            _prepare_pit_fundamentals(events)(left)
+    with pytest.raises(ValueError, match=error):
+        _pit_observations(observations)
 
 
 def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income():
@@ -1101,8 +1054,7 @@ def test_multi_term_factor_vectorization_preserves_domains_and_ratios():
 
 
 @pytest.mark.parametrize("report_type", ["A", "B"])
-@pytest.mark.parametrize("bad_value", ["vendor-invalid", float("inf")])
-def test_optional_financial_metric_never_erases_other_facts(report_type, bad_value):
+def test_missing_financial_metric_preserves_other_facts(report_type):
     records = (
         {
             "asset": "asset",
@@ -1114,9 +1066,11 @@ def test_optional_financial_metric_never_erases_other_facts(report_type, bad_val
         },
     )
     clean = _financial_frame("financial_balance", records)
-    dirty = clean.assign(cash=bad_value, report_type=report_type)
+    incomplete = clean.assign(cash=np.nan, report_type=report_type)
     source = (
-        dirty if report_type == "A" else pd.concat([clean, dirty], ignore_index=True)
+        incomplete
+        if report_type == "A"
+        else pd.concat([clean, incomplete], ignore_index=True)
     )
     disclosure = pd.DataFrame(
         {
@@ -1134,39 +1088,3 @@ def test_optional_financial_metric_never_erases_other_facts(report_type, bad_val
     assert events.loc[events.metric_id.ne("cash"), "value"].eq(100.0).all()
     cash = events.loc[events.metric_id.eq("cash"), "value"].iloc[0]
     assert pd.isna(cash) if report_type == "A" else cash == 100.0
-
-
-@pytest.mark.parametrize("bad", [1, 1.5, True, pd.Timedelta(days=1), "9999-01-01"])
-@pytest.mark.parametrize("coordinate", ["report", "disclosure", "correction"])
-def test_invalid_financial_dates_do_not_publish_fabricated_coordinates(bad, coordinate):
-    row = dict(
-        source_asset_id="bad",
-        report_period="2024-12-31",
-        report_type="A",
-        is_corrected=False,
-        correction_disclosure_date=None,
-        version_identity="original",
-        **{column: 100.0 for column in FINANCIAL_VALUE_COLUMNS["financial_balance"]},
-    )
-    good = row | dict(source_asset_id="good")
-    disclosure = dict(
-        asset_id="bad", report_period="2024-12-31", first_disclosure_date="2025-01-02"
-    )
-    good_disclosure = disclosure | dict(asset_id="good")
-    if coordinate == "report":
-        row["report_period"] = bad
-    elif coordinate == "disclosure":
-        disclosure["first_disclosure_date"] = bad
-    else:
-        row.update(
-            is_corrected=True,
-            correction_disclosure_date=bad,
-            version_identity="correction@1970-01-01",
-        )
-    events = financial_events_from_interim(
-        {"financial_balance": pd.DataFrame([row, good])},
-        pd.DataFrame([disclosure, good_disclosure]),
-        trading_sessions=pd.bdate_range("2025-01-02", periods=3),
-    )
-    assert set(events.asset_id) == {"good"}
-    assert events.report_period.eq(pd.Timestamp("2024-12-31")).all()

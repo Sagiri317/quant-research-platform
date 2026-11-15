@@ -70,8 +70,8 @@ def test_formula_search_retains_undefined_and_applies_frozen_selection(
         "baseline_columns": [],
         "label": "label",
         "train_window": {"start": "2020-01-01", "end": "2020-01-03"},
-        "validation_window": {"start": "2020-01-05", "end": "2020-01-07"},
-        "train_cutoff": "2020-01-04",
+        "validation_window": {"start": "2020-01-04", "end": "2020-01-07"},
+        "train_cutoff": "2020-01-03T23:59:59.999999999",
         "selection_cutoff": "2020-01-08",
         "method": method,
         "budget": 4,
@@ -96,6 +96,17 @@ def test_formula_search_retains_undefined_and_applies_frozen_selection(
         for malformed in ("x", [1]):
             with pytest.raises(ValueError, match="expressions_must_be_string_list"):
                 search_factors({**config, "expressions": malformed})
+        with pytest.raises(ValueError, match="factor_search_windows_not_chronological"):
+            search_factors(
+                {
+                    **config,
+                    "train_window": {
+                        "start": "2020-01-01T00:00:00",
+                        "end": "2020-01-04T00:00:00",
+                    },
+                    "train_cutoff": "2020-01-04T00:00:00",
+                }
+            )
         assert not (tmp_path / "search.json").exists()
     saved = search_factors(config)
     result = parse_qrp_json_object(saved.read_bytes())

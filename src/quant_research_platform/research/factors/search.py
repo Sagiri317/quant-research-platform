@@ -13,6 +13,7 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    time_window_inclusive_bounds,
     time_window_timestamp_interval,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -182,9 +183,7 @@ def search_factors(config):
         raise ValueError("factor_search_windows_invalid")
     if not config["columns"] or type(config["seed"]) is not int or config["seed"] < 0:
         raise ValueError("factor_search_inputs_invalid")
-    train_end = pd.Timestamp(
-        time_window_timestamp_interval(TimeWindow(**config["train_window"]))[1]
-    )
+    train_end = time_window_inclusive_bounds(TimeWindow(**config["train_window"]))[1]
     val_start = pd.Timestamp(
         time_window_timestamp_interval(TimeWindow(**config["validation_window"]))[0]
     )

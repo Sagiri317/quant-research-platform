@@ -405,9 +405,15 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
     policy_ledger = output / "ledger"
     daily_model = train_policy(
         {
-            "episodes": [episode],
+            "episodes": [
+                {**episode, "window": {"start": "2022-12-30", "end": "2023-01-03"}}
+            ],
+            "validation_episodes": [
+                {**episode, "window": {"start": "2023-01-04", "end": "2023-01-06"}}
+            ],
+            "early_stopping": {"eval_freq": 4, "patience": 1, "min_evals": 1},
             "output": str(tmp_path / "daily-ppo"),
-            "fit_cutoff": "2023-01-07",
+            "fit_cutoff": "2023-01-06T23:59:59.999999999",
             "timesteps": 4,
             "seed": 1,
             "device": "cpu",

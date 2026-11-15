@@ -22,13 +22,13 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import (
     TimeWindow,
+    time_window_inclusive_bounds,
 )
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.statistics import (
     _statistics_input_session,
     _statistics_label_availability,
-    _statistics_window_bounds,
 )
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
@@ -131,11 +131,11 @@ def build_a_share_factor_statistics_tables(
         )
     )
     cutoff = (
-        _statistics_window_bounds(
+        time_window_inclusive_bounds(
             TimeWindow(config["label_cutoff"], config["label_cutoff"])
         )[1]
         if "label_cutoff" in config
-        else _statistics_window_bounds(window)[1]
+        else time_window_inclusive_bounds(window)[1]
     )
     business_columns = {
         *((primary_label,) if uses_label else ()),
@@ -805,8 +805,8 @@ def _factor_statistics_from_evaluations(config):
             raise ValueError("factor_statistics_evaluation_inputs_incompatible")
         binding = current
         requested = TimeWindow(**config["window"])
-        low, high = _statistics_window_bounds(requested)
-        original_low, original_high = _statistics_window_bounds(
+        low, high = time_window_inclusive_bounds(requested)
+        original_low, original_high = time_window_inclusive_bounds(
             TimeWindow(**metadata["window"])
         )
         if low < original_low or high > original_high:
@@ -957,7 +957,7 @@ def _factor_statistics_from_evaluations(config):
             )
 
             declared_sessions = evaluation_sessions(declared_sessions)
-            low, high = _statistics_window_bounds(TimeWindow(**config["window"]))
+            low, high = time_window_inclusive_bounds(TimeWindow(**config["window"]))
             declared_sessions = declared_sessions[
                 (declared_sessions >= low.normalize())
                 & (declared_sessions <= high.normalize())

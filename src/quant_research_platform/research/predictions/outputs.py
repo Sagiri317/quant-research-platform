@@ -2,10 +2,7 @@
 
 from quant_research_platform.contracts.models import DEEPLOB_ALGORITHMS
 from quant_research_platform.contracts.time import prediction_window_mask
-from quant_research_platform.contracts.validation import (
-    strict_finite_numeric_series,
-    strict_timestamp_series,
-)
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.deeplob import complete_book_rows
 
@@ -38,12 +35,6 @@ def prediction_rows(frame, metadata, window, *, include_context=False):
             scoped,
             mode=metadata["sample_filter_mode"],
             metadata_key="sample_filter_mode",
-        )
-    for column in metadata["input_columns"]:
-        strict_finite_numeric_series(
-            filtered[column],
-            error=f"invalid_prediction_input: {column}",
-            allow_null=True,
         )
     if not include_context:
         filtered = filtered.loc[prediction_input_mask(filtered, metadata)]

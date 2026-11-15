@@ -2,26 +2,14 @@
 
 from __future__ import annotations
 
-import pandas as pd
-
 from quant_research_platform.contracts.columns import _validate_asset_time_key
 from quant_research_platform.contracts.experiments import (
     training_availability_columns,
-)
-from quant_research_platform.contracts.time import (
-    time_window_timestamp_interval,
 )
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     open_dataset_session,
 )
-
-
-def _statistics_window_bounds(window):
-    start, stop, inclusive = time_window_timestamp_interval(window)
-    return pd.Timestamp(start), pd.Timestamp(stop) if inclusive else pd.Timestamp(
-        stop
-    ) - pd.Timedelta(1, "ns")
 
 
 def _statistics_input_session(config, window):

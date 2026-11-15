@@ -10,9 +10,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import (
-    strict_bool_series,
-    strict_finite_numeric_series,
-    strict_real_numeric_series,
     strict_string_series,
     strict_timestamp_series,
 )
@@ -63,26 +60,8 @@ def financial_events_from_interim(
         raise ValueError("financial_interim_set_invalid")
     if not set(DISCLOSURE_COLUMNS).issubset(disclosures.columns):
         raise ValueError("financial_disclosure_schema_invalid")
-    disclosure = disclosures.loc[:, DISCLOSURE_COLUMNS].copy()
+    disclosure = disclosures.loc[:, DISCLOSURE_COLUMNS]
     counts = {}
-    disclosure["asset_id"] = (
-        disclosure["asset_id"].astype("string").str.strip().replace("", pd.NA)
-    )
-    for column in DISCLOSURE_COLUMNS[1:]:
-        disclosure[column] = strict_timestamp_series(
-            disclosure[column],
-            error="financial_disclosure_date_invalid",
-            allow_null=True,
-            errors="coerce",
-        ).dt.normalize()
-    valid = disclosure.notna().all(axis=1) & disclosure["first_disclosure_date"].ge(
-        disclosure["report_period"]
-    )
-    counts["excluded_invalid_disclosure_rows"] = int((~valid).sum())
-    disclosure = disclosure.loc[valid].drop_duplicates()
-    conflicts = disclosure.duplicated(["asset_id", "report_period"], keep=False)
-    counts["excluded_conflicting_disclosure_rows"] = int(conflicts.sum())
-    disclosure = disclosure.loc[~conflicts]
     sessions = pd.DatetimeIndex(trading_sessions).normalize().drop_duplicates()
     if sessions.empty or not sessions.is_monotonic_increasing:
         raise ValueError("financial_sessions_invalid")
@@ -102,65 +81,9 @@ def financial_events_from_interim(
         if not required.issubset(original.columns):
             raise ValueError("financial_interim_schema_invalid")
         # Only consolidated reports are consumed by these metrics.
-        frame = original.loc[original["report_type"].eq("A"), sorted(required)].copy()
-        frame["asset_id"] = (
-            frame["source_asset_id"].astype("string").str.strip().replace("", pd.NA)
+        frame = original.loc[original["report_type"].eq("A"), sorted(required)].rename(
+            columns={"source_asset_id": "asset_id"}
         )
-        frame["report_period"] = strict_timestamp_series(
-            frame["report_period"],
-            error="financial_report_period_invalid",
-            allow_null=True,
-            errors="coerce",
-        ).dt.normalize()
-        frame["correction_disclosure_date"] = strict_timestamp_series(
-            frame["correction_disclosure_date"],
-            error="financial_correction_date_invalid",
-            allow_null=True,
-            errors="coerce",
-        ).dt.normalize()
-        flags = (
-            frame["is_corrected"]
-            .map(lambda value: value if isinstance(value, (bool, np.bool_)) else pd.NA)
-            .astype("boolean")
-        )
-        valid = (
-            frame["asset_id"].notna() & frame["report_period"].notna() & flags.notna()
-        )
-        valid &= flags.eq(frame["correction_disclosure_date"].notna()).fillna(False)
-        expected_versions = pd.Series("original", index=frame.index, dtype="string")
-        corrected = flags.fillna(False)
-        expected_versions.loc[corrected] = "correction@" + frame.loc[
-            corrected, "correction_disclosure_date"
-        ].dt.strftime("%Y-%m-%d").astype("string")
-        valid &= frame["version_identity"].eq(expected_versions).fillna(False)
-        counts["excluded_invalid_version_rows"] = counts.get(
-            "excluded_invalid_version_rows", 0
-        ) + int((~valid).sum())
-        frame = frame.loc[valid].copy()
-        frame["is_corrected"] = flags.loc[valid].astype(bool)
-        for column in value_columns:
-            values = strict_real_numeric_series(
-                frame[column], error="invalid_financial_value", errors="coerce"
-            )
-            frame[column] = values.where(np.isfinite(values))
-        version_key = [
-            "asset_id",
-            "report_period",
-            "report_type",
-            "version_identity",
-        ]
-        frame = frame.drop_duplicates()
-        duplicate = frame.duplicated(version_key, keep=False)
-        if duplicate.any():
-            for column in value_columns:
-                conflict = (
-                    frame.loc[duplicate]
-                    .groupby(version_key)[column]
-                    .transform(lambda values: values.nunique(dropna=False))
-                    .gt(1)
-                )
-                frame.loc[conflict.index[conflict], column] = np.nan
-            frame = frame.drop_duplicates(version_key)
         frame = frame.merge(
             disclosure,
             on=("asset_id", "report_period"),
@@ -250,19 +173,6 @@ def construct_ttm_events(
     if not required.issubset(events.columns):
         raise ValueError("ttm_event_columns_invalid")
     result = events.reset_index(drop=True).copy()
-    for column in ("report_period", "available_at"):
-        result[column] = strict_timestamp_series(
-            result[column], error="ttm_event_date_invalid"
-        ).dt.normalize()
-    result["is_corrected"] = strict_bool_series(
-        result["is_corrected"], error="ttm_correction_flag_invalid"
-    )
-    result["version_identity"] = strict_string_series(
-        result["version_identity"], error="ttm_version_identity_invalid"
-    )
-    result[value_column] = strict_finite_numeric_series(
-        result[value_column], error="invalid_ttm_value", allow_null=True
-    )
     event_key = [
         "asset_id",
         "metric_id",
@@ -270,8 +180,6 @@ def construct_ttm_events(
         "available_at",
         "version_identity",
     ]
-    if result.duplicated(event_key, keep=False).any():
-        raise ValueError("ttm_event_key_duplicate")
     revision_key = [
         "asset_id",
         "metric_id",
@@ -387,38 +295,10 @@ def _pit_observations(observations):
 
 
 def _prepare_pit_fundamentals(events):
-    """Validate all source events and order each stream once per request."""
+    """Order each normalized event stream once per request."""
     if not _PIT_EVENT_COLUMNS.issubset(events.columns):
         raise ValueError("pit_financial_schema_invalid")
-    right = events.loc[:, list(_PIT_EVENT_COLUMNS)].copy()
-    right["asset_id"] = strict_string_series(
-        right["asset_id"], error="pit_asset_invalid"
-    )
-    right["metric_id"] = strict_string_series(
-        right["metric_id"], error="pit_metric_invalid"
-    )
-    for column in ("report_period", "available_at"):
-        right[column] = strict_timestamp_series(
-            right[column], error="pit_event_date_invalid"
-        ).dt.normalize()
-    values = strict_real_numeric_series(
-        right["value"], error="invalid_pit_value", errors="coerce"
-    )
-    right["value"] = values.where(np.isfinite(values))
-    right["version_identity"] = strict_string_series(
-        right["version_identity"], error="pit_version_identity_invalid"
-    )
-    if right.duplicated(
-        [
-            "asset_id",
-            "metric_id",
-            "report_period",
-            "available_at",
-            "version_identity",
-        ],
-        keep=False,
-    ).any():
-        raise ValueError("pit_event_key_duplicate")
+    right = events.loc[:, list(_PIT_EVENT_COLUMNS)]
     if right.duplicated(
         ["asset_id", "metric_id", "report_period", "available_at"], keep=False
     ).any():
