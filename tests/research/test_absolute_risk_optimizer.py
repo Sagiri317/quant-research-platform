@@ -80,8 +80,19 @@ def test_absolute_alpha_uses_decision_cost_threshold_without_annual_risk_penalty
     assert result.weights.iloc[1] - result.expected_transaction_cost / 100 >= -1e-12
 
 
-@pytest.mark.parametrize("kind", ["name", "industry", "style", "volatility"])
-def test_absolute_constraints_use_postfee_total_nav_with_hand_derived_boundary(kind):
+@pytest.mark.parametrize(
+    "kind,rate",
+    [
+        ("name", 0.1),
+        ("industry", 0.1),
+        ("style", 0.1),
+        ("volatility", 0.1),
+        ("volatility", 0.0),
+    ],
+)
+def test_absolute_constraints_use_postfee_total_nav_with_hand_derived_boundary(
+    kind, rate
+):
     assets = _assets([0.0, 1.0], [0.2, 0.0])
     assets["industry"] = [1.0, 0.0]
     assets["style"] = [2.0, 0.0]
@@ -103,18 +114,21 @@ def test_absolute_constraints_use_postfee_total_nav_with_hand_derived_boundary(k
         "style": 0.15,
         "volatility": 0.1 / np.sqrt(0.05),
     }[kind]
-    # Post-fee stock = x/(1 - .1*x), so x = target/(1 + .1*target).
-    bought = net_stock / (1.0 + 0.1 * net_stock)
+    # Post-fee stock = x/(1-rate*x); at zero fees, initial risk gradient is zero
+    # but the quadratic risk still bounds the final allocation.
+    bought = net_stock / (1.0 + rate * net_stock)
     result = _solve(
         assets,
         config=optimizer.AbsoluteRiskConfig(**limits[kind]),
-        cost=_cost(0.1),
+        cost=_cost(rate),
         factor_covariance=covariance,
         industry_columns=("industry",),
         style_columns=("style",),
     )
     assert result.weights.tolist() == pytest.approx([bought, 1 - bought], abs=2e-8)
-    assert result.expected_transaction_cost == pytest.approx(10 * bought, abs=2e-7)
+    assert result.expected_transaction_cost == pytest.approx(
+        100 * rate * bought, abs=2e-7
+    )
     assert result.factor_variance == pytest.approx(0.04 * net_stock**2, abs=1e-9)
     assert result.specific_variance == pytest.approx(0.01 * net_stock**2, abs=1e-9)
     assert result.predicted_total_volatility == pytest.approx(

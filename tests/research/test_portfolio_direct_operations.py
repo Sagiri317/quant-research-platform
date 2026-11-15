@@ -141,6 +141,7 @@ def test_native_publication_readback_amounts_and_lazy_consumption(
 
 
 @pytest.mark.parametrize("limit,passes", [(0.03, True), (0.02, False)])
+@pytest.mark.filterwarnings("error::RuntimeWarning")
 def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes):
     frame = pd.DataFrame(
         {
@@ -176,7 +177,7 @@ def test_frozen_adv_retains_actual_factor_and_specific_risk(limit, passes):
     else:
         # The frozen 60% holding has at least 10% active exposure. Neither
         # cash nor another holding can reduce its independent 0.0005 risk.
-        with pytest.raises(ValueError, match="optimizer_failed_closed"):
+        with pytest.raises(ValueError, match="optimizer_solution_invalid"):
             optimize_portfolio(frame, **kwargs)
 
 

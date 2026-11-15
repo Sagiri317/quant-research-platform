@@ -752,7 +752,13 @@ def optimize_portfolio(
         constraints.append(
             NonlinearConstraint(fee_value, 0.0, 0.0, jac=fee_jacobian, hess="2-point")
         )
-    if risk_limit is not None:
+    # Constant risk is checked in the original units after solving, like fixed
+    # linear rows; an infeasible zero-Jacobian constraint cannot guide a step.
+    if risk_limit is not None and (
+        fee_variable
+        or np.any(specific[free_weights])
+        or np.any(exposure[free_weights] @ covariance)
+    ):
         fee_direction = -cash_direction if absolute else benchmark - cash_direction
 
         def net_risk(point):
