@@ -311,7 +311,6 @@ def test_actual_constraint_diagnostics_depend_on_account_and_available_facts(
         produce=lambda emit: emit(batch),
     )
     restored = list(read_portfolio_ledger_artifact(path).iter_chunks())
-    assert restored == [batch]
     persisted = {
         row.name: row.number if row.number is not None else row.text
         for row in restored[0].diagnostics

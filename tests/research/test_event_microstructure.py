@@ -204,14 +204,20 @@ def test_event_factor_prepare_and_native_assembly(tmp_path):
     assert result.trade_volume_flow_imbalance.iloc[2] == 1
 
 
-@pytest.mark.parametrize("column", tuple(FACTOR_INPUTS))
-def test_selected_snapshot_factor_uses_only_declared_inputs(column):
-    from quant_research_platform.research.protocols import a_share_hft as protocol
-
+@pytest.fixture(scope="module")
+def snapshot_factors():
     quotes = normalize(raw_quotes(), "hft_quotes", INSTRUMENTS)
     orders = normalize(raw_events("hft_orders"), "hft_orders", INSTRUMENTS)
     trades = normalize(raw_events("hft_trades"), "hft_trades", INSTRUMENTS)
     panel = build_panel(quotes, orders, trades, max_gap_seconds=6)
+    return panel, compute_factors(panel, columns=tuple(FACTOR_INPUTS))
+
+
+@pytest.mark.parametrize("column", tuple(FACTOR_INPUTS))
+def test_selected_snapshot_factor_uses_only_declared_inputs(column, snapshot_factors):
+    from quant_research_platform.research.protocols import a_share_hft as protocol
+
+    panel, expected = snapshot_factors
     minimal = panel.loc[
         :,
         list(
@@ -221,7 +227,6 @@ def test_selected_snapshot_factor_uses_only_declared_inputs(column):
         ),
     ]
     actual = compute_factors(minimal, columns=[column])
-    expected = compute_factors(panel, columns=tuple(protocol.FACTOR_INPUTS))
     pd.testing.assert_frame_equal(
         actual.reset_index(drop=True),
         expected.loc[:, [*protocol.KEY, column]].reset_index(drop=True),

@@ -16,16 +16,8 @@ from quant_research_platform.research.predictions.runner import predict
 from tests.research.direct_model_test_support import fit_frame, predict_frame
 
 
-@pytest.mark.parametrize(
-    "algorithm,input_column",
-    [
-        ("linear_regression", "feature_x"),
-        ("linear_regression", "x"),
-    ],
-)
-def test_transform_prediction_publication_keeps_real_domain(
-    tmp_path, algorithm, input_column
-):
+@pytest.mark.parametrize("input_column", ["feature_x", "x"])
+def test_transform_prediction_publication_keeps_real_domain(tmp_path, input_column):
     count = 106
     raw = pd.DataFrame(
         {
@@ -58,7 +50,7 @@ def test_transform_prediction_publication_keeps_real_domain(
     )
     spec = ModelSpec(
         model_id="candidate",
-        model_algorithm=algorithm,
+        model_algorithm="linear_regression",
         input_factor_columns=(input_column,) if input_column == "x" else (),
         input_feature_columns=() if input_column == "x" else (input_column,),
         target_column="forward_return_20d",
@@ -86,16 +78,14 @@ def test_transform_prediction_publication_keeps_real_domain(
 
 
 @pytest.mark.parametrize(
-    "algorithm,groups",
+    "groups",
     [
-        ("linear_regression", ("processed", "pre_neutral")),
-        ("linear_regression", ("pre_neutral", "pre_neutral")),
-        ("linear_regression", ("processed", "pre_neutral", "raw")),
+        ("processed", "pre_neutral"),
+        ("pre_neutral", "pre_neutral"),
+        ("processed", "pre_neutral", "raw"),
     ],
 )
-def test_mixed_feature_families_keep_nulls_and_partial_samples(
-    tmp_path, algorithm, groups
-):
+def test_mixed_feature_families_keep_nulls_and_partial_samples(tmp_path, groups):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.models.persisted import load_model
     from quant_research_platform.research.models.production import fit
@@ -196,7 +186,7 @@ def test_mixed_feature_families_keep_nulls_and_partial_samples(
             "output": str(tmp_path / "model"),
             "model": {
                 "model_id": "mixed",
-                "model_algorithm": algorithm,
+                "model_algorithm": "linear_regression",
                 "input_factor_columns": factors,
                 "input_feature_columns": features,
                 "target_column": "return_next",
@@ -212,9 +202,7 @@ def test_mixed_feature_families_keep_nulls_and_partial_samples(
     ]
     assert fitted.metadata["rows_after_input_label_dropna"] == len(expected)
     assert fitted.metadata["input_columns"] == [*factors, *features]
-    if algorithm == "xgboost_regressor":
-        assert fitted.prediction_model.scaler.native_missing
-    elif algorithm == "linear_regression" and f"feature_{x}" in inputs:
+    if f"feature_{x}" in inputs:
         index = fitted.metadata["input_columns"].index(f"feature_{x}")
         assert fitted.prediction_model.scaler.medians[index] == pytest.approx(
             date[f"feature_{x}"].iloc[:102].median()
@@ -236,7 +224,7 @@ def test_mixed_feature_families_keep_nulls_and_partial_samples(
     pd.testing.assert_frame_equal(
         prediction[["timestamp", "asset_id"]], expected_keys.reset_index(drop=True)
     )
-    if algorithm == "linear_regression" and groups[0] == "processed":
+    if groups[0] == "processed":
         from quant_research_platform.artifacts.explanations import read_explanation
         from quant_research_platform.research.models.explanations import explain
 

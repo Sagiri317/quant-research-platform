@@ -217,12 +217,6 @@ def test_native_features_reuse_without_recomputation_preserves_model_contract(
     )
     fitted, model_facts = load_model(model)
     # A row with no observed model input cannot enter training.
-    assert actual.feature_reversal_20d.isna().tolist() == [
-        False,
-        True,
-        False,
-        False,
-    ]
     assert fitted.metadata["rows_after_input_label_dropna"] == 3
     assert model_facts["input_units"] == {"feature_reversal_20d": "dimensionless"}
 

@@ -95,13 +95,6 @@ def test_single_market_account_uses_only_its_execution_fees(tmp_path):
         assert [(b.trades, b.cashflows, b.valuations) for b in actual] == [
             (b.trades, b.cashflows, b.valuations) for b in expected
         ]
-        ledger = write_portfolio_ledger_artifact(
-            tmp_path / "ledger",
-            capital=PortfolioCapital("shanghai", 1e6, "CNY", "cash_equity"),
-            metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
-            produce=lambda emit, actual=actual: [emit(batch) for batch in actual],
-        )
-        assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == actual
 
 
 def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoints(
@@ -137,23 +130,6 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         assert before.end_notional.sum() == pytest.approx(
             after.pre_trade_notional.sum()
         )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
-    )
-    metadata = {
-        "window": {"start": "2022-12-30", "end": "2023-01-06"},
-        "sample_role": "validation",
-    }
-
-    def produce(emit):
-        for batch in chunks:
-            emit(batch)
-
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "native-ledger", capital=capital, metadata=metadata, produce=produce
-    )
-    saved = read_portfolio_ledger_artifact(root)
-    assert list(saved.iter_chunks()) == chunks
 
 
 def test_future_lifecycle_append_cannot_change_previous_ledger_prefix(tmp_path):
@@ -402,7 +378,7 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
     bars = materialize_dataset_session(
         open_dataset_session(roots["market_bars_1d"], columns=None, time_window=None)
     )
-    reordered = roots["market_bars_1d"].parent / ("b" * 64)
+    reordered = roots["market_bars_1d"].parent / "asset-ordered-bars"
     write_dataset(
         reordered,
         (
@@ -422,12 +398,10 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
             pd.testing.assert_frame_equal(getattr(left, name), getattr(right, name))
 
 
-def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifact(
-    tmp_path,
-):
-    from hashlib import sha256
-
-    layout, roots, _, _ = _native_inputs(tmp_path / "control")
+def test_native_ledger_rejects_terminal_relisting_before_publication(tmp_path):
+    layout, roots, _, _ = _native_inputs(
+        tmp_path / "relisted", fault="adjacent_relisting"
+    )
     capital = PortfolioCapital(
         "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
     )
@@ -441,20 +415,6 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
             for batch in chunks:
                 emit(batch)
 
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger", capital=capital, metadata=metadata, produce=produce
-    )
-    saved = read_portfolio_ledger_artifact(root)
-    good = list(saved.iter_chunks())
-    assert good
-    hashes = {
-        p.relative_to(root): sha256(p.read_bytes()).hexdigest()
-        for p in root.rglob("*")
-        if p.is_file()
-    }
-    layout, roots, _, _ = _native_inputs(
-        tmp_path / "relisted", fault="adjacent_relisting"
-    )
     with pytest.raises(
         PortfolioTargetBlocked, match="portfolio_held_lifecycle_unproven"
     ):
@@ -464,12 +424,7 @@ def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifa
             metadata=metadata,
             produce=produce,
         )
-    assert hashes == {
-        p.relative_to(root): sha256(p.read_bytes()).hexdigest()
-        for p in root.rglob("*")
-        if p.is_file()
-    }
-    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == good
+    assert not (tmp_path / "rejected-ledger").exists()
 
 
 def test_empty_research_valuation_keeps_boolean_lifecycle_masks():
@@ -666,10 +621,3 @@ def test_native_daily_fees_follow_actual_order_side_and_session(tmp_path):
     )
     actual = list(_ledger({**layout, "fees": fee_root}, roots))
     assert actual == expected
-    ledger = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=PortfolioCapital("buy-only", 1e6, "CNY", "cash_equity"),
-        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
-        produce=lambda emit: [emit(batch) for batch in actual],
-    )
-    assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == actual

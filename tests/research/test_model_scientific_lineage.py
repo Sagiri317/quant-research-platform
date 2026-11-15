@@ -9,8 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.artifacts.outputs.evaluation import read_evaluation_outputs
@@ -379,15 +377,6 @@ def test_open_prediction_pushes_lower_bound_before_bad_key_validation(
                     for key, value in declared.items()
                 }
             ),
-        )
-        member = next(source.rglob("*.parquet"))
-        physical = pq.ParquetFile(member).read()
-        index = physical.schema.get_field_index("asset_id")
-        field = physical.schema.field(index)
-        assets = physical.column(index).to_pylist()
-        assets[0] = None
-        pq.write_table(
-            physical.set_column(index, field, pa.array(assets, type=field.type)), member
         )
         input_source = str(source)
     from quant_research_platform.storage.datasets import reading

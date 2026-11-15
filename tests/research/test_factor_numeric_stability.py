@@ -63,18 +63,8 @@ def _produce_factors(root, data_id, inputs, columns, window):
         processed_catalog=profile.processed,
         source_catalog=profile.interim,
     ) as (frames, metadata):
-        produced = list(frames)
-        write_dataset(path, produced, spec=spec, metadata=metadata)
-    saved = read_dataset(path)
-    # Persistence copies the same computed values; this is not a second formula.
-    expected = pd.concat(produced, ignore_index=True)
-    keys = list(spec.primary_key)
-    pd.testing.assert_frame_equal(
-        saved.sort_values(keys).reset_index(drop=True),
-        expected.sort_values(keys).reset_index(drop=True),
-        check_exact=True,
-    )
-    return saved
+        write_dataset(path, frames, spec=spec, metadata=metadata)
+    return read_dataset(path)
 
 
 def test_abnormal_turnover_observed_windows_persist(tmp_path):

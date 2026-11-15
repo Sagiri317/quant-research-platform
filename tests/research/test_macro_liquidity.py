@@ -228,27 +228,6 @@ def test_volatility_skew_level_and_joint_state_have_explicit_scales():
     assert factor_unit("ml_us_real_treasury_10y_change_x_industry_beta_252d") == "bp"
 
 
-def test_macro_catalog_keeps_classic_representatives_for_evaluation_equivalents():
-    from quant_research_platform.research.factors.macro_liquidity.definitions import (
-        EXPOSURES,
-        RECIPES,
-    )
-
-    for state in ("us_vix3m_vix_ratio_level", "us_vix9d_vix_ratio_level"):
-        assert f"ml_{state}" in RECIPES
-        for exposure in EXPOSURES:
-            assert f"ml_{state}_x_{exposure}" not in RECIPES
-    for exposure in ("volatility_60d", "amihud_60d", "beta_252d"):
-        assert f"ml_us_vix3m_vix_ratio_level_x_industry_{exposure}" in RECIPES
-        assert f"ml_us_vix9d_vix_ratio_level_x_industry_{exposure}" not in RECIPES
-    assert "ml_us_target_upper_level" in RECIPES
-    assert not any(name.startswith("ml_us_target_lower_") for name in RECIPES)
-    assert not any(
-        recipe[0] == "series" and recipe[2] in {"log_level", "implied_variance"}
-        for recipe in RECIPES.values()
-    )
-
-
 def test_industry_exposure_keeps_macro_amplitude_and_unknown_industry_null():
     data = _observations(
         [

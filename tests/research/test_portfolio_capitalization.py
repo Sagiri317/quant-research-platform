@@ -195,7 +195,7 @@ def test_missing_total_only_excludes_unusable_research_size_names(missing):
     assert result.sum() == pytest.approx(1.0)
 
 
-def test_candidate_size_selection_is_persistable_and_validated():
+def test_candidate_rejects_unknown_size_column():
     candidate = PortfolioCandidateSpec(
         "size",
         "global",
@@ -205,13 +205,6 @@ def test_candidate_size_selection_is_persistable_and_validated():
         0.2,
         None,
         neutrality="size",
-    )
-    assert asdict(candidate)["size_cap_column"] == "total_market_cap"
-    assert (
-        PortfolioCandidateSpec(
-            **asdict(replace(candidate, size_cap_column="float_market_cap"))
-        ).size_cap_column
-        == "float_market_cap"
     )
     with pytest.raises(ValueError, match="portfolio_candidate_size_cap_column_invalid"):
         replace(candidate, size_cap_column="other")

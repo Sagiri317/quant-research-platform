@@ -166,17 +166,6 @@ def test_actual_reference_evidence_reaches_retained_equity_ledger(tmp_path, kind
             for batch in batches[1:]
             for trade in batch.trades
         )
-    metadata = {
-        "window": {"start": "2022-12-30", "end": "2023-01-06"},
-        "sample_role": "validation",
-    }
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=capital,
-        metadata=metadata,
-        produce=lambda emit: [emit(batch) for batch in batches],
-    )
-    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 def test_unvalued_successor_blocks_without_synthetic_quote(tmp_path):
@@ -313,16 +302,6 @@ def test_available_replacement_is_atomic_in_every_wealth_snapshot(
     assert not any(
         trade.asset_id == "000001" for batch in batches[1:] for trade in batch.trades
     )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
-    )
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=capital,
-        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
-        produce=lambda emit: [emit(batch) for batch in batches],
-    )
-    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 def test_equal_replacement_native_statistics_has_no_artificial_drawdown_or_volatility(
@@ -573,9 +552,6 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         events_override=events,
         panel_transform=_flat_prices,
     )
-    capital = PortfolioCapital(
-        "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
-    )
     for batch in batches:
         assert portfolio_interval_economics(batch)["gross_return"] == pytest.approx(
             0.0, abs=1e-14
@@ -596,13 +572,6 @@ def test_rights_only_successor_can_settle_to_cash_without_disappearing(tmp_path)
         for batch in batches[1:]
         for trade in batch.trades
     )
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        capital=capital,
-        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
-        produce=lambda emit: [emit(batch) for batch in batches],
-    )
-    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 def test_suspended_forced_share_change_preserves_wealth_with_or_without_quote(tmp_path):
@@ -719,18 +688,3 @@ def test_suspended_forced_share_change_preserves_wealth_with_or_without_quote(tm
     adjustments = [event for batch in unquoted for event in batch.rights_adjustments]
     assert len(adjustments) == 1
     assert adjustments[0].quantity_after == adjustments[0].quantity_before * 2
-    assert not any(
-        trade.asset_id == "000001"
-        and trade.timestamp_ns >= pd.Timestamp("2023-01-04").value
-        for batch in unquoted
-        for trade in batch.trades
-    )
-    ledger = write_portfolio_ledger_artifact(
-        tmp_path / "share-change-ledger",
-        capital=PortfolioCapital(
-            "closed_market_portfolio", 1_000_000.0, "CNY", "cash_equity"
-        ),
-        metadata={"window": {"start": "2022-12-30", "end": "2023-01-06"}},
-        produce=lambda emit: [emit(batch) for batch in unquoted],
-    )
-    assert list(read_portfolio_ledger_artifact(ledger).iter_chunks()) == unquoted

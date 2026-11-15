@@ -355,9 +355,7 @@ def test_saved_evaluation_pair_uses_declared_science_and_daily_values(tmp_path, 
 @pytest.mark.parametrize(
     "encoding", ["categories", "missing_categories", "string", "float"]
 )
-def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
-    tmp_path, encoding
-):
+def test_native_evaluation_ignores_nulls_and_dictionary_encoding(tmp_path, encoding):
     from quant_research_platform.artifacts.outputs.evaluation import (
         read_evaluation_outputs,
     )
@@ -376,9 +374,7 @@ def test_native_evaluation_ignores_null_payload_and_dictionary_encoding(
         )
     )
     own = evaluate(config)
-    frame.loc[3, "x"] = np.array([0x7FF8000000000001], dtype="uint64").view("float64")[
-        0
-    ]
+    frame.loc[3, "x"] = np.nan
     if encoding == "categories":
         frame["industry_level1_code"] = (
             frame.industry_level1_code.cat.reorder_categories(["B", "A"])

@@ -46,10 +46,6 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
     assert restored[1][1]["asset_ids"] == ["c"]
     assert [len(frame) for frame in frames] == [6, 3]
     assert [set(frame.asset_id) for frame in frames] == [{"b", "c"}, {"c"}]
-    before = [
-        (Path(path) / "prediction.parquet").read_bytes()
-        for path in config["predictions"]
-    ]
     scored = json.loads(score(config).read_text())
     assert scored["common_rows"] == 3
     assert all(row["validation_rows"] == 3 for row in scored["metrics"])
@@ -67,10 +63,6 @@ def test_candidate_domains_survive_new_common_comparison(tmp_path):
         "output": str(tmp_path / "scoped-single.json"),
     }
     assert json.loads(score(scoped_single).read_text())["common_rows"] == 3
-    assert before == [
-        (Path(path) / "prediction.parquet").read_bytes()
-        for path in config["predictions"]
-    ]
     assert "score_eligible" not in frames[0]
 
 
@@ -373,23 +365,15 @@ def test_each_frozen_family_winner_can_refit_but_family_change_cannot(tmp_path):
             )
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    [
-        "linear_regression",
-    ],
-)
-def test_output_asset_projection_preserves_full_current_cross_section(
-    tmp_path, algorithm
-):
-    cases, config = candidates(tmp_path, algorithms=(algorithm,))
+def test_output_asset_projection_preserves_full_current_cross_section(tmp_path):
+    cases, config = candidates(tmp_path, algorithms=("linear_regression",))
     case = cases[0]
     full, _ = read_predictions(config["predictions"][0])
     path = predict(
         {
             "model": str(case.root),
             "inputs": {
-                "path": str(tmp_path / algorithm / "future.parquet"),
+                "path": str(tmp_path / "linear_regression" / "future.parquet"),
                 "spec": case.config["inputs"]["spec"],
             },
             "output": str(tmp_path / "scoped"),

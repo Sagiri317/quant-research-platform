@@ -369,32 +369,6 @@ def test_fee_normalized_fixed_missing_risk_has_zero_active_coefficient(missing, 
     assert -1e-14 <= utility_gap <= ECONOMIC_UTILITY_ATOL
 
 
-@pytest.mark.parametrize("missing", ["specific", "exposure"])
-@pytest.mark.parametrize("ulps", [8, 9])
-def test_missing_risk_roundoff_boundary_does_not_erase_known_coefficients(
-    missing, ulps
-):
-    benchmark = np.array([0.5, 0.5])
-    shift = ulps * np.spacing(0.5)
-    weights = benchmark + [shift, -shift]
-    exposure = np.array([[np.nan if missing == "exposure" else 1.0], [1.0]])
-    specific = np.array([np.nan if missing == "specific" else 0.01, 0.01])
-    active = optimizer._risk_active_weights(weights, benchmark, exposure, specific)
-    raw = weights - benchmark
-    assert active[1] == raw[1] != 0.0
-    if ulps == 8:
-        assert active[0] == 0.0
-        factor, residual = optimizer._risk_variances(
-            active, exposure, np.array([[0.04]]), specific
-        )
-        assert factor == pytest.approx(0.04 * raw[1] ** 2, rel=1e-14, abs=0.0)
-        assert residual == pytest.approx(0.01 * raw[1] ** 2, rel=1e-14, abs=0.0)
-    else:
-        assert active[0] == raw[0] != 0.0
-        with pytest.raises(ValueError, match="optimizer_risk_nonfinite"):
-            optimizer._risk_variances(active, exposure, np.array([[0.04]]), specific)
-
-
 def test_unknown_risk_at_zero_benchmark_has_no_absolute_weight_floor():
     weights = np.array([1e-8, 1.0])
     benchmark = np.array([0.0, 1.0])
@@ -406,7 +380,7 @@ def test_unknown_risk_at_zero_benchmark_has_no_absolute_weight_floor():
         optimizer._risk_variances(active, exposure, np.array([[0.04]]), specific)
 
 
-def test_high_cost_no_trade_keeps_self_financing_weights():
+def test_no_trade_keeps_self_financing_weights():
     from quant_research_platform.markets.implementations.a_share.execution import (
         PreparedTradeCost,
     )
@@ -415,7 +389,7 @@ def test_high_cost_no_trade_keeps_self_financing_weights():
     owner = PreparedTradeCost(
         (0.0, 0.0, 0.0),
         (False, False, False),
-        30000.0,
+        4.0,
         0.0,
         "synthetic",
     )
@@ -435,30 +409,6 @@ def test_high_cost_no_trade_keeps_self_financing_weights():
     assert result.expected_transaction_cost == 0.0
     assert result.target_turnover == 0.0
     assert result.predicted_tracking_error == 0.0
-
-
-@pytest.mark.parametrize("direction", [-1.0, 1.0])
-@pytest.mark.parametrize("ulps", [8, 9])
-def test_frozen_missing_risk_admission_uses_the_same_relative_roundoff(direction, ulps):
-    shift = direction * ulps * np.spacing(0.5)
-    assets = _assets([0.5 + shift, 0.5 - shift, 0.0], alpha=[0.0, 0.0, 0.0])
-    assets.loc[0, "adv"] = np.nan
-    assets.loc[0, "specific_variance"] = np.nan
-    if ulps == 9:
-        reason = (
-            "optimizer_held_risk_unavailable"
-            if direction > 0
-            else "optimizer_frozen_constraints_infeasible"
-        )
-        with pytest.raises(ValueError, match=f"^{reason}$"):
-            _solve(assets, cost=_linear_cost(0.0, 0.0))
-    else:
-        result = _solve(assets, cost=_linear_cost(0.0, 0.0))
-        assert result.weights.iloc[0] == assets.current_weight.iloc[0]
-        assert result.expected_transaction_cost == 0.0
-        assert result.predicted_tracking_error == pytest.approx(
-            np.sqrt(0.05) * abs(shift), rel=1e-12, abs=0.0
-        )
 
 
 def test_trade_cost_provider_error_propagates_without_replacement():

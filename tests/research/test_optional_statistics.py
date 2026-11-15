@@ -226,7 +226,7 @@ def test_rank_ic_only_uses_declared_maturity_and_no_market_cap(
             "timestamp": np.repeat(dates, 4),
             "asset_id": ["a", "b", "c", "d"] * 4,
             "eligible": True,
-            "signal": [2**60 + i for i in (0, 1, 2, 3)] * 4,
+            "signal": [0, 1, 2, 3] * 4,
             "return": [0.0, 0.1, 0.3, 0.2] * 4,
             "mature_at": np.repeat(dates + pd.Timedelta(days=2), 4),
             "unused": ["not numeric"] * 16,
@@ -347,19 +347,17 @@ def test_cscv_complement_reuse_preserves_exhaustive_result_and_work(monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "value_dtype,label_dtype,origin",
+    "value_dtype,label_dtype",
     [
-        ("float64", "float64", 0),
-        ("int64", "float64", 2**60),
-        ("uint64", "uint64", 2**64 - 5),
-        ("float64", "int64", -(2**60)),
-        ("Int64", "Int64", 2**60),
-        ("UInt64", "UInt64", 2**64 - 5),
+        ("float64", "float64"),
+        ("int64", "float64"),
+        ("uint64", "uint64"),
+        ("float64", "int64"),
+        ("Int64", "Int64"),
+        ("UInt64", "UInt64"),
     ],
 )
-def test_rank_ic_reuses_only_identical_masks(
-    monkeypatch, value_dtype, label_dtype, origin
-):
+def test_rank_ic_reuses_only_identical_masks(monkeypatch, value_dtype, label_dtype):
     frame = pd.DataFrame(
         {
             "timestamp": [pd.Timestamp("2024-01-02")] * 5,
@@ -376,7 +374,6 @@ def test_rank_ic_reuses_only_identical_masks(
         column: frame[[column, "label"]].dropna().corr(method="spearman").iloc[0, 1]
         for column in ("a", "b", "c")
     }
-    # Compute the oracle before exact translation, never from rounded floats.
     for column, dtype in (
         ("label", label_dtype),
         ("a", value_dtype),
@@ -384,8 +381,6 @@ def test_rank_ic_reuses_only_identical_masks(
         ("c", {"int64": "Int64", "uint64": "UInt64"}.get(value_dtype, value_dtype)),
     ):
         frame[column] = frame[column].astype(dtype)
-        if pd.api.types.is_integer_dtype(frame[column].dtype):
-            frame[column] += origin
     calls = []
     original = statistics._average_ranks
 

@@ -625,13 +625,7 @@ def test_derived_target_preserves_unknown_maturity_and_compares_actual_times(
         assert actual.model_target_available_at.eq(pd.Timestamp(expected)).all()
 
 
-@pytest.mark.parametrize(
-    "roles",
-    [
-        {"asset_id": "key", "timestamp": "key", "asof": "timestamp", "x": "factor"},
-    ],
-)
-def test_assemble_requires_actual_asset_and_timestamp_roles(tmp_path, roles):
+def test_assemble_requires_actual_asset_and_timestamp_roles(tmp_path):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.storage.datasets import write_dataset
@@ -643,7 +637,12 @@ def test_assemble_requires_actual_asset_and_timestamp_roles(tmp_path, roles):
         grain="asset_timestamp",
         primary_key=("asset_id", "timestamp", "asof"),
         partition_columns=("year",),
-        column_roles=roles,
+        column_roles={
+            "asset_id": "key",
+            "timestamp": "key",
+            "asof": "timestamp",
+            "x": "factor",
+        },
     )
     write_dataset(
         source,

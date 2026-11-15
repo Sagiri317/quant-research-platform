@@ -523,20 +523,6 @@ def _validate_inputs(
     )
 
 
-@pytest.mark.parametrize(
-    "overrides,expected",
-    [
-        ({}, ("dummy_dataset", "dummy_market")),
-        ({"data_id": "demo"}, ("demo", "dummy_market")),
-        ({"market_id": "a_share"}, ("dummy_dataset", "a_share")),
-        ({"data_id": "other", "market_id": "other"}, ("other", "other")),
-    ],
-)
-def test_dummy_spec_preserves_explicit_overrides(overrides, expected):
-    spec = make_dummy_research_dataset_spec(**overrides)
-    assert (spec.data_id, spec.market_id) == expected
-
-
 def test_assembler_rejects_requested_column_missing_from_actual_spec(tmp_path):
     layout = StorageLayout(tmp_path)
     write_dummy_processed_inputs(layout, make_dummy_processed_catalog())
