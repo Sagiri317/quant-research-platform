@@ -129,9 +129,11 @@ def test_cli_main_preserves_interrupt_and_redacts_failure(monkeypatch, capsys):
 
 
 def test_catalog_cli_is_read_only_and_outputs_native_catalog():
-    result = CliRunner().invoke(commands.app, ["catalog", "dataset", "pv_all"])
+    result = CliRunner().invoke(commands.app, ["catalog", "factors"])
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["dataset_id"] == "pv_all"
+    rows = result.output.splitlines()
+    assert rows[0] == "factor_id,market_id,family"
+    assert "price_volume_reversal_5d,a_share,price_volume" in rows
 
 
 @pytest.mark.parametrize("command,module,function", CONFIG_OPERATIONS)

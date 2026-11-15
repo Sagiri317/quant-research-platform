@@ -42,25 +42,13 @@ def spec(algorithm="lasso_regression"):
     )
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    [
-        "linear_regression",
-    ],
-)
-def test_train_only_missingness_roundtrip(tmp_path, algorithm):
+def test_train_only_missingness_roundtrip(tmp_path):
     data = frame()
-    case = fit_frame(tmp_path / "model", data, spec(algorithm))
+    case = fit_frame(tmp_path / "model", data, spec("linear_regression"))
     assert case.result.metadata["rows_after_input_label_dropna"] == 6
     scaler = case.result.prediction_model.scaler
-    if algorithm in {
-        "linear_regression",
-    }:
-        assert scaler.medians == (5.0, 6.0)
-        assert scaler.transform(data[["x", "z"]]).shape == (6, 2)
-    else:
-        assert scaler.native_missing
-        assert scaler.transform(data[["x", "z"]]).isna().sum().sum() == 2
+    assert scaler.medians == (5.0, 6.0)
+    assert scaler.transform(data[["x", "z"]]).shape == (6, 2)
     future = data.iloc[:3].copy().assign(timestamp=pd.Timestamp("2024-01-04"))
     future.loc[future.index[0], ["x", "z"]] = np.nan
     future.loc[future.index[1], "z"] = 10000.0
@@ -71,7 +59,7 @@ def test_train_only_missingness_roundtrip(tmp_path, algorithm):
         window={"start": "2024-01-04", "end": "2024-01-04"},
     )
     assert predictions.asset_id.tolist() == ["b", "c"]
-    assert scaler.medians == (() if scaler.native_missing else (5.0, 6.0))
+    assert scaler.medians == (5.0, 6.0)
 
 
 @pytest.mark.parametrize(
@@ -92,17 +80,9 @@ def test_imputed_model_cannot_learn_an_all_missing_feature_median(algorithm):
         )
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    [
-        "xgboost_regressor",
-    ],
-)
-def test_native_missing_training_column_roundtrips_without_imputation(
-    tmp_path, algorithm
-):
+def test_native_missing_training_column_roundtrips_without_imputation(tmp_path):
     parameters = {"max_depth": 2, "n_estimators": 4, "n_jobs": 1}
-    model = replace(spec(algorithm), hyperparameters=parameters)
+    model = replace(spec("xgboost_regressor"), hyperparameters=parameters)
     data = frame().assign(x=np.arange(1.0, 7.0) * 1000, z=np.nan)
     data = pd.concat(
         [data, data.iloc[[-1]].assign(asset_id="d", x=np.nan, label=999.0)],
@@ -142,14 +122,6 @@ def test_native_missing_training_column_roundtrips_without_imputation(
     np.testing.assert_allclose(
         predictions.prediction_score, direct[1:], rtol=1e-12, atol=1e-14
     )
-    method = (
-        "native_tree"
-        if algorithm
-        in {
-            "xgboost_regressor",
-        }
-        else "tree_shap_path"
-    )
     _, tables = read_explanation(
         explain(
             {
@@ -160,7 +132,7 @@ def test_native_missing_training_column_roundtrips_without_imputation(
                 },
                 "output": str(tmp_path / "explanation"),
                 "window": {"start": "2024-01-04", "end": "2024-01-04"},
-                "methods": [method],
+                "methods": ["native_tree"],
                 "selection": {"max_rows": 3, "max_dates": 1},
                 "sample_role": "validation",
                 "output_space": "model_output",

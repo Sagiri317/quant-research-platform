@@ -714,7 +714,6 @@ def definitions():
         FactorDefinition(
             factor_id=name,
             market_id="a_share",
-            factor_set="standard",
             input_columns=("mid",),
             output_column=name,
             family="intraday_context",

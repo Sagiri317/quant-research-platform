@@ -15,7 +15,6 @@ from quant_research_platform.interfaces.api.errors import (
 from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
     LabelCatalogResponse,
-    ResearchDatasetRequirementsResponse,
 )
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
@@ -98,22 +97,6 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
     @app.get("/api/catalog/labels", operation_id="list_catalog_labels")
     def labels(profile: str = A_SHARE_PROFILE_ID) -> LabelCatalogResponse:
         return queries.list_labels(selected_profile(profile))
-
-    @app.get(
-        "/api/research-datasets/{dataset_id}/requirements",
-        operation_id="describe_research_dataset_requirements",
-    )
-    def dataset(
-        dataset_id: str, profile: str = A_SHARE_PROFILE_ID
-    ) -> ResearchDatasetRequirementsResponse:
-        try:
-            return queries.describe_research_dataset_requirements(
-                dataset_id, selected_profile(profile)
-            )
-        except KeyError as exc:
-            raise ApiError(
-                "unknown_dataset_id", status_code=404, field="dataset_id"
-            ) from exc
 
     @app.get("/api/inspect", operation_id="inspect_published_artifact")
     def inspect(path: str) -> dict[str, object]:

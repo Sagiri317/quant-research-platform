@@ -48,17 +48,7 @@ from quant_research_platform.research.risk import (
     FactorRiskState,
 )
 from tests.helpers.optimizer import with_cash_asset
-from tests.helpers.research_configuration import (
-    CORE6_FACTORS,
-    EXECUTION_ASSUMPTIONS,
-    PV25_FACTORS,
-)
-
-
-def test_research_factor_rosters_are_explicit():
-    for factors in (PV25_FACTORS, CORE6_FACTORS):
-        assert factors
-        assert len(factors) == len(set(factors))
+from tests.helpers.research_configuration import EXECUTION_ASSUMPTIONS
 
 
 def test_formal_price_volume_definitions_use_session_windows() -> None:
@@ -390,8 +380,9 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     changed = base.copy()
     changed.loc[changed["timestamp"] >= sessions[220], "adj_close"] *= 3.0
     changed.loc[changed["timestamp"] >= sessions[220], "period_return"] = 0.2
-    first = calculate_price_volume_factors(base)
-    second = calculate_price_volume_factors(changed)
+    columns = ("reversal_20d", "volatility_20d")
+    first = calculate_price_volume_factors(base, factor_columns=columns)
+    second = calculate_price_volume_factors(changed, factor_columns=columns)
     assert second.loc[
         219, ["reversal_20d", "volatility_20d"]
     ].tolist() == pytest.approx(
@@ -400,11 +391,15 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     from quant_research_platform.contracts.time import TimeWindow
 
     window = TimeWindow(sessions[200].date(), sessions[219].date())
-    selected = calculate_price_volume_factors(base, output_window=window)
+    selected = calculate_price_volume_factors(
+        base, factor_columns=columns, output_window=window
+    )
     numeric = list(selected.select_dtypes(include="floating").columns)
     for reference in (
         first.iloc[200:220].reset_index(drop=True),
-        calculate_price_volume_factors(changed, output_window=window),
+        calculate_price_volume_factors(
+            changed, factor_columns=columns, output_window=window
+        ),
     ):
         pd.testing.assert_frame_equal(
             selected.drop(columns=numeric),

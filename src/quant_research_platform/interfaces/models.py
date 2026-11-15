@@ -12,7 +12,6 @@ class _PublicModel(BaseModel):
 class FactorCatalogItem(_PublicModel):
     factor_id: str
     market_id: str
-    factor_set: str
     display_name: str
     description: str
     family: str
@@ -49,12 +48,3 @@ class FactorCatalogResponse(_PublicModel):
 
 class LabelCatalogResponse(_PublicModel):
     items: list[LabelCatalogItem]
-
-
-class ResearchDatasetRequirementsResponse(_PublicModel):
-    dataset_id: str
-    market_id: str
-    input_data_ids: list[str]
-    factor_count: int
-    feature_count: int
-    label_count: int

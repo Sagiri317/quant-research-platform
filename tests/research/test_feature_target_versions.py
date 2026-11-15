@@ -15,7 +15,7 @@ from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
 )
 from quant_research_platform.research.labels.targets import a_share_model_target
-from quant_research_platform.research.protocols.a_share import research_dataset_catalog
+from tests.helpers.research_specs import make_a_share_target_spec
 
 
 def _frame(n=120):
@@ -108,7 +108,7 @@ def test_target_residual_uses_only_same_row_exposures_and_actual_clocks():
     frame.loc[0, "forward_return_5d_available_at"] = pd.Timestamp("2020-03-01")
     frame.loc[1, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-04")
     spec = replace(
-        research_dataset_catalog().get("pv_all"),
+        make_a_share_target_spec(),
         eligibility_recipe=None,
         target_transform="industry_size_residual",
         target_clip="mad",
@@ -484,7 +484,7 @@ def test_raw_target_has_no_unrelated_cross_section_clock_dependency():
     frame.loc[1, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-04")
     frame.loc[2, "forward_return_5d_available_at"] = pd.NaT
     spec = replace(
-        research_dataset_catalog().get("pv_all"),
+        make_a_share_target_spec(),
         eligibility_recipe=None,
         target_transform="raw",
     )
@@ -504,7 +504,7 @@ def test_raw_target_has_no_unrelated_cross_section_clock_dependency():
 def test_target_cross_section_is_independent_of_feature_availability():
     frame = _frame(3)
     frame.loc[2, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-05")
-    spec = replace(research_dataset_catalog().get("pv_all"), eligibility_recipe=None)
+    spec = replace(make_a_share_target_spec(), eligibility_recipe=None)
     expected = _add_a_share_semantic_columns(frame, spec)
     frame[["factor", "other"]] = np.nan
     actual = _add_a_share_semantic_columns(frame, spec)

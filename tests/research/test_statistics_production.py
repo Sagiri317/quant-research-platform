@@ -26,9 +26,8 @@ from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.paths import StorageLayout
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
-    CORE6_FACTORS,
     PRIMARY_LABEL_COLUMN,
-    PV25_FACTORS,
+    TEST_FACTORS,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.statistical_inference import (
@@ -516,9 +515,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                         "market_id": "a_share",
                         "asset_id": f"asset_{asset_index}",
                         "timestamp": timestamp,
-                        **{factor: np.nan for factor in PV25_FACTORS},
-                        CORE6_FACTORS[0]: x,
-                        CORE6_FACTORS[1]: x * x,
+                        **{factor: np.nan for factor in TEST_FACTORS},
+                        TEST_FACTORS[0]: x,
+                        TEST_FACTORS[1]: x * x,
                         PRIMARY_LABEL_COLUMN: label,
                         "forward_return_20d_available_at": label_calendar[
                             date_index + 21
@@ -528,7 +527,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 )
         spec = make_demo_research_dataset_spec(
             data_id="stats_demo",
-            factor_columns=PV25_FACTORS,
+            factor_columns=TEST_FACTORS,
             label_columns=(PRIMARY_LABEL_COLUMN,),
             filter_columns=("eligible",),
             context_columns=(
@@ -560,9 +559,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                     "research_dataset_id": spec.data_id,
                     "signals": [
                         {
-                            "signal_id": CORE6_FACTORS[0],
+                            "signal_id": TEST_FACTORS[0],
                             "source_kind": "factor",
-                            "source_column": CORE6_FACTORS[0],
+                            "source_column": TEST_FACTORS[0],
                         }
                     ],
                     "label_columns": [PRIMARY_LABEL_COLUMN],
@@ -576,9 +575,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         evaluation_summaries.append(summaries["ic_summary"].copy())
         config = statistics_config()
         config["statistics"]["factor_fdr_families"] = {
-            "price_volume": list(PV25_FACTORS)
+            "price_volume": list(TEST_FACTORS)
         }
-        config["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
+        config["statistics"]["fama_macbeth_core_factors"] = list(TEST_FACTORS)
         model = model_statistics_inputs(
             spec,
             config,
@@ -620,11 +619,11 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     factors = outputs[0]["factor_diagnostics"]
     assert set(factors["family_id"]) == {"price_volume"}
     assert set(factors["fdr_method"]) == {"BH", "BY"}
-    assert set(factors["planned_hypothesis_count"]) == {len(PV25_FACTORS)}
+    assert set(factors["planned_hypothesis_count"]) == {len(TEST_FACTORS)}
     assert set(factors["defined_hypothesis_count"]) == {0}
     assert factors.reason.eq("incomplete_session_clock").all()
     assert factors.loc[factors.observation_count.eq(20), "mean"].notna().all()
-    assert set(factors["missing_hypothesis_count"]) == {len(PV25_FACTORS)}
+    assert set(factors["missing_hypothesis_count"]) == {len(TEST_FACTORS)}
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "UNDEFINED"
@@ -636,7 +635,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     fmb = outputs[0]["fama_macbeth"]
     assert fmb.reason.eq("incomplete_session_clock").all()
     assert fmb.loc[fmb.period_count.eq(20), "mean"].notna().all()
-    assert {"equal:single:" + CORE6_FACTORS[0], "equal:core_multifactor"}.issubset(
+    assert {"equal:single:" + TEST_FACTORS[0], "equal:core_multifactor"}.issubset(
         set(fmb["regression_id"])
     )
     assert "intercept" in set(fmb["coefficient_id"])
@@ -698,7 +697,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             assert not table.empty
     from scipy.stats import norm
 
-    expected_periods = {"intercept": [], CORE6_FACTORS[0]: []}
+    expected_periods = {"intercept": [], TEST_FACTORS[0]: []}
     x = np.arange(6, dtype="float64") - 2.0
     centered_x = x - x.mean()
     for date_index in range(20):
@@ -711,15 +710,15 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         if date_index // 5 % 2:
             y = -y
         slope = np.dot(centered_x, y - y.mean()) / np.dot(centered_x, centered_x)
-        expected_periods[CORE6_FACTORS[0]].append(slope)
+        expected_periods[TEST_FACTORS[0]].append(slope)
         expected_periods["intercept"].append(y.mean() - slope * x.mean())
     with factor_artifact.table("fama_macbeth_periods.parquet") as table:
         persisted_periods = table.loc[
-            table.regression_id.eq("equal:single:" + CORE6_FACTORS[0])
+            table.regression_id.eq("equal:single:" + TEST_FACTORS[0])
         ].copy()
     with factor_artifact.table("fama_macbeth.parquet") as table:
         persisted_summary = table.loc[
-            table.regression_id.eq("equal:single:" + CORE6_FACTORS[0])
+            table.regression_id.eq("equal:single:" + TEST_FACTORS[0])
         ].set_index("coefficient_id")
         assert persisted_summary.status.eq("UNDEFINED").all()
         assert persisted_summary.reason.eq("incomplete_session_clock").all()
@@ -728,7 +727,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         complete_summary = (
             factor_stats._fama_macbeth_summary(
                 persisted_periods,
-                factors=(CORE6_FACTORS[0],),
+                factors=(TEST_FACTORS[0],),
                 core_factors=(),
                 max_lags=19,
                 input_date_count=20,
@@ -793,7 +792,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     with factor_zero_artifact.table("fama_macbeth_periods.parquet") as table:
         periods = table.copy()
     single_factor = periods.loc[
-        periods["regression_id"].eq("equal:single:" + CORE6_FACTORS[0])
+        periods["regression_id"].eq("equal:single:" + TEST_FACTORS[0])
     ]
     assert single_factor["status"].eq("DEFINED").all()
     assert single_factor["value"].eq(0.0).all()
@@ -802,7 +801,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     with factor_zero_artifact.table("fama_macbeth.parquet") as table:
         zero_summary = table.copy()
     single_summary = zero_summary.loc[
-        zero_summary["regression_id"].eq("equal:single:" + CORE6_FACTORS[0])
+        zero_summary["regression_id"].eq("equal:single:" + TEST_FACTORS[0])
     ]
     assert single_summary["white_defined_period_count"].eq(0).all()
     assert single_summary["white_undefined_period_count"].eq(20).all()
@@ -1202,7 +1201,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
-    factor = CORE6_FACTORS[0]
+    factor = TEST_FACTORS[0]
     dates = pd.bdate_range("2023-01-02", periods=48)
     cutoff = dates[44]
     window = TimeWindow(dates[0], cutoff)

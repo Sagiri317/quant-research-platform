@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
@@ -40,6 +39,7 @@ from tests.helpers.paths import StorageLayout
 from tests.helpers.research_specs import (
     assemble_research_dataset,
     make_demo_research_dataset_spec,
+    make_research_dataset_catalog,
 )
 
 
@@ -349,7 +349,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
             )
         },
         output_root=tmp_path / "numeric-dataset",
-        dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
+        dataset_catalog=make_research_dataset_catalog(dataset_spec),
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2020-01-01", "2020-01-03"),
     )

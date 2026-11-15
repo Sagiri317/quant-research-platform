@@ -3,6 +3,12 @@
 import re
 
 _NAMES = {
+    "market_trading_liquidity_loss_beta": "市场交易流动性恶化的损失敏感度",
+    "relative_downside_beta": "相对下行Beta",
+    "overnight_intraday_spread": "隔夜减日内累计对数收益",
+    "limit_up_close_failure": "触涨停后收盘未封",
+    "limit_up_streak": "连续收盘涨停会话数",
+    "industry_leader_lag_return": "行业大盘领先响应预测",
     "index_group_positive_fraction": "固定指数集合上涨参与度",
     "index_group_leader_gap": "固定指数集合最强指数领先幅度",
     "financing_balance_change": "融资余额变化率",
@@ -69,11 +75,11 @@ _NAMES = {
     "breadth_price_divergence": "市场广度与价格背离",
     "industry_activity_pressure": "行业交易活跃度压力",
     "industry_amount_hhi": "行业成交额HHI集中度",
-    "industry_amount_share": "行业成交额占全市场比",
+    "industry_amount_share": "个股成交额占行业比",
     "industry_catchdown": "相对行业抗跌后的补跌候选",
     "industry_catchup": "相对行业滞涨后的补涨候选",
     "industry_comovement": "个股与行业收益联动",
-    "industry_isolation": "个股与行业收益隔离度",
+    "industry_isolation": "行业逆势上涨强度",
     "industry_positive_return_hhi": "行业正收益HHI集中度",
     "industry_return_dispersion": "行业收益离散度",
     "industry_return_relative": "个股相对行业收益",

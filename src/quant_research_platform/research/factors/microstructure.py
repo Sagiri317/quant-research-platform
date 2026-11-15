@@ -33,7 +33,7 @@ def _level_flow(prices, quantity, prior_price, prior_quantity, sign):
 
 
 def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
-    columns = protocol.DEFAULT_FACTORS if columns is None else tuple(columns)
+    columns = tuple(protocol.FACTOR_INPUTS) if columns is None else tuple(columns)
     paths = tuple(name for name in columns if name in protocol.PATH_INPUTS)
     if paths:
         from .intraday_path import calculate
@@ -153,9 +153,7 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                     work[column], work.timestamp, 30
                 )
         extended = (
-            requested
-            - set(protocol.DEFAULT_FACTORS)
-            - protocol.INTRADAY_THEME_FACTORS.keys()
+            requested - set(values.columns) - protocol.INTRADAY_THEME_FACTORS.keys()
         )
         if extended:
             values = pd.concat(

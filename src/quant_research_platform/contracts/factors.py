@@ -1,9 +1,8 @@
-"""Define factor identities, required inputs, parameters, and ordered factor sets."""
+"""Define factor identities, required inputs, and calculation parameters."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any
 
 from quant_research_platform.contracts.data import DataGrain
@@ -14,18 +13,10 @@ from quant_research_platform.contracts.validation import (
 )
 
 
-class FactorSet(StrEnum):
-    STANDARD = "standard"
-    CORE = "core"
-    SMOKE = "smoke"
-    EXPERIMENTAL = "experimental"
-
-
 @dataclass(frozen=True)
 class FactorDefinition:
     factor_id: str
     market_id: MarketId
-    factor_set: FactorSet
     input_columns: tuple[str, ...]
     output_column: str
     display_name: str = ""
@@ -45,15 +36,6 @@ class FactorDefinition:
             raise ValueError("factor_full_history_must_be_boolean")
         _validate_non_empty_string(self.factor_id, "factor_id_required")
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
-        try:
-            factor_set = (
-                self.factor_set
-                if isinstance(self.factor_set, FactorSet)
-                else FactorSet(self.factor_set)
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError("unsupported_factor_set") from exc
-        object.__setattr__(self, "factor_set", factor_set)
         _validate_column_tuple(self.input_columns, "factor_input_columns")
         _validate_non_empty_string(self.output_column, "factor_output_column_required")
         _validate_non_empty_string(
@@ -88,7 +70,6 @@ class FactorDefinition:
         payload: dict[str, Any] = {
             "factor_id": self.factor_id,
             "market_id": str(self.market_id),
-            "factor_set": self.factor_set.value,
             "display_name": self.display_name or self.factor_id,
             "description": self.description,
             "family": self.family,

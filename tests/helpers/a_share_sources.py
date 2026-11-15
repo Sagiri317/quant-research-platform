@@ -98,6 +98,8 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "after_hours_volume": 0.0,
             "after_hours_amount": 0.0,
             "prev_close": price - 0.1,
+            "limit_up_price": np.nan,
+            "limit_down_price": np.nan,
             "limit_status": 0.0,
             "period_return": 0.01,
             "adj_close": price,

@@ -42,7 +42,7 @@ from quant_research_platform.sources.reference.interim import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from tests.helpers.portfolio_ledger import write_market_evidence
-from tests.helpers.research_configuration import PV25_FACTORS
+from tests.helpers.research_configuration import TEST_FACTORS
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 
@@ -205,7 +205,7 @@ def _processed_specs() -> ProcessedDataCatalog:
 
 
 def _dataset_spec() -> ResearchDatasetSpec:
-    statistical_factors = tuple(factor for factor in PV25_FACTORS if factor != "x")
+    statistical_factors = TEST_FACTORS
     return ResearchDatasetSpec(
         data_id="pv_all",
         frequency=DataFrequency.DAILY,
@@ -287,11 +287,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
                 "asset_id": asset,
                 "timestamp": timestamp,
                 "x": float(asset == "b"),
-                **{
-                    factor: float(asset == "b")
-                    for factor in PV25_FACTORS
-                    if factor != "x"
-                },
+                **{factor: float(asset == "b") for factor in TEST_FACTORS},
                 "label": float(asset == "b") * 0.01,
                 "label_available_at": calendar_dates[date_index + 1],
                 "forward_return_20d": float(asset == "b") * 0.02,

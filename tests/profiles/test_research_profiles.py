@@ -20,7 +20,6 @@ def test_profiles_expose_catalogs_only(profile_id, market):
     assert profile.market_id == market
     assert profile.factors.list()
     assert profile.labels.list()
-    assert profile.research_datasets.list()
     with pytest.raises(FrozenInstanceError):
         profile.profile_id = "changed"
 

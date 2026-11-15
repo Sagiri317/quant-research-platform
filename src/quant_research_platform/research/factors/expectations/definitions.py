@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 
 EXPECTATIONS_FACTORS = (
@@ -40,7 +40,6 @@ def expectations_factor_definitions(
         FactorDefinition(
             factor_id=f"expectations_{name}",
             market_id=market_id,
-            factor_set=FactorSet.CORE,
             input_columns=(("close",) if name in PRICE_SCALED_EXPECTATIONS else ())
             + EXPECTATIONS_INPUT_COLUMNS,
             output_column=name,

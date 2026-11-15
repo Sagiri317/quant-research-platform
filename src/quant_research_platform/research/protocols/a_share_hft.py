@@ -3,11 +3,9 @@
 import json
 from dataclasses import replace
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.data import ProcessedDataSpec
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.research.factors.intraday_path import (
@@ -86,7 +84,6 @@ FACTOR_INPUTS = {
     "observed_signed_trade_volume_30s": ("observed_signed_trade_volume",),
     "book_ofi_30s": ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1"),
 }
-DEFAULT_FACTORS = tuple(FACTOR_INPUTS)
 FACTOR_INPUTS.update(
     {
         **{
@@ -312,7 +309,6 @@ def factor_catalog():
                 FactorDefinition(
                     factor_id=name,
                     market_id="a_share",
-                    factor_set="standard",
                     family="level2_microstructure",
                     input_columns=inputs,
                     output_column=name,
@@ -507,43 +503,4 @@ def processed_specs():
             source_input_data_ids=("hft_trades",),
             processed_input_data_ids=("hft_panel",),
         ),
-    )
-
-
-def research_dataset_catalog():
-    labels = label_catalog().list()
-    label_columns = tuple(item.output_column for item in labels)
-    maturity = {item.output_column: item.available_at_column for item in labels}
-    context = (
-        "eligible",
-        "session_date",
-        "exchange",
-        "instrument_type",
-        "segment_id",
-        "mid",
-        *maturity.values(),
-    )
-    columns = (*KEY, *DEFAULT_FACTORS, *label_columns, *context)
-    return ResearchDatasetCatalog(
-        (
-            ResearchDatasetSpec(
-                data_id="a_share_hft",
-                market_id="a_share",
-                input_data_ids=("hft_panel", "hft_factors", "hft_labels"),
-                base_input_data_id="hft_panel",
-                factor_columns=DEFAULT_FACTORS,
-                label_columns=label_columns,
-                label_availability_columns=maturity,
-                context_columns=context,
-                frequency="tick",
-                grain="research_row",
-                column_roles=_roles(
-                    columns, factors=FACTOR_INPUTS, labels=label_columns
-                ),
-                primary_key=KEY,
-                partition_columns=("year",),
-                target_transform="raw",
-                target_label_column=default_prediction_target(),
-            ),
-        )
     )

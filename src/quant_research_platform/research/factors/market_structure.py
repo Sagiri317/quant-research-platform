@@ -6,8 +6,16 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import leave_one_out_mean
-from quant_research_platform.compute.dataframe.history import HistoryWindow
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.compute.dataframe.history import (
+    HistoryWindow,
+    liquidity_beta,
+    past_ar1_innovations,
+)
+from quant_research_platform.compute.market_model import (
+    relative_downside_beta,
+    rolling_partial_slope,
+)
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
@@ -15,6 +23,17 @@ from quant_research_platform.contracts.validation import (
 
 _INDUSTRY = ("industry_standard_id", "industry_level1_code")
 INPUTS = {
+    "market_trading_liquidity_loss_beta_252d": (
+        "period_return",
+        "amount",
+        "float_market_cap",
+    ),
+    "relative_downside_beta_252d": ("period_return", "float_market_cap"),
+    "industry_leader_lag_return_252d": (
+        "period_return",
+        "float_market_cap",
+        *_INDUSTRY,
+    ),
     "market_up_fraction": ("period_return",),
     "market_above_ma20_fraction": ("adj_close",),
     "market_above_ma60_fraction": ("adj_close",),
@@ -53,6 +72,10 @@ INPUTS.update(
 
 
 def _lookback(name):
+    if name == "market_trading_liquidity_loss_beta_252d":
+        return 757
+    if name in {"relative_downside_beta_252d", "industry_leader_lag_return_252d"}:
+        return 253
     if name.startswith(
         ("industry_return_relative_", "industry_catchup_", "industry_catchdown_")
     ):
@@ -79,6 +102,28 @@ def _lookback(name):
 
 
 DESCRIPTIONS = {
+    "market_trading_liquidity_loss_beta_252d": (
+        "QRP trading-liquidity risk proxy, not Pastor-Stambaugh or full LCAPM: "
+        "negative 252-session stock-return slope on the market median of "
+        "abs(return)/(amount/prior-float-cap), controlling market return. "
+        "Shock is a strictly past-fitted 252-session AR(1) innovation scaled "
+        "by its preceding 252-session deviation; each estimate needs 126 pairs."
+    ),
+    "relative_downside_beta_252d": (
+        "Ang-Chen-Xing-inspired conditional slope minus the all-days slope "
+        "on the same 252-session paired return domain and prior-float-cap "
+        "weighted market. Downside is market return below its window mean; "
+        "at least 126 pairs and 50 downside pairs, positive denominator."
+    ),
+    "industry_leader_lag_return_252d": (
+        "QRP Hou-inspired prediction: 252-session OLS slope of own return "
+        "on the previous session's leave-one-out industry-leader return, "
+        "controlling lagged own and market returns, times today's leader "
+        "return. Leaders use prior-session PIT industry and top size quintile "
+        "of prior float cap, ties retained; at least five known-size peers "
+        "before own exclusion, all selected leader returns known. Needs 126 "
+        "complete regression rows within one consecutive industry regime."
+    ),
     "market_up_fraction": (
         "Market context: positive-return fraction among fresh valid A-share "
         "returns; unchanged returns remain in the denominator."
@@ -212,7 +257,12 @@ for _width in (1, 5, 20):
     )
 
 MARKET_CONTEXT_FACTORS = (
-    frozenset(name for name in DESCRIPTIONS if name.startswith("market_"))
+    frozenset(
+        name
+        for name in DESCRIPTIONS
+        if name.startswith("market_")
+        and name != "market_trading_liquidity_loss_beta_252d"
+    )
     | {
         "industry_return_dispersion_20d",
         "industry_positive_return_hhi_20d",
@@ -241,6 +291,10 @@ FACTOR_UNITS.update(
         )
     }
 )
+FACTOR_UNITS["market_trading_liquidity_loss_beta_252d"] = (
+    "decimal_return_per_standard_deviation"
+)
+FACTOR_UNITS["industry_leader_lag_return_252d"] = "decimal_return"
 FACTOR_UNITS.update(
     dict.fromkeys(
         ("industry_return_dispersion_20d", "industry_return_relative_20d"),
@@ -254,7 +308,6 @@ def factor_definitions():
         FactorDefinition(
             factor_id=name,
             market_id="a_share",
-            factor_set=FactorSet.STANDARD,
             family="market_structure",
             input_columns=(*INPUTS[name], "filling_flag", "is_a_share_scope"),
             output_column=name,
@@ -447,14 +500,110 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
         peak = history._c.shift().rolling(HistoryWindow(history_start, 60)).max()
         frame["_drawdown"] = (1 - frame._c / peak).clip(lower=0)
 
+    if set(requested).intersection(
+        {
+            "market_trading_liquidity_loss_beta_252d",
+            "relative_downside_beta_252d",
+            "industry_leader_lag_return_252d",
+        }
+    ):
+        _systematic_exposures(frame, out, requested, history)
     del history, fresh
-    if any(name.startswith("industry_") for name in requested):
+    if any(
+        name.startswith("industry_") and name != "industry_leader_lag_return_252d"
+        for name in requested
+    ):
         _industry_context(frame, out, requested, history_start)
     del frame, history_start
     out = out.loc[:, ["asset_id", "timestamp", *requested]]
     for name in requested:
         out[name] = out[name].replace([np.inf, -np.inf], np.nan)
     return out.reset_index(drop=True)
+
+
+def _systematic_exposures(frame, out, requested, history):
+    """Share the historical cross-section and run native rolling kernels per life."""
+    liquidity = "market_trading_liquidity_loss_beta_252d"
+    downside = "relative_downside_beta_252d"
+    lead_lag = "industry_leader_lag_return_252d"
+    timestamps = frame.timestamp
+    size = history.float_market_cap.shift().where(lambda x: x > 0)
+    weight = size.where(frame._r.notna())
+    market = (weight * frame._r).groupby(timestamps).sum(min_count=1) / weight.groupby(
+        timestamps
+    ).sum(min_count=1)
+    frame["_market"] = timestamps.map(market)
+    if liquidity in requested:
+        impact = frame._r.abs() * size / frame._a.where(frame._a > 0)
+        level = impact.groupby(timestamps, sort=True).median()
+        innovations = pd.Series(past_ar1_innovations(level), index=level.index)
+        scale = innovations.shift().rolling(252, min_periods=126).std()
+        frame["_liquidity"] = timestamps.map(innovations / scale.where(scale > 0))
+    if lead_lag in requested:
+        prior_sector = history[list(_INDUSTRY)].shift()
+        known = prior_sector.notna().all(axis=1) & prior_sector.ne("").all(axis=1)
+        group_keys = [
+            timestamps,
+            *(prior_sector[name].where(known) for name in _INDUSTRY),
+        ]
+        eligible_size = size.where(frame.is_a_share_scope.eq(True))
+        grouped_size = eligible_size.groupby(group_keys, sort=False)
+        threshold = grouped_size.transform("quantile", q=0.8)
+        leader = (
+            known & eligible_size.ge(threshold) & grouped_size.transform("count").ge(5)
+        )
+        observed = leader & frame._r.notna()
+        cap = eligible_size.where(observed, 0.0)
+        contribution = (cap * frame._r).where(observed, 0.0)
+        peer_cap = cap.groupby(group_keys, sort=False).transform("sum") - cap
+        peer_return = (
+            contribution.groupby(group_keys, sort=False).transform("sum") - contribution
+        )
+        expected = leader.groupby(group_keys, sort=False).transform("sum") - leader
+        actual = observed.groupby(group_keys, sort=False).transform("sum") - observed
+        frame["_leader"] = (peer_return / peer_cap.where(peer_cap > 0)).where(
+            (expected > 0) & expected.eq(actual)
+        )
+        frame["_sector"] = pd.MultiIndex.from_frame(prior_sector).factorize()[0]
+        frame.loc[~known, "_sector"] = -1
+    selected = tuple(
+        name for name in (liquidity, downside, lead_lag) if name in requested
+    )
+    results = {name: np.full(len(frame), np.nan) for name in selected}
+    returns = frame._r.to_numpy()
+    markets = frame._market.to_numpy()
+    shocks = frame._liquidity.to_numpy() if liquidity in requested else None
+    leaders = frame._leader.to_numpy() if lead_lag in requested else None
+    sectors = frame._sector.to_numpy() if lead_lag in requested else None
+    for positions in history.indices.values():
+        start, end = positions[0], positions[-1] + 1
+        y, m = returns[start:end], markets[start:end]
+        if liquidity in requested:
+            beta = liquidity_beta(y, shocks[start:end], market_returns=m)
+            results[liquidity][start:end] = -beta
+            results[liquidity][start : min(start + 251, end)] = np.nan
+        if downside in requested:
+            results[downside][start:end] = relative_downside_beta(y, m)
+        if lead_lag in requested:
+            regime = sectors[start:end]
+            boundaries = np.r_[
+                0, np.flatnonzero(regime[1:] != regime[:-1]) + 1, end - start
+            ]
+            for left, right in zip(boundaries[:-1], boundaries[1:], strict=True):
+                if regime[left] < 0 or right - left < 252:
+                    continue
+                own = pd.Series(y[left:right])
+                peers = pd.Series(leaders[start + left : start + right])
+                market_return = pd.Series(m[left:right])
+                beta = rolling_partial_slope(
+                    own, peers.shift(), (own.shift(), market_return.shift())
+                )
+                beta[:251] = np.nan
+                results[lead_lag][start + left : start + right] = (
+                    beta * peers.to_numpy()
+                )
+    for name, values in results.items():
+        out[name] = values
 
 
 def _industry_context(frame, out, requested, history_start):

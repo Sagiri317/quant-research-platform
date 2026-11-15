@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
@@ -27,6 +27,29 @@ def make_demo_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
 def make_dummy_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
     return _research_dataset_spec_from_defaults(
         **(_dummy_research_dataset_defaults() | overrides)
+    )
+
+
+def make_a_share_target_spec(label="forward_return_5d"):
+    return replace(
+        make_demo_research_dataset_spec(
+            input_data_ids=("market_panel_1d", "price_volume_facts", "forward_returns"),
+            base_input_data_id="market_panel_1d",
+            factor_columns=("reversal_20d",),
+            label_columns=(label, "model_target"),
+            filter_columns=("eligible",),
+            filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+            context_columns=(
+                label + "_available_at",
+                "model_target_available_at",
+            ),
+        ),
+        eligibility_recipe="a_share_all",
+        target_label_column=label,
+        label_availability_columns={
+            label: label + "_available_at",
+            "model_target": "model_target_available_at",
+        },
     )
 
 
@@ -80,9 +103,9 @@ def _research_dataset_spec_from_defaults(
 def make_research_dataset_catalog(
     *specs: ResearchDatasetSpec,
     **spec_kwargs: object,
-) -> ResearchDatasetCatalog:
+) -> dict[str, ResearchDatasetSpec]:
     registered_specs = specs or (make_demo_research_dataset_spec(**spec_kwargs),)
-    return ResearchDatasetCatalog(registered_specs)
+    return {spec.data_id: spec for spec in registered_specs}
 
 
 def _demo_research_dataset_defaults() -> dict[str, object]:

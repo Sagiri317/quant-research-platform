@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 
 PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
@@ -89,6 +89,13 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "intraday_return": (("adj_open", "adj_close"), (1,)),
     "down_gap_recovery": (("adj_open", "adj_close"), (2,)),
     "up_gap_reversal": (("adj_open", "adj_close"), (2,)),
+    "overnight_intraday_spread_20d": (("adj_open", "adj_close"), (21,)),
+    "overnight_intraday_spread_60d": (("adj_open", "adj_close"), (61,)),
+    "limit_up_close_failure": (
+        ("high", "close", "limit_up_price", "price_limit_applicable"),
+        (1,),
+    ),
+    "limit_up_streak": (("close", "limit_up_price", "price_limit_applicable"), (2,)),
 }
 
 for _window in (60, 252):
@@ -99,6 +106,26 @@ for _window in (60, 252):
         )
 
 PRICE_VOLUME_THEME_DESCRIPTIONS = {
+    **{
+        f"overnight_intraday_spread_{width}d": (
+            f"QRP Lou-Polk-Skouras-inspired decomposition: sum of {width} "
+            "log(adjusted open/prior adjusted close) minus log(adjusted "
+            "close/adjusted open). Complete session path; not the paper's "
+            "strategy-level TugOfWar predictor. Released next session."
+        )
+        for width in (20, 60)
+    },
+    "limit_up_close_failure": (
+        "Observed daily high equals the provider's historical upper limit "
+        "while close is below it. Does not identify an opened sealed queue. "
+        "Known no-limit or suspended sessions are zero; unknown facts stay NULL."
+    ),
+    "limit_up_streak": (
+        "Consecutive market sessions closing at the actual historical upper "
+        "limit. A known non-limit close, no-limit session or suspension resets "
+        "the run. Unknown history remains NULL until a known reset; no "
+        "inferred initial run length. Released next session."
+    ),
     "volatility_compression_20_60": (
         "QRP candidate: sample std(return,20)/std(return,60). Lower means "
         "recent volatility compression; no assumed future-return direction."
@@ -413,6 +440,10 @@ _PRICE_VOLUME_INPUT_WINDOWS.update(
 PRICE_VOLUME_UNITS = dict.fromkeys(_PRICE_VOLUME_INPUT_WINDOWS, "dimensionless")
 PRICE_VOLUME_UNITS["return_acceleration_6m6m"] = "decimal_return"
 PRICE_VOLUME_UNITS.update(
+    {f"overnight_intraday_spread_{w}d": "log_return" for w in (20, 60)}
+)
+PRICE_VOLUME_UNITS["limit_up_streak"] = "trading_sessions"
+PRICE_VOLUME_UNITS.update(
     {
         f"signed_breakout_duration_{width}d": "signed_trading_sessions"
         for width in (20, 60, 252)
@@ -529,19 +560,9 @@ def price_volume_factor_definitions(
             FactorDefinition(
                 factor_id=f"price_volume_{column}",
                 market_id=market_id,
-                factor_set=FactorSet.CORE
-                if column
-                in {
-                    "momentum_252_20",
-                    "reversal_5d",
-                    "volatility_20d",
-                    "amihud_20d",
-                    "turnover_20d",
-                    "log_float_market_cap",
-                }
-                else FactorSet.STANDARD,
                 input_columns=(*inputs, "filling_flag")
                 if column in PRICE_VOLUME_PARTIAL_STATISTICS
+                or column.startswith("limit_up_")
                 else inputs,
                 output_column=column,
                 display_name=column,
@@ -571,7 +592,7 @@ def price_volume_factor_definitions(
                 family=PRICE_VOLUME_FACTOR_FAMILY,
                 required_windows=windows,
                 lookback_window=lookback,
-                full_history=column == "return_acceleration_6m6m"
+                full_history=column in {"return_acceleration_6m6m", "limit_up_streak"}
                 or column.startswith(
                     (
                         "signed_breakout_",

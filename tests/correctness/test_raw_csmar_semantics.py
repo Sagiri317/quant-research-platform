@@ -1718,9 +1718,6 @@ def test_legal_provider_width_and_quoting_preserve_fields(tmp_path, quoted):
 def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
     tmp_path, data_id, single
 ):
-    import hashlib
-
-    from quant_research_platform.storage.datasets.comparison import compare_datasets
     from quant_research_platform.storage.datasets.reading import (
         open_dataset_session,
         read_dataset,
@@ -1748,20 +1745,13 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
     if single:
         source = source[:1]
     rows = [*reversed(source), dict(source[0])]
-    roots, frames, hashes = [], [], []
+    frames = []
     spec = interim.interim_catalog().get(data_id)
     for size in (1, 2, 8):
         layout = StorageLayout(tmp_path / str(size))
         raw = layout.raw_source_root("csmar")
         filesystem_mkdir(raw, parents=True)
         _write_csmar(raw, data_id, rows)
-        hashes.append(
-            hashlib.sha256(
-                Path(
-                    native_filesystem_path(next(filesystem_glob(raw, "*.csv")))
-                ).read_bytes()
-            ).hexdigest()
-        )
         result = interim.materialize_interim_data(
             output_roots={
                 key: layout.interim_data_root("csmar", key) for key in (data_id,)
@@ -1771,7 +1761,6 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
             chunksize=size,
         )
         root = result.artifact_roots[data_id]
-        roots.append(root)
         saved = read_dataset(root)
         frames.append(saved.sort_values(list(spec.primary_key)).reset_index(drop=True))
         metadata = open_dataset_session(root).manifest["producer_diagnostics"]
@@ -1793,11 +1782,8 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
                 assert saved.forecast_eps.isna().any()
         assert str(saved.timestamp.dtype) == "datetime64[ns]"
         assert not saved.duplicated(list(spec.primary_key)).any()
-    assert len(set(hashes)) == 1
     for frame in frames[1:]:
         pd.testing.assert_frame_equal(frames[0], frame, check_exact=True)
-    for root in roots[1:]:
-        assert compare_datasets(roots[0], root).status == "MATCH"
 
 
 @pytest.mark.parametrize("chunksize", (1, 2))

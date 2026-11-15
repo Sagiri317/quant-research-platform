@@ -589,6 +589,12 @@ def _processed_frames(
                     for definition in definitions
                     if definition.output_column == "market_breadth_change_5d"
                     or definition.output_column.startswith("breadth_")
+                    or definition.output_column
+                    in {
+                        "market_trading_liquidity_loss_beta_252d",
+                        "relative_downside_beta_252d",
+                        "industry_leader_lag_return_252d",
+                    }
                 )
             ),
             peer_lookback=factor_engine.factor_lookback_bars(
@@ -596,6 +602,12 @@ def _processed_frames(
                     definition
                     for definition in definitions
                     if definition.output_column == "industry_comovement_20d"
+                    or definition.output_column
+                    in {
+                        "market_trading_liquidity_loss_beta_252d",
+                        "relative_downside_beta_252d",
+                        "industry_leader_lag_return_252d",
+                    }
                     or definition.family in {"style_structure", "risk_residual"}
                 )
             ),

@@ -454,7 +454,7 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
 def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
     from quant_research_platform.research.datasets.assembler import assemble
     from quant_research_platform.research.protocols.a_share import (
-        research_dataset_catalog,
+        forward_label_columns,
     )
 
     sessions = pd.bdate_range("2020-01-02", periods=600).as_unit("ns")
@@ -477,35 +477,42 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
     # Keep native startup, mature, and label-missing branches with full history.
     witness_windows = (sessions[:1], sessions[-8:-5], sessions[-1:])
     # These two recipes consume identical published price/volume inputs.
-    for dataset_id in ("pv_all", "fusion_nf_core"):
-        if dataset_id == "fusion_nf_core":
+    for recipe in ("a_share_all", "a_share_fundamental"):
+        selected_inputs = list(steps)
+        factors = [
+            "share_price",
+            "avg_amount_126d",
+            "turnover_250d",
+            "beta_252d",
+            "residual_volatility_60d",
+        ]
+        if recipe == "a_share_fundamental":
             for name in ("fundamental_pit", "fundamental_factors"):
                 inputs[name] = _prepare(
                     tmp_path / "prepared", name, inputs, sessions[0], sessions[-1]
                 )
-        spec = research_dataset_catalog().get(dataset_id)
+            selected_inputs.append("fundamental_factors")
+            factors.append("earnings_yield")
         outputs = []
         for index, window in enumerate(witness_windows):
             rows = read_dataset(
                 assemble(
                     {
                         "market_id": "a_share",
-                        "dataset_id": dataset_id,
-                        "inputs": {
-                            key: str(inputs[key]) for key in spec.input_data_ids
-                        },
-                        "base_input_data_id": spec.base_input_data_id,
-                        "factor_columns": list(spec.factor_columns),
+                        "dataset_id": recipe,
+                        "inputs": {key: str(inputs[key]) for key in selected_inputs},
+                        "base_input_data_id": "market_panel_1d",
+                        "factor_columns": factors,
                         "feature_columns": [],
-                        "label_columns": list(spec.label_columns),
-                        "filter_columns": list(spec.filter_columns),
+                        "label_columns": [*forward_label_columns(), "model_target"],
+                        "filter_columns": ["eligible"],
                         "feature_recipe": "a_share_canonical",
-                        "eligibility_recipe": spec.eligibility_recipe,
+                        "eligibility_recipe": recipe,
                         "time_window": {
                             "start": str(window[0].date()),
                             "end": str(window[-1].date()),
                         },
-                        "output_root": str(tmp_path / dataset_id / str(index)),
+                        "output_root": str(tmp_path / recipe / str(index)),
                     }
                 )
             )
@@ -546,7 +553,7 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
         assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
         assert output.eligible.any()
         assert output.loc[output.eligible, "model_target"].notna().any()
-        if dataset_id == "pv_all":
+        if recipe == "a_share_all":
             for name in (
                 "share_price",
                 "avg_amount_126d",

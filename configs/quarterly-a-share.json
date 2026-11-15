@@ -1434,6 +1434,7 @@
         "hidden_size": 64,
         "num_layers": 1,
         "n_heads": 4,
+        "independent_layer_initialization": true,
         "batch_size": 2048,
         "learning_rate": 0.0003,
         "weight_decay": 0.0001,

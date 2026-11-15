@@ -27,9 +27,9 @@ Config = Annotated[Path, typer.Option("--config", help="Strict operation JSON fi
 @catalog_app.command("factors")
 def catalog_factors(profile: str = A_SHARE_PROFILE_ID) -> None:
     """List the selected market's factor catalog."""
-    typer.echo("factor_id,market_id,factor_set")
+    typer.echo("factor_id,market_id,family")
     for item in queries.list_factors(research_profile(profile)).items:
-        typer.echo(f"{item.factor_id},{item.market_id},{item.factor_set}")
+        typer.echo(f"{item.factor_id},{item.market_id},{item.family}")
 
 
 @catalog_app.command("labels")
@@ -40,16 +40,6 @@ def catalog_labels(profile: str = A_SHARE_PROFILE_ID) -> None:
         typer.echo(
             f"{item.label_id},{item.market_id},{item.horizon},{item.horizon_unit}"
         )
-
-
-@catalog_app.command("dataset")
-def catalog_dataset(dataset_id: str, profile: str = A_SHARE_PROFILE_ID) -> None:
-    """Describe one research dataset's required inputs and columns."""
-    _echo_result(
-        queries.describe_research_dataset_requirements(
-            dataset_id, research_profile(profile)
-        ).model_dump()
-    )
 
 
 @app.command("schema-inventory")

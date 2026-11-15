@@ -2025,9 +2025,6 @@ def test_native_forward_returns_declare_units_and_actual_maturity_columns():
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
     )
-    from quant_research_platform.research.protocols.a_share import (
-        research_dataset_specs,
-    )
 
     for definition in label_definitions():
         spec = catalog.processed_catalog().get(
@@ -2042,12 +2039,3 @@ def test_native_forward_returns_declare_units_and_actual_maturity_columns():
             spec.label_availability_columns[definition.output_column]
             == definition.available_at_column
         )
-    for dataset in research_dataset_specs():
-        assert (
-            len(dataset.label_columns)
-            == sum(d.family == "forward_return" for d in label_definitions()) + 1
-        )
-        for label, clock in dataset.label_availability_columns.items():
-            assert label in dataset.label_columns
-            assert clock in dataset.context_columns
-            assert dataset.column_roles[clock] is ColumnRole.CONTEXT

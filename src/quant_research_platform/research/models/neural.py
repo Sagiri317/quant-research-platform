@@ -42,16 +42,23 @@ def _network(algorithm, width, parameters):
             else:
                 self.projection = nn.Linear(width, hidden)
                 self.position = nn.Embedding(parameters["sequence_length"], hidden)
-                layer = nn.TransformerEncoderLayer(
-                    hidden,
-                    parameters["n_heads"],
+                layer_parameters = dict(
+                    d_model=hidden,
+                    nhead=parameters["n_heads"],
                     dim_feedforward=hidden * 2,
                     dropout=parameters["dropout"],
                     batch_first=True,
                 )
                 self.encoder = nn.TransformerEncoder(
-                    layer, parameters["num_layers"], enable_nested_tensor=False
+                    nn.TransformerEncoderLayer(**layer_parameters),
+                    parameters["num_layers"],
+                    enable_nested_tensor=False,
                 )
+                if parameters.get("independent_layer_initialization", False):
+                    for index in range(1, parameters["num_layers"]):
+                        self.encoder.layers[index] = nn.TransformerEncoderLayer(
+                            **layer_parameters
+                        )
             self.output = nn.Linear(hidden, 1)
 
         def forward(self, values, lengths):

@@ -3,17 +3,9 @@
 from __future__ import annotations
 
 from quant_research_platform.contracts.data import DataGrain
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.ids import MarketId
 
-CORE_FUNDAMENTAL_FACTORS = (
-    "earnings_yield",
-    "book_to_market",
-    "roe",
-    "accruals",
-    "asset_growth_yoy",
-    "net_debt_to_assets",
-)
 # Signed numerator terms, positive denominator, final growth adjustment.
 FUNDAMENTAL_FORMULAS = {
     "earnings_yield": (("parent_net_income_ttm",), "total_market_cap", 0),
@@ -121,15 +113,11 @@ def fundamental_factor_definitions(
     *,
     market_id: MarketId,
     required_input_data_id: str,
-    factor_set: FactorSet = FactorSet.STANDARD,
 ) -> tuple[FactorDefinition, ...]:
     definitions = tuple(
         FactorDefinition(
             factor_id=f"fundamental_{factor}",
             market_id=market_id,
-            factor_set=FactorSet.CORE
-            if factor in CORE_FUNDAMENTAL_FACTORS
-            else factor_set,
             input_columns=fundamental_inputs(factor),
             output_column=factor,
             display_name=factor,

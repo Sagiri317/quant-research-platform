@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.compute.dataframe.cross_section import (
     _neutralize_cross_section,
 )
@@ -22,8 +23,6 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.research.protocols.a_share import (
     LABEL_HORIZONS,
-    research_dataset_catalog,
-    research_dataset_specs,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
@@ -31,22 +30,20 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from tests.helpers.paths import StorageLayout
-from tests.helpers.research_specs import assemble_research_dataset
+from tests.helpers.research_specs import (
+    assemble_research_dataset,
+    make_a_share_target_spec,
+    make_research_dataset_catalog,
+)
 
 
 @pytest.mark.parametrize("scale", [1.0, 0.01, 100.0])
 def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -> None:
-    spec = research_dataset_catalog().get("pv_all")
+    spec = make_a_share_target_spec()
     assert (
         "model_target"
         not in processed_catalog().get("forward_returns").required_columns
     )
-    for dataset_spec in research_dataset_specs():
-        assert {
-            "scenario_universe",
-            "can_enter",
-            "can_exit",
-        }.isdisjoint(dataset_spec.required_columns)
     frame = pd.DataFrame(
         {
             "market_id": "a_share",
@@ -85,17 +82,17 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -
         has_legal_fundamental_pit=[False, True, True],
     )
     fusion_result = _add_a_share_semantic_columns(
-        fusion, research_dataset_catalog().get("fusion_nf_core")
+        fusion, replace(spec, eligibility_recipe="a_share_fundamental")
     )
     assert fusion_result["eligible"].tolist() == [False, True, False]
     assert not _add_a_share_semantic_columns(
         fusion.assign(is_nonfinancial_industry=False),
-        research_dataset_catalog().get("fusion_nf_core"),
+        replace(spec, eligibility_recipe="a_share_fundamental"),
     )["eligible"].any()
 
 
 def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> None:
-    spec = research_dataset_catalog().get("pv_all")
+    spec = make_a_share_target_spec()
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -181,7 +178,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed = processed_catalog()
-    dataset_spec = research_dataset_catalog().get("pv_all")
+    dataset_spec = make_a_share_target_spec()
     # Synthetic sessions: next-open entry, exit after the registered horizon.
     sessions = pd.bdate_range("2023-01-03", periods=max(LABEL_HORIZONS) + 2)
     timestamps = pd.DatetimeIndex([sessions[0]] * 3)
@@ -215,6 +212,9 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "period_return": 0.0,
         "turnover": 0.1,
         "limit_status": 0.0,
+        "limit_up_price": 11.0,
+        "limit_down_price": 9.0,
+        "price_limit_applicable": 1.0,
         "is_trading": True,
         "is_a_share_scope": True,
         "is_st": False,
@@ -304,7 +304,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
             for key in dataset_spec.input_data_ids
         },
         output_root=tmp_path / "assembled",
-        dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
+        dataset_catalog=make_research_dataset_catalog(dataset_spec),
         dataset_id=dataset_spec.data_id,
         time_window=TimeWindow("2023-01-03", "2023-01-03"),
     )
@@ -572,7 +572,7 @@ def test_native_neutralization_zscore_preserves_units_and_persistence(tmp_path, 
             )
         },
         output_root=tmp_path / "assembled",
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
+        dataset_catalog=make_research_dataset_catalog(spec),
         dataset_id=spec.data_id,
         time_window=TimeWindow("2023-01-03", "2023-01-03"),
     )

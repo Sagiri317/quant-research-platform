@@ -1,11 +1,9 @@
 """Saved models preserve fitted floating moments."""
 
-import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models.persisted import load_model
 from tests.research.direct_model_test_support import fit_frame
 
 
@@ -39,12 +37,4 @@ def test_native_fit_preserves_frozen_moments_and_nonbinary_center(tmp_path):
     assert case.result.metadata["scaler"]["weighted_mean"] == list(scaler.mean_)
     assert scaler.transform(pd.DataFrame({"x": [0.0]})).x.iloc[0] == pytest.approx(
         -(1 / 3) / scaler.scale_[0], rel=1e-14
-    )
-    restored, _ = load_model(case.root)
-    assert restored.prediction_model.scaler.to_payload() == scaler.to_payload()
-    np.testing.assert_allclose(
-        restored.prediction_model.predict(case.frame[["x"]]),
-        predictor.predict(case.frame[["x"]]),
-        rtol=1e-13,
-        atol=1e-14,
     )

@@ -233,6 +233,8 @@ def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
         "float_market_cap",
         "total_market_cap",
         "limit_status",
+        "limit_up_price",
+        "limit_down_price",
     ):
         if column in result:
             result[column] = strict_finite_numeric_series(
@@ -242,6 +244,11 @@ def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
             )
         else:
             result[column] = np.nan
+    result["price_limit_applicable"] = np.where(
+        (result.limit_up_price.gt(0) | result.limit_down_price.gt(0)).fillna(False),
+        1.0,
+        np.nan,
+    )
     result = result.loc[result["market_type"].isin(CURRENT_MARKET_TYPES)]
     if result.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("duplicate_market_panel_key")
@@ -1134,7 +1141,10 @@ def _apply_no_limit_exceptions(
         raise ValueError("no_limit_history_key_duplicate")
     event_keys = pd.MultiIndex.from_frame(right.loc[:, ["asset_id", "timestamp"]])
     panel_keys = pd.MultiIndex.from_frame(result.loc[:, ["asset_id", "timestamp"]])
-    result.loc[panel_keys.isin(event_keys), "limit_status"] = 0.0
+    no_limit = panel_keys.isin(event_keys)
+    result.loc[no_limit, "limit_status"] = 0.0
+    result.loc[no_limit, "price_limit_applicable"] = 0.0
+    result.loc[no_limit, ["limit_up_price", "limit_down_price"]] = np.nan
     return result
 
 

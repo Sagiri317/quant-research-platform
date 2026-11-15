@@ -78,6 +78,9 @@ PANEL_COLUMNS = (
     "period_return",
     "turnover",
     "limit_status",
+    "limit_up_price",
+    "limit_down_price",
+    "price_limit_applicable",
     "is_trading",
     "is_a_share_scope",
     "is_st",
@@ -365,7 +368,17 @@ def _spec(
         **MARKET_STRUCTURE_UNITS,
         **STYLE_UNITS,
         **dict.fromkeys(
-            ("open", "high", "low", "close", "adj_open", "adj_close", "prev_close"),
+            (
+                "open",
+                "high",
+                "low",
+                "close",
+                "adj_open",
+                "adj_close",
+                "prev_close",
+                "limit_up_price",
+                "limit_down_price",
+            ),
             "CNY_per_share",
         ),
         **dict.fromkeys(
@@ -381,6 +394,7 @@ def _spec(
         "beta_252d": "dimensionless",
         "residual_volatility_60d": "decimal_return",
         "market_return": "decimal_return",
+        "price_limit_applicable": "dimensionless",
     }
     units = {column: unit for column, unit in known_units.items() if column in roles}
     units.update({column: "decimal_return" for column in availability})

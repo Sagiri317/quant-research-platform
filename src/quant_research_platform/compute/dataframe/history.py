@@ -105,3 +105,25 @@ def liquidity_beta(
             invertible
         )
     return result.where(enough).to_numpy()
+
+
+def past_ar1_innovations(values, *, window=252, min_observations=126):
+    """One-step forecast errors whose AR(1) fit ends before each observation."""
+    y = pd.Series(np.asarray(values, float))
+    x = y.shift()
+    paired = x.notna() & y.notna()
+    y, x = y.where(paired), x.where(paired)
+    slope = pd.Series(
+        liquidity_beta(
+            y,
+            x,
+            window=window,
+            min_observations=min_observations,
+            min_changes=0,
+        )
+    ).shift()
+    intercept = (
+        y.rolling(window, min_periods=min_observations).mean().shift()
+        - slope * x.rolling(window, min_periods=min_observations).mean().shift()
+    )
+    return (y - intercept - slope * x).to_numpy()

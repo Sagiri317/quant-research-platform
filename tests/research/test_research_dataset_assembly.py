@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.datasets.assembler as assembler_module
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ASSET_TIME_KEY,
@@ -36,6 +35,7 @@ from tests.helpers.research_processed_inputs import (
 )
 from tests.helpers.research_specs import (
     assemble_research_dataset,
+    make_a_share_target_spec,
     make_research_dataset_catalog,
 )
 
@@ -114,13 +114,10 @@ def test_non_a_share_assembly_preserves_input_semantics_and_requires_real_column
                 item.market_id, item.kind, item.data_id
             )
             for item in processed.list()
-            if item.data_id
-            in ResearchDatasetCatalog((spec,)).get(scenario).input_data_ids
+            if item.data_id in spec.input_data_ids
         },
-        output_root=layout.research_dataset_root(
-            ResearchDatasetCatalog((spec,)).get(scenario).market_id, scenario
-        ),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
+        output_root=layout.research_dataset_root(spec.market_id, scenario),
+        dataset_catalog=make_research_dataset_catalog(spec),
         dataset_id=scenario,
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
     )
@@ -620,8 +617,8 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = ResearchDatasetCatalog(
-        (
+    dataset_catalog = make_research_dataset_catalog(
+        *(
             ResearchDatasetSpec(
                 data_id="bad_demo",
                 market_id=MarketId("a_share"),
@@ -749,14 +746,13 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
                     item.market_id, item.kind, item.data_id
                 )
                 for item in processed.list()
-                if item.data_id
-                in ResearchDatasetCatalog((spec,)).get(spec.data_id).input_data_ids
+                if item.data_id in spec.input_data_ids
             },
             output_root=layout.research_dataset_root(
-                ResearchDatasetCatalog((spec,)).get(spec.data_id).market_id,
+                spec.market_id,
                 spec.data_id,
             ),
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
+            dataset_catalog=make_research_dataset_catalog(spec),
             dataset_id=spec.data_id,
             time_window=TimeWindow("2023-12-31", "2024-01-04"),
         )
@@ -780,13 +776,9 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
     from quant_research_platform.contracts.experiments import (
         legal_training_rows,
     )
-    from quant_research_platform.research.protocols import a_share
     from quant_research_platform.storage.datasets import read_dataset
 
-    base = replace(
-        a_share.research_dataset_catalog().get("pv_all"),
-        target_label_column="forward_return_20d",
-    )
+    base = make_a_share_target_spec("forward_return_20d")
     frame = pd.DataFrame(
         {
             "market_id": "a_share",

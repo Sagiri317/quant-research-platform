@@ -17,7 +17,6 @@ from quant_research_platform.research.factors.price_volume.calculations import (
 from quant_research_platform.research.factors.price_volume.definitions import (
     price_volume_factor_definitions,
 )
-from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 UNIQUE_FACTORS = (
     "momentum_60d",
@@ -41,11 +40,10 @@ UNIQUE_FACTORS = (
 @pytest.mark.parametrize("timestamp_unit", ["us", "ns"])
 def test_price_volume_selections_use_one_definition_and_minimum_inputs(timestamp_unit):
     binding = dict(market_id=MarketId("a_share"), required_input_data_id="price_volume")
-    standard = price_volume_factor_definitions(**binding, factor_columns=PV25_FACTORS)
+    selected = ("momentum_252_20", "reversal_5d")
+    standard = price_volume_factor_definitions(**binding, factor_columns=selected)
     assert factor_lookback_bars(standard) == 252
-    assert tuple(item.output_column for item in standard) == PV25_FACTORS
-    core = price_volume_factor_definitions(**binding, factor_columns=CORE6_FACTORS)
-    assert tuple(item.output_column for item in core) == CORE6_FACTORS
+    assert tuple(item.output_column for item in standard) == selected
     reversal = price_volume_factor_definitions(
         **binding, factor_columns=("reversal_5d",)
     )
@@ -83,9 +81,11 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs(timestamp
             "total_market_cap": x * 2000.0,
         }
     )
-    names = tuple(dict.fromkeys((*PV25_FACTORS, *UNIQUE_FACTORS)))
-    definitions = price_volume_factor_definitions(**binding, factor_columns=names)
-    assert len(definitions) == 39
+    definitions = tuple(
+        definition
+        for definition in price_volume_factor_definitions(**binding)
+        if set(factor_panel_input_columns((definition,))).issubset(panel.columns)
+    )
     window = TimeWindow(
         panel.timestamp.iloc[280].date(), panel.timestamp.iloc[-1].date()
     )

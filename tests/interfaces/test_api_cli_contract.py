@@ -33,12 +33,6 @@ async def test_catalog_queries_and_missing_root_are_read_only(anyio_backend):
             response = await client.get(f"/api/catalog/{endpoint}")
             assert response.status_code == 200
             assert response.json()["items"]
-        response = await client.get("/api/research-datasets/pv_all/requirements")
-        assert response.status_code == 200
-        requirements = response.json()
-        assert requirements["dataset_id"] == "pv_all"
-        assert requirements["input_data_ids"]
-        assert requirements["factor_count"] > 0
         assert (
             await client.get("/api/inspect", params={"path": "model"})
         ).status_code == 503
@@ -104,7 +98,6 @@ def test_routes_only_query_explicit_evidence():
     } == {
         ("GET", "/api/catalog/factors"),
         ("GET", "/api/catalog/labels"),
-        ("GET", "/api/research-datasets/{dataset_id}/requirements"),
         ("GET", "/api/inspect"),
         ("GET", "/api/portfolio-curve"),
     }

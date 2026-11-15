@@ -25,6 +25,45 @@ def test_preload_inputs_requires_boolean(value):
         )
 
 
+def test_transformer_independent_initialization_and_seed():
+    import torch
+
+    from quant_research_platform.contracts.models import sequence_parameters
+    from quant_research_platform.research.models.neural import _network
+
+    def build(layers, independent=None):
+        parameters = dict(hidden_size=4, num_layers=layers, sequence_length=3)
+        if independent is not None:
+            parameters["independent_layer_initialization"] = independent
+        parameters = sequence_parameters("transformer_regressor", parameters)
+        with torch.random.fork_rng():
+            torch.manual_seed(19)
+            return _network("transformer_regressor", 2, parameters)
+
+    first = build(2, True)
+    second = build(2, True)
+    for name, value in first.state_dict().items():
+        torch.testing.assert_close(value, second.state_dict()[name], rtol=0, atol=0)
+    left, right = first.encoder.layers
+    assert not torch.equal(
+        left.self_attn.in_proj_weight, right.self_attn.in_proj_weight
+    )
+    assert (
+        left.self_attn.in_proj_weight.data_ptr()
+        != right.self_attn.in_proj_weight.data_ptr()
+    )
+    for layers, explicit in ((2, False), (1, True)):
+        baseline, configured = build(layers), build(layers, explicit)
+        for name, value in baseline.state_dict().items():
+            torch.testing.assert_close(
+                value, configured.state_dict()[name], rtol=0, atol=0
+            )
+    with pytest.raises(ValueError, match="independent_layer_initialization"):
+        sequence_parameters(
+            "transformer_regressor", {"independent_layer_initialization": "true"}
+        )
+
+
 @pytest.mark.parametrize(
     "layers,dropout,training", [(1, 0.4, True), (2, 0.0, True), (2, 0.4, False)]
 )
@@ -209,6 +248,11 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
             "epochs": 1,
             "sequence_length": 4,
             "sequence_group_columns": ["episode"] if grouped else [],
+            **(
+                {"num_layers": 2, "independent_layer_initialization": True}
+                if algorithm == "transformer_regressor"
+                else {}
+            ),
         },
     )
     config["candidate_parameters"] = None
@@ -221,6 +265,13 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
     model = result.prediction_model
     assert result.metadata["resolved_hyperparameters"]["device"] == "cuda"
     assert result.metadata["resolved_hyperparameters"]["preload_inputs"] is False
+    if algorithm == "transformer_regressor":
+        assert (
+            result.metadata["resolved_hyperparameters"][
+                "independent_layer_initialization"
+            ]
+            is True
+        )
 
     # Independent identities isolate contiguous episodes even when group values
     # repeat. Default models instead skip empty rows and retain asset history.

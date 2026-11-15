@@ -57,6 +57,7 @@ from quant_research_platform.research.models.production import fit
 model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 ```
 
+直接拟合示例用单列说明接口；当前完整模型研究使用季度或会话滚动配置，纳入对应原生产物的全部独立输入。
 各阶段需要分别配置。评分操作（score）通过 validation_windows 指定完整验证窗口；
 选择操作（select）通过 refit_windows 与 refit_cutoff 记录最终重新拟合的窗口和截止时刻。
 最终拟合只使用这些窗口中、截至拟合时已成熟的样本；可以加入符合条件的新日期，但不会填平窗口间的空档。
@@ -96,10 +97,9 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 ```text
 qrp catalog factors --profile a_share_csmar_choice
 qrp catalog labels --profile a_share_level2
-qrp catalog dataset pv_all
 ```
 
-HTTP `create_app(project_root=...)` 提供 catalog、数据集要求、
+HTTP `create_app(project_root=...)` 提供因子与标签目录、
 `/api/inspect?path=...` 与 `/api/portfolio-curve?path=...`。
 查询限定在绑定的项目根内，只读取已有结果；原始数据和计算任务由本地接口管理。
 

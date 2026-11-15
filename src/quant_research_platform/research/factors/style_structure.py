@@ -8,7 +8,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     _select_quantile_boundary,
 )
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.factors import FactorDefinition
 
 STYLES = {
     "size": "log_total_market_cap",
@@ -44,7 +44,6 @@ def factor_definitions():
             factor_id=name,
             market_id="a_share",
             family="style_structure",
-            factor_set=FactorSet.STANDARD,
             input_columns=(
                 "period_return",
                 "is_a_share_scope",

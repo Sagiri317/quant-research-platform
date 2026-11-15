@@ -102,7 +102,6 @@ def definitions():
         FactorDefinition(
             factor_id=name,
             market_id="a_share",
-            factor_set="standard",
             input_columns=dependencies
             or (
                 f"implied_variance_{name.split('_')[-1]}",

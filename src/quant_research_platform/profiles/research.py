@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import cache
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.ids import MarketId
@@ -20,7 +19,6 @@ class ResearchProfile:
     market_id: MarketId
     factors: FactorCatalog
     labels: LabelCatalog
-    research_datasets: ResearchDatasetCatalog
 
 
 @cache
@@ -34,7 +32,6 @@ def research_profile(profile_id: str = A_SHARE_PROFILE_ID) -> ResearchProfile:
             MarketId("a_share"),
             a_share.factor_catalog(),
             a_share.label_catalog(),
-            a_share.research_dataset_catalog(),
         )
     if profile_id == A_SHARE_HFT_PROFILE_ID:
         return ResearchProfile(
@@ -42,6 +39,5 @@ def research_profile(profile_id: str = A_SHARE_PROFILE_ID) -> ResearchProfile:
             MarketId("a_share"),
             a_share_hft.factor_catalog(),
             a_share_hft.label_catalog(),
-            a_share_hft.research_dataset_catalog(),
         )
     raise KeyError("unknown_research_profile")

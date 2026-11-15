@@ -120,6 +120,12 @@ def calculate_price_volume_factors(
             if status
             else np.ones(len(group), dtype=bool)
         )
+        if any(name.startswith("limit_up_") for name in requested):
+            values["_suspended"] = (
+                group["filling_flag"].eq(1).fillna(False).to_numpy(dtype=bool)
+                if status
+                else np.zeros(len(group), dtype=bool)
+            )
         start, stop = 0, len(group)
         if bounds is not None:
             lower, upper, closed = bounds
@@ -136,9 +142,12 @@ def calculate_price_volume_factors(
             )
         for column, factor in enumerate(requested):
             partial = factor in PRICE_VOLUME_PARTIAL_STATISTICS
+            known_observations = partial or factor.startswith(
+                "overnight_intraday_spread_"
+            )
             output[offset : offset + stop - start, column] = _calculate_values(
-                statistical_values if partial else values,
-                statistical_sums if partial else sums,
+                statistical_values if known_observations else values,
+                statistical_sums if known_observations else sums,
                 factor,
                 start,
                 stop,
@@ -164,6 +173,42 @@ def _calculate_values(
     min_fresh_fraction: float = 0.75,
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    if factor.startswith("overnight_intraday_spread_"):
+        key = "overnight_intraday_log_difference"
+        if key not in sums:
+            opening = pd.Series(values["adj_open"]).where(lambda x: x > 0)
+            closing = pd.Series(values["adj_close"]).where(lambda x: x > 0)
+            sums[key] = np.log(opening / closing.shift()) - np.log(closing / opening)
+        return sums[key].rolling(windows[0] - 1).sum().to_numpy()[start:stop].copy()
+    if factor.startswith("limit_up_"):
+        close, upper = values["close"], values["limit_up_price"]
+        applicable = values["price_limit_applicable"]
+        if fresh is None:
+            fresh = np.ones(len(close), dtype=bool)
+        suspended = values["_suspended"]
+        no_event = (fresh & (applicable == 0)) | suspended
+        known = fresh & (applicable == 1) & (upper > 0) & (close > 0) & (close <= upper)
+        if factor == "limit_up_close_failure":
+            high = values["high"]
+            known &= np.isfinite(high) & (high >= close) & (high <= upper)
+            result = np.where(
+                known, ((high == upper) & (close < upper)).astype(float), np.nan
+            )
+        else:
+            at_limit = known & (close == upper)
+            reset = no_event | (known & ~at_limit)
+            unknown = ~known & ~no_event
+            index = np.arange(len(close))
+            last_reset = np.maximum.accumulate(np.where(reset, index, -1))
+            last_unknown = np.maximum.accumulate(np.where(unknown, index, -1))
+            result = np.where(
+                at_limit & (last_reset >= 0) & (last_reset > last_unknown),
+                index - last_reset,
+                np.nan,
+            )
+            result[reset] = 0.0
+        result[no_event] = 0.0
+        return result[start:stop].copy()
     if factor == "return_acceleration_6m6m":
         return sums[factor][start:stop].copy()
     if factor.startswith("breakout_activity_divergence_"):

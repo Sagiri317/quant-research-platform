@@ -37,6 +37,9 @@ def panel(prices):
             "amount": 1000.0,
             "period_return": pd.Series(prices).pct_change(fill_method=None),
             "turnover": 1.0,
+            "limit_up_price": prices * 1.1,
+            "price_limit_applicable": 1.0,
+            "filling_flag": 0,
         }
     )
 

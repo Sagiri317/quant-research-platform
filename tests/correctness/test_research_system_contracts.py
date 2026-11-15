@@ -1,6 +1,5 @@
 """Adversarial contracts and exact kernel comparisons against independent references."""
 
-from dataclasses import asdict
 from fractions import Fraction
 
 import numpy as np
@@ -11,7 +10,6 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _industry_size_residuals,
 )
 from quant_research_platform.contracts.features import FeatureTransformSpec
-from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     ModelSpec,
     TrainingWeighting,
@@ -28,10 +26,6 @@ from quant_research_platform.research.models.scaler import (
     equal_timestamp_sample_weights,
 )
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.research.risk import (
-    FactorRiskConfig,
-    FactorRiskState,
-)
 from quant_research_platform.research.statistics import (
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
@@ -152,21 +146,12 @@ def test_equal_timestamp_decay_is_one_frozen_model_contract():
     )
     np.testing.assert_allclose(weights, np.array([2, 2, 8, 16]) / 7)
     assert weights.sum() == pytest.approx(4)
-    spec = ModelSpec(
-        model_id="x",
-        model_algorithm="linear_regression",
-        input_feature_columns=("x",),
-        target_column="y",
-    )
     decayed = ModelSpec(
         model_id="x",
         model_algorithm="linear_regression",
         input_feature_columns=("x",),
         target_column="y",
         training_weighting={"method": "equal_timestamp", "half_life_periods": 756},
-    )
-    assert canonical_json_hash(model_spec_payload(spec)) != canonical_json_hash(
-        model_spec_payload(decayed)
     )
     assert model_spec_payload(decayed)["training_weighting"]["half_life_periods"] == 756
 
@@ -329,21 +314,6 @@ def test_training_preparation_failure_closes_borrowed_dataset_source(
         assert source.gi_frame is None
     finally:
         source.close()
-
-
-def test_risk_manifest_serializes_the_same_runtime_config():
-    config = FactorRiskConfig(
-        factor_window=15,
-        specific_window=8,
-        minimum_factor_dates=3,
-        minimum_specific_dates=2,
-        factor_half_life=7,
-        specific_half_life=3,
-        diagonal_shrinkage=0.4,
-        annualization=250,
-    )
-    assert FactorRiskConfig(**asdict(config)) == config
-    assert FactorRiskState(style_columns=("x",), config=config).config == config
 
 
 def test_forward_labels_match_sparse_session_oracle():

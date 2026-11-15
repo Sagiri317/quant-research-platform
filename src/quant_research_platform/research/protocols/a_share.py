@@ -6,14 +6,10 @@ from dataclasses import replace
 
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
-    DataFrequency,
     DataGrain,
 )
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
-from quant_research_platform.contracts.features import FeatureTransformSpec
+from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.risk import (
     RISK_STYLE_COLUMNS as RISK_STYLE_COLUMNS,
@@ -23,11 +19,9 @@ from quant_research_platform.markets.implementations.a_share.stock_pool import (
     A_SHARE_ELIGIBILITY_FACTS,
 )
 from quant_research_platform.research.factors.expectations.definitions import (
-    ALL_EXPECTATIONS_FACTORS,
     expectations_factor_definitions,
 )
 from quant_research_platform.research.factors.fundamental.definitions import (
-    FUNDAMENTAL_FACTORS,
     fundamental_factor_definitions,
 )
 from quant_research_platform.research.factors.names import factor_display_name
@@ -43,14 +37,7 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
-SCENARIO_IDS = (
-    "pv_all",
-    "pv_nf_expectations",
-    "fusion_nf_core",
-    "fusion_nf_expectations",
-)
 LABEL_HORIZONS = (1, 5, 10, 20, 60, 120)
-MODEL_TARGET_COLUMN = "model_target"
 
 
 def _inference_blocker(manifest):
@@ -64,23 +51,6 @@ def _inference_blocker(manifest):
     if manifest.get("training_weighting", {}).get("role") == "robustness":
         return "training_weighting_robustness_excluded"
     return None
-
-
-def dataset_factor_columns(dataset_id: str) -> tuple[str, ...]:
-    """Return the declared factor set for a static dataset definition."""
-    if dataset_id not in SCENARIO_IDS:
-        raise ValueError("unknown_a_share_dataset")
-    columns = (
-        *PRICE_VOLUME_LIBRARY,
-        *PRICE_VOLUME_PATH_FACTORS,
-        *MARKET_MODEL_FACTORS,
-        *RESIDUAL_FACTOR_WINDOWS,
-    )
-    if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-        columns += FUNDAMENTAL_FACTORS
-    if dataset_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
-        columns += ALL_EXPECTATIONS_FACTORS
-    return columns
 
 
 def factor_catalog() -> FactorCatalog:
@@ -121,7 +91,6 @@ def factor_catalog() -> FactorCatalog:
                 FactorDefinition(
                     factor_id=column,
                     market_id=market_ids.MARKET_ID,
-                    factor_set=FactorSet.STANDARD,
                     input_columns=tuple(
                         dict.fromkeys(
                             (
@@ -156,7 +125,6 @@ def factor_catalog() -> FactorCatalog:
                 FactorDefinition(
                     factor_id=column,
                     market_id=market_ids.MARKET_ID,
-                    factor_set=FactorSet.STANDARD,
                     input_columns=tuple(
                         dict.fromkeys(
                             (
@@ -240,141 +208,6 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
 
 def label_catalog() -> LabelCatalog:
     return LabelCatalog(label_definitions())
-
-
-def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
-    specs: list[ResearchDatasetSpec] = []
-    for scenario_id in SCENARIO_IDS:
-        factor_columns = dataset_factor_columns(scenario_id)
-        feature_columns = tuple(f"feature_{factor}" for factor in factor_columns)
-        labels = (*forward_label_columns(), MODEL_TARGET_COLUMN)
-        context = (
-            *forward_label_available_columns(),
-            "model_target_available_at",
-            "is_a_share_scope",
-            "is_trading",
-            "is_st",
-            "is_pt",
-            "listing_age_trading_days",
-            "has_252_trading_sessions",
-            "close",
-            "adj_close",
-            "volume",
-            "amount",
-            "turnover",
-            "industry_standard_id",
-            "industry_level1_code",
-            "industry_level1_name",
-            "float_market_cap",
-            "total_market_cap",
-        )
-        if scenario_id in {
-            "pv_nf_expectations",
-            "fusion_nf_core",
-            "fusion_nf_expectations",
-        }:
-            context += ("is_nonfinancial_industry",)
-        if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-            context += ("has_legal_fundamental_pit",)
-        all_columns = (
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "eligible",
-            *factor_columns,
-            *feature_columns,
-            *labels,
-            *context,
-        )
-        roles = {
-            column: _dataset_role(
-                column,
-                factor_columns,
-                feature_columns,
-                labels,
-                ("eligible",),
-            )
-            for column in all_columns
-        }
-        transforms = (FeatureTransformSpec("a_share_canonical", tuple(factor_columns)),)
-        input_data_ids = [
-            market_ids.MARKET_PANEL_ID,
-            market_ids.PRICE_VOLUME_DATA_ID,
-            "forward_returns",
-        ]
-        if set(factor_columns).intersection(MARKET_MODEL_FACTORS):
-            input_data_ids.append("market_model_factors")
-        if set(factor_columns).intersection(RESIDUAL_FACTOR_WINDOWS):
-            input_data_ids.append("risk_residual_factors")
-        if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-            input_data_ids.insert(3, "fundamental_factors")
-        if scenario_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
-            input_data_ids.insert(-1, "expectations_factors")
-        specs.append(
-            ResearchDatasetSpec(
-                data_id=scenario_id,
-                market_id=market_ids.MARKET_ID,
-                input_data_ids=tuple(input_data_ids),
-                base_input_data_id=market_ids.MARKET_PANEL_ID,
-                factor_columns=factor_columns,
-                feature_columns=feature_columns,
-                feature_transforms=transforms,
-                label_columns=labels,
-                label_availability_columns={
-                    **{
-                        forward_return_label_column(
-                            h
-                        ): forward_return_available_at_column(h)
-                        for h in LABEL_HORIZONS
-                    },
-                    "model_target": "model_target_available_at",
-                },
-                filter_columns=("eligible",),
-                eligibility_recipe=(
-                    "a_share_fundamental"
-                    if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}
-                    else "a_share_nonfinancial"
-                    if scenario_id == "pv_nf_expectations"
-                    else "a_share_all"
-                ),
-                context_columns=context,
-                frequency=DataFrequency.DAILY,
-                grain="research_row",
-                column_roles=roles,
-                primary_key=("market_id", "asset_id", "timestamp"),
-                partition_columns=("year",),
-                key_coverage={data_id: "strict" for data_id in input_data_ids},
-            )
-        )
-    return tuple(specs)
-
-
-def research_dataset_catalog():
-    from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-
-    return ResearchDatasetCatalog(research_dataset_specs())
-
-
-def _dataset_role(
-    column: str,
-    factors: tuple[str, ...],
-    features: tuple[str, ...],
-    labels: tuple[str, ...],
-    filters: tuple[str, ...],
-) -> ColumnRole:
-    if column in factors:
-        return ColumnRole.FACTOR
-    if column in features:
-        return ColumnRole.FEATURE
-    if column in labels:
-        return ColumnRole.LABEL
-    if column in filters:
-        return ColumnRole.UNIVERSE
-    if column == "timestamp":
-        return ColumnRole.TIMESTAMP
-    if column in {"market_id", "asset_id"}:
-        return ColumnRole.KEY
-    return ColumnRole.CONTEXT
 
 
 def forward_label_columns() -> tuple[str, ...]:

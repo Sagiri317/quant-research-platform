@@ -12,7 +12,7 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.research.protocols.a_share import (
     RISK_STYLE_COLUMNS,
 )
-from tests.helpers.research_configuration import PV25_FACTORS
+from tests.helpers.research_configuration import TEST_FACTORS
 from tests.helpers.statistics_artifacts import portfolio_statistics_config
 
 
@@ -129,7 +129,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     from tests.helpers.research_configuration import research_configuration
 
     candidates, config = portfolio_statistics_config(
-        configuration=research_configuration(factors=PV25_FACTORS)
+        configuration=research_configuration(factors=TEST_FACTORS)
     )
     before, after, end, costs = (
         (1000.0, 1040.0, 1005.0),
@@ -937,7 +937,7 @@ def test_declared_ledger_family_preserves_descriptive_inference(
     from tests.helpers.research_configuration import research_configuration
 
     dates = pd.bdate_range("2023-01-02", periods=75)
-    configuration = research_configuration(factors=PV25_FACTORS)
+    configuration = research_configuration(factors=TEST_FACTORS)
     if candidate_id is not None:
         configuration["portfolios"][0]["candidate_id"] = candidate_id
         configuration["primary_portfolio_id"] = candidate_id
@@ -1219,7 +1219,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     frames = _frames(dates)
     originals = {name: frame.copy(deep=True) for name, frame in frames.items()}
     candidates, config = portfolio_statistics_config(
-        configuration=research_configuration(factors=PV25_FACTORS)
+        configuration=research_configuration(factors=TEST_FACTORS)
     )
     manifest = deepcopy(config)
     window = {

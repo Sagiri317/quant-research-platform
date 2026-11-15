@@ -8,7 +8,7 @@ from quant_research_platform.storage.datasets.schema import data_spec_payload
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     EXECUTION_ASSUMPTIONS,
-    PV25_FACTORS,
+    TEST_FACTORS,
     research_configuration,
 )
 
@@ -162,7 +162,7 @@ def portfolio_statistics_config(sample_role="validation", *, configuration=None)
         RISK_STYLE_COLUMNS,
     )
 
-    configuration = configuration or research_configuration(factors=PV25_FACTORS)
+    configuration = configuration or research_configuration(factors=TEST_FACTORS)
     candidates = tuple(
         PortfolioCandidateSpec(
             **{

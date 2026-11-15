@@ -27,7 +27,7 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 | 能力 | 支持内容 | 输入条件与适用范围 |
 |---|---|---|
 | 数据与 PIT | CSMAR 市场事实、Choice 原生请求归档及事件版本适配、合法可用时点与修订传播 | 每项研究单独检查原始数据与历史修订的覆盖 |
-| 场景与因子 | 配置选择 pv_all、pv_nf_expectations、fusion_nf_core、fusion_nf_expectations；量价／价格路径、关键价位、广度与行业结构、融资、共享风险与残差、基本面及预期因子，公式与实际条目以原生目录为准；PV25/CORE6为目录选择 | 按各因子所需来源确定可计算范围 |
+| 场景与因子 | 按原生目录计算具备实际输入的独立因子；价格路径、关键价位、市场与行业结构、融资、风险暴露、基本面及预期等分类用于说明机制，不限制模型输入 | 按各因子所需来源确定可计算范围 |
 | 特征与标签 | 横截面资格、按显式配方去极值／中性化／标准化、空值、各期限成熟标签及可配置源标签的风险残差 | 缺少必要事实只限制直接依赖项 |
 | 模型与预测 | OLS、Ridge、LASSO、XGBoost、LSTM、Transformer，共享可配置季度扩展训练、预测和评价 | 实际候选和窗口随原生产物保存 |
 | 组合与推断 | 配置简单分位数组合或 CSI500/CSI1000 增强，选择日/周/月再平衡；复用自融资账本、成本/风险/容量/归因及预注册统计 | 实际交易受现金、交易状态和流动性约束 |
@@ -524,28 +524,15 @@ NULL、非正权重、重复键、精确身份不符或总和非有限／超界�
 
 官方基准本身不含摩擦；实际增强跟踪组合中由基准驱动的交易，仍通过真实执行/成本链。
 
-### 5.7 正式场景与资格
+### 5.7 研究输入与样本资格
 
-正式场景由研究配置选择：
+数据集由本次显式输入、因子、处理方式和标签组装，声明直接保存在原生产物中，不维护预设场景目录。
+当前模型使用真实可计算的全部独立因子；因子分类不限制输入，Choice 财务数据仍不使用。
+研究 JSON 指定模型参数、比较基线和访问窗口；研究选择见 [research.md](research.md)。
 
-```text
-pv_all
-pv_nf_expectations
-fusion_nf_core
-fusion_nf_expectations
-```
-
-不跨场景选择优胜模型；各场景分别形成独立评估、模型和组合结论。
-
-`pv_nf_expectations` 要求完整历史行业及非金融身份，但不要求财务 PIT；融合场景继续要求合法财务 PIT。
+样本资格由实际用途选择：全部 A 股、非金融 A 股或具备合法财务 PIT 的非金融 A 股。
 所选财务因子及组合风险暴露共同决定必要报表依赖；未选因子的缺失表不阻塞独立使用方。
-
-#### 科研选择与独立操作
-
-场景提供因子和经济资格的默认组合，显式配置决定实际选择，研究 JSON 决定评估因子、模型输入与参数、比较基线、
-组合集合及访问窗口。配置中未选择的能力不自动补齐；配置仍须符合实际字段、单位、标签成熟和明确冻结的研究边界。
-
-研究选择集中在 [research.md](research.md)。`pv_all` 是唯一量价数据域，输入列与参数由操作配置明确给出；财务和预期场景为独立能力。
+历史实验保留当时各场景的结果与限制，不按当前输入重新解释旧结果。
 
 研究数据集对外只有一个样本过滤真值：
 
@@ -617,48 +604,10 @@ can_exit
 
 ### 5.9 正式因子库
 
-#### 5.9.1 价量因子（PV25与扩展库）
+#### 5.9.1 价量因子
 
-正式 PV25：
-
-```text
-reversal_1d
-reversal_5d
-reversal_20d
-momentum_60_20
-momentum_120_20
-momentum_252_20
-volatility_20d
-volatility_60d
-downside_volatility_20d
-downside_volatility_60d
-max_return_20d
-skewness_60d
-drawdown_60d
-amplitude_20d
-avg_amount_20d
-turnover_20d
-turnover_60d
-turnover_volatility_20d
-amihud_20d
-amihud_60d
-amount_shock_20d
-return_amount_corr_20d
-trend_efficiency_60d
-signed_amount_flow_20d
-log_float_market_cap
-```
-
-CORE 价量因子：
-
-```text
-momentum_252_20
-reversal_5d
-volatility_20d
-amihud_20d
-turnover_20d
-log_float_market_cap
-```
+全部独立公式共用原生目录，不再划分核心、标准或扩展名单。具体依赖、窗口与定义由
+`price_volume_factor_definitions` 提供；模型采用当次数据可计算且符合信息时点的全部独立输入。
 
 滚动统计的窗口要求：
 
@@ -701,11 +650,10 @@ momentum_252_20 = P_{t-20} / P_{t-252} - 1
 
 不使用 epsilon 挽救非法分母。
 
-##### 可选价量因子
+##### 其他价量公式
 
-PV25 与六项 CORE 由普通研究配置保存，不是代码中的隐式默认选择。
-库通过同一 `price_volume_factor_definitions(..., factor_columns=...)` 选择以下可选项；
-没有新增实验输出组，也没有周期笛卡尔展开：
+以下公式与上述因子使用同一目录和计算入口。`factor_columns` 只用于本次计算的列裁剪，
+不代表预设因子集合；独立窗口和经济含义保留，等价重复项合并：
 
 | 因子 | 定义 |
 |---|---|
@@ -752,7 +700,7 @@ beta_252d 与 residual_volatility_60d 复用 compute/market_model 的唯一风�
 
 ##### 路径机制因子
 
-三个路径变量单独注册，不改变 CORE6、PV25、PV52 原选择。使用完整20个日收益：
+三个路径变量与其他独立因子共用目录。使用完整20个日收益：
 `positive_return_fraction_20d = mean(r > 0)`；
 `largest_daily_contribution_20d = max(abs(r)) / sum(abs(r))`；
 `path_roughness_20d = 1 - abs(sum(r)) / sum(abs(r))`。
@@ -781,17 +729,6 @@ capex_to_assets
 liabilities_to_assets
 debt_to_assets
 cash_to_assets
-net_debt_to_assets
-```
-
-CORE 基本面因子：
-
-```text
-earnings_yield
-book_to_market
-roe
-accruals
-asset_growth_yoy
 net_debt_to_assets
 ```
 
@@ -934,19 +871,8 @@ forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利�
 
 ### 5.10 特征范围与变换
 
-正式范围：
-
-```text
-CORE
-FULL
-```
-
-预期场景：
-
-```text
-CORE_Exp = CORE Fusion features + 4 expectations  # 核心融合特征加预期模块
-FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期模块
-```
+因子与特征按原生目录和本次可计算输入确定，不维护 CORE/FULL 或带预期模块的预选名单。
+同一因子选择原值或处理后表示；处理前后版本保留用于因子分析对照，不重复送入模型。
 
 不使用按绩效动态删除因子的选择器。
 
@@ -1092,11 +1018,11 @@ A 股经济时间线：
 
 主模型经济标签：
 
-`forward_return_20d`
+`forward_return_5d`
 
 辅助期限：
 
-`5d / 10d / 60d`
+`10d / 20d / 60d`
 
 诊断期限：
 
@@ -1251,7 +1177,7 @@ GPU 不可用时使用 CPU，也可通过 `device=cpu` 明确选择 CPU。固定
 
 不使用市值样本权重。
 
-主方案不使用时间衰减；启用衰减的研究默认半衰期为 252 完整市场会话。
+当前季度模型不使用时间衰减；如研究另行启用，半衰期须在该次配置中明确指定。
 
 预注册稳健性通过 ModelSpec/config 的 `training_weighting={"method":"equal_timestamp","half_life_periods":756}` 执行；
 按有序训练时点的年龄乘 `0.5 ** (age / half_life_periods)` 后重新归一化为 `sum=N_train`。
@@ -2236,12 +2162,8 @@ HAC 滞后和自助法区块不得跨未定义日期压紧时钟。任一输入�
 
 `HAC / Newey-West 滞后 19`
 
-FDR 家族按预先选择的因子及其 `FactorDefinition.family` 冻结；随仓 PV25/基本面选择对应的示例为：
-
-```text
-PV25 一个家族
-Fundamental19 一个家族
-```
+FDR 家族按本次计算前确定的完整因子目录及其 `FactorDefinition.family` 冻结；
+量价、基本面等按各自家族校正，不按事后表现筛掉成员。该统计分组不限制模型输入。
 
 即使部分因子没有有效观测 p-value，每个家族的校正仍使用预注册完整家族大小。缺失的原始/调整后 p-value 保持 `UNDEFINED`，数值占位不作为观测证据；产物报告各家族计划、已定义和缺失计数。
 
@@ -2258,7 +2180,7 @@ BH/BY 与 SPA/StepM/MCS 按实际选择截止、完整时钟、固定候选族�
 `sample_role=test` 不触发统一排除，也不单独证明样本外资格。合格的冻结最终评价保留所请求的
 HAC、自助法、FDR 与联合检验；开发曲线的选后分析披露探索性用途与选择偏差。
 单候选PSR仍可定义，DSR/PBO统一为UNDEFINED/insufficient_candidate_count；候选数取真实ID数量。
-FDR 永不动态改变 CORE/FULL 因子成员。
+FDR 不根据检验结果改变已声明的因子成员。
 
 #### 5.27.2 挑战模型比较
 
@@ -2313,12 +2235,12 @@ SPA/StepM 的学生化和中心化遵循 [Hansen（2005）](https://bashtage.git
 显式选择 `forward_return_20d` 等其他支持期限时，FMB 使用同一标签及其可用时点确定成熟样本，
 输出的经济解释与该期限一致，不独立读取二十日标签或借用其成熟域。
 
-单因子回归分别运行；多因子回归仅使用 CORE。
+单因子回归分别运行；多因子回归使用显式配置的因子列。
 
 每日分别执行带截距等权 OLS 与总市值加权 WLS；权重为 `total_market_cap`，不是流通市值。
 截距的统一系数标识为 `intercept`，该名称不用于 FMB 输入因子；其他自定义因子名按实际字段保留。
 缺失、不可解析、非有限或非正市值只使对应观察退出加权回归，不影响独立等权结果；合法样本不足则该回归未定义。回归 ID 以 `equal:` / `total_market_cap:`
-区分两套结果；单因子与 CORE 多因子均保留。系数时间序列的 HAC 滞后由调用者通过
+区分两套结果；单因子与显式多因子回归均保留。系数时间序列的 HAC 滞后由调用者通过
 `statistics.hac_lag` 显式给定，并随原生元数据保存。
 异方差辅助检验的残差平方若为常数，其R²无定义，直接保留诊断未定义；不执行零总平方差除法。
 辅助多项式列秩亏不等于主回归秩亏；合法的投影R²与有效秩仍按统计约定使用。

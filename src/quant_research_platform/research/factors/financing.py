@@ -161,7 +161,6 @@ def factor_definitions():
         FactorDefinition(
             factor_id=name,
             market_id="a_share",
-            factor_set="standard",
             family="financing",
             input_columns=(
                 recipe[0],

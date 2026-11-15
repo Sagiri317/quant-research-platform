@@ -260,7 +260,6 @@ def factor_definitions():
         FactorDefinition(
             factor_id=name,
             market_id="a_share",
-            factor_set="experimental",
             family="macro_liquidity",
             input_columns=(*PUBLIC_SERIES[recipe[1]][2], "available_at")
             if recipe[0] == "series" and recipe[1] in PUBLIC_SERIES

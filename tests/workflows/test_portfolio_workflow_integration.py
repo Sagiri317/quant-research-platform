@@ -22,7 +22,7 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.predictions.runner import predict
 from quant_research_platform.storage.datasets import write_dataset
-from tests.helpers.research_configuration import CORE6_FACTORS
+from tests.helpers.research_configuration import TEST_FACTORS
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.statistics_artifacts import statistics_config
 
@@ -31,7 +31,7 @@ from tests.helpers.statistics_artifacts import statistics_config
 def native_comparison(tmp_path_factory):
     root = tmp_path_factory.mktemp("native-comparison")
     dates = pd.bdate_range("2018-08-01", "2019-02-28")
-    factor = CORE6_FACTORS[0]
+    factor = TEST_FACTORS[0]
     frame = pd.DataFrame(
         [
             {
