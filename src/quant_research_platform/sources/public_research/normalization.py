@@ -404,7 +404,7 @@ def accepts(data_id, record):
     if data_id == "public_refinancing_balances":
         return path.endswith((".csv", ".csv.gz"))
     if record["source"].startswith("etf_pcf_"):
-        return path.endswith(".csv")
+        return True
     if (
         record["source"].startswith("yahoo_")
         or data_id == "public_domestic_etf_actions"
@@ -977,7 +977,10 @@ def normalize(data_id, path, record):
         if data_id == "public_etf_pcf_baskets":
             mapping.pop("declared_component_count")
             mapping["original_component_count"] = "declared_component_count"
-        frame = _read_csv(path, columns=mapping, dtype="str")
+        table = data_id.rsplit("_", 1)[1]
+        frame = _read_parquet(
+            path / (table + ".parquet"), record["tables"][table], columns=mapping
+        )
         result = _rename(frame, mapping)
         result["asset_id"] = result.fund_code
         if data_id == "public_etf_pcf_components":

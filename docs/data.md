@@ -37,6 +37,9 @@ CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作�
 适用域，不因此承诺任意导出版本、未知字段或历史完整性。股数、市值、价格、成交量/额
 及百分比换算见 [A 股价格、收益与市值口径](a-share.md#55-价格收益与市值口径)。
 未知枚举由对应表的处理模块按实际用途解释；`corporate_actions.kind` 的保留和诊断见下文字段字典。
+日行情 `LimitUp` / `LimitDown` 分别映射 `limit_up_price` / `limit_down_price`，单位保持人民币/股。
+市场面板据正的实际限价建立 `price_limit_applicable=1`；明确的 `trading_no_limit` 事件置为0并清空当日限价，
+无法确认时保留未知。个股触板和连板按这些历史限价计算，不根据统一百分比或含义未完全确定的 `LimitStatus` 猜涨停价。
 `index_info` 的 `Idxinfo05` 至 `Idxinfo09` 是可选分类来源字符串，未知代码原样保留，
 不猜测含义、不补为空，也不据此排除整行。清单的 `producer_diagnostics.source_row_counts`
 披露原始行数、逐字段 `unsupported_<column>_rows`、按行取并集的
@@ -482,7 +485,7 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 `prepare-source`的`source_id=public_research`接收各来源声明的结构化JSON／JSONL、CSV、XLSX或Parquet表格；JSONL和CSV可按来源使用gzip。
 读取raw根下唯一的`manifest.json`，`manifests`选择其中`collections`的集合标识；
 文件路径相对于其中的`source_root`，只读取当前研究所需来源，保留清单中的来源身份，不复验原件字节或计数。
-CSV、XLSX和SEC Parquet先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
+CSV、XLSX和Parquet先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
 可定位的坏数字／非有限业务单元格在唯一数值解释边界保留为NA，并按字段累计
 `source_invalid_numeric_cells`，其他字段及记录继续规范化；不补零。主键、来源结构、
 单位与可用时钟错误仍明确失败，不以数值缺失规则掩盖。
@@ -492,7 +495,7 @@ CSV、XLSX和SEC Parquet先按实际消费字段投影；这些字段的原始�
 |---|---|
 | `public_margin_balances` | 两融余额、融资买入／偿还额为CNY；数量为股或基金份额。交易所未报的偿还字段可由明确标记的平台公开历史补充，不从余额恒等式推造 |
 | `public_fund_shares` | 交易所ETF总份额；读取结构化CSV，上交所万份换算为份，深交所按原“份”字段读取 |
-| `public_etf_pcf_baskets`／`public_etf_pcf_components` | 每申赎单位基金份额、估值日NAV／现金差额及交付篮子；股票股数与黄金克数分列，不能当实际持仓或指数权重。各基金规则对应各自可用时钟，保留原件URL与来源身份 |
+| `public_etf_pcf_baskets`／`public_etf_pcf_components` | 读取`pcf/baskets.parquet`、`pcf/components.parquet`，按来源记录的`tables`列与行组选择原范围；每申赎单位基金份额、估值日NAV／现金差额及交付篮子。股票股数与黄金克数分列，不能当实际持仓或指数权重。各基金规则对应各自可用时钟，保留原件URL与来源身份 |
 | `public_futures_daily` | 读取结构化CSV中的显式观察日；IF／IH／IC／IM逐合约行情，价格为指数点，成交量与持仓为合约数，不混入期权或小计 |
 | `public_futures_contracts` | 结构化CSV中的真实交易日、产品和合约身份、上市日与到期日；只消费IF／IH／IC／IM，保留原件身份 |
 | `public_option_contracts` | SSE结构化CSV保留上市与调整参数及原响应内行序，SZSE读取既有结构化合约事件；原／新行权价及合约单位分别保存，不从代码猜调整值 |
@@ -531,6 +534,8 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 同样在报告期修正与观察窗口选择后解释；13F 金额按选中报告的真实申报日适用单位换算。
 窗口内不满足约定的事实仍明确失败，不将其补为有效值。所用 release CSV 的来源身份以
 `release_clock_sha256` 保存。原有实际发布时间优先，已有产物的重建写新输出路径。
+
+业务时钟保存在`disclosure-clocks/release-clocks.csv`，每个来源与观察日仅保留一份相同事实，原来源容器身份保存在行内说明及清单中。基金NAV的当前身份输入为`fund-nav/identities.csv`；有实质差异的旧身份及未知分类保留在`fund-nav/identity-prior-facts.csv`，不覆盖当前定义或回填未知时刻。
 
 中国公募报告可用 `source=cn_fund_report:<report_version_identity>` 指定逐报告时钟，观察日使用报告期末，不能用财务单元格的比较期替代。明确选择的结构化 `cn_fund_report_observation_metadata_extracted` 修正该原件哈希对应的实际报告期末；`cn_fund_financial_observation_date_corrections_extracted` 按报告、表、行和列坐标修正财务单元格日期，比较期及数值保持原样。目录中的半年末、年末标签不能覆盖提前终止报告的实际期末。日期上界或合规期限假设只填可用时刻与依据，不补造真实发布时间；清盘事件也不证明股票持仓已经归零。
 

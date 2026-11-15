@@ -691,16 +691,16 @@ def test_pcf_native_units_and_vendor_specific_release_clocks(tmp_path):
                     cash_substitution_flag_as_provided="2",
                 )
             rows.append(row)
-        path = source / f"{suffix}.csv"
-        pd.DataFrame(rows).to_csv(path, index=False)
+        table = write_source_tables(
+            source / suffix,
+            {suffix: pd.DataFrame(rows).to_csv(sep="\t", index=False)},
+        )
         records.append(
             {
-                "path": path.name,
+                **table,
                 "source": f"etf_pcf_{suffix}_extracted",
                 "status": "downloaded",
                 "url": "https://example.org/pcf",
-                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "bytes": path.stat().st_size,
             }
         )
     write_source_manifest(source, {"schema_version": 1, "records": records})
