@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -80,15 +81,16 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
                 for asset_index in range(3)
             ]
     for spec in specs:
-        result = model_fitting._fit_model_result(
+        with closing(
             model_fitting._collect_training_frame(
                 (frame,),
                 spec,
                 fitting_cutoff="2020-02-12",
-            ),
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-        )
+            )
+        ) as prepared:
+            result = model_fitting._fit_model_result(
+                prepared, spec, estimator=build_estimator_from_model_spec(spec)
+            )
         columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp", "asset_id")))
         prediction = prediction_callable(spec.input_columns, result.prediction_model)(
             frame.loc[:, list(columns)]

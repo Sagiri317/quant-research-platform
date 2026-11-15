@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import closing
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -287,11 +289,12 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
             "eligible": True,
         }
     )
-    result = _fit_model_result(
-        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
+    with closing(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02")
+    ) as prepared:
+        result = _fit_model_result(
+            prepared, spec, estimator=build_estimator_from_model_spec(spec)
+        )
     fitted = result
     assert fitted.metadata["scaler"]["columns"] == ["feature"]
     assert fitted.prediction_model.scaler.mean_ == (1.5,)
@@ -299,11 +302,12 @@ def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
     assert fitted.metadata["rows_after_input_label_dropna"] == 2
     assert fitted.metadata["train_end"] == "2024-01-01"
     frame.loc[2:, ["feature", "model_target"]] = [[1e9, -1e9], [-1e9, 1e9]]
-    changed = _fit_model_result(
-        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
+    with closing(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02")
+    ) as prepared:
+        changed = _fit_model_result(
+            prepared, spec, estimator=build_estimator_from_model_spec(spec)
+        )
     assert changed.metadata == fitted.metadata
     assert changed.prediction_model.scaler == fitted.prediction_model.scaler
     # Probe only lawful inputs; poisoned rows must not affect the fitted function.
@@ -342,11 +346,12 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
             "label_available_at": timestamp,
         }
     )
-    result = _fit_model_result(
-        _collect_training_frame((frame,), spec, fitting_cutoff=timestamp),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
+    with closing(
+        _collect_training_frame((frame,), spec, fitting_cutoff=timestamp)
+    ) as prepared:
+        result = _fit_model_result(
+            prepared, spec, estimator=build_estimator_from_model_spec(spec)
+        )
     metadata = result.metadata
     assert metadata["hyperparameters"] == metadata["resolved_hyperparameters"] == {}
     if algorithm == "linear_regression":
@@ -1721,6 +1726,7 @@ def test_null_only_model_rows_cannot_enter_training():
         fitting_cutoff=pd.Timestamp("2024-01-02"),
     )
     training = prepared.training
+    prepared.close()
     assert training.asset_id.tolist() == ["a"]
 
 

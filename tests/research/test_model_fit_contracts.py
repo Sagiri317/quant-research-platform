@@ -1,5 +1,7 @@
 """Model fitting, legal sample retention and owned preprocessing buffers."""
 
+from contextlib import closing
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -299,6 +301,7 @@ def test_precomputed_lasso_reuses_statistics_and_matches_native_weighted_fit(
             statistics = prepared.lasso_gram
         assert prepared.lasso_gram is statistics
         assert "matrix" not in prepared.__dict__
+    prepared.close()
     save_model(tmp_path / "model", result, facts={}, trial_id="gram")
     restored, _ = load_model(tmp_path / "model")
     np.testing.assert_array_equal(
@@ -328,11 +331,12 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
             ),
         }
     )
-    result = fitting._fit_model_result(
-        fitting._collect_training_frame((frame,), spec, fitting_cutoff="2018-12-31"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
+    with closing(
+        fitting._collect_training_frame((frame,), spec, fitting_cutoff="2018-12-31")
+    ) as prepared:
+        result = fitting._fit_model_result(
+            prepared, spec, estimator=build_estimator_from_model_spec(spec)
+        )
     model_result = result
     assert model_result.metadata["rows_input"] == 4
     assert model_result.metadata["rows_after_filter_mode"] == 3
@@ -358,16 +362,19 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
             "label": 2 * common,
         }
     )
-    with pytest.raises(ValueError, match="model_fit_non_converged"):
-        fitting._fit_predictor(
+    with closing(
+        fitting._collect_training_frame(
+            [frame.assign(eligible=True, label_available_at=frame.timestamp)],
             spec,
-            prepared_training=fitting._collect_training_frame(
-                [frame.assign(eligible=True, label_available_at=frame.timestamp)],
-                spec,
-                fitting_cutoff="2018-01-02",
-            ),
-            estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2018-01-02",
         )
+    ) as prepared:
+        with pytest.raises(ValueError, match="model_fit_non_converged"):
+            fitting._fit_predictor(
+                spec,
+                prepared_training=prepared,
+                estimator=build_estimator_from_model_spec(spec),
+            )
 
 
 def test_training_retention_preserves_all_legal_rows_in_canonical_key_order():
@@ -483,6 +490,7 @@ def test_real_estimators_consume_prepared_matrix_without_changing_source(
     pd.testing.assert_frame_equal(prepared.training, training)
     pd.testing.assert_frame_equal(prepared.matrix, original_matrix, check_exact=True)
     np.testing.assert_array_equal(weights, original_weights)
+    prepared.close()
 
 
 @pytest.mark.parametrize("algorithm", ["lasso_regression", "ridge_regression"])
@@ -579,6 +587,7 @@ def test_training_filter_handles_duplicate_dataframe_index():
     assert prepared.training.asset_id.tolist() == ["b"]
     assert prepared.row_counts["rows_input"] == 2
     assert prepared.row_counts["rows_after_filter_mode"] == 1
+    prepared.close()
 
 
 @pytest.mark.parametrize(

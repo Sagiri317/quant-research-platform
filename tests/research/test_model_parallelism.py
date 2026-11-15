@@ -1,5 +1,6 @@
 """Model libraries own thread resolution; persisted parameters retain requests."""
 
+from contextlib import closing
 from dataclasses import replace
 
 import numpy as np
@@ -91,11 +92,10 @@ def test_actual_fit_preserves_thread_configuration_and_metadata(
 
         monkeypatch.setattr(Booster, "update", fit)
     before = threadpool_info()
-    result = fitting._fit_model_result(
-        fitting._collect_training_frame([frame], spec, fitting_cutoff="2024-01-08"),
-        spec,
-        estimator=estimator,
-    )
+    with closing(
+        fitting._collect_training_frame([frame], spec, fitting_cutoff="2024-01-08")
+    ) as prepared:
+        result = fitting._fit_model_result(prepared, spec, estimator=estimator)
     assert observed and all(configuration == before for configuration in observed)
     assert threadpool_info() == before
     assert result.metadata["resolved_hyperparameters"] == (

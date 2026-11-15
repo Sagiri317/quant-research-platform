@@ -1,5 +1,6 @@
 """Adversarial contracts and exact kernel comparisons against independent references."""
 
+from contextlib import closing
 from fractions import Fraction
 
 import numpy as np
@@ -237,22 +238,14 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
             input_feature_columns=("x",),
             target_column="y",
         )
-        assert (
-            len(
-                _collect_training_frame(
-                    [frame], model, fitting_cutoff="2020-01-02"
-                ).training
-            )
-            == 2
-        )
-    assert (
-        len(
-            _collect_training_frame(
-                [frame], model, fitting_cutoff="2020-01-01"
-            ).training
-        )
-        == 1
-    )
+        with closing(
+            _collect_training_frame([frame], model, fitting_cutoff="2020-01-02")
+        ) as prepared:
+            assert len(prepared.training) == 2
+    with closing(
+        _collect_training_frame([frame], model, fitting_cutoff="2020-01-01")
+    ) as prepared:
+        assert len(prepared.training) == 1
 
 
 def test_training_preparation_failure_closes_borrowed_dataset_source(

@@ -205,6 +205,7 @@ def test_enabled_decay_requires_matching_complete_own_calendar():
         [data], model, fitting_cutoff="2024-01-03", trading_calendar=calendar
     )
     weights = prepared.preprocessing[0]
+    prepared.close()
     assert weights[-1] / weights[0] == pytest.approx(4.0)
     with pytest.raises(ValueError, match="calendar_coverage_missing"):
         _collect_training_frame(
@@ -226,6 +227,7 @@ def test_enabled_decay_requires_matching_complete_own_calendar():
         [mixed], model, fitting_cutoff="2024-01-03", trading_calendar=shared
     )
     assert prepared.preprocessing[0].tolist() == pytest.approx(weights.tolist())
+    prepared.close()
     shared.loc[
         shared.source_market_type.eq(4) & shared.calendar_date.eq("2024-01-02"),
         "is_trading_day",
@@ -271,6 +273,7 @@ def test_decay_uses_session_age_without_collapsing_intraday_timestamps(tmp_path)
     # Timestamp masses are 1, 1 and 4, including the unobserved middle session.
     expected = np.array([5 / 12, 5 / 12, 5 / 6, 5 / 3, 5 / 3])
     weights, scaler = prepared.preprocessing
+    prepared.close()
     np.testing.assert_allclose(weights, expected)
     assert sum(weights) == pytest.approx(len(data))
     assert scaler.mean_[0] == pytest.approx(np.average(data.x, weights=expected))

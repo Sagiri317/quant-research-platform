@@ -1,5 +1,6 @@
 """Independent estimator-input and persistence checks for model-stage scaling."""
 
+from contextlib import closing
 from dataclasses import replace
 
 import numpy as np
@@ -156,20 +157,25 @@ def test_actual_estimator_inputs_and_native_roundtrip(
 def test_scaling_independent_of_missingness_and_all_missing_columns():
     data = _frame().assign(z=np.nan)
     for scaling in (False, True):
-        native = _collect_training_frame(
-            [data],
-            _spec("xgboost_regressor", scaling),
-            fitting_cutoff="2024-01-03",
-        )
-        matrix = native.matrix
+        with closing(
+            _collect_training_frame(
+                [data],
+                _spec("xgboost_regressor", scaling),
+                fitting_cutoff="2024-01-03",
+            )
+        ) as native:
+            matrix = native.matrix
         assert matrix.z.isna().all()
         assert matrix.columns.tolist() == ["x", "z"]
-        with pytest.raises(ValueError, match="model_training_feature_all_missing"):
-            _ = _collect_training_frame(
+        with closing(
+            _collect_training_frame(
                 [data],
                 _spec("lasso_regression", scaling),
                 fitting_cutoff="2024-01-03",
-            ).preprocessing
+            )
+        ) as prepared:
+            with pytest.raises(ValueError, match="model_training_feature_all_missing"):
+                _ = prepared.preprocessing
 
 
 @pytest.mark.parametrize("value", [0, 1, "true", []])

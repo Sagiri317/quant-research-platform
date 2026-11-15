@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+from contextlib import closing
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -220,15 +221,14 @@ def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
         target_column="label",
     )
     estimator = build_estimator_from_model_spec(spec)
-    fitted = _fit_model_result(
+    with closing(
         _collect_training_frame(
             (frame.iloc[i : i + chunk_rows] for i in range(0, 8, chunk_rows)),
             spec,
             fitting_cutoff="2020-01-04",
-        ),
-        spec,
-        estimator=estimator,
-    )
+        )
+    ) as prepared:
+        fitted = _fit_model_result(prepared, spec, estimator=estimator)
     assert fitted.metadata["rows_after_input_label_dropna"] == 6
     actual = fitted.prediction_model.predict(pd.DataFrame({"x": [0.0, 1.0, 4.0]}))
     assert actual.tolist() == pytest.approx([1.0, 3.0, 9.0])
