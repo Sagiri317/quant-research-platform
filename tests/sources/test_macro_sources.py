@@ -1,5 +1,6 @@
 """Public macro imports preserve vintages, missing values, and source clocks."""
 
+import gzip
 import hashlib
 import json
 
@@ -70,14 +71,28 @@ def test_date_end_upper_bound_uses_source_dst():
     ]
 
 
-def test_policy_surprise_keeps_units_and_declares_historical_snapshot_assumption():
-    payload = b"Date,Surprise,Orthogonalized Surprise\n2023-12-13,-8.17,-5.32\n"
+def test_policy_surprise_keeps_units_and_declares_historical_snapshot_assumption(
+    tmp_path,
+):
+    path = tmp_path / "surprises.parquet"
+    table = pa.table(
+        {
+            "Date": ["2023-12-13"],
+            "Surprise": ["-8.17"],
+            "Orthogonalized Surprise": ["-5.32"],
+        }
+    )
+    pq.write_table(table, path)
     result = _normalize_response(
-        payload,
+        path,
         ["us_fomc_surprise"],
-        {"retrieved_at": "2026-11-05T00:00:00Z", "url": "https://www.frbsf.org/"},
+        {
+            "retrieved_at": "2026-11-05T00:00:00Z",
+            "url": "https://www.frbsf.org/",
+            "table": {"row_groups": [0], "columns": table.column_names},
+        },
     )[0]
-    assert result.value.iloc[0] == pytest.approx(-8.17)
+    assert float(result.value.iloc[0]) == pytest.approx(-8.17)
     assert result.unit.iloc[0] == "bp"
     assert result.timestamp.iloc[0] == pd.Timestamp("2023-12-13T23:00:00Z")
     assert result.availability_basis.iloc[0] == "inferred_snapshot_release"
@@ -309,14 +324,20 @@ def test_source_priority_is_per_observation_and_keeps_selected_revisions():
     assert sorted(actual.value.tolist()) == [1.0, 2.0, 3.0, 4.0]
 
 
-def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls():
+def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls(tmp_path):
     record = {"retrieved_at": "2026-11-05T00:00Z", "url": "https://example.org/"}
-    shibor = _normalize_response(
+    path = tmp_path / "shibor.jsonl.gz"
+    prefix = gzip.compress(json.dumps({"records": []}).encode())
+    payload = gzip.compress(
         json.dumps(
             {"records": [{"showDateCN": "2024-01-02", "1W": "1.8", "3M": None}]}
-        ).encode(),
+        ).encode()
+    )
+    path.write_bytes(prefix + payload)
+    shibor = _normalize_response(
+        path,
         ["cn_shibor_1w", "cn_shibor_3m"],
-        record,
+        record | {"gzip_member": {"offset": len(prefix), "length": len(payload)}},
     )
     assert shibor[0].value.astype(float).iloc[0] == 1.8
     assert pd.isna(shibor[1].value.iloc[0])
@@ -359,9 +380,16 @@ def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls():
             "3",
         ],
     ]
-    payload = pd.DataFrame(rows[1:], columns=rows[0]).to_csv(index=False).encode()
+    path = tmp_path / "yields.parquet"
+    table = pa.Table.from_arrays(
+        [pa.array([row[i] for row in rows[1:]]) for i in range(len(rows[0]))],
+        names=rows[0],
+    )
+    pq.write_table(table, path)
     names = ["cn_treasury_1y", "cn_treasury_3y", "cn_treasury_10y", "cn_credit_aaa_3y"]
-    actual = _normalize_response(payload, names, record)
+    actual = _normalize_response(
+        path, names, record | {"table": {"row_groups": [0], "columns": rows[0]}}
+    )
     assert [float(f.value.iloc[0]) for f in actual] == [2.1, 2.3, 2.7, 3.4]
 
 
@@ -427,8 +455,7 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
     raw = tmp_path / "raw"
     source = raw / "observations"
     source.mkdir(parents=True)
-    filename, series = "daily.csv", "us_vvix"
-    payload = b"DATE,VVIX\n01/02/2024,20.0\n02/02/2024,invalid\n"
+    filename, series = "daily.parquet", "us_vvix"
     if provider == "alfred":
         filename, series = "WALCL.parquet", "us_fed_assets"
         pq.write_table(
@@ -442,9 +469,14 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
             ),
             source / filename,
         )
-        payload = (source / filename).read_bytes()
     else:
-        (source / filename).write_bytes(payload)
+        pq.write_table(
+            pa.table(
+                {"DATE": ["01/02/2024", "02/02/2024"], "VVIX": ["20.0", "invalid"]}
+            ),
+            source / filename,
+        )
+    payload = (source / filename).read_bytes()
     write_source_manifest(
         raw,
         {
@@ -460,7 +492,16 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
                             "url": "https://example.org/vix",
                             "bytes": len(payload),
                             "sha256": hashlib.sha256(payload).hexdigest(),
-                            **({"row_group": 0} if provider == "alfred" else {}),
+                            **(
+                                {"row_group": 0}
+                                if provider == "alfred"
+                                else {
+                                    "table": {
+                                        "row_groups": [0],
+                                        "columns": ["DATE", "VVIX"],
+                                    }
+                                }
+                            ),
                         }
                     ],
                 }

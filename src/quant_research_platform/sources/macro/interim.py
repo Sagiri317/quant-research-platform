@@ -1,9 +1,9 @@
 """Normalize macro vintages with explicit historical publication assumptions."""
 
+import gzip
 import hashlib
 import io
 import json
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -20,6 +20,7 @@ from quant_research_platform.sources.macro.publication import (
     estimated_release_at,
 )
 from quant_research_platform.sources.tabular import read_csv as _read_selected_csv
+from quant_research_platform.sources.tabular import read_parquet as _read_parquet
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.manifests import read_qrp_json_file
 
@@ -148,14 +149,14 @@ def normalize_alfred(path, name, record, *, start_date=None, end_date=None):
     )
 
 
-def _normalize_response(payload, names, record, *, start_date=None, end_date=None):
+def _normalize_response(path, names, record, *, start_date=None, end_date=None):
     source = SERIES[names[0]].source
     frame = partial(_frame, start_date=start_date, end_date=end_date)
     if source == "cboe":
         name = names[0]
         value_column = "CLOSE" if SERIES[name].code == "VIX9D" else SERIES[name].code
-        data = _read_selected_csv(
-            io.BytesIO(payload), ("DATE", value_column), na_values=["."]
+        data = _read_parquet(
+            path, record["table"], columns=("DATE", value_column), na_values=["."]
         )
         return [
             frame(
@@ -168,10 +169,10 @@ def _normalize_response(payload, names, record, *, start_date=None, end_date=Non
         ]
     if source == "chinabond":
         tenors = {name: name.rsplit("_", 1)[1].replace("y", "年") for name in names}
-        data = _read_selected_csv(
-            io.BytesIO(payload),
-            {"曲线名称", "日期", *tenors.values()},
-            error="chinabond_structured_columns_invalid",
+        data = _read_parquet(
+            path,
+            record["table"],
+            columns={"曲线名称", "日期", *tenors.values()},
             na_values=["--"],
         )
         frames = []
@@ -193,7 +194,9 @@ def _normalize_response(payload, names, record, *, start_date=None, end_date=Non
             )
         return frames
     if source == "sf_fed":
-        data = _read_selected_csv(io.BytesIO(payload), ("Date", SERIES[names[0]].code))
+        data = _read_parquet(
+            path, record["table"], columns=("Date", SERIES[names[0]].code)
+        )
         # The publisher's chart declares basis points; current PCA weights are ex post.
         return [
             frame(
@@ -205,20 +208,22 @@ def _normalize_response(payload, names, record, *, start_date=None, end_date=Non
             )
         ]
     if source == "bis":
-        tree = ET.fromstring(payload)
-        series = [
-            item for item in tree.iter() if item.tag.rsplit("}", 1)[-1] == "Series"
-        ]
-        if len(series) != 1 or series[0].get("UNIT_MULT") != "6":
+        if record["series_attributes"]["UNIT_MULT"] != "6":
             raise ValueError("bis_series_or_unit_invalid")
-        data = pd.DataFrame([item.attrib for item in series[0]])
+        data = _read_parquet(
+            path, record["table"], columns=("TIME_PERIOD", "OBS_VALUE")
+        )
         dates = pd.PeriodIndex(data.TIME_PERIOD, freq="Q").to_timestamp()
         return [
             frame(
                 names[0], data.OBS_VALUE, dates, record=record, timezone="Europe/Zurich"
             )
         ]
-    document = json.loads(payload)
+    member = record["gzip_member"]
+    with path.open("rb") as source_file:
+        source_file.seek(member["offset"])
+        payload = source_file.read(member["length"])
+    document = json.loads(gzip.decompress(payload))
     if source == "mofcom":
         data = pd.DataFrame(document)
         if data.empty:
@@ -486,7 +491,7 @@ def materialize_interim_data(
                     else:
                         chunks.extend(
                             _normalize_response(
-                                member.read_bytes(),
+                                member,
                                 metadata["series_ids"],
                                 record,
                                 start_date=start_date,

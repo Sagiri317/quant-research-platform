@@ -1,6 +1,9 @@
 """Read consumed source columns without pandas' duplicate-header renaming."""
 
+import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
+from pandas._libs.parsers import STR_NA_VALUES
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 
@@ -65,3 +68,38 @@ def read_excel(
         return _read_table(
             pd.read_excel, source, columns, optional_columns, error, options
         )
+
+
+def read_parquet(
+    path, metadata, *, columns, optional_columns=(), chunksize=None, na_values=()
+):
+    fields = metadata["columns"]
+    selected = set(columns) | (set(optional_columns) & set(fields))
+    if any(fields.count(column) != 1 for column in selected):
+        raise ValueError("source_columns_invalid")
+    selected = [field for field in fields if field in selected]
+
+    def frame(table):
+        # Preserve CSV/TSV missing markers on consumed string columns.
+        return (
+            table.to_pandas()
+            .astype("str")
+            .replace([*STR_NA_VALUES, *na_values], np.nan)
+        )
+
+    if chunksize is None:
+        with pq.ParquetFile(path) as source:
+            return frame(
+                source.read_row_groups(metadata["row_groups"], columns=selected)
+            )
+
+    def frames():
+        with pq.ParquetFile(path) as source:
+            for batch in source.iter_batches(
+                batch_size=chunksize,
+                row_groups=metadata["row_groups"],
+                columns=selected,
+            ):
+                yield frame(batch)
+
+    return frames()

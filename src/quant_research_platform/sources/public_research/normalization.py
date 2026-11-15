@@ -7,8 +7,6 @@ from itertools import islice
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
-from pandas._libs.parsers import STR_NA_VALUES
 
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -17,6 +15,9 @@ from quant_research_platform.sources.tabular import (
 )
 from quant_research_platform.sources.tabular import (
     read_excel as _read_excel,
+)
+from quant_research_platform.sources.tabular import (
+    read_parquet as _read_parquet,
 )
 
 DATASETS = {
@@ -763,10 +764,9 @@ def normalize(data_id, path, record):
             "published_at": "published_at",
         }
         with closing_iterator(
-            _source_table(
-                path,
-                record,
-                "financial_cells",
+            _read_parquet(
+                path / "financial_cells.parquet",
+                record["tables"]["financial_cells"],
                 columns=(
                     *mapping,
                     "publication_date",
@@ -1061,10 +1061,9 @@ def normalize(data_id, path, record):
                 }
             )
         if data_id == "public_fund_holdings":
-            frames = _source_table(
-                path,
-                record,
-                "holdings",
+            frames = _read_parquet(
+                path / "holdings.parquet",
+                record["tables"]["holdings"],
                 columns=(
                     *mapping,
                     "published_date",
@@ -1403,36 +1402,6 @@ def _fund_frames(path, record):
             yield pd.DataFrame.from_records(batch, columns=record["columns"])
 
 
-def _source_table(path, record, name, *, columns, optional_columns=(), chunksize=None):
-    metadata = record["tables"][name]
-    fields = metadata["columns"]
-    selected = set(columns) | (set(optional_columns) & set(fields))
-    if any(fields.count(column) != 1 for column in selected):
-        raise ValueError("source_columns_invalid")
-    selected = [field for field in fields if field in selected]
-
-    def frame(table):
-        # Preserve CSV/TSV missing markers on consumed string columns.
-        return table.to_pandas().astype("str").replace(list(STR_NA_VALUES), np.nan)
-
-    if chunksize is None:
-        with pq.ParquetFile(path / (name + ".parquet")) as source:
-            return frame(
-                source.read_row_groups(metadata["row_groups"], columns=selected)
-            )
-
-    def frames():
-        with pq.ParquetFile(path / (name + ".parquet")) as source:
-            for batch in source.iter_batches(
-                batch_size=chunksize,
-                row_groups=metadata["row_groups"],
-                columns=selected,
-            ):
-                yield frame(batch)
-
-    return frames()
-
-
 def _sec(path, source, record, *, data_id):
     """Keep filings separate; amendments are not independent aggregate positions."""
     submission_columns = {"ACCESSION_NUMBER", "FILING_DATE"}
@@ -1443,19 +1412,17 @@ def _sec(path, source, record, *, data_id):
     )
     if source == "sec_nport":
         submission_columns.add("REPORT_DATE")
-    submission = _source_table(
-        path,
-        record,
-        "SUBMISSION",
+    submission = _read_parquet(
+        path / "SUBMISSION.parquet",
+        record["tables"]["SUBMISSION"],
         columns=submission_columns,
     )
     if submission.ACCESSION_NUMBER.duplicated().any():
         raise ValueError("sec_submission_accession_duplicate")
     if source == "sec_13f":
-        covers = _source_table(
-            path,
-            record,
-            "COVERPAGE",
+        covers = _read_parquet(
+            path / "COVERPAGE.parquet",
+            record["tables"]["COVERPAGE"],
             columns=["ACCESSION_NUMBER", "ISAMENDMENT", "AMENDMENTTYPE"],
         )
         submission = submission.merge(
@@ -1476,10 +1443,9 @@ def _sec(path, source, record, *, data_id):
                     for month in (1, 2, 3)
                 ),
             ]
-        funds = _source_table(
-            path,
-            record,
-            "FUND_REPORTED_INFO",
+        funds = _read_parquet(
+            path / "FUND_REPORTED_INFO.parquet",
+            record["tables"]["FUND_REPORTED_INFO"],
             columns=fund_columns,
         )
         submission = submission.merge(
@@ -1517,10 +1483,9 @@ def _sec(path, source, record, *, data_id):
         return
     identifiers = None
     if data_id == "public_security_identifiers":
-        identifiers = _source_table(
-            path,
-            record,
-            "IDENTIFIERS",
+        identifiers = _read_parquet(
+            path / "IDENTIFIERS.parquet",
+            record["tables"]["IDENTIFIERS"],
             columns=[
                 "HOLDING_ID",
                 "IDENTIFIERS_ID",
@@ -1555,10 +1520,9 @@ def _sec(path, source, record, *, data_id):
         }
     )
     with closing_iterator(
-        _source_table(
-            path,
-            record,
-            member,
+        _read_parquet(
+            path / (member + ".parquet"),
+            record["tables"][member],
             chunksize=100000,
             columns=holding_columns,
             optional_columns=("PAYOFF_PROFILE", "DERIVATIVE_CAT")

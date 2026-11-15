@@ -14,17 +14,12 @@ def _publish(tmp_path, provider, columns, values, *, name):
     raw = tmp_path / name / "raw"
     source = raw / "input"
     source.mkdir(parents=True)
-    csv = pd.DataFrame([values], columns=columns).to_csv(index=False).encode()
     series = "us_fed_assets" if provider == "alfred" else "cn_treasury_3y"
-    if provider == "alfred":
-        filename = "WALCL.parquet"
-        table = pa.Table.from_arrays(
-            [pa.array([str(value)]) for value in values], names=columns
-        )
-        pq.write_table(table, source / filename)
-    else:
-        filename = "curve.csv"
-        (source / filename).write_bytes(csv)
+    filename = "WALCL.parquet" if provider == "alfred" else "curve.parquet"
+    table = pa.Table.from_arrays(
+        [pa.array([str(value)]) for value in values], names=columns
+    )
+    pq.write_table(table, source / filename)
     write_source_manifest(
         raw,
         {
@@ -37,7 +32,11 @@ def _publish(tmp_path, provider, columns, values, *, name):
                             "file": f"input/{filename}",
                             "retrieved_at": "2026-11-05T00:00Z",
                             "url": "https://example.org/source",
-                            **({"row_group": 0} if provider == "alfred" else {}),
+                            **(
+                                {"row_group": 0}
+                                if provider == "alfred"
+                                else {"table": {"row_groups": [0], "columns": columns}}
+                            ),
                         }
                     ],
                 }
