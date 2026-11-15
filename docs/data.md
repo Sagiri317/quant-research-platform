@@ -500,7 +500,7 @@ CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头�
 | `public_fund_holdings` | 报告期、经济组合、报告版本、真实证券市场与股票代码、股数、CNY公允价值、NAV百分比及披露范围；原始行与章节共同标识持仓，不混同港股和A股代码 |
 | `public_fund_holdings_reports` | 完整股票表状态、明确无股票声明、股票行数、经济组合及报告版本；零持仓报告独立于持仓行保存，未知解析状态不能当作零仓 |
 | `public_13f_holdings`／`public_nport_holdings` | 按申报编号和持仓行保留版本与修订；13F金额按实际申报日适用的美元／千美元规则换算；N-PORT保留报告币种 |
-| `public_cftc_positions` | TFF交易者类别和持仓合约数；期货单独与期货＋期权分别标识 |
+| `public_cftc_positions` | 读取结构化CSV中的TFF交易者类别和持仓合约数；期货单独与期货＋期权按显式`report_type`区分，原档案SHA／URL逐行保留；长期报告的美式日期和年度报告的ISO日期由同一来源读取逻辑解释 |
 | `public_finra_margin` | 月度融资账户统计，单位百万USD；观察月份不是发布日期 |
 | `public_finra_short_volume` | 场所内卖空成交、豁免成交与对应总成交；不是空头持仓或全市场净卖出；合法代码`NA`不是缺失值 |
 | `public_option_put_call` | Cboe不同范围的Put／Call比率分别保留，不混成一种投资者情绪 |

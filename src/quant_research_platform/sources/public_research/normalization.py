@@ -426,7 +426,7 @@ def accepts(data_id, record):
     if data_id == "public_fund_holdings_reports":
         return path.endswith(".json")
     if data_id == "public_cftc_positions":
-        return path.endswith(".zip")
+        return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_futures_daily":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_finra_short_volume":
@@ -1214,44 +1214,29 @@ def normalize(data_id, path, record):
                 result["product"] = result.asset_id.str[:2]
                 yield result
     elif source == "cftc_tff":
-        with zipfile.ZipFile(path) as archive:
-            members = [
-                name for name in archive.namelist() if name.lower().endswith(".txt")
-            ]
-            if len(members) != 1:
-                raise ValueError("cftc_archive_members_invalid")
-            mapping = {
-                "Report_Date_as_YYYY-MM-DD": "timestamp",
-                "CFTC_Contract_Market_Code": "asset_id",
-                "Lev_Money_Positions_Long_All": "leveraged_long",
-                "Lev_Money_Positions_Short_All": "leveraged_short",
-                "Lev_Money_Positions_Spread_All": "leveraged_spread",
-                "Asset_Mgr_Positions_Long_All": "asset_manager_long",
-                "Asset_Mgr_Positions_Short_All": "asset_manager_short",
-                "Dealer_Positions_Long_All": "dealer_long",
-                "Dealer_Positions_Short_All": "dealer_short",
-                "Open_Interest_All": "open_interest",
-            }
-            with closing_iterator(
-                _read_csv(
-                    archive.open(members[0]),
-                    columns=mapping,
-                    dtype="str",
-                    chunksize=100000,
-                )
-            ) as source_frames:
-                for chunk in source_frames:
-                    result = _rename(
-                        chunk,
-                        mapping,
-                    )
-                    result["report_type"] = (
-                        "futures_only"
-                        if path.name.startswith(("fut_fin", "fin_fut"))
-                        else "futures_and_options"
-                    )
-                    result["asset_id"] = result.asset_id + ":" + result.report_type
-                    yield result
+        mapping = {
+            "Report_Date_as_YYYY-MM-DD": "timestamp",
+            "CFTC_Contract_Market_Code": "asset_id",
+            "Lev_Money_Positions_Long_All": "leveraged_long",
+            "Lev_Money_Positions_Short_All": "leveraged_short",
+            "Lev_Money_Positions_Spread_All": "leveraged_spread",
+            "Asset_Mgr_Positions_Long_All": "asset_manager_long",
+            "Asset_Mgr_Positions_Short_All": "asset_manager_short",
+            "Dealer_Positions_Long_All": "dealer_long",
+            "Dealer_Positions_Short_All": "dealer_short",
+            "Open_Interest_All": "open_interest",
+            "report_type": "report_type",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(path, columns=mapping, dtype="str", chunksize=100000)
+        ) as source_frames:
+            for chunk in source_frames:
+                result = _rename(chunk, mapping)
+                result["timestamp"] = pd.to_datetime(result.timestamp, format="mixed")
+                result["asset_id"] = result.asset_id + ":" + result.report_type
+                yield result
     elif source == "finra_short_volume":
         mapping = {
             "Date": "timestamp",

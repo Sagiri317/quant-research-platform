@@ -98,6 +98,132 @@ def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
     assert result.timestamp.tolist() == [pd.Timestamp("2024-01-31")]
 
 
+def test_cftc_csv_preserves_book_source_identity_mixed_dates_and_release_clock(
+    tmp_path,
+):
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    # Actual TFF observations span the legacy US and annual ISO date formats.
+    cases = [
+        (
+            "13874A",
+            "futures_only",
+            "6/13/2006 12:00:00 AM",
+            "futures-early",
+            [224534, 388325, 137123, 370566, 169268, 296029, 691304, 2042655],
+        ),
+        (
+            "209742",
+            "futures_only",
+            "2017-12-26",
+            "futures-later",
+            [82771, 117039, 6058, 90751, 60561, 53870, 49757, 287695],
+        ),
+        (
+            "209742",
+            "futures_and_options",
+            "6/13/2006 12:00:00 AM",
+            "combined-early",
+            [87991, 233942, 28908, 17444, 51983, 305928, 95265, 607238],
+        ),
+        (
+            "13874A",
+            "futures_and_options",
+            "2017-12-26",
+            "combined-later",
+            [404331, 566097, 524784, 1538461, 734543, 228359, 822729, 3753674],
+        ),
+    ]
+    quantity_fields = [
+        "Lev_Money_Positions_Long_All",
+        "Lev_Money_Positions_Short_All",
+        "Lev_Money_Positions_Spread_All",
+        "Asset_Mgr_Positions_Long_All",
+        "Asset_Mgr_Positions_Short_All",
+        "Dealer_Positions_Long_All",
+        "Dealer_Positions_Short_All",
+        "Open_Interest_All",
+    ]
+    rows = []
+    for code, book, date, identity, quantities in cases:
+        row = dict(zip(quantity_fields, quantities, strict=True))
+        row["CFTC_Contract_Market_Code"] = code
+        row["Report_Date_as_YYYY-MM-DD"] = date
+        row.update(
+            report_type=book,
+            source_sha256=identity,
+            source_url="https://example.org/" + identity + ".zip",
+        )
+        rows.append(row)
+    path = tmp_path / "positions.csv.gz"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                dict(
+                    source="cftc_tff",
+                    path=path.name,
+                    sha256="consolidated-table",
+                )
+            ]
+        },
+    )
+    clock = tmp_path / "release.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="cftc_tff",
+                observation_date="2017-12-26",
+                estimated_available_at="2018-01-05T20:30:00Z",
+                availability_basis="existing_release_assumption",
+                evidence_url="https://example.org/release-calendar",
+            )
+        ]
+    ).to_csv(clock, index=False)
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(clock),
+            outputs={"public_cftc_positions": str(output)},
+        )
+    )
+    frame = read_dataset(output).set_index("source_sha256")
+    assert len(frame) == 4
+    assert frame.loc["futures-early", "asset_id"] == "13874A:futures_only"
+    assert frame.loc["futures-later", "asset_id"] == "209742:futures_only"
+    assert frame.loc["combined-early", "asset_id"] == "209742:futures_and_options"
+    assert frame.loc["combined-later", "asset_id"] == "13874A:futures_and_options"
+    assert frame.loc["futures-early", "timestamp"] == pd.Timestamp("2006-06-13")
+    assert frame.loc["combined-early", "timestamp"] == pd.Timestamp("2006-06-13")
+    assert frame.loc["futures-later", "timestamp"] == pd.Timestamp("2017-12-26")
+    assert frame.loc["futures-early", "leveraged_long"] == 224534
+    assert frame.loc["futures-early", "leveraged_short"] == 388325
+    assert frame.loc["futures-later", "open_interest"] == 287695
+    assert frame.loc["combined-early", "asset_manager_short"] == 51983
+    assert frame.loc["combined-later", "leveraged_spread"] == 524784
+    assert frame.loc["combined-later", "dealer_short"] == 822729
+    assert pd.isna(frame.loc["futures-early", "available_at"])
+    assert pd.isna(frame.loc["combined-early", "available_at"])
+    assert frame.loc["futures-later", "available_at"] == pd.Timestamp(
+        "2018-01-05T20:30Z"
+    )
+    assert frame.loc["combined-later", "available_at"] == pd.Timestamp(
+        "2018-01-05T20:30Z"
+    )
+    assert frame.published_at.isna().all()
+    assert (
+        frame.loc["combined-later", "source_url"]
+        == "https://example.org/combined-later.zip"
+    )
+    spec = json.loads((output / "spec.json").read_text())
+    assert spec["column_units"]["leveraged_long"] == "contracts"
+    assert spec["column_units"]["open_interest"] == "contracts"
+
+
 def test_exchange_contract_expiry_and_csf_units_are_source_facts(tmp_path):
     contracts = tmp_path / "contracts.csv"
     pd.DataFrame(
