@@ -118,7 +118,9 @@ def test_only_required_future_facts_determine_realized_target():
             sessions=frame.timestamp.unique(),
         )
         labeled["eligible"] = True
-        return a_share_model_target(labeled).model_target, labeled
+        return a_share_model_target(
+            labeled, label_column="forward_return_20d"
+        ).model_target, labeled
 
     original, labels = targets(panel)
     assert labels.loc[0, "forward_return_20d"] == pytest.approx(31 / 11 - 1)

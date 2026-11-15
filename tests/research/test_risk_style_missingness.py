@@ -515,9 +515,17 @@ def test_unknown_eligibility_only_excludes_dependent_risk_and_target_values():
         state.prepare_exposure_session(cross).frame,
         state.prepare_exposure_session(excluded).frame,
     )
-    target = a_share_model_target(cross, transform="risk_residual", risk_model=model)
+    target = a_share_model_target(
+        cross,
+        transform="risk_residual",
+        risk_model=model,
+        label_column="forward_return_20d",
+    )
     expected = a_share_model_target(
-        excluded, transform="risk_residual", risk_model=model
+        excluded,
+        transform="risk_residual",
+        risk_model=model,
+        label_column="forward_return_20d",
     )
     pd.testing.assert_frame_equal(target, expected)
     transformed = a_share_feature_pipeline(
