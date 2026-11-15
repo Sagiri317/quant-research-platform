@@ -97,6 +97,34 @@ TRANSFORMS = (
     "innovation",
     "innovation_zscore",
 )
+# Keep the conventional representation of empirically near-identical transforms.
+SERIES_TRANSFORM_EXCLUSIONS = {
+    **dict.fromkeys(
+        (
+            "cn_credit_aaa_3y",
+            "cn_credit_spread",
+            "cn_dr007",
+            "cn_dr007_policy",
+            "cn_shibor_1w",
+            "cn_treasury_10y",
+            "cn_treasury_1y",
+            "cn_treasury_3y",
+            "hk_hibor_1m",
+            "jp_jpy_per_usd",
+            "us_gvz",
+            "us_hy_oas",
+            "us_ig_oas",
+            "us_vix3m_vix_ratio",
+            "us_vix9d_vix_ratio",
+        ),
+        ("innovation_zscore",),
+    ),
+    "cn_usd_cny": ("innovation_zscore", "change", "yoy_change"),
+    "eu_usd_per_eur": ("innovation_zscore", "change", "yoy_change"),
+    "us_broad_dollar": ("innovation_zscore", "growth"),
+    "us_iorb": ("acceleration",),
+    "us_skew": ("innovation_zscore", "growth", "yoy_growth"),
+}
 POSITIVE_VARIABLES = (
     {
         name
@@ -193,7 +221,8 @@ def recipes():
         if name in POSITIVE_VARIABLES:
             transforms += ("growth", "yoy_growth")
         for transform in transforms:
-            output[f"ml_{name}_{transform}"] = ("series", name, transform)
+            if transform not in SERIES_TRANSFORM_EXCLUSIONS.get(name, ()):
+                output[f"ml_{name}_{transform}"] = ("series", name, transform)
     for name in (
         *PRESSURE_COMPONENTS,
         *STATE_PRODUCTS,
@@ -217,8 +246,9 @@ def recipes():
                 exposure,
             )
     for variable in BETA_VARIABLES:
-        for kind in ("beta", "partial_beta"):
-            output[f"ml_{variable}_{kind}"] = ("beta", variable, kind)
+        output[f"ml_{variable}_beta"] = ("beta", variable, "beta")
+        if variable in {"cn_m2", "cn_dr007", "us_vix", "us_vvix"}:
+            output[f"ml_{variable}_partial_beta"] = ("beta", variable, "partial_beta")
     for variable in MATCHED_SHOCK_VARIABLES:
         output[f"ml_{variable}_shock_x_own_beta"] = ("matched_beta", variable)
     return output

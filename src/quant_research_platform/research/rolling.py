@@ -493,6 +493,11 @@ def _select(config, fold, session, candidates, calendar):
                             if patience is not None
                             else {}
                         ),
+                        **(
+                            {"learning_curve": result.metadata["learning_curve"]}
+                            if "learning_curve" in result.metadata
+                            else {}
+                        ),
                     }
                 )
                 del result

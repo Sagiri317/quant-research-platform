@@ -54,9 +54,9 @@ def test_breadth_dispersion_activity_and_leader_interactions_by_hand():
     assert latest.market_high_low_balance_60d.tolist() == pytest.approx([0] * 3)
     assert latest.industry_return_dispersion_20d.tolist() == pytest.approx([0.5] * 3)
     assert latest.industry_positive_return_hhi_20d.tolist() == [1] * 3
-    assert latest.loc["a", "industry_return_relative_20d"] == 1
-    assert latest.loc["b", "industry_return_relative_20d"] == -1
-    assert np.isnan(latest.loc["c", "industry_return_relative_20d"])
+    assert latest.loc["a", "industry_return_relative_1d"] == pytest.approx(1 / 39)
+    assert latest.loc["b", "industry_return_relative_1d"] == pytest.approx(-1 / 39)
+    assert np.isnan(latest.loc["c", "industry_return_relative_1d"])
     assert latest.loc["a", "industry_turnover_relative"] == 3
     assert latest.loc["b", "industry_turnover_relative"] == pytest.approx(1 / 3)
     assert latest.loc["a", "industry_amount_share"] == 0.75
@@ -77,7 +77,7 @@ def test_only_current_dependency_missingness_and_current_classification_are_used
     result = calculate(panel)
     latest = result.loc[result.timestamp.eq(last)].set_index("asset_id")
     assert latest.market_up_fraction.tolist() == [0.5] * 3
-    assert latest.loc["a", "industry_return_relative_20d"] == 1
+    assert latest.loc["a", "industry_return_relative_1d"] == pytest.approx(1 / 39)
     panel.loc[
         panel.asset_id.eq("b") & panel.timestamp.eq(last), "industry_level1_code"
     ] = "Y"
@@ -88,7 +88,7 @@ def test_only_current_dependency_missingness_and_current_classification_are_used
     assert (
         changed.loc[
             changed.asset_id.eq("a") & changed.timestamp.eq(last),
-            "industry_return_relative_20d",
+            "industry_return_relative_1d",
         ]
         .isna()
         .all()
@@ -120,7 +120,7 @@ def test_native_dispatch_future_invariance_and_new_listing_warmup():
     assert (
         reset.loc[
             reset.asset_id.eq("a") & reset.timestamp.gt(cutoff),
-            "industry_return_relative_20d",
+            "industry_catchup_20d",
         ]
         .isna()
         .all()

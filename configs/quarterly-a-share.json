@@ -142,15 +142,15 @@
         "reg_lambda": 10.0
       },
       {
-        "max_depth": 3,
-        "reg_lambda": 100.0
-      },
-      {
         "max_depth": 6,
         "reg_lambda": 10.0
       },
       {
         "max_depth": 6,
+        "reg_lambda": 100.0
+      },
+      {
+        "max_depth": 8,
         "reg_lambda": 100.0
       }
     ],

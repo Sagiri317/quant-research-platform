@@ -230,7 +230,7 @@ def test_breadth_counts_market_sessions_not_each_stocks_sessions(tmp_path):
 def test_all_structure_factors_keep_own_60_and_peer_19_windows_separate(tmp_path):
     from tests.markets.a_share.test_calendar_dependency_scope import _prepare as native
 
-    # Keep the original 15 owners explicit: new multi-year states have wider halos.
+    # Exercise the short-window owners separately from the multi-year states.
     factors = [
         "market_up_fraction",
         "market_above_ma20_fraction",
@@ -239,7 +239,7 @@ def test_all_structure_factors_keep_own_60_and_peer_19_windows_separate(tmp_path
         "market_breadth_change_5d",
         "industry_return_dispersion_20d",
         "industry_positive_return_hhi_20d",
-        "industry_return_relative_20d",
+        "industry_catchup_20d",
         "industry_turnover_relative",
         "industry_amount_share",
         "industry_amount_hhi",

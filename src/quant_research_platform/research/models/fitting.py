@@ -313,6 +313,7 @@ def _fit_estimator_model_result(
         metadata["early_stopping"] = {
             "best_iteration": int(estimator.best_iteration),
             "iterations": len(next(iter(metrics.values()))),
+            "validation_metrics": metrics,
         }
     result = ModelFitResult(metadata=metadata, prediction_model=predictor)
     return result

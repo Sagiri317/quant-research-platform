@@ -49,10 +49,6 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "amount_volatility_20d": (("amount",), (20,)),
     "volume_shock_20d": (("volume",), (20,)),
     "return_volume_corr_20d": (("period_return", "volume"), (20,)),
-    "return_turnover_corr_20d": (
-        ("period_return", "turnover"),
-        (20,),
-    ),
     "return_amount_imbalance_20d": (("period_return", "amount"), (20,)),
     "zero_amount_ratio_20d": (("amount",), (20,)),
     "log_total_market_cap": (("total_market_cap",), ()),

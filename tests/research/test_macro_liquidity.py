@@ -28,6 +28,22 @@ def _config(window=3):
     )
 
 
+def test_canonical_macro_representatives_keep_units_without_retired_aliases():
+    data = _observations(
+        [
+            (series, f"2024-01-0{day}", f"2024-01-0{day}T23:00", value)
+            for series, values in (("cn_usd_cny", (5, 6, 7)), ("us_iorb", (1, 2, 3)))
+            for day, value in enumerate(values, start=1)
+        ]
+    )
+    columns = ["ml_cn_usd_cny_growth", "ml_cn_usd_cny_zscore", "ml_us_iorb_change"]
+    result = macro_states(data, ["2024-01-03T23:00"], columns=columns, config=_config())
+    np.testing.assert_allclose(result[columns].iloc[0], [1 / 6, 1, 100])
+    for column in ("ml_cn_usd_cny_change", "ml_cn_usd_cny_innovation_zscore"):
+        with pytest.raises(ValueError, match="unknown_macro_factors"):
+            macro_states(data, ["2024-01-03T23:00"], columns=[column], config=_config())
+
+
 def test_revisions_change_current_history_not_previously_available_states():
     data = _observations(
         [

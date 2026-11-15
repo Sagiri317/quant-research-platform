@@ -22,7 +22,7 @@ from tests.markets.a_share.test_calendar_dependency_scope import (
         ("market_up_fraction", 0, 1.0),
         ("market_above_ma20_fraction", 19, 1.0),
         ("market_high_low_balance_60d", 60, 1.0),
-        ("industry_return_relative_20d", 20, 0.0),
+        ("industry_catchup_20d", 20, 0.0),
     ],
 )
 def test_structure_only_consumes_required_calendar_halo(

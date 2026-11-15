@@ -41,7 +41,7 @@ INPUTS = {
     "market_breadth_change_5d": ("period_return",),
     "industry_return_dispersion_20d": ("adj_close", *_INDUSTRY),
     "industry_positive_return_hhi_20d": ("adj_close", *_INDUSTRY),
-    "industry_return_relative_20d": ("adj_close", *_INDUSTRY),
+    "industry_return_relative_1d": ("adj_close", *_INDUSTRY),
     "industry_turnover_relative": ("turnover", *_INDUSTRY),
     "industry_amount_share": ("amount", *_INDUSTRY),
     "industry_amount_hhi": ("amount", *_INDUSTRY),
@@ -58,7 +58,7 @@ for _window in (20, 60):
 for _years in (3, 5):
     INPUTS[f"breadth_historical_percentile_{_years}y"] = ("period_return",)
 for _width in (1, 5, 20):
-    for _kind in ("return_relative", "catchup", "catchdown"):
+    for _kind in ("catchup", "catchdown"):
         INPUTS[f"industry_{_kind}_{_width}d"] = ("adj_close", *_INDUSTRY)
 INPUTS.update(
     {
@@ -154,8 +154,8 @@ DESCRIPTIONS = {
         "equal industry weights. No positive industry is undefined; not "
         "market-cap contribution concentration."
     ),
-    "industry_return_relative_20d": (
-        "Stock context: own 20-session return minus leave-one-out equal-weight "
+    "industry_return_relative_1d": (
+        "Stock context: own one-session return minus leave-one-out equal-weight "
         "same-industry return, using PIT standard+level1 affiliation. "
         "Positive/negative identifies past leaders/laggards."
     ),
@@ -240,11 +240,6 @@ DESCRIPTIONS.update(
 )
 
 for _width in (1, 5, 20):
-    DESCRIPTIONS.setdefault(
-        f"industry_return_relative_{_width}d",
-        f"Own {_width}-session adjusted-close return minus the contemporaneous "
-        "PIT-industry leave-one-out mean return.",
-    )
     DESCRIPTIONS[f"industry_catchup_{_width}d"] = (
         "User lead-lag hypothesis: max(peer return-own return,0) when the "
         f"leave-one-out industry's {_width}-session return is positive; "
@@ -295,12 +290,7 @@ FACTOR_UNITS["market_trading_liquidity_loss_beta_252d"] = (
     "decimal_return_per_standard_deviation"
 )
 FACTOR_UNITS["industry_leader_lag_return_252d"] = "decimal_return"
-FACTOR_UNITS.update(
-    dict.fromkeys(
-        ("industry_return_dispersion_20d", "industry_return_relative_20d"),
-        "decimal_return",
-    )
-)
+FACTOR_UNITS["industry_return_dispersion_20d"] = "decimal_return"
 
 
 def factor_definitions():
@@ -653,7 +643,6 @@ def _industry_context(frame, out, requested, history_start):
     peer_ids = (
         groups.ngroup()
         if {
-            "industry_return_relative_20d",
             "industry_turnover_relative",
             "industry_comovement_20d",
         }.intersection(requested)
@@ -669,17 +658,16 @@ def _industry_context(frame, out, requested, history_start):
         )
         else None
     )
+    if "industry_return_relative_1d" in requested:
+        out["industry_return_relative_1d"] = frame._mom1 - leave_one_out_mean(
+            frame._mom1, peer_ids
+        )
     for width in (1, 5, 20):
-        names = {
-            kind: f"industry_{kind}_{width}d"
-            for kind in ("return_relative", "catchup", "catchdown")
-        }
+        names = {kind: f"industry_{kind}_{width}d" for kind in ("catchup", "catchdown")}
         if not set(names.values()).intersection(requested):
             continue
         values = frame["_mom" if width == 20 else f"_mom{width}"]
         peers = leave_one_out_mean(values, peer_ids)
-        if names["return_relative"] in requested:
-            out[names["return_relative"]] = values - peers
         valid = values.notna() & peers.notna()
         if names["catchup"] in requested:
             out[names["catchup"]] = (

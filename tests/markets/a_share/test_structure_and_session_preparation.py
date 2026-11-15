@@ -155,19 +155,19 @@ def test_structure_lifecycle_history_survives_publication_and_assembly(
     structure = read_dataset(root)
     own = structure.loc[structure.asset_id.eq("000001")].set_index("timestamp")
     # Exit uncertainty does not erase observed prices. Unknown identity does:
-    # the recovered listing needs twenty preceding closes again from day 27.
+    # the recovered listing needs a preceding close again from day 27.
     position = np.arange(len(dates))
-    valid = position >= 20
+    valid = position >= 1
     if unknown == "listing":
-        valid &= (position < 22) | (position >= 47)
-    assert own.industry_return_relative_20d.notna().tolist() == valid.tolist()
+        valid &= (position < 22) | (position >= 28)
+    assert own.industry_return_relative_1d.notna().tolist() == valid.tolist()
     day = position[valid]
-    own_return = (11.0 + day) / (11.0 + day - 20) - 1
+    own_return = (11.0 + day) / (11.0 + day - 1) - 1
     peer_return = (
-        sum((initial + day) / (initial + day - 20) - 1 for initial in (12.0, 13.0)) / 2
+        sum((initial + day) / (initial + day - 1) - 1 for initial in (12.0, 13.0)) / 2
     )
     np.testing.assert_allclose(
-        own.loc[dates[valid], "industry_return_relative_20d"],
+        own.loc[dates[valid], "industry_return_relative_1d"],
         own_return - peer_return,
         rtol=1e-12,
         atol=1e-14,

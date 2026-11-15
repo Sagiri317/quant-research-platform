@@ -159,7 +159,6 @@ _NAMES = {
     "return_amount_corr": "收益与成交额相关性",
     "return_amount_imbalance": "收益成交额不平衡",
     "return_shock_1_20": "当日收益相对20日历史冲击",
-    "return_turnover_corr": "收益与换手率相关性",
     "return_volume_corr": "收益与成交量相关性",
     "reversal": "价格反转",
     "share_price": "每股价格",

@@ -474,6 +474,18 @@ def test_four_models_select_historical_mature_rows_then_refit_without_future_lab
                 else "epochs"
             )
             assert parameters[budget] == winner["early_stopping"]["best_iteration"] + 1
+            for candidate in selection["candidates"]:
+                stopping = candidate["early_stopping"]
+                losses = (
+                    stopping["validation_metrics"]["rmse"]
+                    if budget == "n_estimators"
+                    else [
+                        point["validation_loss"]
+                        for point in candidate["learning_curve"]["epochs"]
+                    ]
+                )
+                assert len(losses) == stopping["iterations"]
+                assert int(np.argmin(losses)) == stopping["best_iteration"]
             if facts["model"]["model_id"] in sequence_scores:
                 for candidate, expected in zip(
                     selection["candidates"],
@@ -724,6 +736,7 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
             assert score["early_stopping"] == fresh.metadata["early_stopping"]
         else:
             assert "early_stopping" not in score
+        assert score["learning_curve"] == fresh.metadata["learning_curve"]
     assert selected[0][2]["common_rows"] == 8
 
 

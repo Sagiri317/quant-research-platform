@@ -108,6 +108,7 @@ def test_best_state_native_roundtrip_and_validation_maturity(
         assert stopped["iterations"] < 8
         assert estimator.get_booster().num_boosted_rounds() == best + 1
         losses = estimator.evals_result()["validation_0"]["rmse"]
+        assert stopped["validation_metrics"]["rmse"] == losses
         assert best == int(np.argmin(losses))
     else:
         curve = result.metadata["learning_curve"]["epochs"]

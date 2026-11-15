@@ -30,7 +30,6 @@ UNIQUE_FACTORS = (
     "amount_volatility_20d",
     "volume_shock_20d",
     "return_volume_corr_20d",
-    "return_turnover_corr_20d",
     "return_amount_imbalance_20d",
     "zero_amount_ratio_20d",
     "log_total_market_cap",
@@ -169,8 +168,6 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
         "volume_shock_20d": 61.0 / 50.5 - 1.0,
         "return_volume_corr_20d": np.sum((ret - ret.mean()) * (flow - flow.mean()))
         / np.sqrt(np.sum((ret - ret.mean()) ** 2) * np.sum((flow - flow.mean()) ** 2)),
-        "return_turnover_corr_20d": np.sum((ret - ret.mean()) * (flow - flow.mean()))
-        / np.sqrt(np.sum((ret - ret.mean()) ** 2) * np.sum((flow - flow.mean()) ** 2)),
         "return_amount_imbalance_20d": np.sum(ret * flow) / np.sum(np.abs(ret) * flow),
         "zero_amount_ratio_20d": 0.0,
         "log_total_market_cap": np.log(10000.0),
@@ -236,7 +233,6 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
                 "turnover_change_20d",
                 "amount_change_20d",
                 "return_volume_corr_20d",
-                "return_turnover_corr_20d",
                 "return_amount_imbalance_20d",
                 "kurtosis_60d",
                 "log_total_market_cap",
@@ -446,7 +442,7 @@ def test_skewness_independent_central_moment_oracle(missing, scale):
 
 
 @pytest.mark.parametrize("scale", [0.0001, 1.0, 10000.0])
-@pytest.mark.parametrize("kind", ["amount", "volume", "turnover"])
+@pytest.mark.parametrize("kind", ["amount", "volume"])
 def test_return_correlations_preserve_units(scale, kind):
     from decimal import Decimal, localcontext
 
@@ -516,7 +512,7 @@ def test_rolling_correlations_match_independent_windows_and_warmup(case):
             and np.ptp(right) > 0
         ):
             expected[index] = np.corrcoef(left, right)[0, 1]
-    for kind in ("amount", "volume", "turnover"):
+    for kind in ("amount", "volume"):
         name = f"return_{kind}_corr_20d"
         values = {"period_return": x, kind: y}
         for start, stop in ((0, 160), (22, 41), (99, 160), (19, 20)):

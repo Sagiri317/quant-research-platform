@@ -665,7 +665,7 @@ momentum_252_20 = P_{t-20} / P_{t-252} - 1
 | amount_change_20d / volume_change_20d / turnover_change_20d | 当前值/20日前端点-1 |
 | amount_volatility_20d | 完整20日成交额样本标准差ddof=1 |
 | volume_shock_20d | 当前成交量/前20日成交量均值-1，排除当日 |
-| return_volume_corr_20d / return_turnover_corr_20d | 名义20日窗内有效配对的Pearson相关，默认至少15对；常数或有效配对不足为NULL |
+| return_volume_corr_20d | 收益与成交量在名义20日窗内有效配对的Pearson相关，默认至少15对；常数或有效配对不足为NULL |
 | return_amount_imbalance_20d | sum(r*amount)/sum(abs(r)*amount)，完整20日 |
 | zero_amount_ratio_20d | 成交额非正值占比：mean(amount<=0)，完整20日；NULL传播 |
 | log_total_market_cap | 正总市值自然对数，否则NULL |
