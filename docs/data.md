@@ -535,7 +535,7 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 窗口内不满足约定的事实仍明确失败，不将其补为有效值。所用 release CSV 的来源身份以
 `release_clock_sha256` 保存。原有实际发布时间优先，已有产物的重建写新输出路径。
 
-业务时钟保存在`disclosure-clocks/release-clocks.csv`，每个来源与观察日仅保留一份相同事实，原来源容器身份保存在行内说明及清单中。基金NAV的当前身份输入为`fund-nav/identities.csv`；有实质差异的旧身份及未知分类保留在`fund-nav/identity-prior-facts.csv`，不覆盖当前定义或回填未知时刻。
+业务时钟保存在`disclosure-clocks/release-clocks.csv`，每个来源与观察日仅保留一份相同事实，原来源容器身份保存在行内说明及清单中。基金NAV的身份输入`fund-nav/identities.csv`保留现有调用者明确选择的定义及未知分类；另一份来源中有实质差异的身份解释保留在`fund-nav/identity-alternative-facts.csv`，不按版本名称覆盖实际消费域或回填未知时刻。
 
 中国公募报告可用 `source=cn_fund_report:<report_version_identity>` 指定逐报告时钟，观察日使用报告期末，不能用财务单元格的比较期替代。明确选择的结构化 `cn_fund_report_observation_metadata_extracted` 修正该原件哈希对应的实际报告期末；`cn_fund_financial_observation_date_corrections_extracted` 按报告、表、行和列坐标修正财务单元格日期，比较期及数值保持原样。目录中的半年末、年末标签不能覆盖提前终止报告的实际期末。日期上界或合规期限假设只填可用时刻与依据，不补造真实发布时间；清盘事件也不证明股票持仓已经归零。
 
