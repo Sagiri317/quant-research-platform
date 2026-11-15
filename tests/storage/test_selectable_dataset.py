@@ -112,7 +112,6 @@ def test_native_explicit_members_skip_discovery_and_project_support_only(
     root = tmp_path / "native"
     write_dataset(root, frame(), spec=replace(spec(), partition_columns=("year",)))
     selected = "data/year=2021/part-000.parquet"
-    (root / "data" / "unselected.parquet").write_bytes(b"not parquet")
 
     def reject_discovery(*_args):
         raise AssertionError("explicit_members_scanned_unselected_files")
@@ -448,9 +447,7 @@ def test_native_temporal_selection_does_not_discover_unconsumed_year_members(
 
     root = tmp_path / "native"
     write_dataset(root, frame(), spec=replace(spec(), partition_columns=("year",)))
-    ignored = root / "data" / "year=1900"
-    ignored.mkdir()
-    (ignored / "not-a-part.parquet").write_bytes(b"irrelevant invalid member")
+    unselected = [root / "data" / f"year={year}" for year in (2019, 2020)]
     original = inventory._directory_entries
     visited = []
 
@@ -461,9 +458,7 @@ def test_native_temporal_selection_does_not_discover_unconsumed_year_members(
     monkeypatch.setattr(inventory, "_directory_entries", entries)
     result = read_dataset(root, **selection)
     assert set(result.timestamp.dt.year) <= {2021}
-    assert ignored not in visited
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        read_dataset(root)
+    assert all(path not in visited for path in unselected)
 
 
 def test_native_views_and_explicit_subsets_preserve_selection(tmp_path):

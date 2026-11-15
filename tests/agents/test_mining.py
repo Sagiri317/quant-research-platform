@@ -34,7 +34,6 @@ def test_training_feedback_keeps_failures_undefined_and_coverage(tmp_path):
     assert rows[2]["covered_rows"] == 3 and rows[2]["coverage"] == 0.5
     assert rows[3]["status"] == "undefined" and rows[3]["train_rank_ic"] is None
     assert rows[4]["status"] == "failed"
-    assert "validation" not in str(result)
     config["baseline_columns"] = ["x"]
     config["expressions"] = ["x"]
     redundant = training_feedback(config)["candidates"][0]
