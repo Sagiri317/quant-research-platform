@@ -1,5 +1,6 @@
 """Source-specific schemas; NAV, market prices and trading activity stay distinct."""
 
+import gzip
 import io
 import json
 import re
@@ -381,7 +382,9 @@ def accepts(data_id, record):
         "szse_option_daily_prices",
     }:
         return path.endswith(".json")
-    if data_id in {"public_option_risk", "public_option_contracts"}:
+    if data_id == "public_option_risk":
+        return path.endswith((".csv", ".csv.gz"))
+    if data_id == "public_option_contracts":
         return path.endswith(".json") and record.get("artifact_role", "").startswith(
             "official_"
         )
@@ -417,7 +420,7 @@ def accepts(data_id, record):
     }:
         return path.endswith(".zip")
     if data_id == "public_fund_nav":
-        return path.endswith(".json")
+        return path.endswith(".jsonl.gz")
     if data_id == "public_option_put_call":
         return path.endswith(".csv")
     if data_id == "public_fund_holdings":
@@ -433,7 +436,7 @@ def accepts(data_id, record):
     if data_id == "public_futures_daily":
         return path.endswith((".zip", ".csv"))
     if data_id == "public_finra_short_volume":
-        return path.endswith(".txt")
+        return path.endswith((".csv", ".csv.gz"))
     if data_id in {"public_fund_shares", "public_margin_balances"}:
         return path.endswith((".csv", ".csv.gz"))
     return path.endswith(".json" if data_id == "public_etf_prices" else ".xlsx")
@@ -557,48 +560,60 @@ def normalize(data_id, path, record):
             )
             yield result
         return
-    elif source in {"sse_option_risk_indicators", "sse_option_contract_updates"}:
+    elif source == "sse_option_risk_indicators":
+        mapping = {
+            "SECURITY_ID": "asset_id",
+            "CONTRACT_ID": "contract_id",
+            "TRADE_DATE": "timestamp",
+            "CONTRACT_TYPE": "option_type",
+            "IMPLC_VOLATLTY": "implied_volatility",
+            "DELTA_VALUE": "delta",
+            "GAMMA_VALUE": "gamma",
+            "VEGA_VALUE": "vega",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                result["underlying_id"] = result.contract_id.str[:6]
+                yield result
+        return
+    elif source == "sse_option_contract_updates":
         frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["result"])
         if frame.empty:
             return
-        if data_id == "public_option_risk":
-            result = _rename(
-                frame,
-                {
-                    "SECURITY_ID": "asset_id",
-                    "CONTRACT_ID": "contract_id",
-                    "TRADE_DATE": "timestamp",
-                    "CONTRACT_TYPE": "option_type",
-                    "IMPLC_VOLATLTY": "implied_volatility",
-                    "DELTA_VALUE": "delta",
-                    "GAMMA_VALUE": "gamma",
-                    "VEGA_VALUE": "vega",
-                },
-            )
-            result["underlying_id"] = result.contract_id.str[:6]
-        else:
-            mapping = {
-                "UNDERLYING_SECURITY_ID": "underlying_id",
-                "SECURITY_ID": "security_id",
-                "CONTRACT_ID": "contract_id",
-                "CALL_OR_PUT": "option_type",
-                "EXPIRE_DATE": "expiry_date",
-                "START_DATE": "start_date",
-                "EXERCISE_PRICE": "exercise_price",
-                "CONTRACT_UNIT": "contract_unit",
-                "ORG_CONTRACT_ID": "original_contract_id",
-                "ORG_EXERCISE_PRICE": "original_exercise_price",
-                "ORG_CONTRACT_UNIT": "original_contract_unit",
-                "ADJUST_DATE": "timestamp",
-            }
-            result = _rename(frame, mapping)
-            result["asset_id"] = (
-                result.security_id
-                + ":"
-                + result.contract_id
-                + ":"
-                + frame.index.astype("str")
-            )
+        mapping = {
+            "UNDERLYING_SECURITY_ID": "underlying_id",
+            "SECURITY_ID": "security_id",
+            "CONTRACT_ID": "contract_id",
+            "CALL_OR_PUT": "option_type",
+            "EXPIRE_DATE": "expiry_date",
+            "START_DATE": "start_date",
+            "EXERCISE_PRICE": "exercise_price",
+            "CONTRACT_UNIT": "contract_unit",
+            "ORG_CONTRACT_ID": "original_contract_id",
+            "ORG_EXERCISE_PRICE": "original_exercise_price",
+            "ORG_CONTRACT_UNIT": "original_contract_unit",
+            "ADJUST_DATE": "timestamp",
+        }
+        result = _rename(frame, mapping)
+        result["asset_id"] = (
+            result.security_id
+            + ":"
+            + result.contract_id
+            + ":"
+            + frame.index.astype("str")
+        )
         yield result
         return
     if source == "sec_nport_target_holdings_extracted":
@@ -858,42 +873,46 @@ def normalize(data_id, path, record):
                 )
                 yield result
     elif source == "eastmoney_fund_history_extracted":
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        fields = payload["fields"]
-        frame = pd.DataFrame(fields["Data_netWorthTrend"])
-        if frame.empty:
-            return
-        result = pd.DataFrame(
-            {
-                "fund_code": str(payload["fund_code"]).zfill(6),
-                "timestamp": pd.to_datetime(frame.x, unit="ms", utc=True)
-                .dt.tz_convert("Asia/Shanghai")
-                .dt.tz_localize(None)
-                .dt.normalize(),
-                "nav_cny": frame.y,
-                "reported_return_percent": frame.get(
-                    "equityReturn", pd.Series(pd.NA, index=frame.index)
-                ),
-            }
-        )
-        accumulated = pd.DataFrame(
-            fields.get("Data_ACWorthTrend", []),
-            columns=["epoch_ms", "accumulated_nav_cny"],
-        )
-        accumulated["timestamp"] = (
-            pd.to_datetime(accumulated.epoch_ms, unit="ms", utc=True)
-            .dt.tz_convert("Asia/Shanghai")
-            .dt.tz_localize(None)
-            .dt.normalize()
-        )
-        result = result.merge(
-            accumulated[["timestamp", "accumulated_nav_cny"]],
-            on="timestamp",
-            how="left",
-            validate="one_to_one",
-        )
-        result["asset_id"] = result.fund_code
-        yield result
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                payload = json.loads(line)
+                fields = payload["fields"]
+                frame = pd.DataFrame(fields["Data_netWorthTrend"])
+                if frame.empty:
+                    continue
+                result = pd.DataFrame(
+                    {
+                        "fund_code": str(payload["fund_code"]).zfill(6),
+                        "timestamp": pd.to_datetime(frame.x, unit="ms", utc=True)
+                        .dt.tz_convert("Asia/Shanghai")
+                        .dt.tz_localize(None)
+                        .dt.normalize(),
+                        "nav_cny": frame.y,
+                        "reported_return_percent": frame.get(
+                            "equityReturn", pd.Series(pd.NA, index=frame.index)
+                        ),
+                    }
+                )
+                accumulated = pd.DataFrame(
+                    fields.get("Data_ACWorthTrend", []),
+                    columns=["epoch_ms", "accumulated_nav_cny"],
+                )
+                accumulated["timestamp"] = (
+                    pd.to_datetime(accumulated.epoch_ms, unit="ms", utc=True)
+                    .dt.tz_convert("Asia/Shanghai")
+                    .dt.tz_localize(None)
+                    .dt.normalize()
+                )
+                result = result.merge(
+                    accumulated[["timestamp", "accumulated_nav_cny"]],
+                    on="timestamp",
+                    how="left",
+                    validate="one_to_one",
+                )
+                result["asset_id"] = result.fund_code
+                result["source_sha256"] = payload["source_sha256"]
+                result["source_url"] = payload["source_url"]
+                yield result
     elif source == "public_index_weight_history_extracted":
         mapping = {
             "index_code": "source_asset_id",
@@ -1196,23 +1215,24 @@ def normalize(data_id, path, record):
             "ShortExemptVolume": "short_exempt_volume",
             "TotalVolume": "total_volume",
             "Market": "market",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
         }
-        frame = _read_csv(
-            path,
-            columns=mapping,
-            sep="|",
-            dtype="str",
-            keep_default_na=False,
-            na_values=[""],
-        )
-        frame = frame.loc[frame.Date.str.fullmatch(r"\d{8}", na=False)]
-        result = _rename(
-            frame,
-            mapping,
-        )
-        result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y%m%d")
-        result["asset_id"] = result.asset_id + ":" + result.market
-        yield result
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                result["timestamp"] = pd.to_datetime(result.timestamp, format="%Y%m%d")
+                result["asset_id"] = result.asset_id + ":" + result.market
+                yield result
     elif source == "nasdaq_etf_ohlcv":
         payload = json.loads(path.read_bytes())
         result = _rename(

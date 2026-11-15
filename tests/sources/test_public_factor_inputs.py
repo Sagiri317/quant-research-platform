@@ -1,5 +1,6 @@
 """New structured public inputs retain units, coordinates and filing identity."""
 
+import gzip
 import hashlib
 import json
 import zipfile
@@ -11,20 +12,35 @@ from tests.helpers.public_sources import write_source_manifest
 
 
 def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path):
-    path = tmp_path / "fund.json"
-    path.write_text(
-        json.dumps(
+    path = tmp_path / "funds.jsonl.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        for payload in (
             {
                 "fund_code": "510300",
+                "source_sha256": "extract-one",
+                "provider_source_sha256": "provider-one",
+                "source_url": "https://example.org/510300.js",
                 "fields": {
                     "Data_netWorthTrend": [{"x": 1704124800000, "y": 1.25}],
                     "Data_ACWorthTrend": [[1704124800000, 2.5]],
                 },
-            }
-        ),
-        encoding="utf-8",
-    )
-    result = next(
+            },
+            {
+                "fund_code": "519994",
+                "provider_fund_code": "519995",
+                "source_sha256": "extract-two",
+                "provider_source_sha256": "provider-two",
+                "source_url": "https://example.org/519995.js",
+                "fields": {
+                    "Data_netWorthTrend": [
+                        {"x": 1704124800000, "y": 1.5, "equityReturn": 2.0}
+                    ],
+                    "Data_ACWorthTrend": [],
+                },
+            },
+        ):
+            handle.write(json.dumps(payload) + "\n")
+    result, alias = list(
         normalize(
             "public_fund_nav", path, {"source": "eastmoney_fund_history_extracted"}
         )
@@ -33,6 +49,13 @@ def test_domestic_nav_uses_shanghai_date_and_keeps_missing_return_local(tmp_path
     assert result.nav_cny.tolist() == [1.25]
     assert result.accumulated_nav_cny.tolist() == [2.5]
     assert result.reported_return_percent.isna().all()
+    assert result.source_sha256.tolist() == ["extract-one"]
+    assert alias.asset_id.tolist() == ["519994"]
+    assert alias.source_sha256.tolist() == ["extract-two"]
+    assert alias.source_url.tolist() == ["https://example.org/519995.js"]
+    assert alias.nav_cny.tolist() == [1.5]
+    assert alias.reported_return_percent.tolist() == [2.0]
+    assert alias.accumulated_nav_cny.isna().all()
 
 
 def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
@@ -149,6 +172,87 @@ def test_exchange_contract_expiry_and_csf_units_are_source_facts(tmp_path):
     assert frame.publication_date.isna().all() and frame.published_at.isna().all()
     assert frame.available_at.eq(pd.Timestamp("2024-01-03T01:30:00Z")).all()
     assert frame.availability_basis.eq("current_policy_historical_backcast").all()
+
+
+def test_sse_risk_preserves_zero_iv_and_uses_actual_contract_underlying(tmp_path):
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    path = tmp_path / "risk.csv"
+    pd.DataFrame(
+        [
+            dict(
+                SECURITY_ID="10000001",
+                CONTRACT_ID="588080C2401M01000",
+                CONTRACT_TYPE="认购",
+                IMPLC_VOLATLTY="0.250",
+                DELTA_VALUE="0.966",
+                GAMMA_VALUE="0.000",
+                VEGA_VALUE="0.044",
+            ),
+            dict(
+                SECURITY_ID="10000002",
+                CONTRACT_ID="510050P2401M02500",
+                CONTRACT_TYPE="认沽",
+                IMPLC_VOLATLTY="0.000",
+                DELTA_VALUE="-1.000",
+                GAMMA_VALUE="0.000",
+                VEGA_VALUE="0.000",
+            ),
+        ]
+    ).assign(
+        TRADE_DATE="2024-01-02",
+        CONTRACT_SYMBOL="source contract name",
+        THETA_VALUE="-0.205",
+        RHO_VALUE="0.105",
+        source_sha256="original-query",
+        source_url="https://example.org/risk",
+    ).to_csv(path, index=False)
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                dict(
+                    path=path.name,
+                    source="sse_option_risk_indicators",
+                    sha256="combined-table",
+                )
+            ]
+        },
+    )
+    clock = tmp_path / "release.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="sse_option_risk_indicators",
+                observation_date="2024-01-02",
+                estimated_available_at="2024-01-02T23:59:59+08:00",
+                availability_basis="source_day_end_backcast",
+                evidence_url="https://example.org/risk-disclosure",
+            )
+        ]
+    ).to_csv(clock, index=False)
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(clock),
+            outputs={"public_option_risk": str(output)},
+        )
+    )
+    frame = read_dataset(output).set_index("asset_id")
+    assert len(frame) == 2
+    assert frame.loc["10000001", "underlying_id"] == "588080"
+    assert frame.loc["10000001", "implied_volatility"] == 0.25
+    assert frame.loc["10000001", "vega"] == 0.044
+    assert frame.loc["10000002", "underlying_id"] == "510050"
+    assert frame.loc["10000002", "implied_volatility"] == 0
+    assert frame.loc["10000002", "delta"] == -1
+    assert frame.source_sha256.eq("original-query").all()
+    assert frame.source_url.eq("https://example.org/risk").all()
+    assert frame.published_at.isna().all() and frame.publication_date.isna().all()
+    assert frame.available_at.eq(pd.Timestamp("2024-01-02T15:59:59Z")).all()
 
 
 def test_extracted_13f_values_are_already_usd(tmp_path):

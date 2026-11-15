@@ -1354,17 +1354,20 @@ def test_cboe_structured_raw_preserves_ratio_scope(tmp_path):
 
 
 def test_finra_symbol_na_is_an_identifier_not_missing(tmp_path):
-    path = tmp_path / "short.txt"
+    path = tmp_path / "short.csv"
     path.write_text(
-        "Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market\n"
-        "20240102|NA|4|1|10|Q\n1\n",
+        "Date,Symbol,ShortVolume,ShortExemptVolume,TotalVolume,Market,source_sha256,source_url\n"
+        '20240102,NA,4.531288,0,10.6,"B,Q,N",original-response,https://example.org/short\n',
         encoding="utf-8",
     )
     frame = next(
         normalize("public_finra_short_volume", path, {"source": "finra_short_volume"})
     )
-    assert frame.asset_id.tolist() == ["NA:Q"]
-    assert frame.total_volume.tolist() == ["10"]
+    assert frame.asset_id.tolist() == ["NA:B,Q,N"]
+    assert frame.short_volume.tolist() == ["4.531288"]
+    assert frame.short_exempt_volume.tolist() == ["0"]
+    assert frame.total_volume.tolist() == ["10.6"]
+    assert frame.source_sha256.tolist() == ["original-response"]
 
 
 def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):
