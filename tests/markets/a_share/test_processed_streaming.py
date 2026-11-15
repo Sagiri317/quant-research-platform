@@ -1662,6 +1662,8 @@ def test_native_lifecycle_history_does_not_join_relisting(
                 Adjprcwd=price,
                 PreClosePrice=price,
                 LimitStatus=0,
+                LimitUp=None,
+                LimitDown=None,
             )
         )
     _write_csmar(raw, "market_bars_1d", rows[::-1])

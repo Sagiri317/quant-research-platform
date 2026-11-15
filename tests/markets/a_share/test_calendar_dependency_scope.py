@@ -46,6 +46,8 @@ def _panel(dates, asset="a", market=1):
             low=price - 1,
             close=price,
             limit_status=0,
+            limit_up_price=price * 1.1,
+            price_limit_applicable=1.0,
             is_trading=True,
             filling_flag=0,
             period_return=0.01,

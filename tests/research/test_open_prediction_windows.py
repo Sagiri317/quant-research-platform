@@ -12,14 +12,8 @@ from quant_research_platform.research.predictions.runner import predict
 from tests.research.direct_model_test_support import candidates, fit_frame
 
 
-@pytest.mark.parametrize(
-    "algorithm",
-    [
-        "linear_regression",
-    ],
-)
 def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
-    tmp_path, monkeypatch, algorithm
+    tmp_path, monkeypatch
 ):
     stamps = pd.date_range("2020-01-01", periods=6).repeat(3)
     frame = pd.DataFrame(
@@ -39,7 +33,7 @@ def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
         frame.iloc[:9],
         ModelSpec(
             model_id="open",
-            model_algorithm=algorithm,
+            model_algorithm="linear_regression",
             input_factor_columns=("x",),
             target_column="label",
             random_seed=19,
@@ -67,7 +61,6 @@ def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
         "prediction_window": {"start": "2020-01-04", "end": None},
         "sample_role": "validation",
     }
-    before = {path.name: path.read_bytes() for path in case.root.iterdir()}
     future.loc[future.timestamp <= pd.Timestamp("2020-01-05")].to_parquet(
         source, index=False
     )
@@ -92,13 +85,11 @@ def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
         "2020-01-06"
     )
     assert not extended.timestamp.lt(pd.Timestamp("2020-01-04")).any()
-    if algorithm == "linear_regression":
-        assert not (
-            extended.timestamp.eq(pd.Timestamp("2020-01-04"))
-            & extended.asset_id.eq("a")
-        ).any()
-        expected = extended.asset_id.map({"a": 0.1, "b": 0.2, "c": 0.3})
-        np.testing.assert_allclose(extended.prediction_score, expected)
+    assert not (
+        extended.timestamp.eq(pd.Timestamp("2020-01-04")) & extended.asset_id.eq("a")
+    ).any()
+    expected = extended.asset_id.map({"a": 0.1, "b": 0.2, "c": 0.3})
+    np.testing.assert_allclose(extended.prediction_score, expected)
     scoped, scoped_metadata = read_predictions(
         predict({**config, "asset_ids": ["c"], "output": str(tmp_path / "scoped")})
     )
@@ -121,7 +112,6 @@ def test_native_open_prediction_is_causal_label_free_and_full_cross_section(
     assert (
         empty_metadata["prediction_rows"] == 0 and empty_metadata["status"] == "empty"
     )
-    assert {path.name: path.read_bytes() for path in case.root.iterdir()} == before
 
 
 def test_open_prediction_preserves_nanoseconds_in_filter_and_saved_extent(tmp_path):

@@ -8,9 +8,11 @@ from quant_research_platform.contracts.validation import strict_finite_float
 
 
 def validate_execution_as_of(value, *, start, error):
-    """Require an observed UTC-naive calibration time strictly before execution."""
+    """Require an observed calibration instant strictly before execution."""
     as_of = pd.Timestamp(value)
-    if pd.isna(as_of) or as_of.tz is not None or as_of >= start:
+    if as_of.tz is not None:
+        as_of = as_of.tz_convert(None)
+    if pd.isna(as_of) or as_of >= start:
         raise ValueError(error)
 
 

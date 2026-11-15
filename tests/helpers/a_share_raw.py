@@ -116,6 +116,8 @@ def write_a_share_raw_fixture(
                     "Adjprcwd": price,
                     "PreClosePrice": float(previous[row, column]),
                     "LimitStatus": 0,
+                    "LimitUp": None,
+                    "LimitDown": None,
                 }
 
     _write_csmar(root, "market_bars_1d", bars())

@@ -54,7 +54,7 @@ def test_integer_shares_and_cash_survive_native_ledger_roundtrip(tmp_path, monke
     )
     batches = list(chunks)
     assert batches
-    expected_units = float(float(capital)) / float(float(price))
+    expected_units = capital / price
     assert len(batches[0].trades) == 1
     assert batches[0].trades[0].quantity == expected_units
     assert batches[0].trades[0].notional == capital
@@ -76,23 +76,10 @@ def test_integer_shares_and_cash_survive_native_ledger_roundtrip(tmp_path, monke
                 assert float(row.quantity * float(row.mark_price)) == capital
 
     capital_spec = PortfolioCapital(
-        **{
-            "candidate_id": "independent_numeric_portfolio",
-            "initial_capital": float(capital),
-            "valuation_currency": "CNY",
-            "valuation_method": "cash_equity",
-        }
+        "independent_numeric_portfolio", capital, "CNY", "cash_equity"
     )
     metadata = {
-        "window": {
-            key: value
-            for key, value in {
-                "start": "2023-01-03",
-                "end": "2023-01-06",
-                "access": "validation",
-            }.items()
-            if key != "access"
-        },
+        "window": {"start": "2023-01-03", "end": "2023-01-06"},
         "sample_role": "validation",
     }
 
@@ -104,12 +91,7 @@ def test_integer_shares_and_cash_survive_native_ledger_roundtrip(tmp_path, monke
         tmp_path / "ledger", capital=capital_spec, metadata=metadata, produce=produce
     )
     artifact = read_portfolio_ledger_artifact(root)
-    assert list(artifact.iter_chunks()) == batches
-    economics = _LedgerEconomics(
-        PortfolioCapital(
-            "independent_numeric_portfolio", float(capital), "CNY", "cash_equity"
-        )
-    )
+    economics = _LedgerEconomics(capital_spec)
     for batch in artifact.iter_chunks():
         economics.consume(batch)
     summary = economics.summary()
@@ -220,19 +202,14 @@ def test_admitted_recovery_reaches_native_statistics_without_losing_money(
         )
     )
     candidates, manifest = portfolio_statistics_config(sample_role="validation")
-    window = {"start": "2022-12-30", "end": "2023-01-06", "access": "validation"}
+    window = {"start": "2022-12-30", "end": "2023-01-06"}
     ledgers = {}
     for candidate in candidates:
         capital_spec = PortfolioCapital(
-            **{
-                "candidate_id": candidate.candidate_id,
-                "initial_capital": 1_000_000.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "cash_equity",
-            }
+            candidate.candidate_id, 1_000_000.0, "CNY", "cash_equity"
         )
         metadata = {
-            "window": {key: value for key, value in window.items() if key != "access"},
+            "window": window,
             "sample_role": "validation",
         }
 

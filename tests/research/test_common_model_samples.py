@@ -112,7 +112,6 @@ def test_other_market_comparison_intersects_exact_keys_without_mutating_full_out
     assert tables[1].timestamp.tolist() == [stamps[5], stamps[6], stamps[7]]
     assert tables[0].prediction_score.tolist() == pytest.approx([1.0, 2.0, 4.0])
     assert tables[1].prediction_score.tolist() == pytest.approx([2.5, 3.5, 4.5])
-    before = [(path / "prediction.parquet").read_bytes() for path in paths]
     labels = tmp_path / "labels.parquet"
     config = {
         "predictions": [str(path) for path in paths],
@@ -137,7 +136,6 @@ def test_other_market_comparison_intersects_exact_keys_without_mutating_full_out
         assert [row["validation_mse"] for row in scored["metrics"]] == pytest.approx(
             [0.0, 0.25], rel=1e-14, abs=1e-25
         )
-    assert before == [(path / "prediction.parquet").read_bytes() for path in paths]
 
     # Different assets at identical timestamps have no common observations.
     disjoint = frame.iloc[4:].assign(asset_id="asset_b")

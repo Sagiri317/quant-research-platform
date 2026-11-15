@@ -119,7 +119,10 @@ def test_almgren_chriss_closed_form_limits_and_causal_signal_direction():
     assert execution_fraction(0.3, 2, adjusted, signal=1.0, side=-1) < base
 
 
-def test_ac_and_signal_schedule_replay_native_account(tmp_path):
+@pytest.mark.parametrize(
+    "as_of", ["2024-01-01", "2024-01-01T00:00:00Z", "2024-01-01T08:00:00+08:00"]
+)
+def test_ac_and_signal_schedule_replay_native_account(tmp_path, as_of):
     episode = hft_episode(tmp_path / "inputs")
     episode["account"]["parameters"].update(
         initial_capital=10000.0,
@@ -128,7 +131,7 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path):
     )
     episode["order"]["quantity"] = -400
     params = {
-        "as_of": "2024-01-01",
+        "as_of": as_of,
         "risk_aversion": 0.0,
         "price_volatility": 1.0,
         "temporary_impact": 1.0,
@@ -169,9 +172,7 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path):
 
 
 @pytest.mark.parametrize("strategy", ["vwap", "almgren_chriss"])
-@pytest.mark.parametrize(
-    "as_of", ["NaT", None, "2024-01-02T01:30:00", "2024-01-01T00:00:00Z"]
-)
+@pytest.mark.parametrize("as_of", ["NaT", None, "2024-01-02T01:30:00"])
 def test_execution_schedules_reject_unproved_history_before_writing(
     tmp_path, strategy, as_of
 ):
