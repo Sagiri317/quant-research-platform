@@ -31,8 +31,8 @@ def _frame(n=120):
             "industry_standard_id": "test",
             "industry_level1_code": "I",
             "log_total_market_cap": x / 10,
-            "forward_return_20d": np.sin(x) / 100 + x / 1000,
-            "forward_return_20d_available_at": pd.Timestamp("2020-02-01"),
+            "forward_return_5d": np.sin(x) / 100 + x / 1000,
+            "forward_return_5d_available_at": pd.Timestamp("2020-02-01"),
         }
     )
 
@@ -85,8 +85,8 @@ def test_target_constant_single_missing_and_percentile():
         {
             "timestamp": [1, 1, 1, 2, 2],
             "eligible": True,
-            "forward_return_20d": [0.2, 0.2, np.nan, 0.5, np.nan],
-            "forward_return_20d_available_at": pd.Timestamp("2020-02-01"),
+            "forward_return_5d": [0.2, 0.2, np.nan, 0.5, np.nan],
+            "forward_return_5d_available_at": pd.Timestamp("2020-02-01"),
         }
     )
     result = a_share_model_target(frame).model_target
@@ -97,7 +97,7 @@ def test_target_constant_single_missing_and_percentile():
     assert result.iloc[2:].isna().all()
     pd.testing.assert_series_equal(
         a_share_model_target(frame, transform="raw").model_target,
-        frame.forward_return_20d,
+        frame.forward_return_5d,
         check_names=False,
     )
 
@@ -105,8 +105,8 @@ def test_target_constant_single_missing_and_percentile():
 def test_target_residual_uses_only_same_row_exposures_and_actual_clocks():
     frame = _frame()
     frame.loc[0, "industry_level1_code"] = None
-    frame.loc[0, "forward_return_20d_available_at"] = pd.Timestamp("2020-03-01")
-    frame.loc[1, "forward_return_20d_available_at"] = pd.Timestamp("2020-02-04")
+    frame.loc[0, "forward_return_5d_available_at"] = pd.Timestamp("2020-03-01")
+    frame.loc[1, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-04")
     spec = replace(
         research_dataset_catalog().get("pv_all"),
         eligibility_recipe=None,
@@ -123,11 +123,11 @@ def test_target_residual_uses_only_same_row_exposures_and_actual_clocks():
     assert abs(valid.sum()) < 1e-12
     assert abs(np.dot(valid, frame.loc[valid.index, "log_total_market_cap"])) < 1e-12
     changed = frame.copy()
-    changed.loc[0, "forward_return_20d"] = 1e10
+    changed.loc[0, "forward_return_5d"] = 1e10
     pd.testing.assert_series_equal(
         _add_a_share_semantic_columns(changed, spec).model_target, result.model_target
     )
-    pd.testing.assert_series_equal(result.forward_return_20d, frame.forward_return_20d)
+    pd.testing.assert_series_equal(result.forward_return_5d, frame.forward_return_5d)
 
 
 def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_path):
@@ -150,31 +150,29 @@ def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_p
             "total_market_cap": np.where(signs[:, 6] > 0, 4e8, 1e8),
             **dict(zip(RISK_STYLE_COLUMNS, signs[:, :5].T, strict=True)),
             "reversal_20d": signs[:, 5],
-            "forward_return_20d": 0.02
-            + signs[:, :5] @ (np.arange(5) / 1000)
-            + residual,
-            "forward_return_20d_available_at": pd.Timestamp("2024-02-01"),
+            "forward_return_5d": 0.02 + signs[:, :5] @ (np.arange(5) / 1000) + residual,
+            "forward_return_5d_available_at": pd.Timestamp("2024-02-01"),
         }
     )
-    frame.loc[0, "forward_return_20d_available_at"] = pd.Timestamp("2024-02-04")
+    frame.loc[0, "forward_return_5d_available_at"] = pd.Timestamp("2024-02-04")
     outsider = frame.iloc[[0]].assign(
         asset_id="outside",
         eligible=False,
-        forward_return_20d=10.0,
-        forward_return_20d_available_at=pd.Timestamp("2024-03-01"),
+        forward_return_5d=10.0,
+        forward_return_5d_available_at=pd.Timestamp("2024-03-01"),
     )
     frame = pd.concat([frame, outsider], ignore_index=True)
     source, _ = assembly_source(
         tmp_path,
         frame,
-        units={"forward_return_20d": "decimal_return"},
-        availability={"forward_return_20d": "forward_return_20d_available_at"},
+        units={"forward_return_5d": "decimal_return"},
+        availability={"forward_return_5d": "forward_return_5d_available_at"},
     )
     root = assemble(
         assembly_config(
             tmp_path,
             source,
-            label_columns=["model_target", "forward_return_20d"],
+            label_columns=["model_target", "forward_return_5d"],
             filter_columns=["eligible"],
             target_transform="risk_residual",
         )
@@ -186,7 +184,7 @@ def test_nonfinancial_risk_target_persists_orthogonal_returns_and_maturity(tmp_p
     )
     assert pd.isna(saved.model_target.iloc[-1])
     assert pd.isna(saved.model_target_available_at.iloc[-1])
-    np.testing.assert_array_equal(saved.forward_return_20d, frame.forward_return_20d)
+    np.testing.assert_array_equal(saved.forward_return_5d, frame.forward_return_5d)
     spec = inspect_dataset(root).spec
     assert spec["target_transform"] == "risk_residual"
     from quant_research_platform.contracts.risk import FactorRiskModel
@@ -228,14 +226,14 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
             "total_market_cap": 1e8,
             **dict(zip(RISK_STYLE_COLUMNS, signs[:, :5].T, strict=True)),
             "reversal_20d": signs[:, 5],
-            "forward_return_20d": returns,
+            "forward_return_5d": returns,
             "return_maturity": pd.Timestamp("2024-02-01"),
         }
     )
     excluded = frame.iloc[[0]].assign(
         asset_id="excluded",
         beta_252d=np.nan,
-        forward_return_20d=10.0,
+        forward_return_5d=10.0,
         return_maturity=maturity,
     )
     frame = pd.concat(
@@ -247,7 +245,7 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
             ),
             excluded.assign(
                 asset_id="missing_return",
-                forward_return_20d=np.nan,
+                forward_return_5d=np.nan,
                 return_maturity=pd.NaT,
             ),
         ],
@@ -256,8 +254,8 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
     source, _ = assembly_source(
         tmp_path,
         frame,
-        units={"forward_return_20d": "decimal_return"},
-        availability={"forward_return_20d": "return_maturity"},
+        units={"forward_return_5d": "decimal_return"},
+        availability={"forward_return_5d": "return_maturity"},
     )
     root = assemble(
         assembly_config(
@@ -286,7 +284,7 @@ def test_risk_target_clipping_dependencies_survive_assembly_and_fit(
     np.testing.assert_allclose(
         saved.model_target.iloc[:128], expected, rtol=1e-12, atol=1e-14
     )
-    np.testing.assert_array_equal(saved.forward_return_20d, frame.forward_return_20d)
+    np.testing.assert_array_equal(saved.forward_return_5d, frame.forward_return_5d)
     assert saved.model_target.iloc[128:].isna().all()
     assert saved.model_target_available_at.iloc[128:].isna().all()
     expected_maturity = pd.Timestamp("2024-02-01") if clip == "none" else maturity
@@ -349,7 +347,7 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
         eligible=ColumnRole.UNIVERSE,
         factor=ColumnRole.FACTOR,
         other=ColumnRole.FACTOR,
-        forward_return_20d=ColumnRole.LABEL,
+        forward_return_5d=ColumnRole.LABEL,
     )
     source = ProcessedDataSpec(
         data_id="input",
@@ -362,10 +360,10 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
         column_roles=roles,
         column_units={
             "factor": "dimensionless",
-            "forward_return_20d": "decimal_return",
+            "forward_return_5d": "decimal_return",
         },
         label_availability_columns={
-            "forward_return_20d": "forward_return_20d_available_at"
+            "forward_return_5d": "forward_return_5d_available_at"
         },
     )
     write_dataset(tmp_path / "input", frame, spec=source)
@@ -395,7 +393,7 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
     assert ("feature_factor" in result) == ("processed" in groups)
     assert ("feature_pre_neutral_factor" in result) == ("pre_neutral" in groups)
     pd.testing.assert_series_equal(
-        result.model_target, frame.forward_return_20d, check_names=False
+        result.model_target, frame.forward_return_5d, check_names=False
     )
     assert session.spec["target_transform"] == "raw"
     assert session.spec["target_clip"] == "none"
@@ -483,8 +481,8 @@ def test_assemble_persists_selected_groups_target_and_input_columns(tmp_path, gr
 
 def test_raw_target_has_no_unrelated_cross_section_clock_dependency():
     frame = _frame(3)
-    frame.loc[1, "forward_return_20d_available_at"] = pd.Timestamp("2020-02-04")
-    frame.loc[2, "forward_return_20d_available_at"] = pd.NaT
+    frame.loc[1, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-04")
+    frame.loc[2, "forward_return_5d_available_at"] = pd.NaT
     spec = replace(
         research_dataset_catalog().get("pv_all"),
         eligibility_recipe=None,
@@ -493,7 +491,7 @@ def test_raw_target_has_no_unrelated_cross_section_clock_dependency():
     result = _add_a_share_semantic_columns(frame, spec)
     pd.testing.assert_series_equal(
         result.model_target_available_at,
-        frame.forward_return_20d_available_at.astype("datetime64[ns]"),
+        frame.forward_return_5d_available_at.astype("datetime64[ns]"),
         check_names=False,
     )
     clipped = _add_a_share_semantic_columns(
@@ -505,7 +503,7 @@ def test_raw_target_has_no_unrelated_cross_section_clock_dependency():
 
 def test_target_cross_section_is_independent_of_feature_availability():
     frame = _frame(3)
-    frame.loc[2, "forward_return_20d_available_at"] = pd.Timestamp("2020-02-05")
+    frame.loc[2, "forward_return_5d_available_at"] = pd.Timestamp("2020-02-05")
     spec = replace(research_dataset_catalog().get("pv_all"), eligibility_recipe=None)
     expected = _add_a_share_semantic_columns(frame, spec)
     frame[["factor", "other"]] = np.nan
@@ -542,8 +540,8 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
                     "log_total_market_cap": np.tile(sizes, repetitions),
                     "industry_standard_id": "test",
                     "industry_level1_code": "A",
-                    "forward_return_20d": np.tile(raw / 64, repetitions),
-                    "forward_return_20d_available_at": pd.Timestamp(day)
+                    "forward_return_5d": np.tile(raw / 64, repetitions),
+                    "forward_return_5d_available_at": pd.Timestamp(day)
                     + pd.Timedelta(days=1),
                 }
             )
@@ -551,8 +549,8 @@ def test_projection_feature_and_target_survive_assembly_fit_and_prediction(tmp_p
     source, _ = assembly_source(
         tmp_path,
         pd.concat(frames, ignore_index=True),
-        units={"forward_return_20d": "decimal_return"},
-        availability={"forward_return_20d": "forward_return_20d_available_at"},
+        units={"forward_return_5d": "decimal_return"},
+        availability={"forward_return_5d": "forward_return_5d_available_at"},
     )
     dataset = assemble(
         assembly_config(
@@ -635,8 +633,8 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
     source, _ = assembly_source(
         tmp_path,
         frame,
-        units={"forward_return_20d": "decimal_return"},
-        availability={"forward_return_20d": "forward_return_20d_available_at"},
+        units={"forward_return_5d": "decimal_return"},
+        availability={"forward_return_5d": "forward_return_5d_available_at"},
     )
     from quant_research_platform.research.risk import FactorRiskState
 
@@ -671,7 +669,7 @@ def test_explicit_risk_model_survives_assembly_and_model_facts(tmp_path, monkeyp
     values = frame.log_total_market_cap.to_numpy()
     design = np.column_stack((np.ones(120), (values - values.mean()) / values.std()))
     weights = frame.float_market_cap.to_numpy() ** 0.25
-    returns = frame.forward_return_20d.to_numpy()
+    returns = frame.forward_return_5d.to_numpy()
     coefficients = np.linalg.lstsq(
         design * weights[:, None], returns * weights, rcond=None
     )[0]
@@ -784,8 +782,8 @@ def test_shared_risk_missing_values_only_affect_dependent_outputs(tmp_path):
     source, _ = assembly_source(
         tmp_path,
         raw,
-        units={"forward_return_20d": "decimal_return"},
-        availability={"forward_return_20d": "forward_return_20d_available_at"},
+        units={"forward_return_5d": "decimal_return"},
+        availability={"forward_return_5d": "forward_return_5d_available_at"},
     )
     root = assemble(
         assembly_config(
@@ -810,7 +808,7 @@ def test_shared_risk_missing_values_only_affect_dependent_outputs(tmp_path):
     np.testing.assert_array_equal(
         saved.feature_pre_neutral_reversal_20d, raw.reversal_20d
     )
-    np.testing.assert_array_equal(saved.model_target, raw.forward_return_20d)
+    np.testing.assert_array_equal(saved.model_target, raw.forward_return_5d)
 
 
 def test_full_risk_standardization_preserves_weighted_industry_and_style_neutrality():

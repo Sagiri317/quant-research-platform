@@ -18,7 +18,7 @@
     }
   ],
   "strata": {
-    "primary_label": "forward_return_20d",
+    "primary_label": "forward_return_5d",
     "kinds": [
       "industry",
       "size",
@@ -39,7 +39,7 @@
       }
     ],
     "label_columns": [
-      "forward_return_20d"
+      "forward_return_5d"
     ],
     "evaluation_axis": "cross_sectional",
     "filter_mode": "eligible",

@@ -492,6 +492,7 @@ def test_decision_panel_carries_consumed_label_definition_and_feature_lineage(tm
             label_columns=["model_target"],
             filter_columns=["eligible"],
             target_transform="raw",
+            target_label_column="forward_return_20d",
         )
     )
     calendar = tmp_path / "calendar"
@@ -571,6 +572,7 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
     from quant_research_platform.contracts.portfolios import (
         ExecutionAssumptions,
         PortfolioCandidateSpec,
+        RobustPortfolioConfig,
     )
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.a_share.calendar import (
@@ -724,6 +726,78 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
     )
     assert len(enhanced) == 4
     assert min(seen) == pd.Timestamp("2023-01-02T01:00")
+    if case == "complete":
+        # Weekly risk uses the next planned execution open on the known calendar.
+        final_day = calendar.loc[calendar.calendar_date.eq("2023-01-06")]
+        robust_calendar = pd.concat(
+            [
+                calendar,
+                *(
+                    final_day.assign(
+                        timestamp=day,
+                        calendar_date=day,
+                        is_trading_day=day.weekday() < 5,
+                    )
+                    for day in pd.date_range("2023-01-07", "2023-01-09")
+                ),
+            ],
+            ignore_index=True,
+        )
+        calendar_path = tmp_path / "robust-calendar"
+        write_dataset(
+            calendar_path,
+            robust_calendar,
+            spec=ProcessedDataSpec(
+                data_id="robust_calendar",
+                market_id="a_share",
+                kind="annotation",
+                frequency="1d",
+                grain="source_market_calendar_date",
+                primary_key=("calendar_date", "source_market_type"),
+                partition_columns=(),
+                column_roles={
+                    "calendar_date": "timestamp",
+                    "source_market_type": "key",
+                    "timestamp": "context",
+                    "is_trading_day": "mask",
+                },
+            ),
+        )
+        for schedule in ("daily", "weekly-last-trading-day"):
+            seen.clear()
+            robust = list(
+                backtest_a_share(
+                    **{
+                        **settings,
+                        "candidate": replace(
+                            settings["candidate"],
+                            construction="robust_long_only",
+                            benchmark_id=None,
+                            top_quantile=None,
+                            rebalance_schedule=schedule,
+                            risk_style_columns=("signal",),
+                        ),
+                        "robust_config": RobustPortfolioConfig(),
+                        "inputs": {
+                            **settings["inputs"],
+                            "risk_context": [inputs["dataset"]],
+                            "calendar": calendar_path,
+                        },
+                        "prediction_window": TimeWindow(
+                            "2023-01-02T01:00", "2023-01-06T01:00"
+                        ),
+                        "on_final_calibration": lambda result: None,
+                    }
+                )
+            )
+            assert len(robust) == 4
+            assert min(seen) == pd.Timestamp("2023-01-02T01:00")
+            # The shifted Dec 30 signal executes on Jan 2, never Jan 3.
+            assert {
+                pd.Timestamp(row.timestamp_ns).normalize()
+                for row in robust[0].valuations
+                if row.phase == "after"
+            } == {pd.Timestamp("2023-01-02")}
 
 
 def test_decision_calendar_unknown_is_not_a_closed_day_and_keeps_labels():

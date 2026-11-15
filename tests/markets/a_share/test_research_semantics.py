@@ -63,11 +63,11 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -
             "volume": 100.0,
             "amount": 1_000.0,
             "turnover": 0.1,
-            "forward_return_20d": [0.10 * scale, 0.20 * scale, np.nan],
+            "forward_return_5d": [0.10 * scale, 0.20 * scale, np.nan],
         }
     )
 
-    frame["forward_return_20d_available_at"] = frame["timestamp"] + pd.offsets.BDay(21)
+    frame["forward_return_5d_available_at"] = frame["timestamp"] + pd.offsets.BDay(6)
     result = _add_a_share_semantic_columns(frame, spec)
 
     assert result["eligible"].tolist() == [True, True, False]
@@ -112,11 +112,11 @@ def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> 
             "volume": 100.0,
             "amount": 1_000.0,
             "turnover": 0.1,
-            "forward_return_20d": [0.10, 0.10, 0.10, 0.20],
+            "forward_return_5d": [0.10, 0.10, 0.10, 0.20],
         }
     )
 
-    frame["forward_return_20d_available_at"] = frame["timestamp"] + pd.offsets.BDay(21)
+    frame["forward_return_5d_available_at"] = frame["timestamp"] + pd.offsets.BDay(6)
     result = _add_a_share_semantic_columns(frame, spec)
 
     assert result.loc[result["timestamp"].eq("2024-01-02"), "model_target"].eq(0).all()
@@ -277,7 +277,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
     for column in label_spec.required_columns:
         if column in labels:
             continue
-        if column == "forward_return_20d":
+        if column == "forward_return_5d":
             labels[column] = [0.10] * 3 if constant else [0.10, 0.20, np.nan]
         elif column.endswith("_available_at"):
             horizon = int(
@@ -287,7 +287,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         else:
             labels[column] = 0.10
     if not constant:
-        labels.loc[2, "forward_return_20d_available_at"] = pd.NaT
+        labels.loc[2, "forward_return_5d_available_at"] = pd.NaT
     write_dataset(
         layout.processed_data_root(
             label_spec.market_id, label_spec.kind, label_spec.data_id

@@ -529,6 +529,7 @@ def _defined_target_case(root, *, transform="raw", clip="none", semantics=None):
         filter_columns=("eligible",),
         target_transform=transform,
         target_clip=clip,
+        target_label_column="forward_return_20d",
         column_units={
             "model_target": "decimal_return"
             if transform in {"raw", "industry_size_residual"}

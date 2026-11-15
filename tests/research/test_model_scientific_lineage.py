@@ -55,6 +55,7 @@ def test_target_unit_comes_from_the_selected_label_producer(tmp_path, unit, tran
             root,
             label_columns=["model_target"],
             target_transform=transform,
+            target_label_column="forward_return_20d",
         )
     )
     actual = inspect_dataset(output).spec["column_units"]

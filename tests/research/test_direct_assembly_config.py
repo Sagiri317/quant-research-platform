@@ -180,6 +180,7 @@ def test_declared_industry_pairs_have_independent_native_feature_and_target_resi
                     "scale": False,
                 },
                 label_columns=["model_target"],
+                target_label_column="forward_return_20d",
                 target_transform="industry_size_residual",
                 target_clip="none",
             )
@@ -376,6 +377,7 @@ def test_explicit_recipe_and_actual_clock_are_independent_of_output_name(
             dataset_id=name,
             output_root=str(tmp_path / name),
             label_columns=["model_target"],
+            target_label_column="forward_return_20d",
             filter_columns=["eligible"],
             eligibility_recipe=recipe,
         )
@@ -556,6 +558,7 @@ def test_named_defaults_cannot_invent_missing_upstream_label_maturity(tmp_path):
         dataset_id="pv_all",
         base_input_data_id=root.name,
         label_columns=["model_target"],
+        target_label_column="forward_return_20d",
         eligibility_recipe=None,
     )
     with pytest.raises(ValueError, match="model_target_label_availability_required"):
@@ -608,6 +611,7 @@ def test_derived_target_preserves_unknown_maturity_and_compares_actual_times(
             "inputs": {"source": str(tmp_path / "source")},
             "factor_columns": ["x"],
             "label_columns": ["model_target"],
+            "target_label_column": "forward_return_20d",
             "feature_recipe": None,
             "time_window": {"start": "2024-01-02", "end": "2024-01-02"},
             "output_root": str(tmp_path / "result"),

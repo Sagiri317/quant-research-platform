@@ -139,7 +139,7 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
         selection["cutoff"] = str(cutoff)
     metadata = {
         **model_stats._model_target_metadata(
-            config, data_spec_payload(spec), TimeWindow(dates[0], cutoff)
+            config, data_spec_payload(spec), TimeWindow(dates[0], cutoff), {}
         ),
         "selection_cutoffs": [str(cutoff)],
         "sample_role": "validation",
@@ -1037,6 +1037,7 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                 config,
                 data_spec_payload(spec),
                 TimeWindow(dates[0], cutoff),
+                {},
             ),
             "sample_role": access,
             "window": {"start": str(dates[0]), "end": str(cutoff)},

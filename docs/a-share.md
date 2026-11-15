@@ -1132,13 +1132,13 @@ Asia/Shanghai 15:00 规范到 UTC（现代 A 股为 07:00），不使用该日�
 
 #### 模型目标
 
-以下20日为默认示例。`target_label_column`可显式选择已声明的实际收益标签，
+低频默认源为 `forward_return_5d`，日频与周频调仓均使用该目标。`target_label_column`可显式选择已声明的实际收益标签，
 变换、原值保留和成熟时点均跟随所选源标签，不与20日标签耦合；因子分析使用风险残差作对照。
 
 `model_target` 只在场景研究数据集组装中、确定 `eligible` 之后创建：
 
 ```text
-有效且满足 eligible 的 forward_return_20d
+有效且满足 eligible 的 forward_return_5d
 -> 横截面总体 zscore
 ```
 
@@ -1153,14 +1153,14 @@ Asia/Shanghai 15:00 规范到 UTC（现代 A 股为 07:00），不使用该日�
 残差目标只使用信号日同一行的历史行业/规模事实；行业标准与代码共同标识行业，
 缺少事实的行不参与裁剪及回归，不用未来行业/规模回填。沿用现有中性化样本门槛
 `n >= max(100, 5p)` 及可识别性检查。其余模式不要求这些专用输入。
-原始 `forward_return_20d` 始终保留且不缩尾/改写，所有标签均不插补。
+原始 `forward_return_5d`、`forward_return_20d` 等标签始终保留且不缩尾/改写，所有标签均不插补。
 目标模式、裁剪参数和实际输入列写入原生元数据；raw/残差目标单位为 `decimal_return`，
 zscore/percentile 为 `dimensionless`。
 
 每份数据集按所选模式只生成一列 `model_target`。其 `model_target_available_at` 是该截面真正参与规范化的
 合格非缺失标签成熟时点的最大值；没有有效目标的行保持 NaT。训练与验证使用该独立成熟列。
 无裁剪的 `raw` 目标不参与截面运算，直接沿用自身标签时钟；开启裁剪时仍采用参与截面的最晚时钟。
-逐资产原始 `forward_return_20d_available_at` 保持自身价格来源可用时点，不因其他市场较晚成熟而改写。
+逐资产原始 `forward_return_5d_available_at`、`forward_return_20d_available_at` 等保持自身价格来源可用时点，不因其他市场较晚成熟而改写。
 标签端点及 execution 掩码的分批前瞻读取共用正式 PANEL 的完整资产会话域：包含开市未知报价
 与停牌占位，排除已知闭市，遵守历史市场迁移，不按稀疏原始报价压缩期限。
 
@@ -2309,8 +2309,8 @@ SPA/StepM 的学生化和中心化遵循 [Hansen（2005）](https://bashtage.git
 
 因变量：
 
-研究配置所选 `evaluation.primary_label` 的原始标签；默认是 `forward_return_20d`。
-选择 `forward_return_5d` 等其他支持期限时，FMB 使用同一标签及其可用时点确定成熟样本，
+研究配置所选 `evaluation.primary_label` 的原始标签；低频默认是 `forward_return_5d`。
+显式选择 `forward_return_20d` 等其他支持期限时，FMB 使用同一标签及其可用时点确定成熟样本，
 输出的经济解释与该期限一致，不独立读取二十日标签或借用其成熟域。
 
 单因子回归分别运行；多因子回归仅使用 CORE。

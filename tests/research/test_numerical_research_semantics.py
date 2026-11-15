@@ -186,7 +186,9 @@ def test_distinct_positive_price_labels_keep_distinct_model_targets(tmp_path):
     np.testing.assert_allclose(first.forward_return_20d, expected, rtol=1e-14, atol=0)
     assert 0 < first.forward_return_20d.iloc[0] < first.forward_return_20d.iloc[1]
     np.testing.assert_allclose(
-        a_share_model_target(first).model_target, [-1, 1], rtol=1e-15
+        a_share_model_target(first, label_column="forward_return_20d").model_target,
+        [-1, 1],
+        rtol=1e-15,
     )
 
 

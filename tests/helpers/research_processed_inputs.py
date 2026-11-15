@@ -345,7 +345,7 @@ def assembly_source(
     )
     if "eligible" in frame:
         roles["eligible"] = ColumnRole.UNIVERSE
-    for column in ("return_next", "forward_return_20d"):
+    for column in ("return_next", "forward_return_5d", "forward_return_20d"):
         if column in frame:
             roles[column] = ColumnRole.LABEL
     spec = ProcessedDataSpec(

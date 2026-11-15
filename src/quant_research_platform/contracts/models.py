@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.columns import _validate_asset_time_key
+from quant_research_platform.contracts.datasets import DEFAULT_MODEL_TARGET_LABEL
 from quant_research_platform.contracts.experiments import (
     DEFAULT_ROOT_SEED,
     training_availability_columns,
@@ -552,7 +553,7 @@ def _target_definition(declared, target, manifest=None):
                 .get("target_definitions", {})
                 .get(target)
             )
-        source = declared.get("target_label_column", "forward_return_20d")
+        source = declared.get("target_label_column", DEFAULT_MODEL_TARGET_LABEL)
     semantics = (
         (manifest or {})
         .get("producer_diagnostics", {})

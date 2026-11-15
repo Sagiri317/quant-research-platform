@@ -17,7 +17,10 @@ from quant_research_platform.contracts.columns import (
     _validate_asset_time_key,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.datasets import (
+    DEFAULT_MODEL_TARGET_LABEL,
+    ResearchDatasetSpec,
+)
 from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.time import (
     DECISION_CONTEXT_COLUMNS,
@@ -739,7 +742,33 @@ def assemble(config: Mapping) -> Path:
         "factor_columns",
         [column for column in selected_roles if column in selected_factors],
     )
-    target_label = config.get("target_label_column", "forward_return_20d")
+    default_target, default_transform = DEFAULT_MODEL_TARGET_LABEL, "date_zscore"
+    if (
+        config["market_id"] == "a_share"
+        and actual_specs[base_input].frequency == "tick"
+    ):
+        from quant_research_platform.research.protocols.a_share_hft import (
+            DEFAULT_DECISION_INTERVAL_SECONDS,
+            default_prediction_target,
+        )
+
+        if "target_label_column" not in config:
+            semantics = (
+                sessions[base_input]
+                .manifest.get("producer_diagnostics", {})
+                .get("label_semantics", {})
+            )
+            interval = next(
+                (
+                    facts["decision_interval_seconds"]
+                    for facts in semantics.values()
+                    if "decision_interval_seconds" in facts
+                ),
+                DEFAULT_DECISION_INTERVAL_SECONDS,
+            )
+            default_target = default_prediction_target(interval)
+        default_transform = "raw"
+    target_label = config.get("target_label_column", default_target)
     if type(target_label) is not str or not target_label:
         raise ValueError("target_label_column_required")
     labels = config.get(
@@ -994,7 +1023,7 @@ def assemble(config: Mapping) -> Path:
         factor_columns=tuple(output_factors),
         feature_columns=features,
         feature_transforms=transforms,
-        target_transform=config.get("target_transform", "date_zscore"),
+        target_transform=config.get("target_transform", default_transform),
         target_label_column=target_label,
         target_clip=config.get("target_clip", "none"),
         risk_model=risk_model,

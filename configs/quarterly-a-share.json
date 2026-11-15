@@ -1071,7 +1071,7 @@
         "hidden_size": 64,
         "num_layers": 1,
         "batch_size": 4096,
-        "learning_rate": 0.001,
+        "learning_rate": 0.0003,
         "weight_decay": 0.0001,
         "dropout": 0.0,
         "device": "cuda",
@@ -1435,7 +1435,7 @@
         "num_layers": 1,
         "n_heads": 4,
         "batch_size": 2048,
-        "learning_rate": 0.001,
+        "learning_rate": 0.0003,
         "weight_decay": 0.0001,
         "dropout": 0.1,
         "device": "cuda",
@@ -1480,13 +1480,13 @@
   "parameter_candidates": {
     "lasso": [
       {
+        "alpha": 0.03
+      },
+      {
         "alpha": 0.01
       },
       {
         "alpha": 0.001
-      },
-      {
-        "alpha": 0.0001
       }
     ],
     "xgboost": [
@@ -1514,7 +1514,7 @@
         "hidden_size": 128,
         "num_layers": 2,
         "dropout": 0.1,
-        "learning_rate": 0.0003
+        "learning_rate": 0.0001
       }
     ],
     "transformer": [
@@ -1523,7 +1523,7 @@
         "sequence_length": 60,
         "hidden_size": 128,
         "num_layers": 2,
-        "learning_rate": 0.0003
+        "learning_rate": 0.0001
       }
     ]
   }

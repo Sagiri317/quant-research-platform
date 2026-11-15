@@ -783,7 +783,10 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
     from quant_research_platform.research.protocols import a_share
     from quant_research_platform.storage.datasets import read_dataset
 
-    base = a_share.research_dataset_catalog().get("pv_all")
+    base = replace(
+        a_share.research_dataset_catalog().get("pv_all"),
+        target_label_column="forward_return_20d",
+    )
     frame = pd.DataFrame(
         {
             "market_id": "a_share",

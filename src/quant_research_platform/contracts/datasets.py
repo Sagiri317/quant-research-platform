@@ -16,6 +16,8 @@ from quant_research_platform.contracts.validation import (
     _validate_non_empty_string,
 )
 
+DEFAULT_MODEL_TARGET_LABEL = "forward_return_5d"
+
 
 @dataclass(frozen=True, kw_only=True)
 class ResearchDatasetSpec(DataSpec):
@@ -34,7 +36,7 @@ class ResearchDatasetSpec(DataSpec):
     exclude_st: bool = True
     exclude_pt: bool = True
     target_transform: str = "date_zscore"
-    target_label_column: str = "forward_return_20d"
+    target_label_column: str = DEFAULT_MODEL_TARGET_LABEL
     target_clip: str = "none"
     risk_model: FactorRiskModel | None = None
     key_coverage: Mapping[str, str] = field(default_factory=dict)

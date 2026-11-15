@@ -430,14 +430,14 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 | head_excess_raw_return | 以上两均值之差；任一不可评价则 NULL |
 
 `evaluation.head_fraction` 默认 0.2，可显式覆盖；先按 `ceil(N×fraction)` 确定预测阈值，
-边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定，默认只在输入存在
-`forward_return_20d` 时使用该列，否则收益指标未定义；标准化目标与原始收益使用不同单位。
+边界并列全部入组，再检查目标/收益可用性。`raw_return_label` 可显式指定；默认跟随实际评价收益标签，
+`model_target` 则跟随已存 `target_label_column` 源声明（新低频默认5日）。原始收益列须有 `decimal_return` 单位，否则该默认收益指标未定义；标准化目标与原始收益使用不同单位。
 这是现有头部收益描述口径。新增 long/short IC、RankIC 的 `evaluation.top_quantile` 共用普通组合的
 `floor(N*q)` 边界选择，不改变 `head_fraction`、头部收益或真实交易规则。
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
 MSE 使用标签单位的模型输出，不重复缩放；排序指标与头部选择保持各自定义。
 训练从实际使用的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
-普通标签记录源列本身、不追加变换；`model_target`记录显式`target_label_column`（默认`forward_return_20d`）及实际`target_transform`／`target_clip`。
+普通标签记录源列本身、不追加变换；`model_target`记录显式`target_label_column`（新低频默认`forward_return_5d`）及实际`target_transform`／`target_clip`。旧20日数据、模型和结果的显式定义保持不变。
 不绑定路径、data ID、hash 或整份 spec，不在后来从训练源回读补造历史事实。
 score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入已有单位，两者仍须一致。该声明保存在评分/选择记录中，不从训练单位猜测评价单位。
 只有目标定义和两侧明确单位相同，才计算 MSE 和 OOS R²；`model_target` 的 raw/none 与同源原始标签可比较。

@@ -22,6 +22,8 @@ from quant_research_platform.research.factors.intraday_path import (
 from quant_research_platform.research.factors.names import factor_display_name
 
 KEY = ("market_id", "asset_id", "timestamp")
+DEFAULT_DECISION_INTERVAL_SECONDS = 3
+DEFAULT_PREDICTION_HORIZONS = {3: 30, 30: 60}
 DATA_IDS = (
     "hft_panel",
     "hft_factors",
@@ -348,6 +350,11 @@ def factor_catalog():
     )
 
 
+def default_prediction_target(interval_seconds=DEFAULT_DECISION_INTERVAL_SECONDS):
+    """Choose the raw-return default for the declared common decision clock."""
+    return f"future_mid_return_{DEFAULT_PREDICTION_HORIZONS[interval_seconds]}s"
+
+
 def label_catalog():
     return LabelCatalog(
         LabelDefinition(
@@ -535,6 +542,8 @@ def research_dataset_catalog():
                 ),
                 primary_key=KEY,
                 partition_columns=("year",),
+                target_transform="raw",
+                target_label_column=default_prediction_target(),
             ),
         )
     )

@@ -11,6 +11,7 @@ from quant_research_platform.artifacts.outputs.prediction import read_prediction
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.models import DEEPLOB_INPUT_COLUMNS
 from quant_research_platform.interfaces.cli.commands import app
+from quant_research_platform.research.datasets.assembler import assemble
 from quant_research_platform.research.datasets.high_frequency import sample_hft
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
@@ -113,6 +114,100 @@ def config(tmp_path, inputs, *, end=12, name="sampled", **options):
         "quote_visibility_delay_ms": 0,
         **options,
     }
+
+
+@pytest.mark.parametrize("interval,horizon", [(3, 30), (30, 60)])
+@pytest.mark.parametrize("explicit_label", [None, "future_mid_return_3s"])
+def test_decision_clock_default_target_native_assembly_fit_and_predict(
+    tmp_path, interval, horizon, explicit_label
+):
+    source = save_quotes(
+        tmp_path,
+        pd.concat(
+            [
+                quotes(range(0, 184, 3)),
+                quotes(range(0, 184, 3), day=1),
+            ]
+        ),
+    )
+    settings = config(
+        tmp_path, source, end=180, interval_seconds=interval, label_tolerance_seconds=0
+    )
+    settings["time_window"]["end"] = (
+        START + pd.Timedelta(days=1, seconds=180)
+    ).isoformat()
+    sampled = sample_hft(settings)
+    session = open_dataset_session(sampled)
+    assert session.spec["target_label_column"] == f"future_mid_return_{horizon}s"
+    assert (
+        session.manifest["producer_diagnostics"]["sampling"][
+            "primary_comparison_horizon_seconds"
+        ]
+        == horizon
+    )
+    request = dict(
+        market_id="a_share",
+        dataset_id="target",
+        inputs={"sampled": str(sampled)},
+        factor_columns=["f"],
+        feature_columns=[],
+        feature_recipe=None,
+        label_columns=["model_target"],
+        filter_columns=[],
+        time_window=settings["time_window"],
+        output_root=str(tmp_path / "target"),
+    )
+    if explicit_label is not None:
+        request["target_label_column"] = explicit_label
+    dataset = assemble(request)
+    selected = explicit_label or f"future_mid_return_{horizon}s"
+    result = read_dataset(dataset)
+    at_open = result.loc[result.timestamp.eq(START)].iloc[0]
+    actual_horizon = 3 if explicit_label else horizon
+    assert at_open.model_target == pytest.approx((100 + actual_horizon / 10) / 100 - 1)
+    assert at_open.model_target_available_at == START + pd.Timedelta(
+        seconds=actual_horizon
+    )
+    assert (
+        open_dataset_session(dataset).spec["column_units"]["model_target"]
+        == "decimal_return"
+    )
+    model = fit(
+        dict(
+            market_id="a_share",
+            inputs=str(dataset),
+            output=str(tmp_path / "model"),
+            model=dict(
+                model_id="linear",
+                model_algorithm="linear_regression",
+                input_factor_columns=["f"],
+                target_column="model_target",
+                sample_filter_mode="unfiltered",
+            ),
+            fit_windows=[dict(start="2025-01-02", end="2025-01-02")],
+            fit_cutoff="2025-01-02T07:00",
+        )
+    )
+    _, facts = load_model(model)
+    assert facts["target_definition"]["source_label"] == selected
+    assert facts["target_definition"]["target_transform"] == "raw"
+    assert facts["label_unit"] == "decimal_return"
+    predictions, metadata = read_predictions(
+        predict(
+            dict(
+                model=str(model),
+                inputs=str(dataset),
+                output=str(tmp_path / "predictions"),
+                prediction_window=dict(start="2025-01-03", end="2025-01-03"),
+            )
+        )
+    )
+    assert (
+        predictions.timestamp.tolist()
+        == result.loc[result.timestamp.ge("2025-01-03"), "timestamp"].tolist()
+    )
+    assert np.isfinite(predictions.prediction_score).all()
+    assert metadata["model_facts"]["target_definition"] == facts["target_definition"]
 
 
 def test_common_clock_recomputes_labels_and_cli_roundtrip(tmp_path):

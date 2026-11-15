@@ -147,8 +147,13 @@ def sample_hft(config):
             "max_quote_age_seconds",
         },
     )
-    interval = config.get("interval_seconds", 3)
-    if type(interval) is not int or interval not in {3, 30}:
+    interval = config.get(
+        "interval_seconds", protocol.DEFAULT_DECISION_INTERVAL_SECONDS
+    )
+    if (
+        type(interval) is not int
+        or interval not in protocol.DEFAULT_PREDICTION_HORIZONS
+    ):
         raise ValueError("hft_sampling_interval_invalid")
     max_age = config.get("max_quote_age_seconds", 6)
     tolerance = config.get("label_tolerance_seconds", 6)
@@ -247,6 +252,7 @@ def sample_hft(config):
             name for name, role in roles.items() if role == "context"
         ),
         target_transform="raw",
+        target_label_column=protocol.default_prediction_target(interval),
     )
 
     def days():
@@ -376,7 +382,9 @@ def sample_hft(config):
                     else "unfiltered_observations"
                     if book_status
                     else "inherited_research_membership",
-                    "primary_comparison_horizon_seconds": 30,
+                    "primary_comparison_horizon_seconds": protocol.DEFAULT_PREDICTION_HORIZONS[
+                        interval
+                    ],
                 },
                 "label_semantics": {
                     item.output_column: {

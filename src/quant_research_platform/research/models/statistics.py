@@ -25,6 +25,7 @@ from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.models import (
     CLASSIFICATION_METRICS,
     _prediction_loss_reason,
+    _target_definition,
 )
 from quant_research_platform.contracts.signals import resolve_top_quantile
 from quant_research_platform.contracts.time import (
@@ -57,6 +58,18 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
+
+
+def _raw_return_label(evaluation, declared, manifest):
+    if "raw_return_label" in evaluation:
+        return evaluation["raw_return_label"]
+    definition = _target_definition(declared, evaluation["primary_label"], manifest)
+    label = None if definition is None else definition["source_label"]
+    return (
+        label
+        if declared.get("column_units", {}).get(label) == "decimal_return"
+        else None
+    )
 
 
 _MODEL_ROBUSTNESS_TESTS = (
@@ -133,12 +146,7 @@ def build_a_share_statistics_tables(
     if type(head_fraction) not in (int, float) or not 0 < head_fraction <= 1:
         raise ValueError("model_statistics_head_fraction_invalid")
     top_quantile = resolve_top_quantile(config["evaluation"].get("top_quantile"))
-    raw_label = config["evaluation"].get(
-        "raw_return_label",
-        "forward_return_20d"
-        if "forward_return_20d" in declared["column_roles"]
-        else None,
-    )
+    raw_label = _raw_return_label(config["evaluation"], declared, manifest)
     if raw_label is not None and (type(raw_label) is not str or not raw_label):
         raise ValueError("model_statistics_raw_return_label_invalid")
     if "model_losses" not in analyses:
@@ -592,7 +600,7 @@ def _prediction_quality(
     }
 
 
-def _model_target_metadata(config, spec, window):
+def _model_target_metadata(config, spec, window, manifest):
     """Describe the actual evaluation target without binding unrelated inputs."""
     label = config["evaluation"]["primary_label"]
     availability = _statistics_label_availability(config["evaluation"], spec)
@@ -617,12 +625,7 @@ def _model_target_metadata(config, spec, window):
         },
         "prediction_metrics": {
             "head_fraction": config["evaluation"].get("head_fraction", 0.2),
-            "raw_return_label": config["evaluation"].get(
-                "raw_return_label",
-                "forward_return_20d"
-                if "forward_return_20d" in spec["column_roles"]
-                else None,
-            ),
+            "raw_return_label": _raw_return_label(config["evaluation"], spec, manifest),
             "baseline": config["evaluation"].get("baseline", "zero_prediction"),
             **(
                 {"baseline_weighting": "frozen_model_training_weighting"}
@@ -1242,7 +1245,7 @@ def model_statistics(config):
         output,
         metadata={
             **{key: value for key, value in config.items() if key != "output"},
-            **_model_target_metadata(config, session.spec, window),
+            **_model_target_metadata(config, session.spec, window, session.manifest),
             "inference_scope": "exploratory",
             "formal_selection_qualification": "not_established",
             "correlation_clock": "trading_day",

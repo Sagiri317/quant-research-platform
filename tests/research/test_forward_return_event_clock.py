@@ -14,6 +14,44 @@ from quant_research_platform.research.models.production import fit
 from quant_research_platform.storage.datasets.writing import write_dataset
 
 
+def test_five_session_return_keeps_holiday_axis_and_exit_close_clock():
+    sessions = pd.to_datetime(
+        [
+            "2024-02-07",
+            "2024-02-08",
+            "2024-02-19",
+            "2024-02-20",
+            "2024-02-21",
+            "2024-02-22",
+            "2024-02-23",
+        ]
+    )
+    prices = pd.DataFrame(
+        dict(
+            asset_id="a",
+            timestamp=sessions,
+            adj_open=[9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            filling_flag=0,
+            is_trading=True,
+        )
+    ).drop(index=3)
+    labeled = add_forward_return_labels(prices, horizons=(5, 20), sessions=sessions)
+    assert labeled.forward_return_5d.iloc[0] == pytest.approx(0.5)
+    assert labeled.forward_return_5d_available_at.iloc[0] == pd.Timestamp(
+        "2024-02-23T07:00"
+    )
+    assert labeled.forward_return_5d.iloc[1:].isna().all()
+    assert labeled.forward_return_5d_available_at.iloc[1:].isna().all()
+    assert labeled.forward_return_20d.isna().all()
+    unobserved_exit = prices.copy()
+    unobserved_exit.loc[6, ["filling_flag", "is_trading"]] = [1, False]
+    missing = add_forward_return_labels(
+        unobserved_exit, horizons=(5,), sessions=sessions
+    )
+    assert pd.isna(missing.forward_return_5d.iloc[0])
+    assert pd.isna(missing.forward_return_5d_available_at.iloc[0])
+
+
 @pytest.mark.parametrize(
     "cutoff,mature_rows",
     [

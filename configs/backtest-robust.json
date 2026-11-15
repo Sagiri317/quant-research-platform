@@ -4,7 +4,7 @@
     "selection_group": "quarterly",
     "construction": "robust_long_only",
     "prediction_selector": "lasso",
-    "rebalance_schedule": "monthly-last-trading-day",
+    "rebalance_schedule": "daily",
     "top_quantile": null,
     "benchmark_id": null,
     "risk_style_columns": [

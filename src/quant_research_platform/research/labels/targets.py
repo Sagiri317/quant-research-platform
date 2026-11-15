@@ -10,6 +10,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _stable_zscore,
     _winsorize,
 )
+from quant_research_platform.contracts.datasets import DEFAULT_MODEL_TARGET_LABEL
 from quant_research_platform.contracts.risk import FactorRiskModel
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
@@ -24,7 +25,7 @@ def a_share_model_target(
     *,
     transform: str = "date_zscore",
     clip: str = "none",
-    label_column: str = "forward_return_20d",
+    label_column: str = DEFAULT_MODEL_TARGET_LABEL,
     availability_column: str | None = None,
     risk_model: FactorRiskModel | None = None,
     risk_sessions: dict | None = None,

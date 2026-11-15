@@ -63,7 +63,7 @@ Hawkes保持同刻跳跃前强度约定，未知事件恰好同刻的跳跃前�
 
 ## 共同决策截面
 
-股票截面默认每 3 秒决策，30 秒保留为采样对照。预测期限独立保留 3、30、60 秒，主要比较期限为 30 秒。它们不设定实际调仓频率、交易门槛或 ETF/股票执行策略。
+ETF与股票共同截面默认每3秒决策，原始预测目标为 `future_mid_return_30s`；选30秒决策时，默认目标为 `future_mid_return_60s`。目标变换均为 `raw`，单位为 `decimal_return`，原3、30、60秒标签及各自成熟列全部保留，显式选择其它期限仍有效。默认映射由高频协议维护，采样和组装沿实际决策时钟声明；模型仍显式选择单个目标。预测期限不强制到期回转，也不替代交易门槛或ETF/股票执行规则。
 
 `sample-hft` 调用 `research.datasets.high_frequency.sample_hft`，示例见 [sample-hft-common.json](../configs/high-frequency/sample-hft-common.json)。输入是一份原始报价时间轴上的面板或已组装因子数据集，必须包含 `session_date,exchange,instrument_type,segment_id,eligible,mid`。`assemble-hft.json` 显式保留这些上下文。输出为新原生研究数据集，原始 `hft_panel`、单股时序与 ETF 链路不变，执行仍读取原始行情。单个因子或盘口字段缺失保持空值，不添加专用缺失字段，也不抹去不依赖该字段的其他输入、标签或结果。
 

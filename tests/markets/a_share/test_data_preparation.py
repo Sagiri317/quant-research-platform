@@ -475,7 +475,7 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
             tmp_path / "prepared", name, inputs, sessions[0], sessions[-1]
         )
     # Keep native startup, mature, and label-missing branches with full history.
-    witness_windows = (sessions[:1], sessions[-23:-20], sessions[-1:])
+    witness_windows = (sessions[:1], sessions[-8:-5], sessions[-1:])
     # These two recipes consume identical published price/volume inputs.
     for dataset_id in ("pv_all", "fusion_nf_core"):
         if dataset_id == "fusion_nf_core":
@@ -528,15 +528,15 @@ def test_explicit_preparation_reaches_eligible_research_dataset(tmp_path):
         output = pd.concat(outputs, ignore_index=True)
         startup = output.loc[output.timestamp.eq(sessions[0])]
         assert not startup.eligible.any() and startup.model_target.isna().all()
-        mature = output.loc[output.timestamp.isin(sessions[-23:-21])]
+        mature = output.loc[output.timestamp.isin(sessions[-8:-6])]
         assert mature.eligible.all() and mature.model_target.notna().all()
         assert mature.model_target_available_at.notna().all() and (
             mature.model_target_available_at.dt.normalize().le(sessions[-1]).all()
         )
-        tail = output.loc[output.timestamp.isin(sessions[[-21, -1]])]
+        tail = output.loc[output.timestamp.isin(sessions[[-6, -1]])]
         assert tail.eligible.all()
         assert (
-            tail[["forward_return_20d", "model_target", "model_target_available_at"]]
+            tail[["forward_return_5d", "model_target", "model_target_available_at"]]
             .isna()
             .all()
             .all()

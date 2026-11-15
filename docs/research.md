@@ -7,7 +7,7 @@
 - `pv_all` 提供量价、路径、市场模型及多因子残差因子。实际输入列由操作配置选择，不再为同一数据域维护“基础版/扩展版”场景。
 - 高频按观测事件与报价时钟计算，不能将报价间隔解释成固定分钟 K 线，也不能以快照参与率证明真实队列成交。
 - 默认风险风格为规模、Beta、动量、残差波动和非流动性，加上行业暴露。财务缺失不阻塞这些计算。
-- `risk_residual` 用信号时点已知的行业及五风格暴露，对显式`target_label_column`的未来收益做平方根市值加权回归（默认示例为20会话，也可指定1／5日、次日日内或高频收益）。它复用共同风险的风格预处理和回归实现；残差保留原收益单位，原始收益也保留供评价。残差标签须等参与回归的实际收益全部成熟后才可用于分析或训练。
+- `risk_residual` 用信号时点已知的行业及五风格暴露，对显式`target_label_column`的未来收益做平方根市值加权回归（默认源为5会话，也可指定1／20日、次日日内或高频收益）。它复用共同风险的风格预处理和回归实现；残差保留原收益单位，原始收益也保留供评价。残差标签须等参与回归的实际收益全部成熟后才可用于分析或训练。
 - `industry_size_residual` 是等权行业与规模基线；`raw`、`date_zscore`、`percentile` 分别保留原值、按日标准化或排名。目标裁剪由 `target_clip` 显式指定。缺失风格或不可识别的回归不以零填补。
 
 历史残差因子由 `prepare` 的 `risk_residual_factors` 操作产生，显式输入 `market_panel_1d`、`price_volume_facts`、`market_model_factors` 和 `trading_calendar`。每日收益用前一个自身市场交易会话已知的行业、五风格和总市值拟合，复用平方根市值加权回归；当日收盘才能得到残差。输出为：
@@ -71,9 +71,34 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 `research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。[A 股季度配置](../configs/quarterly-a-share.json)从 2014 年积累历史；[ETF 会话配置](../configs/high-frequency/rolling-etf.json)以 518880 为一份示例，其他 ETF 由调用者替换输入、证券和真实训练起点。两份配置均包含 LASSO、XGBoost、LSTM、Transformer 及其历史验证候选，研究窗截至 2026-10-30。特征列、目标、窗口和输出都由配置显式提供，算法不根据数据集名称选择研究规则。
 
-每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions=20` 个用于验证。20 日标签会使该验证段前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。最早预测季度由合法训练样本决定，不能为补齐首折消费未成熟标签。
+每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions=20` 个用于验证。验证段按所选标签的实际成熟时点前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。最早预测季度由合法训练样本决定，不能为补齐首折消费未成熟标签。
+
+A股低频新研究默认使用 `forward_return_5d`，在唯一目标变换入口按合格截面生成 `model_target`：`date_zscore`、`target_clip=none`，目标单位为 `dimensionless`；原5日、20日等收益及成熟列继续保留。日频和周频调仓使用相同5日预测目标，每日可产生新预测，5日预测期限不强制持有五日。原训练样本加权和expanding历史保持，未启用半衰衰减。已有20日模型、PRED、EVAL和报告保留当时事实；新默认不会重写旧存档。迁移只需用已有5日收益派生新目标及成熟列，再对原全滚动窗重选参和重拟合；原始因子及其它已存收益标签不重算，最早有效折由新成熟规则决定。
+
+ETF高频默认共同决策间隔3秒，对应原始 `future_mid_return_30s`；30秒决策对应 `future_mid_return_60s`，均为 `raw`、`decimal_return`。默认映射由高频协议唯一维护，采样声明及下游组装从实际决策时钟派生，不按数据集名称判断。ModelSpec仍显式指定单个 `target_column`，可取采样产物声明的默认源标签；显式选择其它已声明期限仍有效，不被默认覆盖。标签从决策时点的可见中价出发，成熟钟仍为实际未来报价时刻加可见延迟，不跨连续交易段补标签。
+
+正式A股组合使用既有 `robust_long_only` 和同一风险约束配置，[backtest-robust.json](../configs/backtest-robust.json) 以日频为例。调用方读一次配置后分别调用原生 `backtest`，仅更换调仓日历和输出；风险参数不复制成两份配置：
+
+```python
+from copy import deepcopy
+from pathlib import Path
+
+from quant_research_platform.research.portfolios.production import backtest
+from quant_research_platform.storage.manifests import read_qrp_json_file
+
+base = read_qrp_json_file(Path("configs/backtest-robust.json"))[1]
+for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")):
+    config = deepcopy(base)
+    config["candidate"].update(candidate_id=f"stock_robust_{name}", rebalance_schedule=schedule)
+    config["output"] = str(Path(base["output"]) / name)
+    backtest(config)
+```
+
+调用前由研究caller替换真实输入、预测窗及新输出。观察日T的日频输入已带T+1盘前决策时钟，账户按保留的 `signal_session` 对齐调度，在T+1开盘执行，不再移到T+2；周频按真实相邻交易会话跨周选择信号，在其下一交易日开盘执行，节假日不压缩会话轴。预测5会话收益的价格端点为T+1与T+6，退出日复权开盘依赖当日收盘事实，因此成熟不能提前到退出日开盘；尾部未知保留NaT。
 
 `parameter_candidates` 是以 `model_id` 为键的参数字典列表，各字典覆盖该模型的 `hyperparameters`；省略时只比较配置中这一组参数。所有候选在相同历史验证窗口的成熟共同样本上计算 MSE，先按会话求平均，再等权平均各会话。LASSO 用 `max_iter=null` 收敛求解；XGBoost、LSTM、Transformer 可用无上限迭代及历史验证早停。选择同一模型的最低验证 MSE 候选；若有早停，以学得的最佳迭代编号加一作为最终重拟合轮数，移除早停参数，重拟合至预测前全部成熟历史。序列保留验证起点前的真实历史，以及最后成熟标签之后、预测截止之前可观察的特征上下文；上下文不增加损失样本。
+
+[低频季度配置](../configs/quarterly-a-share.json) 的新5日研究维持 Lasso／XGBoost／LSTM／Transformer 各3／4／2／2组候选：Lasso 的 α 为0.03、0.01、0.001；两种神经网络的原两组架构保持，学习率分别改为0.0003和0.0001。XGBoost网格、早停、批量、样本加权和完整expanding历史保持；ETF配置不变。该固定网格参考旧20日研究结果设计，因此新5日全段回放属于回看研究，不能称为完全未见的独立确认；每折选参仍只使用当时已成熟的历史。旧神经网络常在首轮取得最佳验证值只是下调学习率的诊断线索，尚不能据此断定代码错误或过拟合，新网格效果须由5日历史验证实际确定。
 
 普通模型按输入组与筛选模式，共用只根据候选拟合期合法观测确定的列集合：排除全缺失或常数列，不以验证、未来表现或 IC 选列，不将全缺失补零。最终重拟合沿用该折列集合；下折可纳入随后出现的新信息。DeepLOB 保留固定顺序的40列盘口，不做常量筛列，盘口有效性由原生拟合入口判断。模型原生 `training_selection` 记录保留列、历史窗口、共同样本数、候选验证误差、早停事实与选中参数；普通模型另记全缺失与常数列。训练与预测是否筛选 `eligible` 由显式 `sample_filter_mode` 决定；ETF 使用 `unfiltered` 时不要求该列。
 
