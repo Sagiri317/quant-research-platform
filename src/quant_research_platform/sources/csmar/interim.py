@@ -91,6 +91,8 @@ MARKET_BARS_INTERIM_COLUMNS: tuple[str, ...] = (
     "after_hours_volume",
     "after_hours_amount",
     "prev_close",
+    "limit_up_price",
+    "limit_down_price",
     "limit_status",
     "period_return",
     "adj_close",

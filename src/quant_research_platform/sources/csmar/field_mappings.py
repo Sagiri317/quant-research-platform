@@ -53,6 +53,8 @@ COLUMN_MAPPINGS = {
         "Dretwd": "return_with_dividend",
         "Adjprcwd": "comparable_close_with_dividend",
         "PreClosePrice": "prev_close",
+        "LimitUp": "limit_up_price",
+        "LimitDown": "limit_down_price",
         "LimitStatus": "limit_status",
     },
     "market_cap": {
