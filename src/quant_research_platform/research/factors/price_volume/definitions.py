@@ -562,7 +562,7 @@ def price_volume_factor_definitions(
                 market_id=market_id,
                 input_columns=(*inputs, "filling_flag")
                 if column in PRICE_VOLUME_PARTIAL_STATISTICS
-                or column.startswith("limit_up_")
+                or column.startswith(("limit_up_", "overnight_intraday_spread_"))
                 else inputs,
                 output_column=column,
                 display_name=column,

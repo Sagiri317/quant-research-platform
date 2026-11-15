@@ -208,8 +208,11 @@ def _market(days=820, assets=10):
     return frame, returns, cap
 
 
-def test_full_market_innovation_and_leader_lag_match_independent_past_ols():
+@pytest.mark.parametrize("arrow_input", (False, True))
+def test_full_market_innovation_and_leader_lag_match_independent_past_ols(arrow_input):
     frame, returns, cap = _market()
+    if arrow_input:
+        frame = frame.convert_dtypes(dtype_backend="pyarrow")
     names = (LIQUIDITY, DOWNSIDE, LEADER)
     result = calculate(
         frame, factor_columns=names, history_keys=("asset_id", "listing_date")
@@ -254,7 +257,7 @@ def test_full_market_innovation_and_leader_lag_match_independent_past_ols():
     # Current size cannot select current leaders: only yesterday's known cap can.
     changed = frame.copy()
     changed.loc[changed.timestamp.eq(changed.timestamp.max()), "float_market_cap"] = (
-        1e20
+        1e12
     )
     pd.testing.assert_frame_equal(
         result,
@@ -271,6 +274,42 @@ def test_full_market_innovation_and_leader_lag_match_independent_past_ols():
     latest = calculate(changed, factor_columns=(LEADER,))
     assert pd.isna(latest.loc[latest.asset_id.eq("s00"), LEADER].iloc[-1])
     assert pd.notna(latest.loc[latest.asset_id.eq("s09"), LEADER].iloc[-1])
+
+
+def test_native_single_overnight_spread_retains_unknown_quote_state(tmp_path):
+    from quant_research_platform.markets.prepare import prepare
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.a_share_sources import _calendar_input
+    from tests.markets.a_share.test_prepare_selector_clock import _save
+
+    frame = _prices().assign(
+        market_id="a_share",
+        market_type=1,
+        listing_date=pd.Timestamp("2000-01-01"),
+        filling_flag=0,
+    )
+    frame.loc[40, "filling_flag"] = 2
+    source = _save(tmp_path, "market_panel_1d", frame)
+    calendar = _calendar_input(tmp_path / "calendar", {1: frame.timestamp})
+    name = "overnight_intraday_spread_20d"
+    result = prepare(
+        {
+            "market_id": "a_share",
+            "data_id": "price_volume_facts",
+            "inputs": {"market_panel_1d": source, "trading_calendar": str(calendar)},
+            "factor_columns": [name],
+            "time_window": {
+                "start": str(frame.timestamp.iloc[39].date()),
+                "end": str(frame.timestamp.iloc[61].date()),
+            },
+            "output_root": str(tmp_path / "spread"),
+        }
+    )
+    saved = read_dataset(result).sort_values("timestamp")[name]
+    assert saved.iloc[1:-1].isna().all()
+    np.testing.assert_allclose(
+        saved.iloc[[0, -1]], 20 * (np.log(1.01) - np.log(0.99)), atol=1e-12
+    )
 
 
 def test_native_prepare_and_assemble_preserve_raw_and_both_treatments(tmp_path):

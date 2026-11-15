@@ -559,6 +559,8 @@ def _systematic_exposures(frame, out, requested, history):
         peer_return = (
             contribution.groupby(group_keys, sort=False).transform("sum") - contribution
         )
+        leader = leader.astype("int64")
+        observed = observed.astype("int64")
         expected = leader.groupby(group_keys, sort=False).transform("sum") - leader
         actual = observed.groupby(group_keys, sort=False).transform("sum") - observed
         frame["_leader"] = (peer_return / peer_cap.where(peer_cap > 0)).where(
