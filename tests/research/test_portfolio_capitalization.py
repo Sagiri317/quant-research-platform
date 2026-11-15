@@ -413,14 +413,15 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
 
 
 @pytest.mark.parametrize(
-    ("column", "declaration"),
+    ("column", "declaration", "construction"),
     [
-        ("total_market_cap", "default"),
-        ("float_market_cap", "model"),
+        ("total_market_cap", "default", "benchmark_enhanced"),
+        ("float_market_cap", "model", "benchmark_enhanced"),
+        ("float_market_cap", "model", "robust_long_only"),
     ],
 )
 def test_native_backtest_persists_resolved_risk_and_size_defaults(
-    tmp_path, column, declaration
+    tmp_path, column, declaration, construction
 ):
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
@@ -464,22 +465,23 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
             "sample_role": "validation",
         }
     )
-    benchmark = panel[["market_id", "asset_id", "timestamp"]].assign(
-        benchmark_id="csi500", weight=1 / panel.asset_id.nunique()
-    )
     benchmark_root = tmp_path / "benchmark"
-    write_dataset(
-        benchmark_root, benchmark, spec=_processed_specs().get("benchmark_weights")
-    )
+    if construction == "benchmark_enhanced":
+        benchmark = panel[["market_id", "asset_id", "timestamp"]].assign(
+            benchmark_id="csi500", weight=1 / panel.asset_id.nunique()
+        )
+        write_dataset(
+            benchmark_root, benchmark, spec=_processed_specs().get("benchmark_weights")
+        )
     config = {
         "candidate": {
             "candidate_id": "native",
             "selection_group": "global",
-            "construction": "benchmark_enhanced",
+            "construction": construction,
             "prediction_selector": "linear",
             "rebalance_schedule": "daily",
             "top_quantile": None,
-            "benchmark_id": "csi500",
+            "benchmark_id": "csi500" if construction == "benchmark_enhanced" else None,
             "risk_style_columns": ["signal"],
         },
         "inputs": {
@@ -488,7 +490,11 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
                 for key, value in inputs.items()
                 if key != "risk_context"
             },
-            "benchmark": str(benchmark_root),
+            **(
+                {"benchmark": str(benchmark_root)}
+                if construction == "benchmark_enhanced"
+                else {}
+            ),
             "risk_context": [str(inputs["dataset"])],
         },
         "predictions": [{"path": str(predicted), "window": window}],
@@ -512,7 +518,10 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
         _portfolio_risk_models,
     )
 
-    model = FactorRiskModel(("signal",), FactorRiskConfig(weight_column=column))
+    risk_parameters = {"weight_column": column}
+    if declaration == "model":
+        risk_parameters.update(factor_half_life=42.0, diagonal_shrinkage=0.35)
+    model = FactorRiskModel(("signal",), FactorRiskConfig(**risk_parameters))
     if declaration == "model":
         config["risk_model"] = model.to_dict()
         config["candidate"].pop("risk_style_columns")
@@ -550,9 +559,10 @@ def test_native_backtest_persists_resolved_risk_and_size_defaults(
                 "risk_model": {
                     "style_columns": ["signal"],
                     "config": {
+                        **asdict(model.config),
                         "weight_column": "float_market_cap"
                         if column == "total_market_cap"
-                        else "total_market_cap"
+                        else "total_market_cap",
                     },
                 }
             },
