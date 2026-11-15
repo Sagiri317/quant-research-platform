@@ -99,13 +99,25 @@ def test_nport_fund_totals_do_not_require_or_read_holdings(tmp_path):
 
 
 def test_exchange_contract_expiry_and_csf_units_are_source_facts(tmp_path):
-    xml = tmp_path / "contracts.xml"
-    xml.write_text(
-        "<tradeproperty><INDEX><TRADING_DAY>20240102</TRADING_DAY><PRODUCT_ID>IF</PRODUCT_ID><INSTRUMENT_ID>IF2401</INSTRUMENT_ID><OPEN_DATE>20231023</OPEN_DATE><END_TRADING_DAY>20240119</END_TRADING_DAY></INDEX></tradeproperty>"
-    )
+    contracts = tmp_path / "contracts.csv"
+    pd.DataFrame(
+        [
+            dict(
+                TRADING_DAY="20240102",
+                PRODUCT_ID="IF",
+                INSTRUMENT_ID="IF2401",
+                OPEN_DATE="20231023",
+                END_TRADING_DAY="20240119",
+                source_sha256="original-contract",
+                source_url="https://example.org/contract",
+            )
+        ]
+    ).to_csv(contracts, index=False)
     frame = next(
         normalize(
-            "public_futures_contracts", xml, {"source": "cffex_contract_parameters"}
+            "public_futures_contracts",
+            contracts,
+            {"source": "cffex_contract_parameters"},
         )
     )
     assert frame.asset_id.tolist() == ["IF2401"]
@@ -172,6 +184,82 @@ def test_exchange_contract_expiry_and_csf_units_are_source_facts(tmp_path):
     assert frame.publication_date.isna().all() and frame.published_at.isna().all()
     assert frame.available_at.eq(pd.Timestamp("2024-01-03T01:30:00Z")).all()
     assert frame.availability_basis.eq("current_policy_historical_backcast").all()
+
+
+def test_sse_contract_updates_keep_original_row_identity_adjustments_and_clock(
+    tmp_path,
+):
+    from quant_research_platform.sources.prepare import prepare_source
+    from quant_research_platform.storage.datasets.reading import read_dataset
+
+    path = tmp_path / "contract-updates.csv"
+    pd.DataFrame(
+        [
+            dict(
+                UNDERLYING_SECURITY_ID="510300",
+                SECURITY_ID="10000001",
+                CONTRACT_ID="510300C2406A04000",
+                CALL_OR_PUT="C",
+                EXPIRE_DATE="2024-06-26",
+                START_DATE="2024-01-02",
+                EXERCISE_PRICE="4.1",
+                CONTRACT_UNIT="11000",
+                ORG_CONTRACT_ID="510300C2406M04500",
+                ORG_EXERCISE_PRICE="4.5",
+                ORG_CONTRACT_UNIT="10000",
+                ADJUST_DATE="2024-01-02",
+                UPDATE_VERSION="2",
+                source_row_index="7",
+                source_sha256="original-adjustment",
+                source_url="https://example.org/adjustment",
+            )
+        ]
+    ).to_csv(path, index=False)
+    write_source_manifest(
+        tmp_path,
+        {
+            "records": [
+                dict(
+                    path=path.name,
+                    source="sse_option_contract_updates",
+                    sha256="combined-table",
+                )
+            ]
+        },
+    )
+    clock = tmp_path / "release.csv"
+    pd.DataFrame(
+        [
+            dict(
+                source="sse_option_contract_updates",
+                observation_date="2024-01-02",
+                estimated_available_at="2024-01-02T23:59:59+08:00",
+                availability_basis="source_day_end_backcast",
+                evidence_url="https://example.org/rule",
+            )
+        ]
+    ).to_csv(clock, index=False)
+    output = tmp_path / "out"
+    prepare_source(
+        dict(
+            source_id="public_research",
+            raw_root=str(tmp_path),
+            release_csv=str(clock),
+            outputs={"public_option_contracts": str(output)},
+        )
+    )
+    frame = read_dataset(output)
+    assert frame.asset_id.tolist() == ["10000001:510300C2406A04000:7"]
+    assert frame.exercise_price.tolist() == [4.1]
+    assert frame.original_exercise_price.tolist() == [4.5]
+    assert frame.contract_unit.tolist() == [11000]
+    assert frame.original_contract_unit.tolist() == [10000]
+    assert frame.expiry_date.tolist() == [pd.Timestamp("2024-06-26")]
+    assert frame.original_contract_id.tolist() == ["510300C2406M04500"]
+    assert frame.source_sha256.tolist() == ["original-adjustment"]
+    assert frame.source_url.tolist() == ["https://example.org/adjustment"]
+    assert frame.published_at.isna().all()
+    assert frame.available_at.tolist() == [pd.Timestamp("2024-01-02T15:59:59Z")]
 
 
 def test_sse_risk_preserves_zero_iv_and_uses_actual_contract_underlying(tmp_path):
@@ -301,14 +389,24 @@ def test_source_collection_reads_archived_contracts_and_ignores_unconsumed_recor
     raw.mkdir()
     nested = tmp_path / "archive" / "supplement"
     nested.mkdir(parents=True)
-    file = nested / "contracts.xml"
-    file.write_text(
-        "<tradeproperty><INDEX><TRADING_DAY>20240102</TRADING_DAY><PRODUCT_ID>IF</PRODUCT_ID><INSTRUMENT_ID>IF2401</INSTRUMENT_ID><OPEN_DATE>20231023</OPEN_DATE><END_TRADING_DAY>20240119</END_TRADING_DAY></INDEX></tradeproperty>"
-    )
+    file = nested / "contracts.csv"
+    pd.DataFrame(
+        [
+            dict(
+                TRADING_DAY="20240102",
+                PRODUCT_ID="IF",
+                INSTRUMENT_ID="IF2401",
+                OPEN_DATE="20231023",
+                END_TRADING_DAY="20240119",
+                source_sha256="original-contract",
+                source_url="https://example.org/contract",
+            )
+        ]
+    ).to_csv(file, index=False)
     manifest = {
         "records": [
             {
-                "path": "supplement/contracts.xml",
+                "path": "supplement/contracts.csv",
                 "source": "cffex_contract_parameters",
                 "url": "https://example.org/contract",
                 "sha256": hashlib.sha256(file.read_bytes()).hexdigest(),
@@ -332,6 +430,8 @@ def test_source_collection_reads_archived_contracts_and_ignores_unconsumed_recor
     actual = read_dataset(output)
     assert actual.asset_id.tolist() == ["IF2401"]
     assert actual.expiry_date.tolist() == [pd.Timestamp("2024-01-19")]
+    assert actual.source_sha256.tolist() == ["original-contract"]
+    assert actual.source_url.tolist() == ["https://example.org/contract"]
 
 
 def test_derived_manifest_without_aggregate_url_keeps_row_provenance(tmp_path):

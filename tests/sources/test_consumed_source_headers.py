@@ -230,12 +230,10 @@ def test_public_sec_tsv_join_checks_only_consumed_headers(tmp_path, duplicate):
 
 
 @pytest.mark.parametrize("duplicate", [False, True])
-def test_cffex_gb18030_headers_keep_existing_whitespace_normalization(
-    tmp_path, duplicate
-):
+def test_cffex_consumed_headers_and_explicit_observation(tmp_path, duplicate):
     columns = [
-        "合约代码 ",
-        "今开盘 ",
+        "合约代码",
+        "今开盘",
         "最高价",
         "最低价",
         "今收盘",
@@ -264,8 +262,10 @@ def test_cffex_gb18030_headers_keep_existing_whitespace_normalization(
     if duplicate:
         columns.append("今开盘")
         values.append("5000")
-    path = tmp_path / "20240102_1.csv"
-    path.write_bytes(_csv(columns, values).decode().encode("gb18030"))
+    columns.extend(["observation_date", "source_sha256", "source_url"])
+    values.extend(["2024-01-02", "original-quote", "https://example.org/quote"])
+    path = tmp_path / "quotes.csv"
+    path.write_bytes(_csv(columns, values))
     config = _public_config(tmp_path, path, "cffex_daily", "public_futures_daily")
     if duplicate:
         with pytest.raises(ValueError, match="source_columns_invalid"):
@@ -276,6 +276,8 @@ def test_cffex_gb18030_headers_keep_existing_whitespace_normalization(
         actual = read_dataset(tmp_path / "interim")
         assert actual.open.tolist() == [3000]
         assert actual.asset_id.tolist() == ["IF2401"]
+        assert actual.timestamp.tolist() == [pd.Timestamp("2024-01-02")]
+        assert actual.source_sha256.tolist() == ["original-quote"]
 
 
 def test_selected_chunked_zip_csv_closes_its_member_on_early_stop(tmp_path):

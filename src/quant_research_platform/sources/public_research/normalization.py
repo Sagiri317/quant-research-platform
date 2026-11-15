@@ -1,10 +1,7 @@
 """Source-specific schemas; NAV, market prices and trading activity stay distinct."""
 
 import gzip
-import io
 import json
-import re
-import xml.etree.ElementTree as ET
 import zipfile
 
 import numpy as np
@@ -377,17 +374,14 @@ def accepts(data_id, record):
     path = record["path"]
     if data_id == "public_index_weights":
         return path.endswith((".csv", ".csv.gz"))
-    if record["source"] in {
-        "szse_option_contract_events_extracted",
-        "szse_option_daily_prices",
-    }:
+    if record["source"] == "szse_option_daily_prices":
+        return path.endswith(".jsonl.gz")
+    if record["source"] == "szse_option_contract_events_extracted":
         return path.endswith(".json")
     if data_id == "public_option_risk":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_option_contracts":
-        return path.endswith(".json") and record.get("artifact_role", "").startswith(
-            "official_"
-        )
+        return path.endswith((".csv", ".csv.gz"))
     if record["source"] == "sec_nport_target_holdings_extracted":
         return path.endswith(".csv")
     if data_id == "public_domestic_etf_prices":
@@ -400,7 +394,7 @@ def accepts(data_id, record):
     if data_id == "public_fund_financial_cells":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_futures_contracts":
-        return path.endswith(".xml")
+        return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_futures_member_positions":
         return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_refinancing_balances":
@@ -434,7 +428,7 @@ def accepts(data_id, record):
     if data_id == "public_cftc_positions":
         return path.endswith(".zip")
     if data_id == "public_futures_daily":
-        return path.endswith((".zip", ".csv"))
+        return path.endswith((".csv", ".csv.gz"))
     if data_id == "public_finra_short_volume":
         return path.endswith((".csv", ".csv.gz"))
     if data_id in {"public_fund_shares", "public_margin_balances"}:
@@ -472,28 +466,40 @@ def _rename(frame, mapping):
 def normalize(data_id, path, record):
     source = record["source"]
     if source == "szse_option_daily_prices":
-        payload = json.loads(path.read_bytes())
-        if not isinstance(payload, dict) or payload.get("code") != "0":
-            raise ValueError("public_option_price_response_invalid")
-        data = payload.get("data")
-        if not isinstance(data, dict) or not isinstance(data.get("picupdata"), list):
-            raise ValueError("public_option_price_response_invalid")
-        asset_id = str(data["code"])
-        if asset_id != record["contract_id"]:
-            raise ValueError("public_option_price_identity_mismatch")
-        rows = data["picupdata"]
-        if any(not isinstance(row, list) or len(row) < 9 for row in rows):
-            raise ValueError("public_option_price_response_invalid")
-        if not rows:
-            return
-        result = pd.DataFrame(
-            [row[:5] + row[7:9] for row in rows],
-            columns=("timestamp", "open", "close", "low", "high", "volume", "amount"),
-        )
-        result["asset_id"] = asset_id
-        result["underlying_id"] = record["underlying_security_code"]
-        result["contract_id"] = record["trading_code_as_reported"]
-        yield result
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            for line in handle:
+                payload = json.loads(line)
+                data = payload["data"]
+                if not isinstance(data, dict) or not isinstance(
+                    data.get("picupdata"), list
+                ):
+                    raise ValueError("public_option_price_response_invalid")
+                asset_id = str(data["code"])
+                if asset_id != payload["contract_id"]:
+                    raise ValueError("public_option_price_identity_mismatch")
+                rows = data["picupdata"]
+                if any(not isinstance(row, list) or len(row) < 9 for row in rows):
+                    raise ValueError("public_option_price_response_invalid")
+                if not rows:
+                    continue
+                result = pd.DataFrame(
+                    [row[:5] + row[7:9] for row in rows],
+                    columns=(
+                        "timestamp",
+                        "open",
+                        "close",
+                        "low",
+                        "high",
+                        "volume",
+                        "amount",
+                    ),
+                )
+                result["asset_id"] = asset_id
+                result["underlying_id"] = payload["underlying_security_code"]
+                result["contract_id"] = payload["trading_code_as_reported"]
+                result["source_sha256"] = payload["source_sha256"]
+                result["source_url"] = payload["source_url"]
+                yield result
         return
     if source == "eastmoney_margin_detail":
         mapping = {
@@ -589,9 +595,6 @@ def normalize(data_id, path, record):
                 yield result
         return
     elif source == "sse_option_contract_updates":
-        frame = pd.DataFrame(json.loads(path.read_text(encoding="utf-8"))["result"])
-        if frame.empty:
-            return
         mapping = {
             "UNDERLYING_SECURITY_ID": "underlying_id",
             "SECURITY_ID": "security_id",
@@ -605,16 +608,29 @@ def normalize(data_id, path, record):
             "ORG_EXERCISE_PRICE": "original_exercise_price",
             "ORG_CONTRACT_UNIT": "original_contract_unit",
             "ADJUST_DATE": "timestamp",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
         }
-        result = _rename(frame, mapping)
-        result["asset_id"] = (
-            result.security_id
-            + ":"
-            + result.contract_id
-            + ":"
-            + frame.index.astype("str")
-        )
-        yield result
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=(*mapping, "source_row_index"),
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                result["asset_id"] = (
+                    result.security_id
+                    + ":"
+                    + result.contract_id
+                    + ":"
+                    + frame.source_row_index
+                )
+                yield result
         return
     if source == "sec_nport_target_holdings_extracted":
         mapping = {
@@ -784,25 +800,30 @@ def normalize(data_id, path, record):
                 )
                 yield result
     elif source == "cffex_contract_parameters":
-        frame = pd.DataFrame(
-            [
-                {child.tag: child.text for child in node}
-                for node in ET.parse(path).getroot()
-            ]
-        )
-        result = _rename(
-            frame,
-            {
-                "TRADING_DAY": "timestamp",
-                "PRODUCT_ID": "product",
-                "INSTRUMENT_ID": "asset_id",
-                "OPEN_DATE": "open_date",
-                "END_TRADING_DAY": "expiry_date",
-            },
-        )
-        result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
-        result["publication_date"] = result.timestamp
-        yield result
+        mapping = {
+            "TRADING_DAY": "timestamp",
+            "PRODUCT_ID": "product",
+            "INSTRUMENT_ID": "asset_id",
+            "OPEN_DATE": "open_date",
+            "END_TRADING_DAY": "expiry_date",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                keep_default_na=False,
+                na_values=[""],
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _rename(frame, mapping)
+                result = result.loc[result["product"].isin(("IF", "IC", "IH", "IM"))]
+                result["publication_date"] = result.timestamp
+                yield result
     elif source == "cffex_member_rankings":
         mapping = {
             "instrumentid": "contract_id",
@@ -1159,15 +1180,39 @@ def normalize(data_id, path, record):
                 result["asset_id"] = result.asset_id.str.zfill(6)
                 yield result
     elif source == "cffex_daily":
-        if path.suffix == ".zip":
-            with zipfile.ZipFile(path) as archive:
-                for name in archive.namelist():
-                    if re.search(r"\d{8}_1\.csv$", name):
-                        yield _cffex(
-                            archive.read(name), re.search(r"(\d{8})_1\.csv$", name)[1]
-                        )
-        else:
-            yield _cffex(path.read_bytes(), re.search(r"\d{8}", path.stem)[0])
+        mapping = {
+            "合约代码": "asset_id",
+            "今开盘": "open",
+            "最高价": "high",
+            "最低价": "low",
+            "今收盘": "close",
+            "今结算": "settlement",
+            "前结算": "previous_settlement",
+            "成交量": "volume",
+            "持仓量": "open_interest",
+            "持仓变化": "open_interest_change",
+            "observation_date": "timestamp",
+            "source_sha256": "source_sha256",
+            "source_url": "source_url",
+        }
+        with closing_iterator(
+            _read_csv(
+                path,
+                columns=mapping,
+                dtype="str",
+                chunksize=50000,
+            )
+        ) as frames:
+            for frame in frames:
+                frame = frame.loc[
+                    frame["合约代码"]
+                    .str.strip()
+                    .str.fullmatch(r"(?:IF|IH|IC|IM)\d{4}", na=False)
+                ]
+                result = _rename(frame, mapping)
+                result["asset_id"] = result.asset_id.str.strip()
+                result["product"] = result.asset_id.str[:2]
+                yield result
     elif source == "cftc_tff":
         with zipfile.ZipFile(path) as archive:
             members = [
@@ -1355,36 +1400,6 @@ def normalize_selected_facts(frame, *, source):
         frame["weight"] /= 100
     elif source == "yahoo_chart_extracted" and not frame._currency.eq("USD").all():
         raise ValueError("yahoo_price_currency_not_usd")
-
-
-def _cffex(payload, date):
-    mapping = {
-        "合约代码": "asset_id",
-        "今开盘": "open",
-        "最高价": "high",
-        "最低价": "low",
-        "今收盘": "close",
-        "今结算": "settlement",
-        "前结算": "previous_settlement",
-        "成交量": "volume",
-        "持仓量": "open_interest",
-        "持仓变化": "open_interest_change",
-    }
-    frame = _read_csv(
-        io.BytesIO(payload),
-        columns=mapping,
-        encoding="gb18030",
-        dtype="str",
-        strip_headers=True,
-    )
-    frame = frame.loc[
-        frame["合约代码"].str.strip().str.fullmatch(r"(?:IF|IH|IC|IM)\d{4}", na=False)
-    ]
-    result = _rename(frame, mapping)
-    result["asset_id"] = result.asset_id.str.strip()
-    result["product"] = result.asset_id.str[:2]
-    result["timestamp"] = pd.to_datetime(date, format="%Y%m%d")
-    return result
 
 
 def _sec(path, source, *, data_id):

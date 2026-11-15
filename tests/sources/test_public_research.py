@@ -17,49 +17,6 @@ from quant_research_platform.storage.datasets.reading import (
 from tests.helpers.public_sources import write_source_csv, write_source_manifest
 
 
-def test_public_import_closes_archive_when_output_already_exists(tmp_path, monkeypatch):
-    raw = tmp_path / "raw"
-    raw.mkdir()
-    path = raw / "futures.zip"
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr(
-            "20240102_1.csv",
-            (
-                "合约代码,今开盘,最高价,最低价,今收盘,今结算,前结算,成交量,持仓量,持仓变化\n"
-                "IF2401,3500,3600,3400,3550,3540,3500,100,200,10\n"
-            ).encode("gb18030"),
-        )
-    record = {
-        "path": path.name,
-        "source": "cffex_daily",
-        "status": "downloaded",
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "bytes": path.stat().st_size,
-    }
-    write_source_manifest(raw, {"schema_version": 1, "records": [record]})
-    output = tmp_path / "interim"
-    config = {
-        "source_id": "public_research",
-        "raw_root": str(raw),
-        "outputs": {"public_futures_daily": str(output)},
-    }
-    prepare_source(config)
-    baseline = read_dataset(output)
-    opened = []
-
-    class ObservedZipFile(zipfile.ZipFile):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            opened.append(self)
-
-    monkeypatch.setattr(zipfile, "ZipFile", ObservedZipFile)
-    with pytest.raises(ValueError, match="dataset_exists") as caught:
-        prepare_source(config)
-    assert caught.value is not None
-    assert opened and all(archive.fp is None for archive in opened)
-    pd.testing.assert_frame_equal(baseline, read_dataset(output))
-
-
 def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
     tmp_path,
 ):
@@ -69,7 +26,11 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
     trading_code = "159915C2612M003400"
     payload = json.dumps(
         {
-            "code": "0",
+            "contract_id": security_id,
+            "underlying_security_code": "159915",
+            "trading_code_as_reported": trading_code,
+            "source_sha256": "original-price-query",
+            "source_url": "https://example.org/original-prices",
             "data": {
                 "code": security_id,
                 "picupdata": [
@@ -91,16 +52,12 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
             },
         }
     ).encode()
-    (raw / "prices.json").write_bytes(payload)
+    with gzip.open(raw / "prices.jsonl.gz", "wb") as handle:
+        handle.write(payload + b"\n")
     record = {
-        "path": "prices.json",
+        "path": "prices.jsonl.gz",
         "source": "szse_option_daily_prices",
-        "status": "downloaded",
-        "sha256": hashlib.sha256(payload).hexdigest(),
-        "bytes": len(payload),
-        "contract_id": security_id,
-        "underlying_security_code": "159915",
-        "trading_code_as_reported": trading_code,
+        "sha256": "combined-table",
     }
     write_source_manifest(raw, {"schema_version": 1, "records": [record]})
     clocks = raw / "release.csv"
@@ -129,6 +86,8 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
     )
     frame = read_dataset(output)
     assert frame.asset_id.tolist() == [security_id] * 2
+    assert frame.source_sha256.eq("original-price-query").all()
+    assert frame.source_url.eq("https://example.org/original-prices").all()
     assert frame.contract_id.tolist() == [trading_code] * 2
     assert frame.underlying_id.tolist() == ["159915"] * 2
     assert frame.timestamp.tolist() == list(
@@ -159,35 +118,36 @@ def test_szse_daily_option_prices_preserve_units_identity_and_estimated_clocks(
 
 
 @pytest.mark.parametrize(
-    ("payload", "error"),
+    ("data", "error"),
     [
-        ({"code": "1", "data": None}, "public_option_price_response_invalid"),
         (
-            {"code": "0", "data": {"code": "90007412", "picupdata": []}},
+            {"code": "90007412", "picupdata": []},
             "public_option_price_identity_mismatch",
         ),
         (
-            {"code": "0", "data": {"code": "90007411", "picupdata": [["2026-04-23"]]}},
+            {"code": "90007411", "picupdata": [["2026-04-23"]]},
             "public_option_price_response_invalid",
         ),
     ],
 )
-def test_szse_daily_option_prices_reject_failed_or_misidentified_response(
-    tmp_path, payload, error
+def test_szse_daily_option_prices_reject_misidentified_or_incomplete_facts(
+    tmp_path, data, error
 ):
-    path = tmp_path / "prices.json"
-    path.write_text(json.dumps(payload), encoding="utf-8")
+    payload = dict(
+        data=data,
+        contract_id="90007411",
+        underlying_security_code="159915",
+        trading_code_as_reported="159915C2612M003400",
+        source_sha256="original-query",
+        source_url="https://example.org/prices",
+    )
+    path = tmp_path / "prices.jsonl.gz"
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
     with pytest.raises(ValueError, match=error):
         list(
             normalize(
-                "public_option_prices",
-                path,
-                {
-                    "source": "szse_option_daily_prices",
-                    "contract_id": "90007411",
-                    "underlying_security_code": "159915",
-                    "trading_code_as_reported": "159915C2612M003400",
-                },
+                "public_option_prices", path, {"source": "szse_option_daily_prices"}
             )
         )
 

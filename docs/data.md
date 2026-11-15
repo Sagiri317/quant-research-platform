@@ -479,7 +479,7 @@ score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入
 
 ## 宏观源补充
 
-`prepare-source`的`source_id=public_research`接收结构化JSON、CSV、XLSX或ZIP内的表格。
+`prepare-source`的`source_id=public_research`接收各来源声明的结构化JSON／JSONL、CSV、XLSX或ZIP内的表格；JSONL和CSV可按来源使用gzip。
 读取raw根下唯一的`manifest.json`，`manifests`选择其中`collections`的集合标识；
 文件路径相对于其中的`source_root`，只读取当前研究所需来源，保留清单中的来源身份，不复验原件字节或计数。
 CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头必须唯一，不接受解析器自动改名后的歧义字段。未消费说明列不参与该检查。
@@ -493,7 +493,9 @@ CSV、TSV 和 XLSX 先按实际消费字段投影；这些字段的原始表头�
 | `public_margin_balances` | 两融余额、融资买入／偿还额为CNY；数量为股或基金份额。交易所未报的偿还字段可由明确标记的平台公开历史补充，不从余额恒等式推造 |
 | `public_fund_shares` | 交易所ETF总份额；读取结构化CSV，上交所万份换算为份，深交所按原“份”字段读取 |
 | `public_etf_pcf_baskets`／`public_etf_pcf_components` | 每申赎单位基金份额、估值日NAV／现金差额及交付篮子；股票股数与黄金克数分列，不能当实际持仓或指数权重。各基金规则对应各自可用时钟，保留原件URL与来源身份 |
-| `public_futures_daily` | IF／IH／IC／IM逐合约行情，价格为指数点，成交量与持仓为合约数；不混入期权或小计 |
+| `public_futures_daily` | 读取结构化CSV中的显式观察日；IF／IH／IC／IM逐合约行情，价格为指数点，成交量与持仓为合约数，不混入期权或小计 |
+| `public_futures_contracts` | 结构化CSV中的真实交易日、产品和合约身份、上市日与到期日；只消费IF／IH／IC／IM，保留原件身份 |
+| `public_option_contracts` | SSE结构化CSV保留上市与调整参数及原响应内行序，SZSE读取既有结构化合约事件；原／新行权价及合约单位分别保存，不从代码猜调整值 |
 | `public_futures_member_positions` | IF／IH／IC／IM逐合约会员成交与持仓排名，数量为合约数；读取结构化CSV并去除标识字段的定长右侧空格，保留原件身份与修订。真实发布时间未知时，观察日按次日本地零点给出可用上界 |
 | `public_fund_holdings` | 报告期、经济组合、报告版本、真实证券市场与股票代码、股数、CNY公允价值、NAV百分比及披露范围；原始行与章节共同标识持仓，不混同港股和A股代码 |
 | `public_fund_holdings_reports` | 完整股票表状态、明确无股票声明、股票行数、经济组合及报告版本；零持仓报告独立于持仓行保存，未知解析状态不能当作零仓 |
@@ -516,7 +518,7 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 该结论不外推到2027/28以后新制度或本批次没有的保密申报。
 规范化成功不表示该源已满足PIT因子或历史成分映射的输入条件。机制、研究范围和处理规则见[因子假设清单](factor-hypotheses.md)。
 
-`source=szse_option_daily_prices`从官方历史行情JSON的`data.picupdata`读取观察日、开收低高价、成交量和成交额，核对响应合约编码与清单身份。数值沿原生公共数值边界解释，源报零价及零成交保留；合约基金份额单位由`public_option_contracts`提供，不能把成交合约数当基金份额。该来源不提供IV或Greeks，价格不写入`public_option_risk`。现有批次只含采集时存续的159915合约，2026年的这些日价不代表完整已到期合约历史，也不覆盖2023—2024研究窗口；历史首发时刻未知，按显式release CSV保留同日末估计上界，不以取得时刻回填。
+`source=szse_option_daily_prices`读取逐合约JSONL gzip业务文件，从`data.picupdata`读取观察日、开收低高价、成交量和成交额，核对数据中的合约编码与同条记录的合约身份。辅助数组与原件URL、SHA保留在来源文件中。数值沿原生公共数值边界解释，源报零价及零成交保留；合约基金份额单位由`public_option_contracts`提供，不能把成交合约数当基金份额。该来源不提供IV或Greeks，价格不写入`public_option_risk`。现有批次只含采集时存续的159915合约，2026年的这些日价不代表完整已到期合约历史，也不覆盖2023—2024研究窗口；历史首发时刻未知，按显式release CSV保留同日末估计上界，不以取得时刻回填。
 
 `prepare-source`可显式传入`release_csv`补充有依据的历史可用时间。字段为`source`、
 `observation_date`、`estimated_available_at`、`availability_basis`、`evidence_url`，

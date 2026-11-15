@@ -109,12 +109,10 @@ def materialize_interim_data(
     for data_id in data_ids:
         evidence = correction_evidence.get(data_id, []).copy()
         numeric_counts = {}
-        complete_archives = set()
 
         def frames(
             data_id=data_id,
             evidence=evidence,
-            complete_archives=complete_archives,
             numeric_counts=numeric_counts,
         ):
             key_columns = catalog.get(data_id).primary_key
@@ -133,10 +131,6 @@ def materialize_interim_data(
                 evidence.append(
                     {k: record[k] for k in ("path", "url", "sha256") if k in record}
                 )
-                if record["source"] == "cffex_daily" and path.suffix == ".zip":
-                    if digest in complete_archives:
-                        continue
-                    complete_archives.add(digest)
                 with closing_iterator(normalize(data_id, path, record)) as normalized:
                     for frame in normalized:
                         if frame.empty:
