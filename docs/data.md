@@ -440,7 +440,7 @@ valuations、diagnostics、rights_adjustments；不在本文手写第二套完�
 元数据 `prediction_metrics` 保存解析后的头部比例、原始收益列和聚合口径。
 MSE 使用标签单位的模型输出，不重复缩放；排序指标与头部选择保持各自定义。
 训练从实际使用的 spec/manifest 冻结 `facts.target_definition`：源标签、目标 transform、clip 以及所选源标签的 `label_semantics`；PRED 的 `model_facts` 原样携带。
-普通标签记录源列本身、不追加变换；`model_target`记录显式`target_label_column`（新低频默认`forward_return_5d`）及实际`target_transform`／`target_clip`。旧20日数据、模型和结果的显式定义保持不变。
+普通标签记录源列本身、不追加变换；`model_target`记录显式`target_label_column`（新低频默认`forward_return_5d`）及实际`target_transform`／`target_clip`。标签的显式定义决定其经济含义，修改默认期限不会改写已生成数据。
 不绑定路径、data ID、hash 或整份 spec，不在后来从训练源回读补造历史事实。
 score 的显式 `label_unit` 可补充标签输入未声明的单位；若输入已有单位，两者仍须一致。该声明保存在评分/选择记录中，不从训练单位猜测评价单位。
 只有目标定义和两侧明确单位相同，才计算 MSE 和 OOS R²；`model_target` 的 raw/none 与同源原始标签可比较。

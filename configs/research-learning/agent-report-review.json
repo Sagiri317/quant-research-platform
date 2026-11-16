@@ -1,11 +1,10 @@
 {
-  "question": "只读分析已有日频研究报告及汇总附件。先检索并阅读声明的 documents，核对 fixed_portfolios 中 core6/global 的等权排名 Top20% 等权和冠军 Top20% 等权两行，报告累计净收益、Sharpe、最大回撤、累计费用及两者净收益百分点差。说明历史研究窗口、账户口径和回顾性选型限制，区分历史结果与当前代码验证，给出对 ETF 底仓增强研究有用的评价方法。引用真实证据编号，禁止声称重新运行回测或把历史股票结果当作 ETF 证据。完成后结束会话。",
+  "question": "只读分析声明的当前ETF预测报告和汇总附件。逐只比较四只ETF的Lasso与XGBoost日均MSE、RMSE、IC和RankIC，说明收益率平方与bp单位、各自样本及共同样本的区别。核对训练、验证与随后预测的口径和覆盖缺口，不把误差改善当作扣费后的交易收益。引用真实证据编号，不运行新的实验，完成后结束会话。",
   "tools": {},
   "documents": {
-    "daily_report": "reports/A股量价研究报告.md",
-    "fixed_portfolios": "reports/data/fixed-portfolios.csv",
-    "prediction_comparisons": "reports/data/prediction-comparisons.csv",
-    "historical_methods": "reports/data/a-share-methods.json"
+    "etf_report": "reports/ETF高频滚动预测报告.md",
+    "prediction_summary": "reports/data/etf-current-prediction-summary.csv",
+    "model_protocol": "reports/data/etf-rolling-protocol.json"
   },
   "budget": {
     "max_requests": 12,

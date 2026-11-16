@@ -1,7 +1,6 @@
 # A 股低频研究
 
 本文件说明 A 股日频研究的数据、因子、模型、组合与统计方法。
-已完成的 Core6/PV25/PV52 及经济块消融实验见[量价研究报告](../reports/A股量价研究报告.md)；报告按实验实际设置解释结果，本文件描述当前实现。
 研究协议标识为 a_share_low_frequency，只读目录查询使用 a_share_csmar_choice。
 每项计算都接收自己的明确配置，目录查询配置（profile）不会自动展开整项研究。
 因子分析的期限与处理选择见[因子假设清单](factor-hypotheses.md)，模型、组合与回测按各自配置执行。
@@ -1230,8 +1229,6 @@ ADV 参与率由 ExecutionAssumptions 统一定义，不另设 CLI 覆盖值。
 不得同时指定 `min_child_weight`。启用 `early_stopping_rounds` 时须提供合法、与训练不重叠的验证输入；
 未启用时按配置树数训练。
 
-历史量价实验的候选网格与实际运行参数保留在[量价研究报告](../reports/A股量价研究报告.md)
-及其[实验配置](../reports/data/a-share-methods.json)，不作为当前研究的固定配置。
 
 ### 5.15 模型选择
 

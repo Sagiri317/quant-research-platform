@@ -1,0 +1,4 @@
+sample,model_id,fold,model_input_count,latest_excluded_all_missing,latest_excluded_constant
+510300,lasso,2026-10-22,134.0,"[""observed_completed_lifetime_seconds"", ""prior_ownership_crowding_x_intraday_liquidity_stress"", ""prior_residual_drawdown_x_activity_x_depth_recovery""]",[]
+159915,lasso,2026-09-29,135.0,"[""prior_ownership_crowding_x_intraday_liquidity_stress"", ""prior_residual_drawdown_x_activity_x_depth_recovery""]",[]
+518880,lasso,2026-09-29,129.0,"[""observed_completed_lifetime_seconds"", ""lagged_linked_benchmark_return_30s"", ""lagged_linked_benchmark_return_60s"", ""prior_ownership_crowding_x_intraday_liquidity_stress"", ""prior_residual_drawdown_x_activity_x_depth_recovery""]","[""opening_relative_activity_15m"", ""opening_relative_activity_30m"", ""opening_relative_activity_5m""]"
