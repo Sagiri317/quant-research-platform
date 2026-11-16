@@ -46,6 +46,7 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session,
     open_dataset_session,
 )
+from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 @dataclass(frozen=True)
@@ -394,6 +395,21 @@ def _select_inputs(fold, session, candidates):
     return selected, facts
 
 
+def _validation_predictions(frames, spec, prediction_model):
+    """Score ordered windows with one sequence state, retaining original row order."""
+    predict = prediction_callable(spec.input_columns, prediction_model)
+    for frame in frames:
+        values = np.empty(len(frame), dtype="float64")
+        order = np.argsort(frame.timestamp.to_numpy(), kind="stable")
+        for start in range(0, len(frame), DEFAULT_BATCH_ROWS):
+            positions = order[start : start + DEFAULT_BATCH_ROWS]
+            predicted = predict(frame.iloc[positions])
+            if predicted.shape != (len(positions),):
+                raise ValueError("invalid_prediction_values")
+            values[positions] = predicted
+    return values
+
+
 def _select(config, fold, session, candidates, calendar):
     from quant_research_platform.research.models.production import (
         _fit_input_key,
@@ -447,7 +463,6 @@ def _select(config, fold, session, candidates, calendar):
         )
     ]
     validation = validation_frames[-1]
-    scoring_context = pd.concat(validation_frames, ignore_index=True)
     cutoff = pd.Timestamp(fold.prediction.start) - pd.Timedelta(1, "ns")
     common = label_maturity_mask(
         validation,
@@ -514,11 +529,9 @@ def _select(config, fold, session, candidates, calendar):
                     validation_cutoff=prepared_cutoff,
                     fit_inputs=fit_inputs,
                 )
-                values = prediction_callable(
-                    spec.input_columns, result.prediction_model
-                )(scoring_context)[-len(validation) :]
-                if values.shape != (len(validation),):
-                    raise ValueError("invalid_prediction_values")
+                values = _validation_predictions(
+                    validation_frames, spec, result.prediction_model
+                )
                 signal_domain &= prediction_input_mask(
                     validation, result.metadata
                 ).to_numpy()

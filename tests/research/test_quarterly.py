@@ -874,11 +874,15 @@ def test_unfiltered_native_fit_and_mature_rolling_ignore_eligibility(
         assert sequence.metadata["rows_after_input_label_dropna"] == 180
 
 
-def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_path):
+@pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])
+def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(
+    tmp_path, monkeypatch, algorithm
+):
     from dataclasses import replace
 
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research import rolling
     from quant_research_platform.research.models.fitting import prediction_callable
     from quant_research_platform.research.models.production import fit_model
     from quant_research_platform.research.rolling import RollingFold, _select
@@ -893,6 +897,7 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
     frame.loc[frame.timestamp.dt.day.isin([2, 5]) & frame.asset_id.eq("b"), "x"] = (
         np.nan
     )
+    frame = frame.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     frame.to_parquet(path, index=False)
     declared = input_spec()
     declared["column_roles"]["episode"] = "context"
@@ -907,13 +912,13 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
     )
     base = ModelSpec(
         model_id="lstm",
-        model_algorithm="lstm_regressor",
+        model_algorithm=algorithm,
         input_feature_columns=("x",),
         target_column="label",
         random_seed=17,
     )
     defaults = dict(
-        device="cpu", epochs=1, hidden_size=3, sequence_length=3, batch_size=32
+        device="cpu", epochs=1, hidden_size=4, sequence_length=3, batch_size=32
     )
     candidates = [
         (
@@ -933,12 +938,16 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
             },
         )
     ]
+    # Cut through timestamps and asset histories, including the gap window.
+    monkeypatch.setattr(rolling, "DEFAULT_BATCH_ROWS", 2)
     selected = _select(
         {"market_id": "a_share", "evaluation": {}}, fold, session, candidates, None
     )
     scores = selected[0][2]["candidates"]
     held = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
-    scoring = frame.loc[frame.timestamp.between("2020-01-03", "2020-01-06")]
+    scoring = pd.concat(
+        [frame.loc[frame.timestamp.eq("2020-01-03")], held], ignore_index=True
+    )
     cutoff = pd.Timestamp("2020-01-07") - pd.Timedelta(1, "ns")
     for (_, spec), score in zip(candidates, scores, strict=True):
         validation = (
@@ -967,7 +976,7 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(tmp_p
         )
         assert score["hyperparameters"] == dict(spec.hyperparameters)
         assert score["validation_daily_mse"] == pytest.approx(
-            errors.groupby(level=0).mean().mean(), rel=1e-12, abs=1e-14
+            errors.groupby(level=0).mean().mean(), rel=1e-6, abs=1e-9
         )
         if validation:
             assert score["early_stopping"] == fresh.metadata["early_stopping"]

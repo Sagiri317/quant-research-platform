@@ -1,0 +1,3 @@
+implementation,model,features,observed_assets,sessions,prediction_rows,context_rows,sequence_length,hidden_size,num_layers,batch_size,cpu_threads,gpu,score_seconds,peak_rss_gib,keys_and_order_equal,missing_equal,max_absolute_prediction_difference
+whole,2022Q1/lstm,1221,121,58,7018,121,60,128,2,4096,10,NVIDIA GeForce RTX 3090,29.23670871183276,11.940448760986328,true,true,0.0
+chunked_and_batched_history,2022Q1/lstm,1221,121,58,7018,121,60,128,2,4096,10,NVIDIA GeForce RTX 3090,11.37724507972598,10.78765869140625,true,true,0.0

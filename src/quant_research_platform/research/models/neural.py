@@ -198,15 +198,17 @@ class SequencePredictor:
             valid = _observed_rows(context, columns, deep)
             starts = _sequence_starts(context, valid, groups, deep)
             endpoints = np.asarray(endpoints)
-            matrix = _matrix(self.scaler, work, columns, valid[endpoints])
+            observed = np.zeros(len(context), dtype=bool)
+            observed[endpoints] = valid[endpoints]
+            seeds = {}
             for asset, positions in assets.indices.items():
                 if asset not in history:
                     first = endpoints[positions[0]]
-                    seed = slice(starts[first], first)
-                    initial = _matrix(
-                        self.scaler, context.iloc[seed], columns, valid[seed]
-                    )
-                    history[asset] = deque(initial[valid[seed]], maxlen=length)
+                    seeds[asset] = slice(starts[first], first)
+                    observed[seeds[asset]] = valid[seeds[asset]]
+            matrix = _matrix(self.scaler, context, columns, observed)
+            for asset, seed in seeds.items():
+                history[asset] = deque(matrix[seed][valid[seed]], maxlen=length)
             batches, indices = [], []
 
             def flush():
@@ -241,7 +243,7 @@ class SequencePredictor:
                     history[asset].clear()
                 if not valid[endpoint]:
                     continue
-                history[asset].append(matrix[i].copy())
+                history[asset].append(matrix[endpoint].copy())
                 batches.append(np.stack(history[asset]))
                 indices.append(work.index[i])
                 if len(batches) == self.parameters["batch_size"]:
