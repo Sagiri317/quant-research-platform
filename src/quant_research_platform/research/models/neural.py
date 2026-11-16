@@ -313,18 +313,10 @@ def _sequence_arrays(prepared, spec, scaler, history=None):
     return context, matrix, endpoints, _sequence_starts(context, valid, groups, deep)
 
 
-def fit_sequence(prepared, spec, validation=None):
-    import torch
-    from stable_baselines3.common.utils import get_device
-
+def _prepare_sequence_inputs(prepared, spec, validation=None):
     parameters = sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
-    device = get_device(parameters["device"])
-    input_device = device if parameters["preload_inputs"] else "cpu"
-    weights, scaler = prepared.preprocessing
-    weight_sum = float(weights.sum())
-    classification = spec.model_algorithm == "deeplob_classifier"
+    scaler = prepared.preprocessing[1]
     context, matrix, endpoints, group_start = _sequence_arrays(prepared, spec, scaler)
-    matrix = torch.as_tensor(matrix, device=input_device)
     history_rows = context.groupby("asset_id", sort=False).tail(
         parameters["sequence_length"] - 1
     )
@@ -342,14 +334,6 @@ def fit_sequence(prepared, spec, validation=None):
         ],
         axis=1,
     )
-    target = prepared.training[spec.target_column].to_numpy(dtype="float64")
-    mean = float(np.average(target, weights=weights))
-    scale = float(np.sqrt(np.average((target - mean) ** 2, weights=weights))) or 1.0
-    if classification:
-        normalized = direction_classes(target, parameters["class_threshold"])
-        mean, scale = 0.0, 1.0
-    else:
-        normalized = ((target - mean) / scale).astype("float32")
     validation_arrays = None
     if validation is not None:
         keys = ["asset_id", "timestamp"]
@@ -363,6 +347,39 @@ def fit_sequence(prepared, spec, validation=None):
         _, v_matrix, v_endpoints, v_starts = _sequence_arrays(
             validation, spec, scaler, validation_history
         )
+        validation_arrays = v_matrix, v_endpoints, v_starts
+    return matrix, endpoints, group_start, history, validation_arrays
+
+
+def fit_sequence(prepared, spec, validation=None, *, fit_inputs=None):
+    import torch
+    from stable_baselines3.common.utils import get_device
+
+    parameters = sequence_parameters(spec.model_algorithm, dict(spec.hyperparameters))
+    device = get_device(parameters["device"])
+    input_device = device if parameters["preload_inputs"] else "cpu"
+    weights, scaler = prepared.preprocessing
+    weight_sum = float(weights.sum())
+    classification = spec.model_algorithm == "deeplob_classifier"
+    matrix, endpoints, group_start, history, validation_arrays = (
+        _prepare_sequence_inputs(prepared, spec, validation)
+        if fit_inputs is None
+        else fit_inputs
+    )
+    matrix = torch.as_tensor(matrix, device=input_device)
+    history = history.groupby("asset_id", sort=False).tail(
+        parameters["sequence_length"] - 1
+    )
+    target = prepared.training[spec.target_column].to_numpy(dtype="float64")
+    mean = float(np.average(target, weights=weights))
+    scale = float(np.sqrt(np.average((target - mean) ** 2, weights=weights))) or 1.0
+    if classification:
+        normalized = direction_classes(target, parameters["class_threshold"])
+        mean, scale = 0.0, 1.0
+    else:
+        normalized = ((target - mean) / scale).astype("float32")
+    if validation_arrays is not None:
+        v_matrix, v_endpoints, v_starts = validation_arrays
         v_matrix = torch.as_tensor(v_matrix, device=input_device)
         v_target = validation.training[spec.target_column].to_numpy(dtype="float64")
         v_actual = (

@@ -87,16 +87,26 @@ class PreparedTraining:
             self.training_weighting,
             trading_sessions=self.trading_sessions,
         )
-        scaler = ModelMatrixScaler.fit(
-            self.features,
-            sample_weight=weights,
-            missing=None
-            if self.complete_inputs
-            else "native"
-            if self.native_missing
-            else "impute",
-            scaling=self.training_scaling,
-            rows=self.training_rows,
+        scaler = (
+            ModelMatrixScaler(
+                self.input_columns,
+                (0.0,) * len(self.input_columns),
+                (1.0,) * len(self.input_columns),
+                native_missing=True,
+                scaling=False,
+            )
+            if self.native_missing and not self.training_scaling
+            else ModelMatrixScaler.fit(
+                self.features,
+                sample_weight=weights,
+                missing=None
+                if self.complete_inputs
+                else "native"
+                if self.native_missing
+                else "impute",
+                scaling=self.training_scaling,
+                rows=self.training_rows,
+            )
         )
         return weights, scaler
 
@@ -169,13 +179,16 @@ def _fit_model_result(
     *,
     estimator: object,
     validation=None,
+    fit_inputs=None,
 ) -> ModelFitResult:
     if spec.model_algorithm == "linear_regression":
         result = _fit_linear_model_result(prepared_training, spec)
     elif spec.model_algorithm in SEQUENCE_ALGORITHMS:
         from quant_research_platform.research.models.neural import fit_sequence
 
-        predictor, curve, stopping = fit_sequence(prepared_training, spec, validation)
+        predictor, curve, stopping = fit_sequence(
+            prepared_training, spec, validation, fit_inputs=fit_inputs
+        )
         result = ModelFitResult(
             metadata=model_metadata(
                 spec,
@@ -190,7 +203,11 @@ def _fit_model_result(
             result.metadata["early_stopping"] = stopping
     else:
         result = _fit_estimator_model_result(
-            prepared_training, spec, estimator=estimator, validation=validation
+            prepared_training,
+            spec,
+            estimator=estimator,
+            validation=validation,
+            fit_inputs=fit_inputs,
         )
     target = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
     result.metadata["training_target_mean"] = float(
@@ -285,6 +302,7 @@ def _fit_estimator_model_result(
     *,
     estimator: object,
     validation=None,
+    fit_inputs=None,
 ) -> ModelFitResult:
     row_counts = prepared_training.row_counts
     filter_metadata = prepared_training.filter_metadata
@@ -295,6 +313,7 @@ def _fit_estimator_model_result(
         prepared_training=prepared_training,
         estimator=estimator,
         validation=validation,
+        fit_inputs=fit_inputs,
     )
 
     resolved_hyperparameters = estimators.resolved_model_hyperparameters(spec)
@@ -628,6 +647,7 @@ def _fit_predictor(
     prepared_training: PreparedTraining,
     estimator: object,
     validation=None,
+    fit_inputs=None,
 ) -> object:
     weights, scaler = prepared_training.preprocessing
     from sklearn.exceptions import ConvergenceWarning
@@ -636,16 +656,10 @@ def _fit_predictor(
         _fit_lasso_gram(estimator, prepared_training)
         return ScaledPredictor(estimator, scaler)
     if spec.model_algorithm == "xgboost_regressor":
-        from xgboost import config_context
-
-        with config_context(
-            **(
-                {"use_cuda_async_pool": True}
-                if spec.hyperparameters.get("external_memory", False)
-                else {}
+        with _booster_context(spec):
+            _fit_booster(
+                estimator, prepared_training, spec, validation, fit_inputs=fit_inputs
             )
-        ):
-            _fit_booster(estimator, prepared_training, spec, validation)
         return ScaledPredictor(estimator, scaler)
     scaled_matrix = prepared_training.matrix
     y = prepared_training.training[spec.target_column].to_numpy(dtype="float64")
@@ -824,10 +838,19 @@ def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
     )
 
 
-def _fit_booster(estimator, prepared, spec, validation):
-    from xgboost import Booster
-    from xgboost.callback import EarlyStopping
+def _booster_context(spec):
+    from xgboost import config_context
 
+    return config_context(
+        **(
+            {"use_cuda_async_pool": True}
+            if spec.hyperparameters.get("external_memory")
+            else {}
+        )
+    )
+
+
+def _booster_inputs(estimator, prepared, spec, validation):
     scaler = prepared.preprocessing[1]
     external = spec.hyperparameters.get("external_memory", False)
     training = _booster_matrix(estimator, prepared, scaler, external=external)
@@ -837,6 +860,18 @@ def _fit_booster(estimator, prepared, spec, validation):
         else _booster_matrix(
             estimator, validation, scaler, ref=training, external=external
         )
+    )
+    return training, held
+
+
+def _fit_booster(estimator, prepared, spec, validation, *, fit_inputs=None):
+    from xgboost import Booster
+    from xgboost.callback import EarlyStopping
+
+    training, held = (
+        _booster_inputs(estimator, prepared, spec, validation)
+        if fit_inputs is None
+        else fit_inputs
     )
     booster = Booster(
         estimator.get_xgb_params(),

@@ -43,6 +43,91 @@ def test_quarterly_windows_expand_and_first_quarter_supplies_initial_training():
         assert fold.train.end < fold.validation.start < fold.prediction.start
 
 
+@pytest.mark.parametrize("native", [True, False])
+def test_input_selection_prunes_resolved_columns_without_losing_late_variation(
+    tmp_path, monkeypatch, native
+):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research import rolling
+    from quant_research_platform.storage.datasets import write_dataset
+    from quant_research_platform.storage.datasets.reading import (
+        _dataset_input_options,
+        open_dataset_session,
+    )
+
+    dates = pd.to_datetime(["2020-01-02", "2021-01-04", "2022-01-03"])
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(2),
+            "asset_id": ["a", "b"] * 3,
+            "x": [0.0, 1.0] * 3,
+            "late_variation": [1.0, 1.0, 2.0, 2.0, 3.0, 3.0],
+            "future_only": [np.nan] * 4 + [1.0, 2.0],
+            "constant": 7.0,
+            "label": [0.0, 1.0] * 3,
+            "eligible": True,
+            "label_available_at": dates.repeat(2),
+        }
+    )
+    declared = input_spec()
+    declared["column_roles"].update(
+        late_variation="feature", future_only="feature", constant="feature"
+    )
+    path = tmp_path / ("native" if native else "foreign.parquet")
+    if native:
+        write_dataset(
+            path,
+            frame,
+            spec=DataSpec(
+                **{
+                    **declared,
+                    "primary_key": tuple(declared["primary_key"]),
+                    "partition_columns": tuple(declared["partition_columns"]),
+                }
+            ),
+        )
+        source = str(path)
+    else:
+        frame.to_parquet(path, index=False)
+        source = {"path": str(path), "spec": declared}
+    session = open_dataset_session(**_dataset_input_options(source))
+    reads = []
+    read = rolling.iter_dataset_chunks
+
+    def observe(view, **kwargs):
+        reads.append(view.logical_columns)
+        yield from read(view, **kwargs)
+
+    monkeypatch.setattr(rolling, "iter_dataset_chunks", observe)
+    spec = ModelSpec(
+        model_id="input",
+        model_algorithm="lasso_regression",
+        input_feature_columns=("x", "late_variation", "future_only", "constant"),
+        target_column="label",
+    )
+    _, facts = rolling._select_inputs(
+        rolling.RollingFold(
+            "fold",
+            TimeWindow("2020-01-01", "2021-12-31"),
+            TimeWindow("2022-01-01", "2022-01-31"),
+            TimeWindow("2022-02-01", "2022-02-28"),
+        ),
+        session,
+        [("input", spec)],
+    )
+    assert facts["input"] == {
+        "retained": ["x", "late_variation"],
+        "all_missing": ["future_only"],
+        "constant": ["constant"],
+    }
+    assert len(reads) == (2 if native else 1)
+    if native:
+        assert "x" not in reads[1]
+        assert {"late_variation", "future_only", "constant"} <= set(reads[1])
+
+
 @pytest.mark.parametrize("implicit", [False, True])
 def test_quarterly_runs_real_fit_prediction_and_evaluation(tmp_path, implicit):
     inputs = data(tmp_path)

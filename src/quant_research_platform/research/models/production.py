@@ -22,6 +22,7 @@ from quant_research_platform.contracts.models import (
     compare_model_facts,
     model_spec_payload,
     sequence_context_columns,
+    sequence_parameters,
     validate_model_input_roles,
 )
 from quant_research_platform.contracts.time import (
@@ -137,7 +138,57 @@ def _prepare_fit(
         return prepared, validation, validation_cutoff
 
 
-def _fit_prepared(prepared, spec, *, validation=None, validation_cutoff=None):
+def _fit_input_key(spec):
+    """Group candidates only when their native input representation is shared."""
+    return (
+        sequence_context_columns(spec.model_algorithm, spec.hyperparameters),
+        spec.hyperparameters.get("early_stopping_rounds") is not None,
+        tuple(
+            spec.hyperparameters.get(name)
+            for name in (
+                "external_memory",
+                "device",
+                "tree_method",
+                "booster",
+                "max_bin",
+                "missing",
+                "enable_categorical",
+                "feature_types",
+                "feature_weights",
+                "n_jobs",
+            )
+        )
+        if spec.model_algorithm == "xgboost_regressor"
+        else (),
+    )
+
+
+def _prepare_model_inputs(prepared, specs, validation):
+    """Prepare native matrices once for this candidate family's lifetime."""
+    spec = specs[0]
+    if spec.model_algorithm in SEQUENCE_ALGORITHMS:
+        from quant_research_platform.research.models.neural import (
+            _prepare_sequence_inputs,
+        )
+
+        longest = max(
+            specs,
+            key=lambda item: sequence_parameters(
+                item.model_algorithm, dict(item.hyperparameters)
+            )["sequence_length"],
+        )
+        return _prepare_sequence_inputs(prepared, longest, validation)
+    if spec.model_algorithm == "xgboost_regressor":
+        with fitting._booster_context(spec):
+            return fitting._booster_inputs(
+                build_estimator_from_model_spec(spec), prepared, spec, validation
+            )
+    return None
+
+
+def _fit_prepared(
+    prepared, spec, *, validation=None, validation_cutoff=None, fit_inputs=None
+):
     """Fit a fresh candidate using a reusable prepared sample."""
     patience = spec.hyperparameters.get("early_stopping_rounds")
     if patience is not None and validation is None:
@@ -147,6 +198,7 @@ def _fit_prepared(prepared, spec, *, validation=None, validation_cutoff=None):
         spec,
         estimator=build_estimator_from_model_spec(spec),
         validation=validation,
+        fit_inputs=fit_inputs,
     )
     if patience is not None:
         result.metadata["early_stopping"].update(
@@ -195,6 +247,7 @@ def fit_model(
         validation_cutoff=validation_cutoff,
         validation_windows=validation_windows,
     )
+    fit_inputs = None
     try:
         if candidate_parameters is not None:
             spec = replace(
@@ -203,10 +256,20 @@ def fit_model(
                     spec.model_algorithm, candidate_parameters, len(prepared.training)
                 ),
             )
+        fit_inputs = _prepare_model_inputs(prepared, [spec], validation)
+        if fit_inputs is not None:
+            prepared.close()
+            if validation is not None:
+                validation.close()
         return _fit_prepared(
-            prepared, spec, validation=validation, validation_cutoff=validation_cutoff
+            prepared,
+            spec,
+            validation=validation,
+            validation_cutoff=validation_cutoff,
+            fit_inputs=fit_inputs,
         )
     finally:
+        del fit_inputs
         prepared.close()
         if validation is not None:
             validation.close()

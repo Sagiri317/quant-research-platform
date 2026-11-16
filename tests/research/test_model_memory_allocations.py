@@ -359,6 +359,43 @@ def test_scaler_parses_each_source_column_once(missing, monkeypatch):
     assert calls == list(frame.columns)
 
 
+def test_native_unscaled_training_keeps_identity_without_rescanning(monkeypatch):
+    source = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=3),
+            "asset_id": "a",
+            "x": [1.0, np.nan, 3.0],
+            "z": [np.nan, 2.0, 4.0],
+            "label": [2.0, 3.0, 4.0],
+            "eligible": True,
+            "label_available_at": pd.Timestamp("2020-01-03"),
+        }
+    )
+    spec = ModelSpec(
+        model_id="native",
+        model_algorithm="xgboost_regressor",
+        input_feature_columns=("x", "z"),
+        target_column="label",
+        training_scaling=False,
+        hyperparameters={"device": "cpu"},
+    )
+    with closing(
+        fitting._collect_training_frame([source], spec, fitting_cutoff="2020-01-03")
+    ) as prepared:
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                ModelMatrixScaler,
+                "fit",
+                lambda *a, **kw: pytest.fail("identity rescanned"),
+            )
+            _, scaler = prepared.preprocessing
+        assert scaler.mean_ == (0.0, 0.0) and scaler.scale_ == (1.0, 1.0)
+        assert scaler.native_missing and not scaler.scaling and not scaler.medians
+        np.testing.assert_allclose(
+            scaler.transform(source[["x", "z"]]), source[["x", "z"]], equal_nan=True
+        )
+
+
 def test_sequence_fit_only_materializes_its_context_matrix(monkeypatch):
     timestamps = pd.date_range("2024-01-01", periods=4).repeat(2)
     frame = pd.DataFrame(

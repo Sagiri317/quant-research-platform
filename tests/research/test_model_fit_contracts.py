@@ -632,3 +632,151 @@ def test_filtered_raw_training_rows_still_reject_invalid_values(column, value):
     )
     with pytest.raises(ValueError):
         fitting._collect_training_frame([frame], spec, fitting_cutoff="2020-01-02")
+
+
+@pytest.mark.parametrize(
+    "algorithm",
+    [
+        "xgboost_regressor",
+        "lstm_regressor",
+        "transformer_regressor",
+        "deeplob_regressor",
+        "deeplob_classifier",
+    ],
+)
+def test_shared_candidate_inputs_match_fresh_fits_with_distinct_histories(algorithm):
+    from dataclasses import replace
+    from itertools import groupby
+
+    from quant_research_platform.contracts.models import DEEPLOB_INPUT_COLUMNS
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models.production import (
+        _fit_input_key,
+        _fit_prepared,
+        _prepare_fit,
+        _prepare_model_inputs,
+        fit_model,
+    )
+
+    dates = pd.date_range("2020-01-01T09:30", periods=24, freq="s")
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(2),
+            "asset_id": ["a", "b"] * len(dates),
+            "x": np.sin(np.arange(48)),
+            "z": np.cos(np.arange(48)),
+            "label": np.sin(np.arange(48)) / 200,
+            "eligible": True,
+            "label_available_at": dates.repeat(2),
+            "regime": np.repeat(np.arange(24) // 10, 2),
+        }
+    )
+    deep = algorithm.startswith("deeplob")
+    columns = DEEPLOB_INPUT_COLUMNS if deep else ("x", "z")
+    if deep:
+        for level in range(1, 11):
+            for side, sign in (("ask", 1), ("bid", -1)):
+                frame[f"{side}_px{level}"] = 10 + sign * level / 100 + frame.x / 1000
+                frame[f"{side}_vol{level}"] = 100 + level + frame.z
+        frame["session_date"] = frame.timestamp.dt.normalize()
+        frame["segment_id"] = frame.regime.astype(str)
+    frame.loc[5, list(columns)] = np.nan
+    parameters = (
+        {
+            "device": "cpu",
+            "n_jobs": 1,
+            "n_estimators": 6,
+            "early_stopping_rounds": 2,
+            "max_depth": 1,
+            "max_bin": 4,
+        }
+        if algorithm == "xgboost_regressor"
+        else {
+            "device": "cpu",
+            "epochs": 2,
+            "batch_size": 16,
+            "hidden_size": 4,
+            "sequence_length": 3,
+            **(
+                {"conv_channels": 2, "inception_channels": 2}
+                if deep
+                else {"sequence_group_columns": ["regime"]}
+            ),
+            **({"n_heads": 2} if algorithm == "transformer_regressor" else {}),
+            **({"class_threshold": 0.001} if algorithm == "deeplob_classifier" else {}),
+        }
+    )
+    spec = ModelSpec(
+        model_id="shared",
+        model_algorithm=algorithm,
+        input_feature_columns=columns,
+        target_column="label",
+        hyperparameters=parameters,
+        training_scaling=algorithm != "xgboost_regressor",
+        random_seed=13,
+    )
+    variants = (
+        ({"max_depth": 1}, {"max_depth": 2}, {"max_bin": 8})
+        if algorithm == "xgboost_regressor"
+        else ({"sequence_length": 3}, {"sequence_length": 7})
+    )
+    candidates = [
+        replace(spec, hyperparameters={**parameters, **item}) for item in variants
+    ]
+    train = frame.loc[frame.timestamp <= dates[15]]
+    held = frame.loc[
+        frame.timestamp >= dates[16 if algorithm == "xgboost_regressor" else 14]
+    ]
+    windows = (TimeWindow(dates[0], dates[15]),)
+    validation_windows = (TimeWindow(dates[16], dates[-1]),)
+    groups = [list(items) for _, items in groupby(candidates, _fit_input_key)]
+    assert len(groups) == (2 if algorithm == "xgboost_regressor" else 1)
+    for family in groups:
+        prepared, validation, cutoff = _prepare_fit(
+            [train],
+            family[0],
+            windows=windows,
+            cutoff=dates[15],
+            validation_frames=[held],
+            validation_cutoff=dates[-1],
+            validation_windows=validation_windows,
+        )
+        with closing(prepared), closing(validation):
+            inputs = _prepare_model_inputs(prepared, family, validation)
+            prepared.close()
+            validation.close()
+            for candidate in family:
+                actual = _fit_prepared(
+                    prepared,
+                    candidate,
+                    validation=validation,
+                    validation_cutoff=cutoff,
+                    fit_inputs=inputs,
+                )
+                fresh = fit_model(
+                    [train],
+                    candidate,
+                    fit_windows=windows,
+                    fit_cutoff=dates[15],
+                    validation_frames=[held],
+                    validation_cutoff=dates[-1],
+                    validation_windows=validation_windows,
+                )
+                np.testing.assert_allclose(
+                    fitting.prediction_callable(columns, actual.prediction_model)(held),
+                    fitting.prediction_callable(columns, fresh.prediction_model)(held),
+                    rtol=1e-6,
+                    atol=1e-8,
+                )
+                if algorithm != "xgboost_regressor":
+                    pd.testing.assert_frame_equal(
+                        actual.prediction_model.history.reset_index(drop=True),
+                        fresh.prediction_model.history.reset_index(drop=True),
+                    )
+                    for left, right in zip(
+                        actual.metadata["learning_curve"]["epochs"],
+                        fresh.metadata["learning_curve"]["epochs"],
+                        strict=True,
+                    ):
+                        assert left == pytest.approx(right, rel=1e-6, abs=1e-8)
+            del inputs

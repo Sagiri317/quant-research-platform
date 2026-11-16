@@ -301,35 +301,54 @@ def _select_inputs(fold, session, candidates):
         )
         pending, first, varying = set(spec.input_columns), {}, set()
         cutoff = pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns")
-        with closing_iterator(
-            iter_dataset_chunks(
-                session.filtered_view(fold.train).projected_view(
-                    _columns(spec, availability)
-                )
+        training = session.filtered_view(fold.train)
+        required = model_training_read_columns(
+            ("timestamp", "asset_id"),
+            (),
+            label_column=spec.target_column,
+            sample_filter_mode=spec.sample_filter_mode,
+            availability_column=availability,
+        )
+        # Foreign members retain one reader's cross-member key checks.
+        members = (
+            ((path,) for path in training.read_paths)
+            if training.native
+            else (training.read_paths,)
+        )
+        for paths in members:
+            columns = (
+                *required,
+                *(column for column in spec.input_columns if column in pending),
             )
-        ) as frames:
-            for frame in frames:
-                mature = label_maturity_mask(
-                    frame,
-                    fitting_cutoff=cutoff,
-                    availability_column=availability,
-                    target_column=spec.target_column,
+            with closing_iterator(
+                iter_dataset_chunks(
+                    replace(training, read_paths=paths).projected_view(columns)
                 )
-                legal, _ = apply_filter_mode(
-                    frame.loc[mature],
-                    mode=spec.sample_filter_mode,
-                    metadata_key="sample_filter_mode",
-                )
-                for column in tuple(pending):
-                    values = legal[column].dropna()
-                    if values.empty:
-                        continue
-                    first.setdefault(column, values.iloc[0])
-                    if values.ne(first[column]).any():
-                        varying.add(column)
-                        pending.remove(column)
-                if not pending:
-                    break
+            ) as frames:
+                for frame in frames:
+                    mature = label_maturity_mask(
+                        frame,
+                        fitting_cutoff=cutoff,
+                        availability_column=availability,
+                        target_column=spec.target_column,
+                    )
+                    legal, _ = apply_filter_mode(
+                        frame.loc[mature],
+                        mode=spec.sample_filter_mode,
+                        metadata_key="sample_filter_mode",
+                    )
+                    for column in tuple(pending):
+                        values = legal[column].dropna()
+                        if values.empty:
+                            continue
+                        first.setdefault(column, values.iloc[0])
+                        if values.ne(first[column]).any():
+                            varying.add(column)
+                            pending.remove(column)
+                    if not pending:
+                        break
+            if not pending:
+                break
         if not varying:
             raise ValueError("rolling_no_varying_inputs")
         groups[key] = {
@@ -377,9 +396,11 @@ def _select_inputs(fold, session, candidates):
 
 def _select(config, fold, session, candidates, calendar):
     from quant_research_platform.research.models.production import (
+        _fit_input_key,
         _fit_prepared,
         _fit_read_windows,
         _prepare_fit,
+        _prepare_model_inputs,
     )
 
     candidates, input_groups = _select_inputs(fold, session, candidates)
@@ -443,11 +464,7 @@ def _select(config, fold, session, candidates, calendar):
     predictions, rows = [], []
     for _, family in groupby(
         candidates,
-        key=lambda item: (
-            item[0],
-            sequence_context_columns(item[1].model_algorithm, item[1].hyperparameters),
-            item[1].hyperparameters.get("early_stopping_rounds") is not None,
-        ),
+        key=lambda item: (item[0], _fit_input_key(item[1])),
     ):
         family = list(family)
         spec = family[0][1]
@@ -480,13 +497,22 @@ def _select(config, fold, session, candidates, calendar):
                 else {}
             ),
         )
+        fit_inputs = None
         try:
+            fit_inputs = _prepare_model_inputs(
+                prepared, [spec for _, spec in family], prepared_validation
+            )
+            if fit_inputs is not None:
+                prepared.close()
+                if prepared_validation is not None:
+                    prepared_validation.close()
             for model_id, spec in family:
                 result = _fit_prepared(
                     prepared,
                     spec,
                     validation=prepared_validation,
                     validation_cutoff=prepared_cutoff,
+                    fit_inputs=fit_inputs,
                 )
                 values = prediction_callable(
                     spec.input_columns, result.prediction_model
@@ -515,6 +541,7 @@ def _select(config, fold, session, candidates, calendar):
                 )
                 del result
         finally:
+            del fit_inputs
             prepared.close()
             if prepared_validation is not None:
                 prepared_validation.close()
