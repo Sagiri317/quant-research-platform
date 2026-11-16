@@ -15,6 +15,7 @@ class PolicyDecision:
     marks are currency per share, while cash and NAV are account currency amounts.
     Prediction inventory targets use physical_sellable before order reservations,
     after settlement and equity locks; cash plus reserved_cash is actual cash.
+    Reference quantities are the fixed initial shares for ETF prediction tasks.
     The account consumes a target Series or dynamic PolicyExecution request sent
     back to the yielding iterator.
     """
@@ -26,7 +27,7 @@ class PolicyDecision:
     marks: pd.Series
     cash: float
     nav: float
-    opening_quantities: pd.Series | None = None
+    reference_quantities: pd.Series | None = None
     pending_quantities: pd.Series | None = None
     pending_targets: pd.Series | None = None
     estimated_trade_cost_bps: pd.Series | None = None

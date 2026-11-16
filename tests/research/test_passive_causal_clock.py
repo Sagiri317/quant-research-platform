@@ -44,6 +44,7 @@ def test_future_snapshot_and_missing_tail_snapshot_cannot_erase_earlier_fill(
         raw[f"bid_px{level}"] = 100000 - level * 100
         raw[f"ask_px{level}"] = 100000 + level * 100
         raw[f"bid_vol{level}"] = 100.0
+        raw[f"ask_vol{level}"] = 500.0
     panel = build_panel(
         normalize(raw, "hft_quotes", INSTRUMENTS),
         normalize(raw_events("hft_orders").iloc[:0], "hft_orders", INSTRUMENTS),

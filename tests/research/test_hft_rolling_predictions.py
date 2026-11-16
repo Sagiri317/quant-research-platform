@@ -80,6 +80,13 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
             }
         )
     holding_config = {**config, "predictions": [], "output": str(tmp_path / "holding")}
+    holding_config["parameters"] = {
+        key: value
+        for key, value in config["parameters"].items()
+        if key != "initial_inventory"
+    }
+    # 20% of 5000 at the initial price 10 is the same 100-share holding.
+    holding_config["parameters"]["initial_weights"] = {"a": 0.2}
     del holding_config["candidate_id"]
     held = read_portfolio_ledger_artifact(backtest(holding_config))
     assert held.capital.candidate_id == "hft_inventory"

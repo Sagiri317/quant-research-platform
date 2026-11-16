@@ -171,7 +171,7 @@ def test_maker_cancel_keeps_pre_ack_fills_and_real_locked_inventory(tmp_path):
         "2024-01-02",
         assets=("a",),
         clocks=("01:30:00", "01:30:01", "01:30:02", "01:30:03", "01:30:04"),
-    ).assign(bid_vol1=0.0, ask_vol1=0.0)
+    ).assign(bid_vol1=500.0, ask_vol1=500.0)
     params = parameters(("a",))
     params.update(
         latency_ms=10,
@@ -181,9 +181,9 @@ def test_maker_cancel_keeps_pre_ack_fills_and_real_locked_inventory(tmp_path):
     events = trade_input(
         tmp_path / "trades",
         [
-            (1.5, "a", "sell", 50, 9.99),
+            (1.5, "a", "sell", 550, 9.99),
             (2.5, "a", "sell", 100, 9.99),
-            (3.5, "a", "buy", 100, 10.01),
+            (3.5, "a", "buy", 600, 10.01),
         ],
     )
     source = status_source(tmp_path, panel, known_second=1.25)

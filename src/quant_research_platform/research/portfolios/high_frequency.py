@@ -43,6 +43,7 @@ from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
     prepare_trade_cost,
+    round_stock_orders,
     stock_order_limits,
 )
 from quant_research_platform.markets.implementations.a_share.portfolio_sessions import (
@@ -54,6 +55,7 @@ from quant_research_platform.research.portfolios.accounting import (
     EquityEntitlements,
     ResearchValuationMarks,
     execute_stock_target,
+    quoted_execution_depth,
 )
 from quant_research_platform.research.portfolios.inventory_analysis import (
     inventory_daily_economics,
@@ -82,7 +84,6 @@ def _parameters(value, *, policy=False):
         value,
         {
             "initial_capital",
-            "initial_inventory",
             "maximum_inventory",
             "buy_threshold",
             "sell_threshold",
@@ -91,12 +92,21 @@ def _parameters(value, *, policy=False):
             "restore_at",
         }
         - ({"buy_threshold", "sell_threshold"} if policy else set()),
-        {"passive", "taker_depth_levels", "markout_ms", "latency_ms"}
+        {
+            "initial_inventory",
+            "initial_weights",
+            "passive",
+            "taker_depth_levels",
+            "markout_ms",
+            "latency_ms",
+        }
         | (set() if policy else {"signal_processing"}),
     )
     params.setdefault("latency_ms", 10.0)
+    if ("initial_inventory" in params) == ("initial_weights" in params):
+        raise ValueError("hft_initial_holdings_require_quantities_or_weights")
     for name in ("initial_inventory", "maximum_inventory"):
-        values = params[name]
+        values = params.get(name, {})
         if not isinstance(values, dict) or any(
             type(asset) is not str
             or not asset
@@ -106,13 +116,24 @@ def _parameters(value, *, policy=False):
             for asset, quantity in values.items()
         ):
             raise ValueError("hft_inventory_invalid")
-    initial, maximum = params["initial_inventory"], params["maximum_inventory"]
+    initial, maximum = params.get("initial_inventory", {}), params["maximum_inventory"]
     if (
         not maximum
         or not initial.keys() <= maximum.keys()
         or any(quantity > maximum[asset] for asset, quantity in initial.items())
     ):
         raise ValueError("hft_inventory_invalid")
+    if "initial_weights" in params:
+        weights = params["initial_weights"]
+        if not isinstance(weights, dict) or not weights.keys() <= maximum.keys():
+            raise ValueError("hft_initial_weights_invalid")
+        weights = {
+            asset: strict_finite_float(weight, error="hft_initial_weights_invalid")
+            for asset, weight in weights.items()
+        }
+        if any(weight < 0 for weight in weights.values()) or fsum(weights.values()) > 1:
+            raise ValueError("hft_initial_weights_invalid")
+        params["initial_weights"] = weights
     if "signal_processing" in params:
         params["signal_processing"] = signal_processing_parameters(
             params["signal_processing"]
@@ -124,6 +145,7 @@ def _parameters(value, *, policy=False):
         raise ValueError("hft_taker_depth_levels_invalid")
     for name in set(params) - {
         "initial_inventory",
+        "initial_weights",
         "maximum_inventory",
         "restore_at",
         "signal_processing",
@@ -249,7 +271,7 @@ def inventory_batches(
     lower, upper, closed = time_window_timestamp_interval(window)
     lower, upper = pd.Timestamp(lower), pd.Timestamp(upper)
     assets = pd.Index(sorted(params["maximum_inventory"]), name="asset_id")
-    units = pd.Series(params["initial_inventory"], dtype="float64").reindex(
+    units = pd.Series(params.get("initial_inventory", {}), dtype="float64").reindex(
         assets, fill_value=0.0
     )
     instrument_types = pd.Series("stock", index=assets)
@@ -464,6 +486,27 @@ def inventory_batches(
         if cash is None:
             lives = projected.listing_date.reindex(assets)
             marks = opening_marks
+            if "initial_weights" in params:
+                weights = pd.Series(params["initial_weights"], dtype="float64")
+                selected = weights.index[weights.gt(0)]
+                prices = marks.reindex(selected)
+                if not (np.isfinite(prices) & prices.gt(0)).all():
+                    raise ValueError("hft_initial_weight_price_missing")
+                _, minimum, increment, _ = stock_order_limits(
+                    projected.market_type.reindex(selected),
+                    day.date(),
+                    instrument_types,
+                )
+                units.loc[selected] = round_stock_orders(
+                    params["initial_capital"]
+                    * weights.loc[selected].to_numpy()
+                    / prices.to_numpy(),
+                    minimum,
+                    increment,
+                )
+                if units.gt(pd.Series(params["maximum_inventory"])).any():
+                    raise ValueError("hft_initial_inventory_exceeds_maximum")
+            initial_inventory = units.copy()
             for record_at, events in view.corporate_events.groupby("record_at"):
                 if record_at < day:
                     if events.asset_id.isin(units.index[units.ne(0)]).any():
@@ -506,6 +549,12 @@ def inventory_batches(
             for asset in units.index
         }
         opening_inventory = units.copy()
+        reference_inventory = (
+            initial_inventory
+            if prediction_decisions
+            and prediction_task in {"inventory", "dynamic_execution"}
+            else opening_inventory
+        )
         bought_today = pd.Series(0.0, index=units.index)
         adjustments, flows = equity_at(rights, start)
         yield emit(
@@ -609,6 +658,7 @@ def inventory_batches(
                 assumptions,
                 params["participation_rate"],
                 max_quote_gap_seconds=max_quote_gap_seconds,
+                depth_levels=params.get("taker_depth_levels", 1),
                 face_value_per_share=projected.get("face_value_per_share"),
                 instrument_types=instrument_types,
                 cash_balance=cash_balance if dynamic_execution else None,
@@ -693,7 +743,7 @@ def inventory_batches(
             stamp,
             requests_at,
             *,
-            opening_inventory=opening_inventory,
+            reference_inventory=reference_inventory,
             units=units,
             passive=passive,
             status_target=status_target,
@@ -701,7 +751,7 @@ def inventory_batches(
             targets, activation_times = {}, {}
             for asset, (execution_at, score) in requests_at.items():
                 targets[asset] = (
-                    min(opening_inventory[asset], params["maximum_inventory"][asset])
+                    min(reference_inventory[asset], params["maximum_inventory"][asset])
                     if score is None
                     else params["maximum_inventory"][asset]
                     if score > params["buy_threshold"]
@@ -736,6 +786,7 @@ def inventory_batches(
             units=units,
             bought_today=bought_today,
             opening_inventory=opening_inventory,
+            reference_inventory=reference_inventory,
             request_targets=request_targets,
             status_events=status_events,
             status_can_enter=status_can_enter,
@@ -984,7 +1035,7 @@ def inventory_batches(
                 cash
                 + fsum((units.reindex(assets) * visible_marks).fillna(0))
                 + fsum(entitlements.receivables.values()),
-                opening_inventory.reindex(assets).copy(),
+                reference_inventory.reindex(assets).copy(),
                 pending,
                 pending_targets,
                 estimated_costs,
@@ -1250,7 +1301,7 @@ def inventory_batches(
                 decision = decisions.pop((int(at.value), asset), None)
                 if restoring:
                     targets[asset] = min(
-                        opening_inventory[asset], params["maximum_inventory"][asset]
+                        reference_inventory[asset], params["maximum_inventory"][asset]
                     )
                     signal_times[asset] = int(restore_at.value)
                 elif decision is not None:
@@ -1346,10 +1397,8 @@ def inventory_batches(
                         "mark_price": marks.fillna(0.0),
                         "buy_price": current.ask_px1.reindex(units.index),
                         "sell_price": current.bid_px1.reindex(units.index),
-                        "buy_capacity": current.ask_vol1.reindex(units.index)
-                        * params["participation_rate"],
-                        "sell_capacity": current.bid_vol1.reindex(units.index)
-                        * params["participation_rate"],
+                        "buy_capacity": 0.0,
+                        "sell_capacity": 0.0,
                         "adv": np.nan,
                         "can_enter": permissions
                         & status_can_enter.reindex(units.index).fillna(False),
@@ -1360,24 +1409,17 @@ def inventory_batches(
                     orders["face_value_per_share"] = (
                         projected.face_value_per_share.reindex(units.index)
                     )
-                depth = None
-                if params.get("taker_depth_levels", 1) > 1:
-                    depth = {}
+                depth = {
+                    asset: quoted_execution_depth(
+                        current.loc[asset],
+                        1 if targets[asset] > units[asset] else -1,
+                        params.get("taker_depth_levels", 1),
+                        params["participation_rate"],
+                    )
                     for asset in current.index[
                         targets.reindex(current.index).ne(units.reindex(current.index))
-                    ]:
-                        row = current.loc[asset]
-                        side = "ask" if targets[asset] > units[asset] else "bid"
-                        depth[asset] = np.array(
-                            [
-                                (
-                                    row.get(f"{side}_px{level}", np.nan),
-                                    row.get(f"{side}_vol{level}", np.nan)
-                                    * params["participation_rate"],
-                                )
-                                for level in range(1, params["taker_depth_levels"] + 1)
-                            ]
-                        )
+                    ]
+                }
                 # Successor reservations cannot block the IOC that precedes them.
                 reserved_cash = (
                     passive.frozen_cash(exclude_assets=taker_requests)
@@ -1615,7 +1657,7 @@ def inventory_batches(
                         text="COMPLETE"
                         if np.allclose(
                             units,
-                            opening_inventory.reindex(units.index, fill_value=0.0),
+                            reference_inventory.reindex(units.index, fill_value=0.0),
                             rtol=1e-12,
                             atol=1e-9,
                         )

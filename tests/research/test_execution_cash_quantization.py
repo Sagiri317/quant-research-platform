@@ -157,6 +157,7 @@ def test_passive_fee_obligation_is_known_before_nonzero_order_reservation(side):
             SETTINGS,
             1.0,
             max_quote_gap_seconds=6,
+            depth_levels=1,
         )
         orders.request(start, {"a": target}, {"a": at.value})
         return orders
@@ -256,6 +257,7 @@ def test_passive_reservation_uses_the_same_currency_budget(side, budget):
         SETTINGS,
         1.0,
         max_quote_gap_seconds=6,
+        depth_levels=1,
     )
     units = pd.Series({"a": 0.0 if side == "buy" else 1.0})
     manager.request(start, {"a": 300 if side == "buy" else 0}, {"a": at.value})
@@ -293,3 +295,38 @@ def test_passive_reservation_uses_the_same_currency_budget(side, budget):
     else:
         assert fill is None
     assert not manager.orders and manager.frozen_cash() == 0.0
+
+
+@pytest.mark.parametrize("missing", ["bid_px1", "ask_px1", "ask_vol1"])
+def test_inflight_maker_missing_quote_does_not_reserve_an_unsubmitted_order(missing):
+    import pandas as pd
+
+    from quant_research_platform.research.portfolios.passive import PassiveOrders
+    from tests.helpers.high_frequency import quotes
+
+    panel = quotes("2024-01-03", assets=("a",))
+    panel[missing] = pd.Series(pd.NA, index=panel.index, dtype="Float64")
+    current = panel.iloc[[0]].set_index("asset_id")
+    manager = PassiveOrders(
+        {"queue_model": "conservative", "cancel_latency_ms": 0},
+        pd.Series({"a": 4}),
+        DAY,
+        _schedule(),
+        SETTINGS,
+        0.4,
+        max_quote_gap_seconds=6,
+        depth_levels=1,
+    )
+    units = pd.Series({"a": 0.0})
+    manager.request(
+        panel.timestamp.iloc[0],
+        {"a": 1000},
+        {"a": panel.timestamp.iloc[1].value},
+        modes=pd.Series({"a": "maker"}),
+        decision_book=current,
+        quantities=units,
+        sellable=units,
+        cash=20_000,
+    )
+    assert manager.frozen_cash() == 0
+    assert manager.frozen_shares("a") == 0

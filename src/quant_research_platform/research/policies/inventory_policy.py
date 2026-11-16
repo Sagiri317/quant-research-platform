@@ -97,7 +97,7 @@ def inventory_targets(decision, maximum, parameters):
         if not np.isfinite(cost) or not np.isfinite(exit_cost):
             continue
         actual = decision.quantities[asset]
-        opening = decision.opening_quantities[asset]
+        opening = decision.reference_quantities[asset]
         lower = max(0, actual - decision.physical_sellable[asset])
         upper = max(lower, min(limit, actual + max(0, cash) / price))
         # Proportional-cost stationary points plus knots form a transparent baseline.

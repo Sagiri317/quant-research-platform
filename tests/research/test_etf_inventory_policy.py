@@ -233,7 +233,7 @@ def test_missing_signal_keeps_live_maker_and_pending_is_not_actual(tmp_path):
         "2024-01-02",
         assets=("a",),
         clocks=("01:30:00", "01:30:00.020", "01:30:04", "01:30:07"),
-    ).assign(instrument_type="gold_etf", bid_vol1=10.0, ask_vol1=10.0)
+    ).assign(instrument_type="gold_etf", bid_vol1=10.0, ask_vol1=500.0)
     signals = pd.DataFrame(
         {
             "timestamp": [

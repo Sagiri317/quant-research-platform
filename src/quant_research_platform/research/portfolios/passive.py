@@ -21,6 +21,10 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     round_stock_orders,
     stock_order_limits,
 )
+from quant_research_platform.research.portfolios.accounting import (
+    execution_depth,
+    quoted_execution_depth,
+)
 
 
 def passive_parameters(value):
@@ -93,6 +97,7 @@ class PassiveOrders:
         participation,
         *,
         max_quote_gap_seconds,
+        depth_levels,
         face_value_per_share=None,
         instrument_types=None,
         cash_balance=None,
@@ -130,6 +135,7 @@ class PassiveOrders:
         )
         self.minimum_commission = assumptions.minimum_commission
         self.participation = participation
+        self.depth_levels = depth_levels
         markets, minimum, increment, maximum = stock_order_limits(
             market_types, day, instrument_types
         )
@@ -202,6 +208,8 @@ class PassiveOrders:
             return 0.0, 0
         book, mode, cap, available, initial, quantities = record
         requested = target - quantities[asset]
+        if not requested:
+            return 0.0, 0
         side = 1 if requested > 0 else -1
         change = quantities[asset] - initial
         available = max(
@@ -212,9 +220,18 @@ class PassiveOrders:
             ),
         )
         market, minimum, increment, maximum = self.limits[asset]
+        capacity = execution_depth(
+            quoted_execution_depth(book, side, self.depth_levels, self.participation),
+            side,
+        )[:, 1].sum()
         count = int(
             round_stock_orders(
-                min(abs(requested), available if side == -1 else np.inf, maximum),
+                min(
+                    abs(requested),
+                    available if side == -1 else np.inf,
+                    maximum,
+                    capacity,
+                ),
                 minimum,
                 increment,
                 sellable=available if side == -1 else None,
@@ -229,7 +246,7 @@ class PassiveOrders:
         )
         level = self.config.get("quote_level", 1) if mode == "maker" else 1
         price = book[f"{book_side}_px{level}"]
-        if not np.isfinite(price) or price <= 0:
+        if pd.isna(price) or not np.isfinite(price) or price <= 0:
             return 0.0, 0
         key = market, side
         if key not in self.costs:
@@ -674,7 +691,13 @@ class PassiveOrders:
                 continue
             market, minimum, increment, maximum = self.limits[asset]
             available = sellable[asset] if side == -1 else np.inf
-            desired = min(abs(requested), available, maximum)
+            capacity = execution_depth(
+                quoted_execution_depth(
+                    row, side, self.depth_levels, self.participation
+                ),
+                side,
+            )[:, 1].sum()
+            desired = min(abs(requested), available, maximum, capacity)
             quantity = int(
                 round_stock_orders(
                     desired,

@@ -724,6 +724,31 @@ class ExecutionAccounting:
         )
 
 
+def quoted_execution_depth(quote, side, levels, participation):
+    """Read the opposite-side price and participated quantity at each level."""
+    book_side = "ask" if side > 0 else "bid"
+    book = np.empty((levels, 2), dtype="float64")
+    for level in range(levels):
+        for column, field in enumerate(("px", "vol")):
+            value = quote.get(f"{book_side}_{field}{level + 1}", np.nan)
+            book[level, column] = np.nan if pd.isna(value) else value
+    book[:, 1] *= participation
+    return book
+
+
+def execution_depth(raw, side):
+    """Use the known ordered prefix; never skip an unobserved price or quantity."""
+    book = np.asarray(raw, dtype="float64")
+    if book.ndim != 2 or book.shape[1] != 2 or np.isinf(book).any() or (book < 0).any():
+        raise ValueError("execution_depth_invalid")
+    known = np.isfinite(book).all(axis=1) & (book[:, 0] > 0)
+    if not known.all():
+        book = book[: np.flatnonzero(~known)[0]]
+    if len(book) and (np.diff(book[:, 0]) * side <= 0).any():
+        raise ValueError("execution_depth_price_order_invalid")
+    return book
+
+
 def execute_stock_target(
     orders: pd.DataFrame,
     *,
@@ -797,22 +822,7 @@ def execute_stock_target(
             index = frame.index.get_loc(asset)
             if not desired_values[index]:
                 continue
-            book = np.asarray(raw, dtype="float64")
-            if (
-                book.ndim != 2
-                or book.shape[1] != 2
-                or np.isinf(book).any()
-                or (book < 0).any()
-            ):
-                raise ValueError("execution_depth_invalid")
-            known = np.isfinite(book).all(axis=1) & (book[:, 0] > 0)
-            if not known.all():
-                book = book[: np.flatnonzero(~known)[0]]
-            if (
-                len(book)
-                and (np.diff(book[:, 0]) * np.sign(desired_values[index]) <= 0).any()
-            ):
-                raise ValueError("execution_depth_price_order_invalid")
+            book = execution_depth(raw, np.sign(desired_values[index]))
             prices[index] = book[0, 0] if len(book) else np.nan
             book = book[book[:, 1] > 0]
             shares = np.r_[0.0, np.cumsum(book[:, 1])]

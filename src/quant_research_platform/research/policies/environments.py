@@ -191,7 +191,7 @@ class TradingEnv(gym.Env):
                 if restore_at is not None and (
                     event.timestamp + pd.Timedelta(hours=8)
                 ).time() >= time.fromisoformat(restore_at):
-                    self.target = event.opening_quantities.clip(
+                    self.target = event.reference_quantities.clip(
                         upper=pd.Series(
                             self.episode["account"]["parameters"]["maximum_inventory"]
                         )

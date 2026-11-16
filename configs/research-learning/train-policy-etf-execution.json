@@ -53,13 +53,10 @@
         },
         "parameters": {
           "initial_capital": 1000000,
-          "initial_inventory": {
-            "518880": 100000
-          },
           "maximum_inventory": {
             "518880": 200000
           },
-          "participation_rate": 0.05,
+          "participation_rate": 0.1,
           "minimum_commission": 5,
           "latency_ms": 10,
           "taker_depth_levels": 1,
@@ -68,6 +65,9 @@
             "queue_model": "conservative",
             "cancel_latency_ms": 10,
             "quote_level": 1
+          },
+          "initial_weights": {
+            "518880": 0.5
           }
         }
       }
@@ -127,13 +127,10 @@
         },
         "parameters": {
           "initial_capital": 1000000,
-          "initial_inventory": {
-            "518880": 100000
-          },
           "maximum_inventory": {
             "518880": 200000
           },
-          "participation_rate": 0.05,
+          "participation_rate": 0.1,
           "minimum_commission": 5,
           "latency_ms": 10,
           "taker_depth_levels": 1,
@@ -142,6 +139,9 @@
             "queue_model": "conservative",
             "cancel_latency_ms": 10,
             "quote_level": 1
+          },
+          "initial_weights": {
+            "518880": 0.5
           }
         }
       }

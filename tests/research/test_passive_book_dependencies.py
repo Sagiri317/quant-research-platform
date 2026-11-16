@@ -1,4 +1,4 @@
-"""Maker fills depend on their own observed quote and causal order state."""
+"""Maker orders use opposite capacity, own queue depth and causal order state."""
 
 import pandas as pd
 import pytest
@@ -31,9 +31,9 @@ from tests.markets.a_share.test_high_frequency import (
     "case,expected",
     [
         ("complete", "full"),
-        ("opposite_missing_submission", "full"),
+        ("opposite_missing_submission", "delayed"),
         ("opposite_missing_later", "full"),
-        ("opposite_missing_all", "full"),
+        ("opposite_missing_all", "none"),
         ("own_missing_all", "none"),
         ("own_volume_missing_all", "none"),
         ("own_volume_missing_later", "full"),
@@ -51,6 +51,7 @@ def test_native_maker_side_dependencies_and_order_clock(
         raw[f"bid_px{level}"] = 100000 - level * 100
         raw[f"ask_px{level}"] = 100000 + level * 100
         raw[f"bid_vol{level}"] = raw[f"ask_vol{level}"] = 100.0
+        raw[f"{'ask' if side == 1 else 'bid'}_vol{level}"] = 1000.0
     events = pd.concat([raw_events("hft_trades").iloc[:1]] * 2, ignore_index=True)
     events = normalize(
         events.assign(
@@ -139,14 +140,16 @@ def test_native_maker_side_dependencies_and_order_clock(
         if expected == "none"
         else [side * 50]
         if expected == "partial"
+        else [200 if side == 1 else -300]
+        if expected == "delayed"
         else [50, 150]
         if side == 1
         else [-50, -250]
     )
     assert [trade.quantity for trade in trades] == quantities
-    assert [pd.Timestamp(trade.timestamp_ns).second for trade in trades] == [4, 7][
-        : len(quantities)
-    ]
+    assert [pd.Timestamp(trade.timestamp_ns).second for trade in trades] == (
+        [7] if expected == "delayed" else [4, 7][: len(quantities)]
+    )
     assert [trade.notional for trade in trades] == pytest.approx(
         [quantity * (10.0 - side * 0.01) for quantity in quantities]
     )

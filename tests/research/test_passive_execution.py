@@ -346,7 +346,8 @@ def test_native_book_segments_and_unquoted_unheld_asset_allow_passive_fill(tmp_p
         )
     )
     assert panel.segment_id.map(type).eq(str).all()
-    assert [trade.quantity for batch in batches for trade in batch.trades] == [200]
+    # The native opposite best level contains 100 shares.
+    assert [trade.quantity for batch in batches for trade in batch.trades] == [100]
 
 
 def test_passive_depth_and_markouts_reuse_native_partial_fill_ledger(tmp_path):
@@ -409,6 +410,7 @@ def test_passive_owner_rejects_replayed_trade_but_accepts_distinct_same_time_pri
         ExecutionAssumptions(5000.0, 0.0, 0.0, 1.0, (1.0,), 0.0),
         1.0,
         max_quote_gap_seconds=6,
+        depth_levels=1,
     )
     orders.request(panel.timestamp.iloc[0], {"a": 300.0}, {"a": at.value})
     orders.quote(
@@ -532,17 +534,71 @@ def test_maker_taker_comparison_keeps_same_mother_order_and_separate_cash_ledger
     assert summaries[1]["total_implementation_shortfall_bps"] == pytest.approx(-3.0)
 
 
-@pytest.mark.parametrize("missing,expected", [("bid_vol1", 0), ("ask_vol1", 200)])
-def test_passive_submission_requires_own_depth_not_opposite_side_volume(
-    tmp_path, missing, expected
+@pytest.mark.parametrize("missing", ["bid_vol1", "ask_vol1"])
+def test_passive_submission_requires_queue_depth_and_opposite_capacity(
+    tmp_path, missing
 ):
     panel = quotes("2024-01-02", assets=("a",))
-    panel[missing] = float("nan")
+    panel[missing] = pd.Series(pd.NA, index=panel.index, dtype="Float64")
     panel["eligible"] = False
     signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
     batches, _ = replay(tmp_path, panel, signals, [(4, "a", "sell", 1000, 9.99)])
-    assert (
-        sum(trade.quantity for batch in batches for trade in batch.trades) == expected
+    assert not any(batch.trades for batch in batches)
+
+
+@pytest.mark.parametrize("side", [1, -1])
+@pytest.mark.parametrize(
+    "levels,gap,expected",
+    [(1, False, 200), (3, False, 500), (3, True, 200), (1, True, 0)],
+)
+def test_maker_submission_and_taker_fill_share_opposite_depth(
+    tmp_path, side, levels, gap, expected
+):
+    panel = quotes("2024-01-02", assets=("a",), clocks=("01:30:00", "01:30:03"))
+    opposite = "ask" if side == 1 else "bid"
+    for level, volume in enumerate((2500, 1500, 1000), 1):
+        panel[f"{opposite}_px{level}"] = 10 + side * 0.01 * level
+        panel[f"{opposite}_vol{level}"] = pd.Series(
+            pd.NA if gap and level == min(2, levels) else volume,
+            index=panel.index,
+            dtype="Float64",
+        )
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=side)
+    settings = dict(
+        initial_inventory={"a": 1000},
+        maximum_inventory={"a": 2000},
+        participation_rate=0.1,
+        taker_depth_levels=levels,
+    )
+    batches, _ = replay(
+        tmp_path,
+        panel,
+        signals,
+        [(100, "a", "sell", 1, 9.99)],
+        capital=30000,
+        account_parameters=settings,
+    )
+    submitted = [
+        row.number
+        for batch in batches
+        for row in batch.diagnostics
+        if row.name == "passive_submitted_quantity"
+    ]
+    assert submitted == ([side * expected] if expected else [])
+    params = parameters(("a",))
+    params.update(settings, initial_capital=30000)
+    active = list(
+        inventory_batches(
+            [(daily_view(panel), panel, signals)],
+            schedule(),
+            params,
+            TimeWindow(
+                panel.timestamp.min().isoformat(), panel.timestamp.max().isoformat()
+            ),
+        )
+    )
+    assert [trade.quantity for batch in active for trade in batch.trades] == (
+        [side * expected] if expected else []
     )
 
 

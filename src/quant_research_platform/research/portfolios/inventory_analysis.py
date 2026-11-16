@@ -165,10 +165,19 @@ def analyze_inventory(config):
     for ledger in (strategy, benchmark):
         if ledger.metadata.get("kind") != "a_share_hft":
             raise ValueError("inventory_ledger_required")
-    if (
-        strategy.metadata["parameters"]["initial_inventory"]
-        != benchmark.metadata["parameters"]["initial_inventory"]
-    ):
+    initial_holdings = []
+    for ledger in (strategy, benchmark):
+        with closing_iterator(ledger.iter_chunks()) as batches:
+            initial_holdings.append(
+                {
+                    item.asset_id: item.quantity
+                    for item in next(batches).valuations
+                    if item.phase == "before"
+                    and item.asset_id != PORTFOLIO_CASH_ASSET_ID
+                    and item.quantity != 0
+                }
+            )
+    if initial_holdings[0] != initial_holdings[1]:
         raise ValueError("inventory_benchmark_initial_holdings_mismatch")
     daily, _ = inventory_daily_economics(strategy)
     reference, _ = inventory_daily_economics(benchmark)
