@@ -8,42 +8,6 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 from quant_research_platform.markets.prepare import _configured_spec
 
 
-def test_hft_examples_connect_inputs_targets_and_training_windows():
-    import json
-    from datetime import datetime
-    from pathlib import Path
-
-    root = Path(__file__).resolve().parents[2] / "configs"
-
-    def read(name):
-        return json.loads((root / name).read_text(encoding="utf-8"))
-
-    sampled = read("high-frequency/sample-hft-common.json")
-    fitting, evaluating = (read(name) for name in ("fit-hft.json", "evaluate-hft.json"))
-    assert fitting["inputs"] == evaluating["inputs"] == sampled["output"]
-    assert evaluating["evaluation"]["label_columns"] == [
-        fitting["model"]["target_column"]
-    ]
-
-    stopping = read("high-frequency/fit-xgboost-early-stopping.json")
-    assert stopping["inputs"] == sampled["output"]
-    assert stopping["output"] != fitting["output"]
-    assert stopping["model"]["target_column"] == fitting["model"]["target_column"]
-    fit_cutoff = datetime.fromisoformat(stopping["fit_cutoff"])
-    validation = stopping["validation"]
-    assert all(
-        datetime.fromisoformat(window["end"]) <= fit_cutoff
-        for window in stopping["fit_windows"]
-    )
-    assert all(
-        fit_cutoff
-        < datetime.fromisoformat(window["start"])
-        <= datetime.fromisoformat(window["end"])
-        <= datetime.fromisoformat(validation["cutoff"])
-        for window in validation["windows"]
-    )
-
-
 @pytest.mark.parametrize(
     "factor,sources",
     [

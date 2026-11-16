@@ -215,7 +215,7 @@ def train_policy(config):
             closing_iterator(
                 VecNormalize(
                     (DummyVecEnv if len(factories) == 1 else SubprocVecEnv)(factories),
-                    norm_reward=False,
+                    norm_reward=True,
                 )
             ) as environment,
         ):
@@ -226,6 +226,7 @@ def train_policy(config):
                 device=config["device"],
                 **parameters,
             )
+            environment.gamma = model.gamma
             callback = None
             best = {}
             if validation_episodes:
@@ -524,7 +525,7 @@ def backtest_policy(config, *, portfolio_context=None):
                 elif strategy == "etf_inventory":
                     target = inventory_targets(
                         env.decision,
-                        episode["account"]["parameters"]["maximum_inventory"],
+                        env.decision.maximum_quantities,
                         inventory_parameters,
                     )
                     observation, _, done, _, info = env.step_targets(target)
@@ -541,7 +542,7 @@ def backtest_policy(config, *, portfolio_context=None):
                     try:
                         target, optimization = portfolio_targets(
                             env.decision,
-                            episode["account"]["parameters"]["maximum_inventory"],
+                            env.decision.maximum_quantities,
                             portfolio_parameters,
                             context=context,
                         )
@@ -604,15 +605,10 @@ def backtest_policy(config, *, portfolio_context=None):
                         ]
                     )
                 elif episode["task"] == "inventory":
-                    maximum = pd.Series(
-                        episode["account"]["parameters"]["maximum_inventory"]
-                    ).reindex(env.assets)
-                    action = (
-                        env.decision.quantities.reindex(env.assets)
-                        .divide(maximum.where(maximum > 0))
-                        .fillna(0)
-                        .to_numpy()
+                    observation, _, done, _, info = env.step_targets(
+                        env.decision.quantities.copy()
                     )
+                    continue
                 elif strategy == "equal_weight":
                     action = np.array([1.0] * len(env.assets) + [0.0])
                 else:

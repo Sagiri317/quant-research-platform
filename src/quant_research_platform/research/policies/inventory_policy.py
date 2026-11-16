@@ -99,7 +99,7 @@ def inventory_targets(decision, maximum, parameters):
         actual = decision.quantities[asset]
         opening = decision.reference_quantities[asset]
         lower = max(0, actual - decision.physical_sellable[asset])
-        upper = max(lower, min(limit, actual + max(0, cash) / price))
+        upper = max(actual, min(limit, actual + max(0, cash) / price))
         # Proportional-cost stationary points plus knots form a transparent baseline.
         candidates = np.clip(
             [

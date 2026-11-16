@@ -33,14 +33,14 @@
             "000001": 1000,
             "600000": 1000
           },
-          "maximum_inventory": {
-            "000001": 2000,
-            "600000": 2000
-          },
           "latency_ms": 10,
           "participation_rate": 0.05,
           "minimum_commission": 5.0,
-          "restore_at": null
+          "restore_at": null,
+          "maximum_weights": {
+            "000001": 1.0,
+            "600000": 1.0
+          }
         }
       },
       "risk_aversion": 0.001,

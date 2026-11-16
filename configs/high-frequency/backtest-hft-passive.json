@@ -1,7 +1,9 @@
 {
   "candidate_id": "hft_passive",
   "panel": "data/processed/a_share/hft_panel",
-  "predictions": ["results/hft/predictions"],
+  "predictions": [
+    "results/hft/predictions"
+  ],
   "fee_schedule": "data/processed/a_share/fee_schedule",
   "window": {
     "start": "2018-02-14T05:00:00",
@@ -12,10 +14,6 @@
     "initial_inventory": {
       "000001": 1000,
       "600000": 1000
-    },
-    "maximum_inventory": {
-      "000001": 2000,
-      "600000": 2000
     },
     "buy_threshold": 0.001,
     "sell_threshold": -0.001,
@@ -37,7 +35,11 @@
         "enter": 0.002,
         "exit": 0.001
       }
-    ]
+    ],
+    "maximum_weights": {
+      "000001": 1.0,
+      "600000": 1.0
+    }
   },
   "output": "results/hft/passive-ledger",
   "daily_inputs": {

@@ -1,7 +1,7 @@
 # A股低频监督模型的设置依据
 
 本协议以未来5个交易日收益的当日合格股票截面标准分为唯一目标，比较 Lasso、XGBoost、LSTM 和 Transformer。
-执行配置以 [quarterly-a-share.json](../configs/quarterly-a-share.json) 为准；本页解释实际生效的设置及取舍，不另建配置副本。
+执行配置以 [run-quarterly-a-share.json](../configs/run-quarterly-a-share.json) 为准；本页解释实际生效的设置及取舍，不另建配置副本。
 产出范围为模型拟合、未来预测、信号检验与报告，不包含组合回测或交易执行。
 这里的选择是研究设计，不是已证实的5日效果提升。
 

@@ -87,6 +87,21 @@ def test_every_allowed_operation_exposes_actual_native_api():
     assert '"model_id"' in fit["text"]
 
 
+def test_operation_examples_include_nested_configs_without_prefix_collisions():
+    def examples(name):
+        result = lookup(
+            {"scope": "operations", "query": "", "key": name}, {"config": {}}
+        )
+        return result["text"].split("Native entry point")[0]
+
+    prepare = examples("prepare")
+    assert "prepare-source" not in prepare
+    fit = examples("fit")
+    assert "high-frequency/fit-deeplob.json" in fit
+    assert "fit-cost-model.json" not in fit
+    assert "fit-hawkes.json" not in fit
+
+
 @pytest.mark.parametrize("limit", [300000, None])
 def test_large_and_unlimited_context_keep_full_evidence(tmp_path, limit):
     config = agent_config(tmp_path)

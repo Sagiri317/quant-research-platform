@@ -106,7 +106,7 @@ VIX 扩展沿用上述变换，并增加：
 缺少必要输入时 Beta 保持缺失，产物的 `macro_beta_missing_inputs` 列明缺项，独立水平和交互列继续产出。
 滚动流动性 Beta 支持简单回归及控制市场收益的二元回归；使用滚动协方差/方差充分统计，无逐窗拟合。只有截至决策时已成熟的个股收益进入估计，默认窗口 252、至少 126 个有效观测及 20 次宏观变化。按个股连续已知上市周期估计，重新上市或上市身份未知均截断历史；缺少 `listing_date` 或 `period_return` 时仅 Beta 缺失，独立宏观因子继续输出。零方差、奇异控制变量及不足历史保留缺失。它是历史暴露估计，不是因果效应识别。
 
-M2按月发布，约一年的252个交易会话内通常不足20次发布变化；不能为了产出数值降低冲击数门槛。[月频宏观Beta配置](../configs/macro-liquidity/monthly-beta.json)明确采用756会话窗口、至少378个有效收益和20次宏观变化，沿用同一估计器。三年是本项目为月频更新选择的研究参数，不是原论文固定定义，也不改变其他日频利率Beta的默认参数；不足历史、新上市及发布时间未知仍保留缺失。比较结果时以原生参数元数据识别该窗口。
+M2按月发布，约一年的252个交易会话内通常不足20次发布变化；不能为了产出数值降低冲击数门槛。[月频宏观Beta配置](../configs/macro-liquidity/prepare-monthly-beta.json)明确采用756会话窗口、至少378个有效收益和20次宏观变化，沿用同一估计器。三年是本项目为月频更新选择的研究参数，不是原论文固定定义，也不改变其他日频利率Beta的默认参数；不足历史、新上市及发布时间未知仍保留缺失。比较结果时以原生参数元数据识别该窗口。
 
 ## 操作顺序
 
@@ -116,8 +116,8 @@ M2按月发布，约一年的252个交易会话内通常不足20次发布变化�
 
 ```text
 qrp prepare-source --config configs/macro-liquidity/prepare-source.json
-qrp prepare --config configs/macro-liquidity/decision-panel.json
-qrp prepare --config configs/macro-liquidity/factors.json
+qrp prepare --config configs/macro-liquidity/prepare-decision-panel.json
+qrp prepare --config configs/macro-liquidity/prepare-factors.json
 qrp assemble --config configs/macro-liquidity/assemble.json
 ```
 

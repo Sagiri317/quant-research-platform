@@ -277,6 +277,25 @@ def train_policy(config: Config) -> None:
     _echo_result(train_policy(read_qrp_json_file(config)[1]))
 
 
+@app.command("run-etf-execution")
+def run_etf_execution(
+    config: Config,
+    stage: Annotated[str, typer.Option("--stage", help="direct, train, or ppo.")],
+    asset_id: Annotated[
+        str | None,
+        typer.Option("--asset-id", help="One asset, or all configured assets."),
+    ] = None,
+) -> None:
+    """Run one ETF execution stage using the shared study configuration."""
+    from quant_research_platform.research.policies.etf_execution import (
+        run_etf_execution,
+    )
+
+    _echo_result(
+        run_etf_execution(read_qrp_json_file(config)[1], stage=stage, asset_id=asset_id)
+    )
+
+
 @app.command("backtest-policy")
 def backtest_policy(config: Config) -> None:
     """Evaluate a frozen policy or execution baseline in the native account."""

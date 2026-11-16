@@ -94,7 +94,7 @@ class _Terminal:
                 reject_if_exists(self.workspace)
             else:
                 profile = read_qrp_json_file(
-                    Path("configs/research-learning/agent-report-review.json")
+                    Path("configs/research-learning/agent.json")
                 )[1]
                 self.config = {
                     key: deepcopy(profile[key])
@@ -107,18 +107,7 @@ class _Terminal:
                     tools={},
                     inputs={},
                     workspace=str(Path.cwd()),
-                    web_search=True,
-                )
-                self.config["budget"].update(
-                    max_requests=40,
-                    max_experiments=30,
-                    wall_seconds=3600,
-                )
-                self.config["documents"].update(
-                    project_readme="README.md",
-                    architecture="docs/architecture.md",
-                    agent_usage="docs/agent.md",
-                    research_methods="docs/research-learning.md",
+                    web_search=profile["web_search"],
                 )
                 self.workspace = Path(f"results/agent-chat/{uuid4().hex}").resolve()
             self.config["output"] = str(self.workspace)

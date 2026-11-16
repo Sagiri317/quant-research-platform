@@ -667,7 +667,7 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
         "parameters": {
             "initial_capital": 10000.0,
             "initial_inventory": {"000001.SZ": 100},
-            "maximum_inventory": {"000001.SZ": 200},
+            "maximum_weights": {"000001.SZ": 1.0},
             "restore_at": None,
             "buy_threshold": 0.0,
             "sell_threshold": -1.0,
@@ -760,7 +760,7 @@ def test_inventory_t1_subsequent_quote_fees_and_native_ledger(tmp_path):
         {
             "initial_capital": 10000.0,
             "initial_inventory": {"000001.SZ": 100},
-            "maximum_inventory": {"000001.SZ": 200},
+            "maximum_weights": {"000001.SZ": 1.0},
             "restore_at": None,
             "buy_threshold": 0.5,
             "sell_threshold": -0.5,
@@ -862,7 +862,7 @@ def test_sale_requires_cash_to_cover_minimum_commission(
         dict(
             initial_capital=initial_capital,
             initial_inventory={"stock": 100},
-            maximum_inventory={"stock": 100},
+            maximum_weights={"stock": 1.0},
             restore_at=None,
             buy_threshold=0.5,
             sell_threshold=-0.5,

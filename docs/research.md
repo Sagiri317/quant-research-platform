@@ -33,7 +33,7 @@
 
 股票截面复用 `research.factors.statistics.factor_statistics` 的 `evaluation_inputs` 与 `window`，读取已发布EVAL的每日指标，发布新的STAT产物。它不重新读取因子面板、计算因子或重新划分每日多空组，也不能从全区间平均IC反推子区间。窗口必须在原评估范围内；原信号时点、筛选方式、标签及成熟截止不变。因子或检验口径已经修正时，先使用修正后的EVAL。
 
-[日表统计配置](../configs/statistics-stratified-a-share.json)复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方明确 `evaluation_inputs`、新 `output` 路径及 `window`；历史近期检验使用2022-01-01至2026-10-30，其他子区间直接修改窗口。
+[日表统计配置](../configs/statistics-factors-stratified-a-share.json)复用原有 `statistics-factors --config` CLI及同实现Python入口。调用方明确 `evaluation_inputs`、新 `output` 路径及 `window`；历史近期检验使用2022-01-01至2026-10-30，其他子区间直接修改窗口。
 
 `analyses=["stratified_ic"]` 复用已有全体、long、short的IC和RankIC，输出均值、有效日数、配对观测数及可定义时的HAC推断与BY校正；原评估已有额外分层时同时保留。缺失导致推断未定义时，仍保留独立可用的均值和样本数。多重检验范围是本次明确输入的原生评估，不冒称覆盖其他研究。
 
@@ -50,7 +50,7 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.storage.datasets import read_dataset
 
-config = json.loads(Path("configs/statistics-stratified-a-share.json").read_text())
+config = json.loads(Path("configs/statistics-factors-stratified-a-share.json").read_text())
 config["evaluation_inputs"] = ["results/factor-evaluation"]
 config["output"] = "results/factor-recent"
 config["window"] = {"start": "2022-01-01", "end": "2026-10-30"}
@@ -69,7 +69,7 @@ ETF日频的全区间时序相关不能由一个总相关系数切出子区间�
 
 ## 滚动选参与重拟合
 
-`research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。[A 股季度配置](../configs/quarterly-a-share.json)从 2014 年积累历史；[ETF 会话配置](../configs/high-frequency/rolling-etf.json)以 518880 为一份示例，其他 ETF 由调用者替换输入、证券和真实训练起点。两份配置均包含 LASSO、XGBoost、LSTM、Transformer 及其历史验证候选，研究窗截至 2026-10-30。特征列、目标、窗口和输出都由配置显式提供，算法不根据数据集名称选择研究规则。
+`research.rolling.run_quarterly(config)` 按季度扩窗，`run_sessions(config)` 按显式会话块扩窗；薄 CLI 分别为 `qrp run-quarterly`、`qrp run-sessions`。两者共用候选拟合、验证选择、全历史重拟合和未来预测实现，保存原生模型、PRED 和 EVAL。调用方提供完整 `sessions` 或现有 `trading_calendar`，不从有观测的日期猜测休市。[A 股季度配置](../configs/run-quarterly-a-share.json)从 2014 年积累历史；[ETF 会话配置](../configs/high-frequency/run-sessions-etf.json)以 518880 为一份示例，其他 ETF 由调用者替换输入、证券和真实训练起点。两份配置均包含 LASSO、XGBoost、LSTM、Transformer 及其历史验证候选，研究窗截至 2026-10-30。特征列、目标、窗口和输出都由配置显式提供，算法不根据数据集名称选择研究规则。
 
 每折在预测开始前一刻已成熟的历史信号会话中取最近 `validation_sessions` 个用于验证；股票季度配置为120，ETF会话配置为20。股票从2014年积累历史，优先预测2022Q1至2026Q4，每季只有一次训练／验证划分。验证段按所选标签的实际成熟时点前移，标签期限与成熟规则保持原定义。候选只拟合验证起点之前、当时已成熟的全部历史样本；初始化不足的折返回 `reason=insufficient_mature_history`，后续折继续。末季度只覆盖实际数据日期。
 
@@ -98,7 +98,7 @@ for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")
 
 `parameter_candidates` 是以 `model_id` 为键的参数字典列表，各字典覆盖该模型的 `hyperparameters`；省略时只比较配置中这一组参数。候选使用相同历史验证窗口的成熟共同样本。`selection_metric` 默认 `daily_mse`，按日等权MSE最小选优；股票配置使用 `daily_rank_ic`，在同一家族候选共同有定义的日期上按日均RankIC最大选优，全期无定义的候选不参与选择，全部无定义或共同日期为空时失败，并列按原候选顺序。MSE始终保存供诊断。LASSO 用 `max_iter=null` 收敛求解；XGBoost、LSTM、Transformer 可用无上限迭代及历史验证早停。NN的早停MSE和XGBoost的早停RMSE按时间戳等质量加权，股票即日期等权。若有早停，以学得的最佳迭代编号加一作为最终重拟合轮数，移除早停参数，重拟合至预测前全部成熟历史；插补和缩放重新在该训练历史估计。序列保留验证起点前的真实历史，以及最后成熟标签之后、预测截止之前可观察的特征上下文；上下文不增加损失样本。
 
-[低频季度配置](../configs/quarterly-a-share.json) 保留四家族各3／4／2／2组候选，两种神经网络均保留20日／64维／1层与60日／128维／2层，Transformer使用Pre-LayerNorm和末端LayerNorm。参数及研究依据统一见[低频模型设置](low-frequency-models.md)。每季候选选优后，各家族独立重拟合和预测；旧研究结果保持当时参数与验证口径，不随当前配置改写。
+[低频季度配置](../configs/run-quarterly-a-share.json) 保留四家族各3／4／2／2组候选，两种神经网络均保留20日／64维／1层与60日／128维／2层，Transformer使用Pre-LayerNorm和末端LayerNorm。参数及研究依据统一见[低频模型设置](low-frequency-models.md)。每季候选选优后，各家族独立重拟合和预测；旧研究结果保持当时参数与验证口径，不随当前配置改写。
 
 普通模型按输入组与筛选模式，共用只根据候选拟合期合法观测确定的列集合：排除全缺失或常数列，不以验证、未来表现或 IC 选列，不将全缺失补零。最终重拟合沿用该折列集合；下折可纳入随后出现的新信息。DeepLOB 保留固定顺序的40列盘口，不做常量筛列，盘口有效性由原生拟合入口判断。模型原生 `training_selection` 记录保留列、历史窗口、共同样本数、候选验证误差、早停事实与选中参数；普通模型另记全缺失与常数列。训练与预测是否筛选 `eligible` 由显式 `sample_filter_mode` 决定；ETF 使用 `unfiltered` 时不要求该列。
 
@@ -106,7 +106,7 @@ for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")
 
 会话扩窗默认 `min_train_sessions=60`、`validation_sessions=20`、`prediction_sessions=20`，三项由调用者配置为正整数，末块可以不足预测块长度；标签成熟仍按每折真实时点决定，不能以名义会话数代替成熟样本数。正式研究的模型、参数候选、目标单位和窗口属于本次运行配置，示例值不代表通用最优参数。该流程按时间反复选择和重拟合，研究结果应如实说明这种使用方式。
 
-`research.models.periods.evaluate_model_periods(config)` 及薄 CLI `qrp evaluate-model-periods --config ...` 独立汇总每个滚动期的训练、验证和预测指标，配置结构见 [model-periods.json](../configs/model-periods.json)。调用者替换结构示例的路径、证券及完整会话轴，`sessions` 须覆盖原拟合窗、序列真实前文和预测窗，应取原 rolling 配置的完整时钟；只含样本外日期的评价时钟不够，也不加入拟合起点之前的因子预热。不能用有记录的日期推断休市。`periods` 显式映射每期覆盖完整日的预测窗及各模型的冻结 MDL，日表不能恢复半日区间；`prediction_daily` 指向同一模型原生 `evaluate-time-series` 的 `daily`。已有全期评价可直接复用；尚无误差日表时，先用现有 `evaluate-time-series` 评价保存的 PRED，不重新生成未来预测。日表的证券域、会话、目标及轴须对应本次请求和冻结模型；操作不依赖数据集名称。
+`research.models.periods.evaluate_model_periods(config)` 及薄 CLI `qrp evaluate-model-periods --config ...` 独立汇总每个滚动期的训练、验证和预测指标，配置结构见 [evaluate-model-periods.json](../configs/evaluate-model-periods.json)。调用者替换结构示例的路径、证券及完整会话轴，`sessions` 须覆盖原拟合窗、序列真实前文和预测窗，应取原 rolling 配置的完整时钟；只含样本外日期的评价时钟不够，也不加入拟合起点之前的因子预热。不能用有记录的日期推断休市。`periods` 显式映射每期覆盖完整日的预测窗及各模型的冻结 MDL，日表不能恢复半日区间；`prediction_daily` 指向同一模型原生 `evaluate-time-series` 的 `daily`。已有全期评价可直接复用；尚无误差日表时，先用现有 `evaluate-time-series` 评价保存的 PRED，不重新生成未来预测。日表的证券域、会话、目标及轴须对应本次请求和冻结模型；操作不依赖数据集名称。
 
 训练阶段只加载最终冻结模型，按原 `fit_windows`、`fit_cutoff`、筛选、输入观察和标签成熟规则前向，使用冻结插补及缩放；按自然月分块读取特征，块内按日聚合，并保持跨块的因果序列状态。它输出原拟合样本的日等权 MSE、RMSE、MAE、IC、RankIC 及相对同域零预测的 R²，不重新拟合，也不保存逐行训练 PRED。这是最终重拟合模型的回代误差，不是样本外表现或原优化器加权损失。
 

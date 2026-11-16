@@ -212,7 +212,7 @@ def write_replay(tmp_path):
     for key in ("buy_threshold", "sell_threshold", "initial_capital", "restore_at"):
         del params[key]
     params.update(
-        initial_inventory={"a": 0, "b": 0}, maximum_inventory={"a": 1000, "b": 1000}
+        initial_inventory={"a": 0, "b": 0}, maximum_weights={"a": 1.0, "b": 1.0}
     )
     return {
         "strategy": "stock_portfolio",

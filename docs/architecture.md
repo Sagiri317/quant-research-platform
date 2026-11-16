@@ -317,7 +317,7 @@ Transformer 的 `independent_layer_initialization` 默认为 `false`，沿用原
 不改变已保存权重；股票协议与完整参数依据见 [低频模型设置](low-frequency-models.md)。
 验证窗口和最终重新拟合范围由调用方分别安排；最终重拟合复用验证选出的轮数，再包含验证期内已成熟的历史标签。
 PPO 和成本感知模型同样复用训练中位数；PPO 从有界训练 episode 的真实决策特征拟合，
-仅 PPO 所需观察归一化继续由 VecNormalize 负责。原始环境观察保留空值，基准策略不凭空填特征。
+PPO 的观察与训练奖励归一化由 VecNormalize 负责；验证和回放使用原始奖励。原始环境观察保留空值，基准策略不凭空填特征。
 
 `fit` 与 `score` 的 `label_unit` 可从输入 `column_units` 复用；缺声明时才需明确提供，
 两处同时声明必须一致。模型保存实际成熟列及最终训练样本的最大成熟时刻，并确认该时刻不晚于拟合截止。

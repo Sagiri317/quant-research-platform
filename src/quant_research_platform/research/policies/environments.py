@@ -5,7 +5,6 @@ Actions request inventory or portfolio targets; fills, fees, and tradeability
 remain the account engine's responsibility. Rewards use its realized ledger.
 """
 
-from datetime import time
 from math import fsum
 
 import gymnasium as gym
@@ -123,9 +122,7 @@ class TradingEnv(gym.Env):
             if not np.isfinite(self.arrival_price) or self.arrival_price <= 0:
                 raise ValueError("policy_arrival_price_missing")
             initial = float(self.decision.quantities[order["asset_id"]])
-            maximum = self.episode["account"]["parameters"]["maximum_inventory"][
-                order["asset_id"]
-            ]
+            maximum = max(initial, self.decision.maximum_quantities[order["asset_id"]])
             if not 0 <= initial + order["quantity"] <= maximum:
                 raise ValueError("policy_order_outside_inventory")
         return self._observation(), self._info()
@@ -140,6 +137,9 @@ class TradingEnv(gym.Env):
                 if self.task == "dynamic_execution" and self.decision is not None:
                     before = [row for row in event.valuations if row.phase == "before"]
                     self._integrate_exposure(before, pd.Timestamp(ends[0].timestamp_ns))
+                    for diagnostic in event.diagnostics:
+                        if diagnostic.name == "inventory_target":
+                            self.target[diagnostic.asset_id] = diagnostic.number
                 self._last_valuations = ends
                 self.nav = fsum(row.value for row in ends)
                 self.fees += -fsum(
@@ -184,18 +184,9 @@ class TradingEnv(gym.Env):
             if self.task == "dynamic_execution":
                 self.target = inventory_targets(
                     event,
-                    self.episode["account"]["parameters"]["maximum_inventory"],
+                    event.maximum_quantities,
                     self.episode["inventory_parameters"],
                 )
-                restore_at = self.episode["account"]["parameters"]["restore_at"]
-                if restore_at is not None and (
-                    event.timestamp + pd.Timedelta(hours=8)
-                ).time() >= time.fromisoformat(restore_at):
-                    self.target = event.reference_quantities.clip(
-                        upper=pd.Series(
-                            self.episode["account"]["parameters"]["maximum_inventory"]
-                        )
-                    )
         except StopIteration:
             if self.task == "dynamic_execution" and self.decision is not None:
                 _, end, _ = time_window_timestamp_interval(
@@ -269,9 +260,7 @@ class TradingEnv(gym.Env):
             )
         ).astype(np.float32)
         if self.task == "dynamic_execution":
-            maximum = pd.Series(
-                self.episode["account"]["parameters"]["maximum_inventory"]
-            ).reindex(self.assets)
+            maximum = decision.maximum_quantities.reindex(self.assets)
             state = decision.order_state.reindex(self.assets)
             marks = decision.marks.reindex(self.assets)
             result = np.r_[
@@ -426,8 +415,8 @@ class TradingEnv(gym.Env):
                 action[0] * remaining
             )
         elif self.task == "inventory":
-            maximum = pd.Series(
-                self.episode["account"]["parameters"]["maximum_inventory"]
+            maximum = decision.maximum_quantities.fillna(decision.quantities).clip(
+                lower=decision.quantities
             )
             target = maximum.reindex(self.assets) * action
         else:
@@ -437,10 +426,10 @@ class TradingEnv(gym.Env):
                 target = (
                     target * max(decision.nav, 0) / decision.marks.reindex(self.assets)
                 )
-                maximum = pd.Series(
-                    self.episode["account"]["parameters"]["maximum_inventory"]
-                )
-                target = target.clip(upper=maximum).fillna(0)
+                maximum = decision.maximum_quantities.fillna(decision.quantities)
+                target = target.clip(
+                    upper=maximum.clip(lower=decision.quantities)
+                ).fillna(0)
         return self.step_targets(target)
 
     def step_targets(self, target):

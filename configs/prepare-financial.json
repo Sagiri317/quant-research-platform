@@ -4,8 +4,7 @@
   "inputs": {
     "financial_balance": "results/financial-balance",
     "trading_calendar": "results/calendar",
-    "financial_first_disclosure": "results/first-disclosure",
-    "market_panel_1d": "results/panel"
+    "financial_first_disclosure": "results/first-disclosure"
   },
   "factor_columns": [
     "book_to_market"

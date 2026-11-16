@@ -119,6 +119,7 @@ def test_partial_fills_consume_each_print_once_and_charge_one_commission(tmp_pat
         ],
         minimum=5,
         capital=4005,
+        account_parameters={"maximum_weights": {"a": 3000 / 4005, "b": 3000 / 4005}},
     )
     trades = [trade for batch in batches for trade in batch.trades]
     assert [(t.asset_id, t.quantity) for t in trades] == [
@@ -163,6 +164,7 @@ def test_cash_limited_passive_order_keeps_native_ledger_quantities(tmp_path):
         [(4, "a", "sell", 130, 9.99), (5, "a", "sell", 100, 9.99)],
         minimum=5,
         capital=2504,
+        account_parameters={"maximum_weights": {"a": 1.0}},
     )
     # Cash of 1504 covers 100 shares at 9.99 plus 5 commission, but not 200.
     assert [trade.quantity for batch in batches for trade in batch.trades] == [30, 70]
@@ -566,7 +568,7 @@ def test_maker_submission_and_taker_fill_share_opposite_depth(
     signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=side)
     settings = dict(
         initial_inventory={"a": 1000},
-        maximum_inventory={"a": 2000},
+        maximum_weights={"a": 2 / 3},
         participation_rate=0.1,
         taker_depth_levels=levels,
     )

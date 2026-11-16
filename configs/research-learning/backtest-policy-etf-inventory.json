@@ -37,10 +37,6 @@
         "equity_events": "data/interim/reference/a_share_equity_events"
       },
       "parameters": {
-        "maximum_inventory": {
-          "510300": 200000,
-          "518880": 200000
-        },
         "participation_rate": 0.1,
         "minimum_commission": 5,
         "latency_ms": 10,
@@ -48,6 +44,10 @@
         "initial_weights": {
           "510300": 0.25,
           "518880": 0.25
+        },
+        "maximum_weights": {
+          "510300": 1.0,
+          "518880": 1.0
         }
       }
     },

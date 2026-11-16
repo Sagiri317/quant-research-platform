@@ -84,7 +84,7 @@ def _parameters(value, *, policy=False):
         value,
         {
             "initial_capital",
-            "maximum_inventory",
+            "maximum_weights",
             "buy_threshold",
             "sell_threshold",
             "participation_rate",
@@ -105,24 +105,35 @@ def _parameters(value, *, policy=False):
     params.setdefault("latency_ms", 10.0)
     if ("initial_inventory" in params) == ("initial_weights" in params):
         raise ValueError("hft_initial_holdings_require_quantities_or_weights")
-    for name in ("initial_inventory", "maximum_inventory"):
-        values = params.get(name, {})
-        if not isinstance(values, dict) or any(
-            type(asset) is not str
-            or not asset
-            or asset == PORTFOLIO_CASH_ASSET_ID
-            or type(quantity) is not int
-            or quantity < 0
-            for asset, quantity in values.items()
-        ):
-            raise ValueError("hft_inventory_invalid")
-    initial, maximum = params.get("initial_inventory", {}), params["maximum_inventory"]
-    if (
-        not maximum
-        or not initial.keys() <= maximum.keys()
-        or any(quantity > maximum[asset] for asset, quantity in initial.items())
+    initial = params.get("initial_inventory", {})
+    if not isinstance(initial, dict) or any(
+        type(asset) is not str
+        or not asset
+        or asset == PORTFOLIO_CASH_ASSET_ID
+        or type(quantity) is not int
+        or quantity < 0
+        for asset, quantity in initial.items()
     ):
         raise ValueError("hft_inventory_invalid")
+    maximum = params["maximum_weights"]
+    if (
+        not isinstance(maximum, dict)
+        or not maximum
+        or any(
+            type(asset) is not str or not asset or asset == PORTFOLIO_CASH_ASSET_ID
+            for asset in maximum
+        )
+    ):
+        raise ValueError("hft_maximum_weights_invalid")
+    maximum = {
+        asset: strict_finite_float(weight, error="hft_maximum_weights_invalid")
+        for asset, weight in maximum.items()
+    }
+    if any(not 0 <= weight <= 1 for weight in maximum.values()):
+        raise ValueError("hft_maximum_weights_invalid")
+    if not initial.keys() <= maximum.keys():
+        raise ValueError("hft_inventory_invalid")
+    params["maximum_weights"] = maximum
     if "initial_weights" in params:
         weights = params["initial_weights"]
         if not isinstance(weights, dict) or not weights.keys() <= maximum.keys():
@@ -146,7 +157,7 @@ def _parameters(value, *, policy=False):
     for name in set(params) - {
         "initial_inventory",
         "initial_weights",
-        "maximum_inventory",
+        "maximum_weights",
         "restore_at",
         "signal_processing",
         "passive",
@@ -270,7 +281,8 @@ def inventory_batches(
         status_state = load_stock_status(stock_status)
     lower, upper, closed = time_window_timestamp_interval(window)
     lower, upper = pd.Timestamp(lower), pd.Timestamp(upper)
-    assets = pd.Index(sorted(params["maximum_inventory"]), name="asset_id")
+    assets = pd.Index(sorted(params["maximum_weights"]), name="asset_id")
+    maximum_weights = pd.Series(params["maximum_weights"], dtype="float64")
     units = pd.Series(params.get("initial_inventory", {}), dtype="float64").reindex(
         assets, fill_value=0.0
     )
@@ -299,6 +311,21 @@ def inventory_batches(
 
     def cash_balance():
         return cash
+
+    def account_nav(prices):
+        quantities = units.reindex(prices.index)
+        return (
+            cash
+            + fsum((quantities * prices).where(quantities.ne(0), 0.0))
+            + fsum(entitlements.receivables.values())
+        )
+
+    def maximum_quantities(prices, nav=None):
+        return (
+            maximum_weights
+            * max(0.0, account_nav(prices) if nav is None else nav)
+            / prices.where(prices.gt(0))
+        )
 
     def values(at):
         rows = {}
@@ -504,8 +531,8 @@ def inventory_batches(
                     minimum,
                     increment,
                 )
-                if units.gt(pd.Series(params["maximum_inventory"])).any():
-                    raise ValueError("hft_initial_inventory_exceeds_maximum")
+            if units.gt(maximum_quantities(marks, params["initial_capital"])).any():
+                raise ValueError("hft_initial_inventory_exceeds_maximum")
             initial_inventory = units.copy()
             for record_at, events in view.corporate_events.groupby("record_at"):
                 if record_at < day:
@@ -666,11 +693,7 @@ def inventory_batches(
         requests = {}
         if (passive is not None and not interactive) or prediction_decisions:
             for (signal_at, asset), (execution_at, score) in destinations.items():
-                if (
-                    dynamic_execution
-                    or restore_at is None
-                    or signal_at < restore_at.value
-                ):
+                if restore_at is None or signal_at < restore_at.value:
                     requests.setdefault(signal_at, {})[asset] = (execution_at, score)
         if passive is not None and restore_at is not None and len(quotes):
             if restore_at <= quotes.timestamp.max():
@@ -749,11 +772,12 @@ def inventory_batches(
             status_target=status_target,
         ):
             targets, activation_times = {}, {}
+            limits = maximum_quantities(marks)
             for asset, (execution_at, score) in requests_at.items():
                 targets[asset] = (
-                    min(reference_inventory[asset], params["maximum_inventory"][asset])
+                    min(reference_inventory[asset], max(units[asset], limits[asset]))
                     if score is None
-                    else params["maximum_inventory"][asset]
+                    else max(units[asset], limits[asset])
                     if score > params["buy_threshold"]
                     else 0.0
                     if score < params["sell_threshold"]
@@ -761,14 +785,30 @@ def inventory_batches(
                 )
                 targets[asset] = status_target(asset, targets[asset])
                 activation_times[asset] = execution_at
-            return passive.request(
+            diagnostics = passive.request(
                 pd.Timestamp(stamp),
                 targets,
                 activation_times,
+                modes=(
+                    dict.fromkeys(targets, "taker")
+                    if any(score is None for _, score in requests_at.values())
+                    else None
+                ),
                 segment_bound=any(
                     score is not None for _, score in requests_at.values()
                 ),
             )
+            diagnostics.extend(
+                PortfolioDiagnostic(
+                    asset,
+                    None,
+                    "inventory_target",
+                    number=float(status_target(asset, reference_inventory[asset])),
+                )
+                for asset, (_, score) in requests_at.items()
+                if score is None
+            )
+            return diagnostics
 
         def apply_request(
             stamp,
@@ -871,7 +911,7 @@ def inventory_batches(
             if not requested:
                 return
             if not prediction_decisions or (
-                not dynamic_execution and restore_at is not None and at >= restore_at
+                restore_at is not None and at >= restore_at
             ):
                 diagnostics = request_targets(stamp, requested)
                 if diagnostics:
@@ -1025,6 +1065,8 @@ def inventory_batches(
                     {asset: passive.frozen_shares(asset) for asset in assets}
                 )
             free_cash = cash - (passive.frozen_cash() if passive is not None else 0)
+            nav = account_nav(visible_marks)
+            limits = maximum_quantities(visible_marks, nav)
             target = yield PolicyDecision(
                 at,
                 features,
@@ -1032,9 +1074,7 @@ def inventory_batches(
                 sellable,
                 visible_marks,
                 free_cash,
-                cash
-                + fsum((units.reindex(assets) * visible_marks).fillna(0))
-                + fsum(entitlements.receivables.values()),
+                nav,
                 reference_inventory.reindex(assets).copy(),
                 pending,
                 pending_targets,
@@ -1045,9 +1085,11 @@ def inventory_batches(
                 estimate_trade_cost_gradient=estimate_trade_cost_gradient,
                 order_state=passive.state(at, assets) if dynamic_execution else None,
                 physical_sellable=available_sellable,
+                maximum_quantities=limits,
             )
             modes = None
             strategy_targets = None
+            target_limits = limits.fillna(units).clip(lower=units)
             if dynamic_execution:
                 if not isinstance(target, PolicyExecution):
                     raise ValueError("policy_execution_request_required")
@@ -1055,7 +1097,7 @@ def inventory_batches(
                 strategy_targets = policy_target(
                     target.strategy_targets,
                     assets,
-                    maximum=params["maximum_inventory"],
+                    maximum=target_limits,
                     allow_missing=True,
                 )
                 if (
@@ -1070,7 +1112,7 @@ def inventory_batches(
                 policy_target(
                     target,
                     assets,
-                    maximum=params["maximum_inventory"],
+                    maximum=target_limits,
                     allow_missing=True,
                 )
                 .where(features.prediction_score.notna() | dynamic_execution)
@@ -1291,17 +1333,17 @@ def inventory_batches(
             targets = units.copy()
             signal_times = {}
             restoring = (
-                not dynamic_execution
-                and restore_at is not None
+                restore_at is not None
                 and at > restore_at
                 and at.value >= restore_at.value + latency_ns
             )
+            limits = maximum_quantities(marks) if restoring else None
             for asset in current.index:
                 # Taker intents are single-quote attempts, not retained history.
                 decision = decisions.pop((int(at.value), asset), None)
                 if restoring:
                     targets[asset] = min(
-                        reference_inventory[asset], params["maximum_inventory"][asset]
+                        reference_inventory[asset], max(units[asset], limits[asset])
                     )
                     signal_times[asset] = int(restore_at.value)
                 elif decision is not None:
@@ -1316,7 +1358,9 @@ def inventory_batches(
                                 units[asset] + max(0, remaining_order),
                             )
                     elif score > params["buy_threshold"]:
-                        targets[asset] = params["maximum_inventory"][asset]
+                        if limits is None:
+                            limits = maximum_quantities(marks)
+                        targets[asset] = max(units[asset], limits[asset])
                     elif score < params["sell_threshold"]:
                         targets[asset] = 0.0
                     signal_times[asset] = signal_at
@@ -1339,6 +1383,16 @@ def inventory_batches(
                     PORTFOLIO_CASH_ASSET_ID, None, "session_phase", text="quote"
                 )
             ]
+            if restoring:
+                diagnostics.extend(
+                    PortfolioDiagnostic(
+                        asset,
+                        None,
+                        "inventory_target",
+                        number=float(status_target(asset, reference_inventory[asset])),
+                    )
+                    for asset in current.index
+                )
             trades, flows = [], []
             taker_requests = {}
             if passive is not None:
@@ -1361,7 +1415,7 @@ def inventory_batches(
                             segment_bound,
                         )
                 diagnostics.extend(passive.quote(at, current, units, sellable, cash))
-                if dynamic_execution:
+                if dynamic_execution or restoring:
                     taker_requests = passive.taker_requests(at, current.index)
                     for asset, (signal_at, target) in taker_requests.items():
                         targets[asset] = status_target(asset, target)
@@ -1374,7 +1428,27 @@ def inventory_batches(
                             for asset in sellable.index
                         }
                     )
-            if (passive is None or dynamic_execution) and targets.ne(units).any():
+                if restoring:
+                    for asset in current.index:
+                        if (
+                            asset in passive.orders
+                            or asset in passive.intent_cancellations
+                            or asset in passive.replacements
+                        ):
+                            if asset not in taker_requests:
+                                targets[asset] = units[asset]
+                        else:
+                            targets[asset] = status_target(
+                                asset,
+                                min(
+                                    reference_inventory[asset],
+                                    max(units[asset], limits[asset]),
+                                ),
+                            )
+                            signal_times[asset] = int(restore_at.value)
+            if (passive is None or dynamic_execution or restoring) and targets.ne(
+                units
+            ).any():
                 # One-sided quotes can execute against the observed side while
                 # valuation retains its last known mid; crossed books cannot.
                 crossed = (
@@ -1527,11 +1601,13 @@ def inventory_batches(
             if (
                 interactive
                 and not prediction_decisions
+                and (restore_at is None or at < restore_at)
                 and any(
                     destinations.get((int(at.value), asset), (None,))[0] is not None
                     for asset in current.index
                 )
             ):
+                limits = maximum_quantities(marks)
                 target = yield PolicyDecision(
                     at,
                     current.reindex(assets).loc[:, list(decision_columns)].copy(),
@@ -1547,9 +1623,10 @@ def inventory_batches(
                     marks.reindex(assets).copy(),
                     cash - (passive.frozen_cash() if passive is not None else 0),
                     fsum(row.value for row in values(at).values()),
+                    maximum_quantities=limits,
                 )
                 target = policy_target(
-                    target, assets, maximum=params["maximum_inventory"]
+                    target, assets, maximum=limits.fillna(units).clip(lower=units)
                 )
                 for asset in target.index:
                     target[asset] = status_target(asset, target[asset])
@@ -1934,9 +2011,7 @@ def inventory_inputs(
 
     daily = config["daily_inputs"]
     start, end = pd.Timestamp(window.start).date(), pd.Timestamp(window.end).date()
-    asset_filter = (
-        ("asset_id", "in", tuple(config["parameters"]["maximum_inventory"])),
-    )
+    asset_filter = (("asset_id", "in", tuple(config["parameters"]["maximum_weights"])),)
     panel = open_dataset_session(
         **_dataset_input_options(
             config["panel"],
@@ -2002,7 +2077,7 @@ def inventory_inputs(
                 facts,
                 columns=("timestamp", "asset_id", "prediction_score"),
                 time_window=TimeWindow(start, end),
-                asset_ids=tuple(config["parameters"]["maximum_inventory"]),
+                asset_ids=tuple(config["parameters"]["maximum_weights"]),
             )
         ) as chunks:
             for frame in chunks:

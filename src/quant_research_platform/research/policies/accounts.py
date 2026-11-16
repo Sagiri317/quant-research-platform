@@ -173,7 +173,7 @@ def _stream(episode):
         )
         prediction = episode.get("prediction")
         params = _parameters(account["parameters"], policy=True)
-        if set(params["maximum_inventory"]) != set(episode["asset_ids"]) or (
+        if set(params["maximum_weights"]) != set(episode["asset_ids"]) or (
             params["restore_at"] is not None and prediction is None
         ):
             raise ValueError("policy_inventory_or_restoration_conflict")

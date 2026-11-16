@@ -28,8 +28,8 @@ qrp prepare-source --config configs/prepare-source.json
 qrp prepare --config <数据准备配置.json>
 qrp assemble --config <组装配置.json>
 qrp fit --config configs/fit-a-share.json
-qrp run-quarterly --config configs/quarterly-a-share.json
-qrp run-sessions --config configs/high-frequency/rolling-etf.json
+qrp run-quarterly --config configs/run-quarterly-a-share.json
+qrp run-sessions --config configs/high-frequency/run-sessions-etf.json
 qrp backtest-hft --config configs/backtest-hft.json
 qrp predict --config configs/predict.json
 qrp explain --config configs/explain-model.json
@@ -67,7 +67,9 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 同一日期的样本可以先用于评价，待标签成熟后再进入后续训练；窗口用途随本次操作记录。
 计算会检查拟合截止、标签成熟和校准时点。直接使用 Parquet 时，还需声明列角色、单位、主键和信息可用时间。
 
-[操作示例](configs/) 中的路径需替换为实际已准备输入。
+[配置索引](configs/README.md)区分当前研究入口与原生操作示例；示例中的路径需替换为实际已准备输入。
+四只 ETF 的直接策略与 PPO 共用 [执行研究配置](configs/high-frequency/run-etf-execution.json)，
+以 `qrp run-etf-execution --config ... --stage direct/train/ppo` 选择阶段。
 [选择并组装输入](configs/assemble-selected.json)统一演示分批因子与已有特征的列选择和拼接。
 已有特征保留原变换、资格列和缺值；`feature_recipe=null` 不重复处理。
 该示例生成无标签输入，训练时需另选标签及其成熟时间列。
@@ -75,11 +77,11 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 路径、证券与时间范围由调用者改为本次研究值，不为这些取值另存一套配置。
 
 [隔夜与日内收益准备](configs/prepare-on-id.json)、[共同样本分层评价](configs/evaluate-stratified-a-share.json)与
-[已保存日表的统计汇总](configs/statistics-stratified-a-share.json)分别调用 prepare、evaluate、statistics-factors。
+[已保存日表的统计汇总](configs/statistics-factors-stratified-a-share.json)分别调用 prepare、evaluate、statistics-factors。
 若要同时报告各方案自身样本的结果，需另建输出，设置 sample_scope=own，并移除 comparison_inputs。
 自身样本与共同样本两份评价应使用相同的焦点信号、输入和分层设置。
 [冻结模型解释](configs/explain-model.json)的背景必须落在该模型实际拟合域内；
-[组合基准比较](configs/statistics-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，并通过 inputs.calendar 提供覆盖收益区间的完整交易日历。
+[组合基准比较](configs/statistics-portfolio-benchmark-a-share.json)需替换真实指数代码、时钟、币种及价格/全收益口径，并通过 inputs.calendar 提供覆盖收益区间的完整交易日历。
 组合统计默认只计算绩效，额外分析通过 analyses 选择。
 [研究选择](docs/research.md)说明主线、比较方法与证据边界；运行参数在各项操作中明确指定。
 实际运行仍需填写各操作自己的配置。接口会校验字段、类型和必要数值，拒绝重复的 JSON 键。

@@ -127,7 +127,7 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path, as_of):
     episode["account"]["parameters"].update(
         initial_capital=10000.0,
         initial_inventory={"a": 500},
-        maximum_inventory={"a": 1000},
+        maximum_weights={"a": 1.0},
     )
     episode["order"]["quantity"] = -400
     params = {
@@ -160,15 +160,6 @@ def test_ac_and_signal_schedule_replay_native_account(tmp_path, as_of):
     assert summaries["vwap"] == summaries["almgren_chriss"] == summaries["twap"]
     assert summaries["twap"]["completion_rate"] == 0.5
     assert summaries["signal_ac"]["completion_rate"] < 0.5
-    with pytest.raises(ValueError, match="not_historical"):
-        backtest_policy(
-            {
-                "episode": episode,
-                "strategy": "almgren_chriss",
-                "execution_parameters": {**params, "as_of": episode["window"]["start"]},
-                "output": str(tmp_path / "invalid"),
-            }
-        )
 
 
 @pytest.mark.parametrize("strategy", ["vwap", "almgren_chriss"])

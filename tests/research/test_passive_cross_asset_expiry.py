@@ -35,6 +35,7 @@ def test_expired_partial_order_releases_cash_before_another_asset_request(tmp_pa
         [(4, "a", "sell", 130, 9.99), (15, "b", "sell", 300, 9.99)],
         capital=4005,
         minimum=5,
+        account_parameters={"maximum_weights": {"a": 1.0, "b": 1.0}},
         window=TimeWindow("2024-01-02T01:30:00", "2024-01-02T01:30:16"),
     )
     trades = [trade for batch in batches for trade in batch.trades]

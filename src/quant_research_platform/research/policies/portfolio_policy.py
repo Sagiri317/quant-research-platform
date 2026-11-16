@@ -105,7 +105,7 @@ def portfolio_targets(decision, maximum, parameters, *, context=None):
     cash = max(0.0, decision.cash - extra_reserved)
     available = float(holding.sum()) + cash
     construction = parameters["construction"]
-    maximum = pd.Series(maximum).reindex(index)
+    maximum = pd.Series(maximum).reindex(index).clip(lower=quantities)
     if construction != "absolute_risk":
         weights = build_simple_target_weights(
             score,

@@ -86,7 +86,7 @@ def run_stream(panel, signals, params, *, events=None, policy=None):
                 target = (
                     inventory_targets(
                         event,
-                        params["maximum_inventory"],
+                        event.maximum_quantities,
                         inventory_policy_parameters({}),
                     )
                     if policy is None
@@ -101,6 +101,188 @@ def run_stream(panel, signals, params, *, events=None, policy=None):
     finally:
         stream.close()
     return decisions, batches
+
+
+@pytest.mark.parametrize("price", [5.0, 10.0])
+def test_inventory_cap_tracks_current_nav_instead_of_fixed_shares(price):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        mid=price,
+        clocks=("01:30:00", "01:30:00.020", "01:30:03", "01:30:03.020"),
+    ).assign(instrument_type="gold_etf", ask_vol1=10_000.0)
+    signals = pd.DataFrame(
+        {
+            "timestamp": [
+                START + pd.Timedelta(milliseconds=1),
+                START + pd.Timedelta(seconds=3, milliseconds=1),
+            ],
+            "asset_id": "a",
+            "prediction_score": 0.1,
+        }
+    )
+    params = parameters(("a",))
+    del params["initial_inventory"]
+    params.update(
+        initial_capital=10_000, initial_weights={"a": 0.5}, maximum_weights={"a": 1.0}
+    )
+    decisions, batches = run_stream(panel, signals, params)
+    filled = 900 if price == 5 else 400
+    assert decisions[0].quantities.a == 5000 / price
+    assert decisions[0].maximum_quantities.a == 10_000 / price
+    assert [t.quantity for b in batches for t in b.trades] == [filled]
+    assert decisions[1].nav == pytest.approx(10_000 - filled * 0.01)
+    assert decisions[1].maximum_quantities.a == pytest.approx(
+        (10_000 - filled * 0.01) / price
+    )
+    cash = next(
+        v.value
+        for v in batches[-1].valuations
+        if v.phase == "end" and v.asset_id == "__cash__"
+    )
+    assert cash == pytest.approx(5000 - filled * (price + 0.01))
+
+
+@pytest.mark.parametrize("change", [0, -100, 1])
+def test_price_gain_above_weight_cap_allows_holding_or_reducing_only(change):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:00.020", "01:30:03", "01:30:03.020"),
+    ).assign(instrument_type="gold_etf")
+    panel.loc[
+        panel.timestamp.ge(START + pd.Timedelta(seconds=3)),
+        ["mid", "bid_px1", "ask_px1"],
+    ] = [20, 19.99, 20.01]
+    signals = pd.DataFrame(
+        {
+            "timestamp": [
+                START + pd.Timedelta(milliseconds=1),
+                START + pd.Timedelta(seconds=3, milliseconds=1),
+            ],
+            "asset_id": "a",
+            "prediction_score": 0.1,
+        }
+    )
+    params = parameters(("a",))
+    params.update(
+        initial_capital=10_000, initial_inventory={"a": 500}, maximum_weights={"a": 0.5}
+    )
+
+    def target(decision):
+        return decision.quantities + (change if decision.marks.a == 20 else 0)
+
+    if change > 0:
+        with pytest.raises(ValueError, match="policy_target_inventory_exceeded"):
+            run_stream(panel, signals, params, policy=target)
+        return
+    decisions, batches = run_stream(panel, signals, params, policy=target)
+    assert decisions[1].nav == 15_000
+    assert decisions[1].maximum_quantities.a == 375
+    assert decisions[1].quantities.a == 500
+    assert [t.quantity for b in batches for t in b.trades] == (
+        [] if change == 0 else [-100]
+    )
+
+
+@pytest.mark.parametrize("passive", [False, True])
+@pytest.mark.parametrize("sold", [0, 400])
+def test_restore_preserves_fixed_reference_but_caps_new_purchases(
+    tmp_path, passive, sold
+):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=(
+            "01:30:00",
+            "01:30:00.020",
+            "01:30:00.040",
+            "01:30:03",
+            "06:49:59",
+            "06:50:00.020",
+            "06:50:00.040",
+        ),
+    ).assign(instrument_type="gold_etf")
+    panel.loc[
+        panel.timestamp.ge(START + pd.Timedelta(seconds=3)),
+        ["mid", "bid_px1", "ask_px1"],
+    ] = [20, 19.99, 20.01]
+    signals = pd.DataFrame(
+        {
+            "timestamp": [START + pd.Timedelta(milliseconds=1)],
+            "asset_id": "a",
+            "prediction_score": -0.1,
+        }
+    )
+    params = parameters(("a",), restore_at="14:50:00")
+    params.update(
+        initial_capital=10_000,
+        initial_inventory={"a": 500},
+        maximum_weights={"a": 0.5},
+        latency_ms=10,
+    )
+    events = None
+    if passive:
+        params["passive"] = {"queue_model": "conservative", "cancel_latency_ms": 0}
+        events = trade_input(tmp_path / "trades", [(0.030, "a", "buy", 900, 10.01)])
+    _, batches = run_stream(
+        panel,
+        signals,
+        params,
+        events=events,
+        policy=lambda decision: decision.quantities - sold,
+    )
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [trade.quantity for trade in trades] == ([-400, 100] if sold else [])
+    last = {v.asset_id: v for v in batches[-1].valuations if v.phase == "end"}
+    assert last["a"].quantity == (200 if sold else 500)
+    sale_price = 10.01 if passive else 9.99
+    assert last["__cash__"].value == pytest.approx(
+        5000 + 400 * sale_price - 100 * 20.01 if sold else 5000
+    )
+    # After the gain, unchanged 500 shares exceed 50% * 15000 / 20 = 375;
+    # after selling 400, the cap is 274.9/275.1 and only one buy lot fits.
+    assert [
+        d.text
+        for b in batches
+        for d in b.diagnostics
+        if d.name == "inventory_restoration_status"
+    ] == ["INCOMPLETE" if sold else "COMPLETE"]
+    assert {
+        d.number
+        for b in batches
+        if b.valuations[0].timestamp_ns >= pd.Timestamp("2024-01-02T06:50:00").value
+        for d in b.diagnostics
+        if d.name == "inventory_target"
+    } == {500.0}
+
+
+def test_unknown_decision_price_cannot_bypass_money_cap_with_explicit_target():
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:03.020"),
+    ).assign(instrument_type="gold_etf", ask_vol1=5000.0)
+    panel.loc[panel.timestamp.eq(START + pd.Timedelta(seconds=3)), "mid"] = np.nan
+    signals = pd.DataFrame(
+        {
+            "timestamp": [START + pd.Timedelta(seconds=3, milliseconds=1)],
+            "asset_id": "a",
+            "prediction_score": 0.1,
+        }
+    )
+    params = parameters(("a",))
+    params.update(
+        initial_capital=10_000, initial_inventory={"a": 0}, maximum_weights={"a": 0.1}
+    )
+
+    def target(decision):
+        assert pd.isna(decision.marks.a)
+        assert pd.isna(decision.maximum_quantities.a)
+        return pd.Series({"a": 500.0})
+
+    with pytest.raises(ValueError, match="policy_target_inventory_exceeded"):
+        run_stream(panel, signals, params, policy=target)
 
 
 def test_quadratic_band_sizes_weak_missing_and_pending():
@@ -342,6 +524,7 @@ def test_native_pred_to_policy_to_persisted_ledger(tmp_path, empty_prediction):
         params["initial_capital"],
         params["restore_at"],
     )
+    params["maximum_weights"] = {"a": 0.003}
     config = {
         "strategy": "etf_inventory",
         "output": str(tmp_path / "result"),

@@ -863,6 +863,7 @@ def test_inventory_risk_uses_full_cross_section_and_keeps_account_economics(
     )
     params = parameters((assets[0],))
     params["minimum_commission"] = 2.0
+    params["maximum_weights"] = {assets[0]: 0.61}
     view = daily_view(panel, listing=listing)
     native_account(
         tmp_path,

@@ -60,6 +60,15 @@ def lookup(arguments, state):
         cli = ast.parse(
             (package / "interfaces/cli/commands.py").read_text(encoding="utf-8")
         )
+        command_names = {
+            decorator.args[0].value
+            for command in cli.body
+            if isinstance(command, ast.FunctionDef)
+            for decorator in command.decorator_list
+            if isinstance(decorator, ast.Call)
+            and decorator.args
+            and isinstance(decorator.args[0], ast.Constant)
+        }
         for command in cli.body:
             if not isinstance(command, ast.FunctionDef):
                 continue
@@ -75,11 +84,22 @@ def lookup(arguments, state):
                     continue
                 text = ast.get_docstring(command) or name
                 if arguments.get("key") == name:
-                    for example in sorted(
-                        (package.parents[1] / "configs").glob(f"{name}*.json")
-                    ):
+                    examples = package.parents[1] / "configs"
+                    for example in sorted(examples.rglob(f"{name}*.json")):
+                        owner = max(
+                            (
+                                command_name
+                                for command_name in command_names
+                                if example.stem == command_name
+                                or example.stem.startswith(command_name + "-")
+                            ),
+                            key=len,
+                            default=None,
+                        )
+                        if owner != name:
+                            continue
                         text += (
-                            f"\nNative config example: {example.name}. "
+                            f"\nNative config example: {example.relative_to(examples).as_posix()}. "
                             "Paths and dates are examples, not task inputs.\n"
                             + example.read_text(encoding="utf-8")
                         )

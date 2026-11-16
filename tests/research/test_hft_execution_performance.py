@@ -41,6 +41,7 @@ def test_cancelled_cash_is_available_without_another_quote_for_that_asset(
         [(7, borrower, "sell", 1000, 9.99)],
         cancel_ms=1000,
         capital=3998,
+        account_parameters={"maximum_weights": {cancelled: 1.0, borrower: 1.0}},
     )
     trades = [trade for batch in batches for trade in batch.trades]
     assert [(trade.asset_id, trade.quantity) for trade in trades] == [(borrower, 200)]
@@ -77,6 +78,7 @@ def test_off_quote_policy_observes_released_cash_before_its_next_decision(tmp_pa
     params = {
         **parameters(),
         "initial_capital": 3998,
+        "maximum_weights": {"a": 1.0, "b": 1.0},
         "passive": {"queue_model": "conservative", "cancel_latency_ms": 1000},
     }
     events = trade_input(tmp_path / "trades", [(7, "b", "sell", 1000, 9.99)])

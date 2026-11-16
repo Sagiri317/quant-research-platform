@@ -38,14 +38,14 @@
       },
       "parameters": {
         "initial_inventory": {},
-        "maximum_inventory": {
-          "000001": 10000000,
-          "600000": 10000000
-        },
         "participation_rate": 0.5,
         "minimum_commission": 5,
         "latency_ms": 10,
-        "taker_depth_levels": 1
+        "taker_depth_levels": 1,
+        "maximum_weights": {
+          "000001": 1.0,
+          "600000": 1.0
+        }
       },
       "stock_status": {
         "stock_master": "data/processed/a_share/stock_master_pit",

@@ -72,4 +72,5 @@ def agent_config(tmp_path):
         "budget": {"max_requests": 4, "max_experiments": 3, "wall_seconds": 60},
         "output": str(tmp_path / "agent"),
         "llm": {},
+        "web_search": False,
     }

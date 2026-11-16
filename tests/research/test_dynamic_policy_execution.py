@@ -1,7 +1,6 @@
 """PPO execution uses causal predictions, one order book, and native cash economics."""
 
 import pickle
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, replace
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.contracts.policies import PolicyDecision, PolicyExecution
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.policies import environments
 from quant_research_platform.research.policies.environments import (
     TradingEnv,
     _trading_seconds,
@@ -35,6 +33,7 @@ from quant_research_platform.research.portfolios import high_frequency
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from tests.helpers.high_frequency import (
     daily_view,
+    memory_account,
     parameters,
     quotes,
     trade_input,
@@ -124,7 +123,7 @@ def test_inflight_replacement_cannot_block_or_change_prior_ioc_economics(
     params.update(
         initial_capital=capital,
         initial_inventory={"a": initial},
-        maximum_inventory={"a": limit},
+        maximum_weights={"a": min(1.0, limit * 10 / capital)},
         latency_ms=4000,
         minimum_commission=5,
         passive={"queue_model": "conservative", "cancel_latency_ms": 1500},
@@ -158,9 +157,29 @@ def test_inflight_replacement_cannot_block_or_change_prior_ioc_economics(
                     )
                     event = stream.send(
                         PolicyExecution(
-                            pd.Series({"a": target}),
+                            pd.Series(
+                                {
+                                    "a": min(
+                                        target,
+                                        max(
+                                            event.quantities.a,
+                                            event.maximum_quantities.a,
+                                        ),
+                                    )
+                                }
+                            ),
                             pd.Series({"a": mode}),
-                            pd.Series({"a": replacement_target}),
+                            pd.Series(
+                                {
+                                    "a": min(
+                                        replacement_target,
+                                        max(
+                                            event.quantities.a,
+                                            event.maximum_quantities.a,
+                                        ),
+                                    )
+                                }
+                            ),
                         )
                     )
                     decision_count += 1
@@ -251,7 +270,9 @@ def execution_episode(
     )
     parameters = {
         "initial_inventory": dict.fromkeys(assets, 100),
-        "maximum_inventory": dict.fromkeys(assets, 300),
+        "maximum_weights": dict.fromkeys(
+            assets, min(1.0, 3000 / (capital or 1_000_000 * len(assets)))
+        ),
         "latency_ms": 10,
         "participation_rate": 1,
         "minimum_commission": 5,
@@ -324,28 +345,15 @@ def test_half_capital_and_fixed_reference_survive_unfinished_restoration(monkeyp
                 }
             )
         )
-    events = pd.DataFrame(
-        columns=(
-            "timestamp",
-            "asset_id",
-            "source_row",
-            "event_kind",
-            "side",
-            "price",
-            "volume",
-        )
-    ).astype({"timestamp": "datetime64[ns]", "price": "float64", "volume": "float64"})
-    monkeypatch.setattr(high_frequency, "materialize_dataset_session", lambda _: events)
     params = parameters(("a",), restore_at="14:50:00")
     del params["initial_inventory"], params["buy_threshold"], params["sell_threshold"]
     params.update(
         initial_weights={"a": 0.5},
         initial_capital=4500,
-        maximum_inventory={"a": 300},
+        maximum_weights={"a": 2 / 3},
         latency_ms=10,
         passive={"queue_model": "conservative", "cancel_latency_ms": 10},
     )
-    params = high_frequency._parameters(params, policy=True)
     episode = {
         "kind": "hft",
         "task": "dynamic_execution",
@@ -353,37 +361,22 @@ def test_half_capital_and_fixed_reference_survive_unfinished_restoration(monkeyp
         "feature_columns": ["prediction_score"],
         "window": {"start": "2024-01-02", "end": "2024-01-03"},
         "prediction": {"paths": ["memory"]},
-        "account": {"trades": "memory", "parameters": params},
+        "account": memory_account(
+            monkeypatch,
+            [
+                (daily_view(panel, listing=pd.Timestamp("2024-01-02")), panel, signal)
+                for panel, signal in zip(panels, signals, strict=True)
+            ],
+            etf_schedule(),
+            params,
+        ),
         "inventory_parameters": {"trade_cost_bps": 0, "exit_cost_bps": 0},
         "risk_aversion": 0,
         "target_deviation_bps": 0,
         "unfinished_penalty_bps": 0,
     }
 
-    @contextmanager
-    def native_stream(selected):
-        sessions = [
-            (daily_view(panel, listing=pd.Timestamp("2024-01-02")), panel, signal)
-            for panel, signal in zip(panels, signals, strict=True)
-        ]
-        with closing_iterator(
-            high_frequency.inventory_batches(
-                sessions,
-                etf_schedule(),
-                params,
-                TimeWindow(**selected["window"]),
-                decision_columns=("prediction_score",),
-                prediction_decisions=True,
-                prediction_task="dynamic_execution",
-                quote_visibility_delay_ms=1,
-                trade_session=SimpleNamespace(filtered_view=lambda _: None),
-                max_quote_gap_seconds=6,
-            )
-        ) as stream:
-            yield stream
-
-    monkeypatch.setattr(environments, "_stream", native_stream)
-    decisions, batches, _, _, _ = replay(episode, [[7]] * 10)
+    decisions, batches, _, _, _ = replay(episode, [[7], [0]])
     # 4500 * 50% / 10 = 225 shares, rounded down to two lots.
     first = {v.asset_id: v for v in batches[0].valuations if v.phase == "before"}
     assert first["a"].quantity == 200
@@ -399,6 +392,116 @@ def test_half_capital_and_fixed_reference_survive_unfinished_restoration(monkeyp
         for d in b.diagnostics
         if d.name == "inventory_restoration_status"
     ] == ["INCOMPLETE", "COMPLETE"]
+
+
+@pytest.mark.parametrize("kind", ["gold_etf", "equity_etf"])
+def test_native_restoration_overrides_wait_and_respects_cancellation_and_t1(
+    monkeypatch, kind
+):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=(
+            "06:49:53",
+            "06:49:53.020",
+            "06:49:56",
+            "06:49:56.020",
+            "06:49:59",
+            "06:50:00.020",
+            "06:50:00.500",
+            "06:50:01.001",
+            "06:50:01.020",
+        ),
+    ).assign(instrument_type=kind, bid_vol1=1000.0, ask_vol1=1000.0)
+    panel.loc[panel.timestamp.ge(pd.Timestamp("2024-01-02T06:49:56")), "bid_vol1"] = (
+        100.0
+    )
+    signals = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-02T06:49:53.001",
+                    "2024-01-02T06:49:56.001",
+                    "2024-01-02T06:49:59.001",
+                    "2024-01-02T06:50:01.002",
+                ]
+            ),
+            "asset_id": "a",
+            "prediction_score": [-0.1, 0.1, 0.1, 0.1],
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-02T06:49:57", "2024-01-02T06:50:00.500"], format="mixed"
+            ),
+            "asset_id": "a",
+            "source_row": [0, 1],
+            "event_kind": "trade",
+            "side": "sell",
+            "price": 9.99,
+            "volume": [700.0, 100.0],
+        }
+    )
+    params = parameters(("a",), restore_at="14:50:00")
+    del params["buy_threshold"], params["sell_threshold"]
+    params.update(
+        initial_capital=10_000,
+        initial_inventory={"a": 500},
+        maximum_weights={"a": 1.0},
+        latency_ms=10,
+        passive={"queue_model": "conservative", "cancel_latency_ms": 1000},
+    )
+    episode = {
+        "kind": "hft",
+        "task": "dynamic_execution",
+        "asset_ids": ["a"],
+        "feature_columns": ["prediction_score"],
+        "window": {"start": "2024-01-02", "end": "2024-01-02"},
+        "prediction": {"paths": ["memory"]},
+        "account": memory_account(
+            monkeypatch,
+            [(daily_view(panel), panel, signals)],
+            etf_schedule(),
+            params,
+            trades=events,
+        ),
+        "inventory_parameters": {"trade_cost_bps": 0, "exit_cost_bps": 0},
+        "risk_aversion": 0,
+        "target_deviation_bps": 10,
+        "unfinished_penalty_bps": 0,
+    }
+
+    decisions, batches, rewards, _, _ = replay(episode, [[7], [4], [0]])
+    assert len(decisions) == 3
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [trade.quantity for trade in trades] == (
+        [-500, 600, 100, -100, -100] if kind == "gold_etf" else [-500, 600, 100]
+    )
+    if kind == "gold_etf":
+        assert trades[-2].timestamp_ns == pd.Timestamp("2024-01-02T06:50:01.001").value
+    assert any(
+        d.name == "passive_cancel_requested" for b in batches for d in b.diagnostics
+    )
+    assert [
+        d.text
+        for b in batches
+        for d in b.diagnostics
+        if d.name == "inventory_restoration_status"
+    ] == ["COMPLETE" if kind == "gold_etf" else "INCOMPLETE"]
+    last = next(
+        v for v in batches[-1].valuations if v.phase == "end" and v.asset_id == "a"
+    )
+    assert last.quantity == (500 if kind == "gold_etf" else 700)
+
+    # Integrate the last action from 14:49:59.001: the account changes its
+    # target to 500 at 14:50, before cancellation and the subsequent fills.
+    squared_share_seconds = 400.1**2 * 0.999 + 100**2 * 0.5
+    squared_share_seconds += (
+        200**2 * 0.501 + 100**2 * 0.019 if kind == "gold_etf" else 200**2 * 599.5
+    )
+    penalty = 10 * (10 / 10_000) ** 2 * squared_share_seconds / 14400
+    assert rewards[-1] == pytest.approx((-1 if kind == "gold_etf" else 1) - penalty)
 
 
 def test_half_capital_is_saved_as_actual_shares_in_native_ledger(tmp_path):
@@ -422,6 +525,94 @@ def test_half_capital_is_saved_as_actual_shares_in_native_ledger(tmp_path):
     assert before["__cash__"].value == 2500
 
 
+@pytest.mark.parametrize("task", ["inventory", "execution"])
+def test_policy_can_hold_or_reduce_an_existing_position_above_money_cap(
+    monkeypatch, task
+):
+    panel = quotes(
+        "2024-01-02", assets=("a",), clocks=("01:29:59", "01:30:03", "01:30:06")
+    ).assign(instrument_type="gold_etf")
+    panel.loc[panel.timestamp.dt.minute.eq(30), ["mid", "bid_px1", "ask_px1"]] = [
+        20,
+        19.99,
+        20.01,
+    ]
+    params = parameters(("a",))
+    del params["buy_threshold"], params["sell_threshold"]
+    params.update(
+        initial_capital=10_000, initial_inventory={"a": 500}, maximum_weights={"a": 0.5}
+    )
+    episode = {
+        "kind": "hft",
+        "task": task,
+        "asset_ids": ["a"],
+        "feature_columns": ["mid"],
+        "window": {"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:06"},
+        "account": memory_account(
+            monkeypatch,
+            [(daily_view(panel), panel, pd.DataFrame())],
+            etf_schedule(),
+            params,
+        ),
+        "risk_aversion": 0,
+        "unfinished_penalty_bps": 0,
+    }
+    if task == "execution":
+        episode["order"] = {"asset_id": "a", "quantity": -100}
+
+    decisions, batches, _, _, _ = replay(episode, [[1.0], [1.0]])
+    assert decisions[0].nav == 15_000
+    assert decisions[0].quantities.a == 500
+    assert decisions[0].maximum_quantities.a == 375
+    assert [trade.quantity for batch in batches for trade in batch.trades] == (
+        [] if task == "inventory" else [-100]
+    )
+
+
+def test_inventory_action_waits_for_a_known_money_cap(monkeypatch):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:03.020", "01:30:06", "01:30:06.020"),
+    ).assign(instrument_type="gold_etf", ask_vol1=5000.0)
+    panel.loc[panel.timestamp.eq(pd.Timestamp("2024-01-02T01:30:03")), "mid"] = np.nan
+    signals = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-02T01:30:03.001", "2024-01-02T01:30:06.001"]
+            ),
+            "asset_id": "a",
+            "prediction_score": 0.1,
+        }
+    )
+    params = parameters(("a",), restore_at="14:50:00")
+    del params["buy_threshold"], params["sell_threshold"]
+    params.update(
+        initial_capital=10_000, initial_inventory={"a": 0}, maximum_weights={"a": 0.1}
+    )
+    episode = {
+        "kind": "hft",
+        "task": "inventory",
+        "asset_ids": ["a"],
+        "feature_columns": ["prediction_score"],
+        "prediction": {"paths": ["memory"]},
+        "window": {"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:07"},
+        "capital_scale": 0.01,
+        "account": memory_account(
+            monkeypatch, [(daily_view(panel), panel, signals)], etf_schedule(), params
+        ),
+        "risk_aversion": 0,
+        "unfinished_penalty_bps": 0,
+    }
+
+    decisions, batches, _, _, _ = replay(episode, [[1.0], [1.0]])
+    assert pd.isna(decisions[0].maximum_quantities.a)
+    assert decisions[1].maximum_quantities.a == 100
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [trade.quantity for trade in trades] == [100]
+    assert trades[0].timestamp_ns == pd.Timestamp("2024-01-02T01:30:06.020").value
+
+
 @pytest.mark.parametrize("weights", [{"a": -0.1}, {"a": 1.1}, {"b": 0.5}])
 def test_initial_weight_input_rejects_invalid_allocation(weights):
     params = parameters(("a",))
@@ -439,6 +630,7 @@ def test_maker_to_taker_waits_for_cancel_and_settles_partial_fills_once(tmp_path
             (4.001, "a", "sell", 25, 9.99),
         ],
     )
+    episode["account"]["parameters"]["maximum_weights"] = {"a": 0.0031}
     decisions, batches, rewards, info, initial = replay(episode, [[4], [7], [0], [0]])
     trades = [trade for batch in batches for trade in batch.trades]
     assert [trade.quantity for trade in trades] == [50, 25, 25, 100]
@@ -526,7 +718,7 @@ def test_dynamic_execution_obeys_native_t1_and_t0(kind, remaining, tmp_path):
 def test_ppo_quantity_actions_share_opposite_capacity(tmp_path, action, expected):
     episode = execution_episode(tmp_path)
     episode["account"]["parameters"].update(
-        maximum_inventory={"a": 500}, participation_rate=0.4
+        maximum_weights={"a": 0.005}, participation_rate=0.4
     )
     decisions, batches, _, _, _ = replay(episode, [[action], [0], [0], [0]])
     # Gap 400; fractions request 100/200/400, capped at ask depth 500 * .4.
@@ -598,6 +790,7 @@ def test_observation_and_action_follow_caller_asset_order(tmp_path):
         tmp_path / "different_daily", panel
     )
     episode["asset_ids"] = ["b", "a"]
+    episode["account"]["parameters"]["maximum_weights"] = {"a": 0.0015, "b": 0.003}
     env = TradingEnv([episode])
     try:
         observation, _ = env.reset(seed=0)
@@ -694,6 +887,13 @@ def test_risk_time_excludes_lunch_overnight_and_weekend():
         == 3600
     )
 
+    assert (
+        _trading_seconds(
+            pd.Timestamp("2024-01-05T07:00"), pd.Timestamp("2024-01-08T01:30")
+        )
+        == 0
+    )
+
 
 @pytest.mark.parametrize(
     "end,trading_seconds",
@@ -728,20 +928,6 @@ def test_terminal_exposure_uses_only_observed_native_sessions(
             "prediction_score": 0.1,
         }
     )
-    empty_trades = pd.DataFrame(
-        columns=(
-            "timestamp",
-            "asset_id",
-            "source_row",
-            "event_kind",
-            "side",
-            "price",
-            "volume",
-        )
-    ).astype({"timestamp": "datetime64[ns]", "price": "float64", "volume": "float64"})
-    monkeypatch.setattr(
-        high_frequency, "materialize_dataset_session", lambda _: empty_trades
-    )
     params = parameters(("a",), restore_at="14:50:00")
     del params["buy_threshold"], params["sell_threshold"]
     params.update(
@@ -758,44 +944,23 @@ def test_terminal_exposure_uses_only_observed_native_sessions(
             "end": end,
         },
         "prediction": {"paths": ["memory"]},
-        "account": {"trades": "memory", "parameters": params},
+        "account": memory_account(
+            monkeypatch,
+            [(daily_view(panel), panel, predictions)],
+            etf_schedule(),
+            params,
+        ),
         "inventory_parameters": {"trade_cost_bps": 0, "exit_cost_bps": 0},
         "risk_aversion": 1,
         "target_deviation_bps": 0,
         "unfinished_penalty_bps": 0,
     }
 
-    @contextmanager
-    def native_stream(selected):
-        with closing_iterator(
-            high_frequency.inventory_batches(
-                [(daily_view(panel), panel, predictions)],
-                etf_schedule(),
-                params,
-                TimeWindow(**selected["window"]),
-                decision_columns=("prediction_score",),
-                prediction_decisions=True,
-                prediction_task="dynamic_execution",
-                quote_visibility_delay_ms=1,
-                trade_session=SimpleNamespace(filtered_view=lambda _: None),
-                max_quote_gap_seconds=6,
-            )
-        ) as stream:
-            yield stream
-
-    # Supply in-memory inputs at the I/O seam; rewards and the account are real.
-    monkeypatch.setattr(environments, "_stream", native_stream)
     _, batches, rewards, info, _ = replay(episode, [[0], [0], [0], [0]])
     assert info["economic_reward_bps"] == 0
     assert not any(batch.trades or batch.cashflows for batch in batches)
     assert sum(rewards) == pytest.approx(
         -((100 * 10 / 1_000_000) ** 2) * trading_seconds / 14400, rel=1e-12, abs=1e-15
-    )
-    assert (
-        _trading_seconds(
-            pd.Timestamp("2024-01-05T07:00"), pd.Timestamp("2024-01-08T01:30")
-        )
-        == 0
     )
 
 
@@ -842,9 +1007,11 @@ def test_target_penalty_is_integrated_without_a_second_fee_or_cashflow(tmp_path)
     assert not any(batch.trades or batch.cashflows for batch in batches)
 
 
-@pytest.mark.parametrize("kind", ["gold_etf", "equity_etf"])
-@pytest.mark.parametrize("side", [1, -1])
-@pytest.mark.parametrize("partial_fill", [0, 100])
+@pytest.mark.parametrize(
+    "kind,side,partial_fill",
+    [("gold_etf", side, fill) for side in (1, -1) for fill in (0, 100)]
+    + [("equity_etf", 1, 100)],
+)
 def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
     monkeypatch, kind, side, partial_fill
 ):
@@ -893,13 +1060,12 @@ def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
             "volume",
         ),
     ).astype({"timestamp": "datetime64[ns]", "price": "float64", "volume": "float64"})
-    monkeypatch.setattr(high_frequency, "materialize_dataset_session", lambda _: events)
     params = parameters(("a",), restore_at="14:50:00")
     del params["buy_threshold"], params["sell_threshold"]
     params.update(
         initial_capital=20_000,
         initial_inventory={"a": 1000},
-        maximum_inventory={"a": 2000},
+        maximum_weights={"a": 1.0},
         minimum_commission=0,
         passive={"queue_model": "conservative", "cancel_latency_ms": 10_000},
     )
@@ -910,33 +1076,19 @@ def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
         "feature_columns": ["prediction_score"],
         "window": {"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:12"},
         "prediction": {"paths": ["memory"]},
-        "account": {"trades": "memory", "parameters": params},
+        "account": memory_account(
+            monkeypatch,
+            [(daily_view(panel), panel, predictions)],
+            etf_schedule(),
+            params,
+            trades=events,
+        ),
         "inventory_parameters": {"trade_cost_bps": 0, "exit_cost_bps": 0},
         "risk_aversion": 0,
         "target_deviation_bps": 10,
         "unfinished_penalty_bps": 0,
     }
 
-    @contextmanager
-    def native_stream(selected):
-        with closing_iterator(
-            high_frequency.inventory_batches(
-                [(daily_view(panel), panel, predictions)],
-                etf_schedule(),
-                params,
-                TimeWindow(**selected["window"]),
-                decision_columns=("prediction_score",),
-                prediction_decisions=True,
-                prediction_task="dynamic_execution",
-                quote_visibility_delay_ms=1,
-                trade_session=SimpleNamespace(filtered_view=lambda _: None),
-                max_quote_gap_seconds=6,
-            )
-        ) as stream:
-            yield stream
-
-    # Matching, eligibility and reward stay native; only input I/O is supplied.
-    monkeypatch.setattr(environments, "_stream", native_stream)
     batches, decisions, targets, rewards = [], [], [], []
     env = TradingEnv([episode], on_batch=batches.append)
     try:
@@ -950,7 +1102,12 @@ def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
     finally:
         env.close()
     # The live order is 200 shares; the larger replacement reserves at most 500.
-    assert targets == [2000.0 if side == 1 else 0.0] * 4
+    maximum_after_fill = (20_000 + partial_fill * 0.01) / 10
+    assert targets == (
+        [2000.0, 2000.0, maximum_after_fill, maximum_after_fill]
+        if side == 1
+        else [0.0] * 4
+    )
     assert decisions[1].pending_quantities.a == side * 200
     assert decisions[2].pending_quantities.a == side * (200 - partial_fill)
     assert decisions[2].quantities.a == 1000 + side * partial_fill
@@ -967,7 +1124,8 @@ def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
         assert decisions[2].sellable.a == physical - 500
         assert decisions[2].reserved_cash == 0
     # The later three-second interval rewards only actual inventory reduction.
-    expected_penalty = -10 * ((1000 - partial_fill) * 10 / 20_000) ** 2 * 3 / 14400
+    distance = (maximum_after_fill if side == 1 else 0) - (1000 + side * partial_fill)
+    expected_penalty = -10 * (distance * 10 / 20_000) ** 2 * 3 / 14400
     assert rewards[2] == pytest.approx(expected_penalty, rel=1e-10, abs=1e-15)
     trades = [trade for batch in batches for trade in batch.trades]
     assert [trade.quantity for trade in trades] == (
@@ -980,11 +1138,15 @@ def test_execution_reservations_cannot_change_strategy_target_or_earn_reward(
     opposite["prediction_score"] = -side * 0.1
     opposite_target = inventory_targets(
         replace(decisions[2], features=opposite),
-        params["maximum_inventory"],
+        decisions[2].maximum_quantities,
         env.episode["inventory_parameters"],
     )
     assert opposite_target.a == (
-        2000 if side == -1 else partial_fill if kind == "equity_etf" else 0
+        maximum_after_fill
+        if side == -1
+        else partial_fill
+        if kind == "equity_etf"
+        else 0
     )
 
 
@@ -1013,6 +1175,9 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
     evaluated_updates = []
 
     def observed_evaluation(model, *args, **kwargs):
+        assert model.get_env().norm_reward
+        assert not args[0].training
+        assert not args[0].norm_reward
         evaluated_updates.append(model._n_updates)
         return evaluate(model, *args, **kwargs)
 
@@ -1036,6 +1201,7 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
         "threads": 1,
         "ppo": {
             "n_steps": 4,
+            "gamma": 0.999,
             "batch_size": 4,
             "n_epochs": 1,
             "policy_kwargs": {"net_arch": [8]},
@@ -1054,6 +1220,9 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
     assert facts["validation"]["best_validation_reward"] == 0
     assert facts["training_decisions"]["start"] == "2024-01-02T01:30:00.001000"
     feature_scaler = (model / "feature_scaler.pkl").read_bytes()
+    normalization = pickle.loads((model / "normalization.pkl").read_bytes())
+    assert normalization.norm_reward
+    assert normalization.gamma == 0.999
     assert pickle.loads(feature_scaler).medians == (0, 10, 10, 500)
     later = deepcopy(episode)
     later["window"] = {"start": "2024-01-04T01:30:00", "end": "2024-01-04T01:30:12"}

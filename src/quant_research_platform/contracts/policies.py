@@ -16,6 +16,8 @@ class PolicyDecision:
     Prediction inventory targets use physical_sellable before order reservations,
     after settlement and equity locks; cash plus reserved_cash is actual cash.
     Reference quantities are the fixed initial shares for ETF prediction tasks.
+    For HFT, maximum_quantities converts the configured NAV fractions to shares
+    using these marks and NAV; an existing excess position may be held or reduced.
     The account consumes a target Series or dynamic PolicyExecution request sent
     back to the yielding iterator.
     """
@@ -39,6 +41,7 @@ class PolicyDecision:
     ) = None
     order_state: pd.DataFrame | None = None
     physical_sellable: pd.Series | None = None
+    maximum_quantities: pd.Series | None = None
 
 
 @dataclass(frozen=True)

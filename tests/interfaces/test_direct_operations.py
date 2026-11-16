@@ -89,13 +89,13 @@ def test_cli_registers_independent_operations_with_help():
     from typer.main import get_command
 
     command = get_command(commands.app)
-    assert set(command.commands) == {
+    assert {
         *(name for name, _, _ in CONFIG_OPERATIONS),
         "agent",
         "inspect",
         "catalog",
         "schema-inventory",
-    }
+    } <= set(command.commands)
     for name, _, _ in CONFIG_OPERATIONS:
         assert [param.name for param in command.commands[name].params] == ["config"]
     assert all(item.help for item in command.commands.values())

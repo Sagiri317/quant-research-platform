@@ -1,6 +1,7 @@
 """Explicit small quote and daily evidence fixtures for A-share execution tests."""
 
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -14,7 +15,7 @@ from quant_research_platform.markets.implementations.a_share.portfolio_sessions 
     _CORPORATE_EVENT_COLUMNS,
     _PortfolioSession,
 )
-from quant_research_platform.research.portfolios.high_frequency import _parameters
+from quant_research_platform.research.portfolios import high_frequency
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
 from tests.helpers.portfolio_inputs import _interim_specs, _processed_specs
@@ -54,6 +55,43 @@ def daily_view(quotes, *, listing=None, corporate_events=None, rights_events=Non
         if corporate_events is None
         else corporate_events,
     )
+
+
+def memory_account(monkeypatch, sessions, fees, params, *, trades=None):
+    """Replace input I/O while retaining the real policy-to-account connection."""
+    account = {
+        "panel": "memory",
+        "fee_schedule": "memory",
+        "daily_inputs": {},
+        "parameters": params,
+    }
+    trade_session = None
+    if "passive" in params:
+        if trades is None:
+            trades = pd.DataFrame(
+                columns=(
+                    "timestamp",
+                    "asset_id",
+                    "source_row",
+                    "event_kind",
+                    "side",
+                    "price",
+                    "volume",
+                )
+            ).astype(
+                {"timestamp": "datetime64[ns]", "price": "float64", "volume": "float64"}
+            )
+        trade_session = SimpleNamespace(filtered_view=lambda _: trades)
+        monkeypatch.setattr(
+            high_frequency, "materialize_dataset_session", lambda frame: frame
+        )
+        account["trades"] = "memory"
+    monkeypatch.setattr(
+        high_frequency,
+        "inventory_inputs",
+        lambda *_args, **_kwargs: (iter(sessions), fees, trade_session, 6),
+    )
+    return account
 
 
 def write_daily_inputs(root, quotes):
@@ -125,11 +163,11 @@ def quotes(
 
 
 def parameters(assets=("a", "b"), *, restore_at=None):
-    return _parameters(
+    return high_frequency._parameters(
         dict(
             initial_capital=5000.0,
             initial_inventory=dict.fromkeys(assets, 100),
-            maximum_inventory=dict.fromkeys(assets, 300),
+            maximum_weights=dict.fromkeys(assets, 0.6),
             buy_threshold=0.5,
             sell_threshold=-0.5,
             latency_ms=0.0,

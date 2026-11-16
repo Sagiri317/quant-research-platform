@@ -22,6 +22,8 @@
   "memory": "results/agent-memory",
   "web_search": true,
   "documents": {
+    "project_readme": "README.md",
+    "architecture": "docs/architecture.md",
     "research_methods": "docs/research-learning.md",
     "agent_usage": "docs/agent.md",
     "factor_formula_api": "src/quant_research_platform/research/factors/search.py",
