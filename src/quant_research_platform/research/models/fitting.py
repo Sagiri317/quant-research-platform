@@ -813,6 +813,7 @@ def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
                 missing=estimator.missing,
                 nthread=estimator.n_jobs,
                 max_bin=estimator.max_bin,
+                cache_host_ratio=1.0,
                 enable_categorical=estimator.enable_categorical,
             )
     return estimator._create_dmatrix(
