@@ -361,7 +361,8 @@ def _legal_training_rows(
 
 
 def _collect_training_frame(frames, spec, **kwargs):
-    feature_file = TemporaryFile()
+    # Coalesce wide IPC column buffers before writing to the filesystem.
+    feature_file = TemporaryFile(buffering=8 * 1024 * 1024)
     try:
         with pa.ipc.new_file(
             feature_file,

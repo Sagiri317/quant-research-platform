@@ -167,8 +167,8 @@ def test_fit_closes_temporary_inputs_on_success_and_failure(monkeypatch, failure
     handles = []
     original = fitting.TemporaryFile
 
-    def opened():
-        handle = original()
+    def opened(*args, **kwargs):
+        handle = original(*args, **kwargs)
         handles.append(handle)
         return handle
 
