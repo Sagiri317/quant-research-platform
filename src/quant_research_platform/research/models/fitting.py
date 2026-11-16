@@ -805,14 +805,16 @@ def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
             return True
 
     if external:
-        return ExtMemQuantileDMatrix(
-            Batches(),
-            ref=ref,
-            missing=estimator.missing,
-            nthread=estimator.n_jobs,
-            max_bin=estimator.max_bin,
-            enable_categorical=estimator.enable_categorical,
-        )
+        # Share the driver async pool with XGBoost instead of retaining a CuPy cache.
+        with cupy.cuda.using_allocator(cupy.cuda.malloc_async):
+            return ExtMemQuantileDMatrix(
+                Batches(),
+                ref=ref,
+                missing=estimator.missing,
+                nthread=estimator.n_jobs,
+                max_bin=estimator.max_bin,
+                enable_categorical=estimator.enable_categorical,
+            )
     return estimator._create_dmatrix(
         ref=ref,
         data=Batches(),

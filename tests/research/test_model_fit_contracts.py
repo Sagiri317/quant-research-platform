@@ -119,7 +119,9 @@ def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_
         },
     )
     results = []
-    for external in (False, True):
+    allocator = cupy.cuda.get_allocator()
+    cached_bytes = cupy.get_default_memory_pool().total_bytes()
+    for external in (False, True, True):
         candidate = replace(
             spec, hyperparameters={**spec.hyperparameters, "external_memory": external}
         )
@@ -134,11 +136,19 @@ def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_
         assert (
             result.metadata["resolved_hyperparameters"]["external_memory"] is external
         )
+        assert cupy.cuda.get_allocator() is allocator
+        assert cupy.get_default_memory_pool().total_bytes() == cached_bytes
         results.append(result)
     inputs = frame.loc[:, spec.input_columns]
     np.testing.assert_allclose(
         results[0].prediction_model.predict(inputs),
         results[1].prediction_model.predict(inputs),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        results[1].prediction_model.predict(inputs),
+        results[2].prediction_model.predict(inputs),
         rtol=2e-6,
         atol=2e-6,
     )

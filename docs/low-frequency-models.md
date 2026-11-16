@@ -285,6 +285,7 @@ XGBoost以原生DataIter分块消费同一训练矩阵，标签、行权重、�
 股票配置显式`external_memory=true`时，用CUDA数组及官方`ExtMemQuantileDMatrix`把量化批次放在GPU外，
 由原生后端取用；普通路径保持`QuantileDMatrix`。这个执行选项不改变树参数、缺失分支或早停规则，默认false。
 GPU外存需要可选依赖组`xgboost-external-memory`，当前CUDA12项目环境使用CuPy14.2；
+CuPy输入批次与XGBoost共用当前CUDA异步内存池，避免独立的CuPy缓存保留显存；矩阵构造结束后恢复调用者的分配器。
 缺少依赖或GPU入口失败时明确报错，不静默改CPU。
 依据[官方外存说明](https://xgboost.readthedocs.io/en/release_3.2.0/tutorials/external_memory.html)和
 [CuPy安装说明](https://docs.cupy.dev/en/stable/install.html)。
