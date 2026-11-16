@@ -284,10 +284,12 @@ def _sequence_arrays(prepared, spec, scaler, history=None):
         context = context.loc[valid]
         valid = valid[valid]
     matrix = np.zeros((len(context), len(spec.input_columns)), dtype="float32")
+    # Read in source order so Arrow take does not repeatedly combine distant chunks.
+    source_order = np.argsort(context.index.to_numpy())
     for start in range(0, len(context), 16384):
-        rows = context.index[start : start + 16384].to_numpy()
-        selected = valid[start : start + len(rows)]
-        rows = rows[selected]
+        positions = source_order[start : start + 16384]
+        positions = positions[valid[positions]]
+        rows = context.index[positions].to_numpy()
         values = (
             prepared.feature_rows(rows - prefix)
             if not prefix
@@ -299,13 +301,7 @@ def _sequence_arrays(prepared, spec, scaler, history=None):
                 ignore_index=True,
             )
         )
-        if prefix:
-            # Prefix and observed rows can interleave after sorting by asset.
-            order = np.argsort(
-                np.r_[np.flatnonzero(rows < prefix), np.flatnonzero(rows >= prefix)]
-            )
-            values = values.iloc[order]
-        matrix[start : start + len(selected)][selected] = scaler._transform_numeric(
+        matrix[positions] = scaler._transform_numeric(
             values.to_numpy(dtype="float64", copy=True), dtype="float32"
         )
     keys = ["asset_id", "timestamp"]

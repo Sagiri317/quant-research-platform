@@ -2,6 +2,7 @@
 
 import tracemalloc
 import weakref
+from contextlib import closing
 from types import SimpleNamespace
 
 import numpy as np
@@ -427,3 +428,76 @@ def test_sequence_matrix_float32_conversion_preserves_float64_preprocessing():
     actual = _matrix(scaler, frame, tuple(frame.columns), valid)
     np.testing.assert_array_equal(actual, expected)
     pd.testing.assert_frame_equal(frame, original)
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_sequence_arrays_preserve_history_and_gaps_across_source_batches(grouped):
+    from quant_research_platform.research.models.neural import _sequence_arrays
+
+    dates = pd.bdate_range("2014-01-02", periods=2000)
+    count = len(dates) * 9
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(9),
+            "asset_id": np.tile(list("abcdefghi"), len(dates)),
+            "x": np.arange(count, dtype="float64") + 0.25,
+            "y": np.arange(count, dtype="float64") % 17,
+            "regime": np.repeat(np.arange(len(dates)) >= 1000, 9),
+            "label": np.arange(count) % 5 / 100,
+            "eligible": np.arange(count) % 17 != 0,
+            "label_available_at": dates.repeat(9),
+        }
+    )
+    frame.loc[frame.index % 11 == 0, "y"] = np.nan
+    frame.loc[[90, 17000], ["x", "y"]] = np.nan
+    history = frame.iloc[:9].copy()
+    history["timestamp"] = dates[0] - pd.offsets.BDay()
+    history[["x", "y"]] = [-1.0, 2.0]
+    spec = ModelSpec(
+        model_id="sequence",
+        model_algorithm="lstm_regressor",
+        input_feature_columns=("x", "y"),
+        target_column="label",
+        hyperparameters={"sequence_group_columns": ["regime"] if grouped else []},
+    )
+    scaler = ModelMatrixScaler(("x", "y"), (2.0, -1.0), (4.0, 2.0), (3.0, 5.0))
+    expected = pd.concat([history, frame], ignore_index=True)
+    if not grouped:
+        expected = expected.loc[expected[["x", "y"]].notna().any(axis=1)]
+    expected = expected.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
+    valid = expected[["x", "y"]].notna().any(axis=1).to_numpy()
+    values = expected[["x", "y"]].fillna({"x": 3.0, "y": 5.0}).to_numpy()
+    values = ((values - [2.0, -1.0]) / [4.0, 2.0]).astype("float32")
+    values[~valid] = 0
+    lookup = {(row.asset_id, row.timestamp): i for i, row in expected.iterrows()}
+    starts = []
+    previous, previous_valid, start = None, False, 0
+    for i, row in expected.iterrows():
+        key = (row.asset_id, row.regime) if grouped else (row.asset_id,)
+        if key != previous or grouped and (not valid[i] or not previous_valid):
+            start = i
+        starts.append(start)
+        previous, previous_valid = key, valid[i]
+    with closing(
+        fitting._collect_training_frame(
+            [frame.iloc[start : start + 1024] for start in range(0, count, 1024)],
+            spec,
+            fitting_cutoff=dates[-1],
+        )
+    ) as prepared:
+        context, matrix, endpoints, group_start = _sequence_arrays(
+            prepared, spec, scaler, history
+        )
+        pd.testing.assert_frame_equal(
+            context[["asset_id", "timestamp"]].reset_index(drop=True),
+            expected[["asset_id", "timestamp"]],
+        )
+        np.testing.assert_array_equal(matrix, values)
+        np.testing.assert_array_equal(group_start, starts)
+        np.testing.assert_array_equal(
+            endpoints,
+            [
+                lookup[(row.asset_id, row.timestamp)]
+                for row in prepared.training.itertuples()
+            ],
+        )
