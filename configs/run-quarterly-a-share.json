@@ -50,15 +50,15 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {
         "epochs": null,
-        "early_stopping_rounds": 10,
-        "sequence_length": 20,
+        "early_stopping_rounds": 5,
+        "sequence_length": 60,
         "hidden_size": 64,
-        "num_layers": 1,
+        "num_layers": 2,
         "input_gate_xavier_initialization": true,
         "batch_size": 4096,
-        "learning_rate": 0.0003,
-        "weight_decay": 0.0001,
-        "dropout": 0.0,
+        "learning_rate": 0.00003,
+        "weight_decay": 0.01,
+        "dropout": 0.3,
         "device": "cuda",
         "preload_inputs": false,
         "sequence_group_columns": [
@@ -75,17 +75,17 @@
       "sample_filter_mode": "eligible",
       "hyperparameters": {
         "epochs": null,
-        "early_stopping_rounds": 10,
-        "sequence_length": 20,
+        "early_stopping_rounds": 5,
+        "sequence_length": 60,
         "hidden_size": 64,
-        "num_layers": 1,
+        "num_layers": 2,
         "n_heads": 4,
         "norm_first": true,
         "independent_layer_initialization": true,
         "batch_size": 2048,
-        "learning_rate": 0.0003,
-        "weight_decay": 0.0001,
-        "dropout": 0.1,
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "dropout": 0.2,
         "device": "cuda",
         "preload_inputs": false,
         "sequence_group_columns": [
@@ -160,20 +160,13 @@
     "lstm": [
       {},
       {
-        "sequence_length": 60,
-        "hidden_size": 128,
-        "num_layers": 2,
-        "dropout": 0.1,
-        "learning_rate": 0.0001
+        "hidden_size": 128
       }
     ],
     "transformer": [
       {},
       {
-        "sequence_length": 60,
-        "hidden_size": 128,
-        "num_layers": 2,
-        "learning_rate": 0.0001
+        "hidden_size": 128
       }
     ]
   }

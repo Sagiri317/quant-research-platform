@@ -2,7 +2,7 @@
 
 本协议以未来5个交易日收益的当日合格股票截面标准分为唯一目标，比较 Lasso、XGBoost、LSTM 和 Transformer。
 执行配置以 [run-quarterly-a-share.json](../configs/run-quarterly-a-share.json) 为准；本页解释实际生效的设置及取舍，不另建配置副本。
-产出范围为模型拟合、未来预测、信号检验与报告，不包含组合回测或交易执行。
+本文覆盖模型拟合、未来预测、信号检验与报告；组合回测在独立操作中消费已发布预测。
 这里的选择是研究设计，不是已证实的5日效果提升。
 
 ## 研究设计与验证诊断
@@ -16,6 +16,14 @@ MSE诊断幅度与偏移，IC/RankIC诊断排序；曲线出现训练改善、�
 NN逐epoch训练/验证曲线保存在候选的`learning_curve`，XGBoost逐树验证指标保存在`early_stopping.validation_metrics`。
 NN训练曲线属于在线epoch损失，区别于最终冻结模型的训练误差。所有候选继续按当时验证期选择，
 再用成熟历史重新拟合并预测下一季度，不额外增加搜索或拟合。
+
+旧配置下，LSTM的2022Q1—Q3两档候选共六次训练均在第1轮取得最低验证MSE，
+之后训练损失下降而验证误差上升。当前配置据此降低学习率、加强衰减和层间dropout，
+固定60日、两层，只比较64／128宽度；两层使原生LSTM的层间dropout实际生效。
+Transformer尚无本协议完整验证结果，按用户要求与LSTM统一为60日、两层、64／128宽度，
+保留Pre-LayerNorm和独立初始化，降低原小候选学习率并加强正则；不因LSTM表现提前删除Transformer层。
+每家族仍只有两次候选拟合与一次胜者重拟合；两个候选只改变宽度，不再同时搜索窗口、层数和学习率。
+这些是基于已有诊断的研究设定，效果须由新验证结果确认；旧结果及其参数保留在历史报告中。
 
 ## 选型指标与结果报告
 
@@ -45,7 +53,7 @@ NN训练曲线属于在线epoch损失，区别于最终冻结模型的训练误�
 
 | 项目 | 实际设置 | 决定及理由 |
 |---|---|---|
-| 目标 | `forward_return_5d` → `model_target`；`date_zscore`、`target_clip=none`；单位为标准分 | 保留明确的五日单目标，预测期限不随20／60观察窗口改变。真实尾部不裁剪，也不填补标签 |
+| 目标 | `forward_return_5d` → `model_target`；`date_zscore`、`target_clip=none`；单位为标准分 | 保留明确的五日单目标，预测期限不随60日观察窗口改变。真实尾部不裁剪，也不填补标签 |
 | 特征声明 | 四家族声明去重后全部可算输入，现为1069个原始表示和207个处理后表示，共1276列；每个原始因子只取一种表示 | 35个近重复项直接删除原生实现，采用[经典代表](factor-representatives.md)；其余全部保留。该取舍来自已观察数据，历史回测不称为未触碰的盲测；不增加运行期PCA或聚类筛选 |
 | 特征来源 | 量价、行业/五风格、两融、PCF被动流、公募持仓与赎回、期货套保、宏观及跨境暴露 | 不使用 Choice 财务或分析师预期；`financing_*` 是两融而非财务报表因子，公募持仓/赎回来自基金报告。通用财务适配能力的存在不代表本协议消费它 |
 | 已有特征处理 | 逐列复用原生产者记录的剪尾、行业/五风格残差及标准化；原始表示保留其经济定义 | 复用原生产者元数据；不在模型复核中重新剪尾或中性化。具体处理含义见 [因子处理](factor-treatment.md) |
@@ -108,25 +116,25 @@ NN训练曲线属于在线epoch损失，区别于最终冻结模型的训练误�
 
 ## 神经网络：完整结构和实际默认
 
-两种候选的序列长度、宽度和层数分别为 `(20,64,1)`、`(60,128,2)`。
-这些是最大历史观察数，不是20／60日预测期限。每条股票序列止于当前预测时点，只消费已经可见的特征。
-两种候选比较不同的窗口与容量；深度、宽度和序列长度成组变化，不能据此识别60日或128维单独的作用。
+两家族的两档均为 `(60,64,2)`、`(60,128,2)`，依次表示序列长度、宽度和层数。
+60是最大历史观察数，不是预测期限。
+每条股票序列止于当前预测时点，只消费已经可见的特征；同一家族仅比较宽度。
 
 | 项目 | LSTM实际设置 | Transformer实际设置 | 决定及理由 |
 |---|---|---|---|
 | 输入/输出 | 当折冻结的输入列经训练缩放；最后一层最后有效隐藏状态→带偏置线性单输出 | 输入线性投影→可学习位置嵌入→编码器→最后有效位置→带偏置线性单输出 | 保留单目标，不加输出激活或把分数限制为正；预测目标是实数 |
 | 内部激活 | 输入/遗忘/输出门sigmoid，候选状态与单元输出tanh | FFN默认ReLU，注意力softmax | 保留。GELU是合理替代，但原论文实验不能证明本股票目标上优于ReLU；LSTM改门激活会变为另一循环单元 |
-| 深度/宽度 | 1×64或2×128；`bidirectional=false`、`proj_size=0`、`bias=true` | 1×64或2×128；4个头，每头16／32维；FFN宽度`2*hidden`即128／256 | 保留有限容量；不因“深度学习”名称再堆层。不将4倍FFN当必需规范 |
+| 深度/宽度 | 2×64或2×128；`bidirectional=false`、`proj_size=0`、`bias=true` | 2×64或2×128；4个头，每头16／32维；FFN宽度`2*hidden`即128／256 | 同一家族只比较宽度；不因输入1276列自动加深 |
 | 时间信息 | 单向LSTM，默认零初始隐藏/单元状态；每个历史片段独立开始 | 相对片段位置0…L−1的可学习Embedding；无额外CLS、日历嵌入或旋转位置编码 | 保留。输入已有多期限因子，不为了更长序列重复增加大网络 |
 | 可见域/填充 | packed sequence忽略右侧填充，只取真实长度末端 | key padding mask屏蔽右侧填充；历史片段内部可双向注意，最终只预测片段末端 | 保留。片段内全部为已知历史，不需要因生成模型惯例而添加三角mask；不允许看到端点以后行 |
 | 分组/断点 | 两者按asset及`listing_date`分组；全输入缺失处切断，短历史按实际长度使用 | 同左，`enable_nested_tensor=false` | 保留上市生命周期和断点，不跨重上市接序列，不用后续数据补足历史 |
-| dropout | 小候选0；大候选.1，只在相邻LSTM层之间。没有input、recurrent-state、输出头dropout；单层即使设非零也被owner置0 | 两档.1，生效于注意力权重、注意力残差输出、FFN激活后及FFN残差输出；投影/位置/最终输出头无额外dropout | 保留实际位置。单层LSTM不能靠只调现有dropout字段增加正则；独立输出或变分循环dropout需新的受控比较 |
+| dropout | 两档.3，只在相邻LSTM层之间；没有input、recurrent-state、输出头dropout | 两档.2，生效于注意力权重、注意力残差输出、FFN激活后及FFN残差输出；投影/位置/最终输出头无额外dropout | 复用原生dropout位置加强正则，不新增循环掩码或输出头分支 |
 | 归一化 | 除训练输入和目标缩放，无内部BatchNorm/LayerNorm | 每编码器两处带仿射参数的Pre-LN，`eps=1e-5`、`norm_first=true`；编码器末端同样加LayerNorm | 采用原生Pre-LN结构，不扩展RMSNorm选项；按单个历史位置的隐藏维度归一化，不沿未来日期估计统计量 |
 | 初始化 | 原生权重/偏置为`±1/sqrt(hidden)`；股票仅首层四块输入权重改为逐gate Xavier uniform，gain=1；无正交重置、没有额外forget-bias=1 | QKV权重Xavier uniform，QKV与attention输出bias为0；其它Linear按原生fan-in均匀初始化，LayerNorm权重1/bias0，位置Embedding标准正态；股票逐层独立构造 | 初始化只调用原生构造器/nn.init；LSTM首层修正输入宽度尺度，Transformer去掉层间复制。循环权重、偏置和后层保持原生定义 |
 
 上述默认与位置核对 [LSTM官方实现说明](https://docs.pytorch.org/docs/2.12/generated/torch.nn.LSTM.html)、
 [TransformerEncoderLayer](https://docs.pytorch.org/docs/2.12/generated/torch.nn.TransformerEncoderLayer.html) 及安装源码。
-按1276列计算，小／大LSTM参数为343,617／852,097，Pre-LN Transformer含末端归一化为116,673／436,481。当折冻结排除不可估计列后略少。大候选扩大的是窗口、容量和单轮计算，不仅是参数数量。
+按1276列计算，小／大LSTM参数为376,897／852,097，Pre-LN Transformer含末端归一化为152,705／436,481。当折冻结排除不可估计列后略少。大候选仅扩大宽度，不改变历史长度或层数。
 
 ## 神经网络：损失、正则与训练
 
@@ -135,11 +143,11 @@ NN训练曲线属于在线epoch损失，区别于最终冻结模型的训练误�
 | loss | 平方误差；训练按每日等质量权重；每批`mean(weight*error²)` | 保留目标一致性，不换Huber或纯相关损失。无标签剪尾不等于无需考察尾部误差；改变loss须另行比较其估计目标 |
 | 目标内部缩放 | 仅训练样本加权均值和总体标准差；NN训练标准化目标，预测及曲线误差换回model_target单位 | 保留，不使用验证期统计；不是取消逐日截面标签变换，也不是把最终分数恢复为原始百分比收益 |
 | 优化器 | AdamW；`betas=(.9,.999)`、`eps=1e-8`、`amsgrad=false`、`maximize=false` | 保留成熟默认；未因配置省略betas就误判为未使用动量或自适应尺度 |
-| 权重衰减 | `weight_decay=1e-4`，同一参数组覆盖全部可训练参数，含bias、LayerNorm仿射及位置嵌入；无额外神经网络L1/L2 loss项 | 保留温和的解耦衰减。将bias/norm免衰减或统一加至.01都是新的正则方案，当前没有隔离比较支持；不把AdamW误称为Adam加普通L2 |
-| 学习率 | 两家族小候选`.0003`、大候选`.0001` | 采用较低更新步长，结合候选验证曲线评价；较小学习率可能增加轮数，不能同时承诺更快或必然防止过拟合 |
+| 权重衰减 | 两家族`weight_decay=.01`，同一参数组覆盖全部可训练参数，含bias、LayerNorm仿射及位置嵌入；无额外神经网络L1/L2 loss项 | 比旧配置`1e-4`加强衰减；未独立证明该值最优，不增加参数分组或额外正则机制 |
+| 学习率 | LSTM两档`.00003`，Transformer两档`.0001` | 降低原候选更新步长；较小学习率可能增加轮数，不能承诺更快或必然防止过拟合 |
 | 批大小 | LSTM4096，Transformer2048，均包含最后不足一批的样本 | 保留吞吐与每轮覆盖，不丢样本；未按大batch经验线性放大学习率 |
 | 顺序/随机种子 | NumPy种子42在训练行上逐epoch打乱端点；PyTorch种子42；每个端点历史内部仍有序，验证不打乱 | 保留。训练批端点shuffle不等于把未来混入历史切分；单种子不是随机种子稳定性证明 |
-| 早停 | `epochs=null`、耐心10；每epoch结束对日期等权验证MSE作严格改善比较，恢复最佳state；首个评估点在第1轮后 | 保留无总轮数上限；不为早停靠前直接延长耐心。未做epoch0验证，不能把随机初始网络当已测基线 |
+| 早停 | `epochs=null`、两家族耐心5；每epoch结束对日期等权验证MSE作严格改善比较，恢复最佳state；首个评估点在第1轮后 | 缩短已观察到的长期无改善等待，仍无总轮数上限；不把历史第1轮最优变成固定只训练1轮。未做epoch0验证 |
 | LR调度/预热 | 无warmup、cosine、ReduceLROnPlateau或重启 | 保留固定较低步长；调度能继续优化训练并不保证改善预测；不叠加多个相互耦合的学习率参数 |
 | 梯度处理 | 无梯度裁剪、无累积；`zero_grad(set_to_none=true)`、反传、AdamW更新 | 保留。现有曲线未记录梯度范数，不能诊断“爆炸”，也不能证明不存在；裁剪是有依据的工具，但没有依据指定本任务阈值1或其他值 |
 | 数值与执行 | 网络和输入float32，目标/预处理统计用float64；无AMP或自定义量化；`device=cuda`，`preload_inputs=false` | 宽输入改为CPU保存float32输入、每批送GPU，模型计算仍在CUDA；不删样本、不减批大小。不把GPU内核非确定性称为模型研究噪声已消除 |
@@ -148,10 +156,11 @@ NN训练曲线属于在线epoch损失，区别于最终冻结模型的训练误�
 AdamW的解耦衰减依据 [Loshchilov与Hutter](https://arxiv.org/abs/1711.05101)，实际默认见
 [PyTorch AdamW](https://docs.pytorch.org/docs/2.12/generated/torch.optim.AdamW.html)。
 其单步衰减与学习率和步数有关，学习率下降而衰减系数不变不意味着有效收缩强度绝对不变；
-本次将早停交给验证，未声称`.0001`是正则强度最优值。
+本次将早停交给验证，未声称`.01`是正则强度最优值。
 
-耐心10不是总epoch上限：验证损失改善后重新计数，连续10个完整epoch没有严格改善才停止，并恢复最佳权重。
-它既不要求训练恰好10轮，也不保证是当前任务的最优耐心；判断是否调整应结合已保存的候选验证曲线。
+耐心5不是总epoch上限：验证损失改善后重新计数，连续5个完整epoch没有严格改善才停止，并恢复最佳权重。
+新旧候选都保留MSE早停、RankIC选候选的既定口径。当前未记录逐epoch RankIC，
+不能把最低MSE轮次称为RankIC最优轮次；本次不同时引入新的选轮算法。
 
 ## 后续改进文献的适用性
 
@@ -165,7 +174,7 @@ AdamW的解耦衰减依据 [Loshchilov与Hutter](https://arxiv.org/abs/1711.0510
 | [DLinear，AAAI 2023](https://ojs.aaai.org/index.php/AAAI/article/view/26317)、[PatchTST，ICLR 2023](https://arxiv.org/abs/2211.14730)、[iTransformer，ICLR 2024](https://arxiv.org/abs/2310.06625) | 分别提示线性基线、patch长历史和变量轴注意的价值；多步序列值预测与单一五日截面分数不同，不能从这些benchmark断言应去掉Transformer或必须分patch。输入已含多个回看窗口，暂不增加新序列编码 |
 | [RevIN，ICLR 2022](https://openreview.net/references/pdf?id=SRgrKlAhbc) | 针对输入/输出同量纲序列的可逆归一化；本任务X是异质因子、y是截面收益标准分。不能把输入窗口均值方差直接逆变换到y；保留训练冻结缩放 |
 | [MASTER，AAAI 2024](https://arxiv.org/html/2312.15235v1)、[StockMixer，AAAI 2024](https://ojs.aaai.org/index.php/AAAI/article/view/28681) | A股相关研究有更近的任务依据，包含股票间信息交换/市场引导。MASTER也使用日截面收益标准化并调较小学习率，但其股票域、标签、选择指标不同；引入横截面attention需要完整同日股票批及新消费者，不是只调层数。本次不冒称当前逐股票网络已实现它们 |
-| [Pre-LN，ICML 2020](https://proceedings.mlr.press/v119/xiong20b.html) | 依据其初始化梯度与稳定性分析，采用Pre-LN及末端LayerNorm；本网络只有1／2层，不能仅凭预测误差判断归一化类型的作用 |
+| [Pre-LN，ICML 2020](https://proceedings.mlr.press/v119/xiong20b.html) | 依据其初始化梯度与稳定性分析，采用Pre-LN及末端LayerNorm；本网络只有2层，不能仅凭预测误差判断归一化类型的作用 |
 | [RMSNorm，2019](https://arxiv.org/abs/1910.07467)、[Pre-RMSNorm等价转换，2023](https://arxiv.org/abs/2305.14858) | 支持减少归一化计算及特定转换下的等价关系，没有本股票任务优于LayerNorm的实测；本轮保留原生LayerNorm，不扩充归一化搜索 |
 | [GELU](https://arxiv.org/abs/1606.08415) | 平滑激活在原文视觉、语言、语音任务有结果，未直接检验此股票问题；保留Transformer ReLU，避免把“更现代”当效果证据 |
 | [循环网络的梯度裁剪，ICML 2013](https://proceedings.mlr.press/v28/pascanu13.html)、[变分循环dropout，NeurIPS 2016](https://proceedings.neurips.cc/paper/2016/hash/076a0c97d09cf1a0ec3e19c7f2529f2b-Abstract.html) | 两者处理明确的优化/正则问题；原生LSTM层间dropout不等于变分循环dropout。当前先保留其现有语义，不加未经本任务检验的裁剪阈值或循环掩码 |
@@ -205,7 +214,7 @@ Lasso的目标函数按样本质量归一化，不含除以输入列数的因子
 参数定义依据[scikit-learn Lasso](https://scikit-learn.org/stable/modules/generated/sklearn.linear_model.Lasso.html)和
 [XGBoost官方参数](https://xgboost.readthedocs.io/en/release_3.2.0/parameter.html)。
 
-神经网络保留64／128隐藏维、1／2层、20／60观察窗口和既有dropout、AdamW衰减与学习率。
+神经网络按上文固定各家族的窗口、层数、dropout、AdamW衰减与学习率，仅比较64／128隐藏维。
 Transformer已有输入投影，扩大输入主要增加投影参数，不会把时间注意力的宽度自动扩大到输入列数。
 LSTM首层直接消费全部输入，参数和矩阵乘法随列数增长；不能把更多输入解释为需要更多循环层。
 [表格模型的系统比较](https://arxiv.org/abs/2207.08815)指出无效输入是神经网络的实际难点，
