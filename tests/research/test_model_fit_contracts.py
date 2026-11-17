@@ -64,6 +64,9 @@ def test_default_native_inputs_freeze_one_representation_and_preserve_explicit_c
         {"external_memory": 1},
         {"external_memory": True, "device": "cpu"},
         {"external_memory": True, "tree_method": "exact"},
+        {"max_quantile_batches": 32},
+        {"external_memory": True, "max_quantile_batches": 0},
+        {"external_memory": True, "max_quantile_batches": True},
     ],
 )
 def test_external_memory_requires_an_explicit_gpu_hist_protocol(parameters):
@@ -121,9 +124,14 @@ def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_
     results = []
     allocator = cupy.cuda.get_allocator()
     cached_bytes = cupy.get_default_memory_pool().total_bytes()
-    for external in (False, True, True):
+    for external, batches in ((False, None), (True, None), (True, 1), (True, 1)):
         candidate = replace(
-            spec, hyperparameters={**spec.hyperparameters, "external_memory": external}
+            spec,
+            hyperparameters={
+                **spec.hyperparameters,
+                "external_memory": external,
+                **({"max_quantile_batches": batches} if batches is not None else {}),
+            },
         )
         result = fit_model(
             [frame.iloc[:training_rows]],
@@ -135,6 +143,10 @@ def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_
         )
         assert (
             result.metadata["resolved_hyperparameters"]["external_memory"] is external
+        )
+        assert (
+            result.metadata["resolved_hyperparameters"].get("max_quantile_batches")
+            == batches
         )
         assert cupy.cuda.get_allocator() is allocator
         assert cupy.get_default_memory_pool().total_bytes() == cached_bytes
@@ -152,11 +164,18 @@ def test_gpu_external_memory_matches_native_quantile_and_survives_roundtrip(tmp_
         rtol=2e-6,
         atol=2e-6,
     )
-    save_model(tmp_path / "external", results[1], facts={}, trial_id="external")
+    np.testing.assert_allclose(
+        results[2].prediction_model.predict(inputs),
+        results[3].prediction_model.predict(inputs),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    save_model(tmp_path / "external", results[2], facts={}, trial_id="external")
     restored, _ = load_model(tmp_path / "external")
+    assert restored.metadata["resolved_hyperparameters"]["max_quantile_batches"] == 1
     np.testing.assert_array_equal(
         restored.prediction_model.predict(inputs),
-        results[1].prediction_model.predict(inputs),
+        results[2].prediction_model.predict(inputs),
     )
 
 

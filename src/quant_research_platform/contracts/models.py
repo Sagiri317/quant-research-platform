@@ -351,6 +351,14 @@ class ModelSpec:
                 or hyperparameters.get("tree_method", "hist") != "hist"
             ):
                 raise ValueError("model_external_memory_requires_cuda_hist")
+        if "max_quantile_batches" in hyperparameters:
+            batches = hyperparameters["max_quantile_batches"]
+            if (
+                not hyperparameters.get("external_memory", False)
+                or type(batches) is not int
+                or batches < 1
+            ):
+                raise ValueError("model_external_memory_quantile_batches_invalid")
         if "early_stopping_rounds" in hyperparameters:
             patience = hyperparameters["early_stopping_rounds"]
             if (

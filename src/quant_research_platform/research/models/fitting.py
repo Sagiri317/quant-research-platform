@@ -779,7 +779,9 @@ def _fit_lasso_gram(estimator, prepared):
     estimator.dual_gap_ = gap / count
 
 
-def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
+def _booster_matrix(
+    estimator, prepared, scaler, *, ref=None, external=False, max_quantile_batches=None
+):
     from xgboost import DataIter
 
     weights = (
@@ -828,6 +830,7 @@ def _booster_matrix(estimator, prepared, scaler, *, ref=None, external=False):
                 missing=estimator.missing,
                 nthread=estimator.n_jobs,
                 max_bin=estimator.max_bin,
+                max_quantile_batches=max_quantile_batches,
                 cache_host_ratio=1.0,
                 enable_categorical=estimator.enable_categorical,
             )
@@ -854,12 +857,20 @@ def _booster_context(spec):
 def _booster_inputs(estimator, prepared, spec, validation):
     scaler = prepared.preprocessing[1]
     external = spec.hyperparameters.get("external_memory", False)
-    training = _booster_matrix(estimator, prepared, scaler, external=external)
+    batches = spec.hyperparameters.get("max_quantile_batches")
+    training = _booster_matrix(
+        estimator, prepared, scaler, external=external, max_quantile_batches=batches
+    )
     held = (
         None
         if validation is None
         else _booster_matrix(
-            estimator, validation, scaler, ref=training, external=external
+            estimator,
+            validation,
+            scaler,
+            ref=training,
+            external=external,
+            max_quantile_batches=batches,
         )
     )
     return training, held

@@ -256,8 +256,10 @@ XGBoost以原生DataIter分块消费同一训练矩阵，标签、行权重、�
 候选的分箱、设备、缺失值、列类型和列权重等矩阵配置一致时，共用原生训练及验证矩阵；配置不同时分别准备。共享输入仅保留到本组候选结束，不进入模型产物。
 股票配置显式`external_memory=true`时，用CUDA数组及官方`ExtMemQuantileDMatrix`把量化批次放在GPU外，
 训练和验证均设置`cache_host_ratio=1.0`，使多页缓存留在主机内存，给GPU页预取和建树留出空间；单页数据仍由原生后端直接驻留GPU。
+外存模型可在`hyperparameters`中显式设置正整数`max_quantile_batches`，限制原生GPU分位数汇总的单个子流批数；未设置时沿用XGBoost默认值。
+该参数保存在模型事实中，不传给树估计器；不同取值的候选不共用量化矩阵。它不删样本或改变`max_bin`，但会改变近似分位数的分割，不能宣称预测逐位相同。
 普通路径保持`QuantileDMatrix`。
-这个执行选项不改变树参数、缺失分支或早停规则，默认false。
+`external_memory`不改变树参数、缺失分支或早停规则，默认false。
 GPU外存需要可选依赖组`xgboost-external-memory`，当前CUDA12项目环境使用CuPy14.2；
 CuPy输入批次与XGBoost共用当前CUDA异步内存池，避免独立的CuPy缓存保留显存；矩阵构造结束后恢复调用者的分配器。
 缺少依赖或GPU入口失败时明确报错，不静默改CPU。

@@ -151,6 +151,7 @@ def _fit_input_key(spec):
                 "tree_method",
                 "booster",
                 "max_bin",
+                "max_quantile_batches",
                 "missing",
                 "enable_categorical",
                 "feature_types",

@@ -52,6 +52,7 @@ def build_estimator_from_model_spec(spec: ModelSpec) -> object | None:
     params = resolved_model_hyperparameters(spec)
     if spec.model_algorithm == "xgboost_regressor":
         params.pop("external_memory", None)
+        params.pop("max_quantile_batches", None)
     module, name = _MODEL_ESTIMATOR_CLASSES[spec.model_algorithm]
     estimator_class = getattr(import_module(module), name)
     params.setdefault("random_state", spec.random_seed)
