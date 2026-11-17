@@ -2170,6 +2170,7 @@ def backtest(config):
         Path(config["output"]),
         capital=capital,
         metadata={
+            **{key: value for key, value in config.items() if key != "output"},
             "market_id": "a_share",
             "kind": "a_share_hft",
             "window": {

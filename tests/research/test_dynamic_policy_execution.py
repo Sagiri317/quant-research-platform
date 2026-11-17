@@ -1216,6 +1216,14 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
         item["timesteps"] for item in facts["validation"]["evaluations"]
     ] == evaluations
     assert evaluated_updates == updates
+    assert [item["updates"] for item in facts["validation"]["evaluations"]] == updates
+    for item in facts["validation"]["evaluations"]:
+        assert item["episode_lengths"] == [4]
+        assert item["episode_metrics"][0]["episode_index"] == 0
+        assert item["episode_metrics"][0]["economic_reward"] == 0
+        assert item["episode_metrics"][0]["reward_penalty"] == 0
+    progress = pd.read_csv(model.with_name(model.name + ".trial") / "progress.csv")
+    assert progress["train/n_updates"].max() == facts["actual_updates"]
     assert facts["validation"]["selected_timesteps"] == 4
     assert facts["validation"]["best_validation_reward"] == 0
     assert facts["training_decisions"]["start"] == "2024-01-02T01:30:00.001000"
@@ -1237,6 +1245,16 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
     ledger = read_portfolio_ledger_artifact(output / "ledger")
     assert list(ledger.iter_chunks())
     assert ledger.metadata["dynamic_execution"]["reward_unit"] == "bps_of_initial_nav"
+    final = backtest_policy(
+        {
+            "episode": later,
+            "strategy": "ppo",
+            "policy": str(model),
+            "checkpoint": "final",
+            "output": str(tmp_path / "final-replay"),
+        }
+    )
+    assert list(read_portfolio_ledger_artifact(final / "ledger").iter_chunks())
     with pytest.raises(ValueError, match="policy_validation_not_after_training"):
         train_policy(
             {

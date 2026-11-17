@@ -62,6 +62,9 @@ def test_rolling_forecasts_keep_cash_inventory_and_next_day_sellability(tmp_path
         "candidate_id": "rolling",
     }
     ledger = read_portfolio_ledger_artifact(backtest(config))
+    assert ledger.metadata["predictions"] == paths
+    assert ledger.metadata["panel"] == config["panel"]
+    assert ledger.metadata["daily_inputs"] == config["daily_inputs"]
     assert ledger.capital.candidate_id == "rolling"
     batches = list(ledger.iter_chunks())
     trades = [trade for batch in batches for trade in batch.trades]

@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
+from quant_research_platform.contracts.models import model_spec_payload
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.rolling import (
     quarterly_folds,
@@ -301,6 +302,19 @@ def test_rank_selection_compares_common_defined_days_then_refits(
     (item,) = run_quarterly(config)
     fitted, facts = load_model(item["model"])
     selection = facts["training_selection"]
+    from quant_research_platform.storage.datasets import read_dataset
+
+    validation = read_dataset(item["validation"])
+    compared = validation.loc[validation.comparison_sample]
+    assert len(compared) == selection["common_rows"]
+    assert not validation.loc[validation.asset_id.eq("late"), "comparison_sample"].any()
+    for candidate in selection["candidates"]:
+        squared = (compared[candidate["prediction_column"]] - compared.label) ** 2
+        assert squared.groupby(compared.timestamp).mean().mean() == pytest.approx(
+            candidate["validation_daily_mse"]
+        )
+        assert candidate["input_columns"] == ["x", "z"]
+        assert candidate["scaler"] is not None
     assert selection["common_rows"] == 8
     assert selection["common_sessions"] == 2
     assert selection["fit_window"]["end"] == "2021-11-01"
@@ -941,7 +955,16 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(
     # Cut through timestamps and asset histories, including the gap window.
     monkeypatch.setattr(rolling, "DEFAULT_BATCH_ROWS", 2)
     selected = _select(
-        {"market_id": "a_share", "evaluation": {}}, fold, session, candidates, None
+        {
+            "market_id": "a_share",
+            "evaluation": {},
+            "inputs": {"path": str(path), "spec": declared},
+            "output": str(tmp_path / "selection"),
+        },
+        fold,
+        session,
+        candidates,
+        None,
     )
     scores = selected[0][2]["candidates"]
     held = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
@@ -974,7 +997,7 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(
             (predictions[observed] - held.label.to_numpy()[observed]) ** 2,
             index=held.timestamp.loc[observed],
         )
-        assert score["hyperparameters"] == dict(spec.hyperparameters)
+        assert score["hyperparameters"] == model_spec_payload(spec)["hyperparameters"]
         assert score["validation_daily_mse"] == pytest.approx(
             errors.groupby(level=0).mean().mean(), rel=1e-6, abs=1e-9
         )

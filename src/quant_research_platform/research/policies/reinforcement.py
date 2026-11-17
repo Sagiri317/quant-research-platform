@@ -62,6 +62,8 @@ def train_policy(config):
     """Train on explicitly bounded episodes; persist PPO and frozen normalization."""
     import torch
     from stable_baselines3 import PPO
+    from stable_baselines3.common.logger import configure
+    from stable_baselines3.common.monitor import Monitor
     from stable_baselines3.common.vec_env import (
         DummyVecEnv,
         SubprocVecEnv,
@@ -205,9 +207,42 @@ def train_policy(config):
             scaling=False,
         )
         del observations
+        diagnostic_columns = (
+            "initial_nav",
+            "nav",
+            "fees",
+            "economic_reward",
+            "reward_penalty",
+        )
+        if episodes[0]["task"] == "execution":
+            diagnostic_columns += (
+                "completion_rate",
+                "filled_quantity",
+                "unfilled_quantity",
+                "unfilled_reason",
+                "last_block_reason",
+                "arrival_price",
+                "terminal_observed_mark",
+                "implementation_shortfall_bps",
+                "opportunity_cost_bps",
+                "opportunity_cost_reason",
+                "total_implementation_shortfall_bps",
+            )
+
+        def monitored_environment(episodes, filename=None):
+            return Monitor(
+                TradingEnv(episodes, feature_scaler=feature_scaler),
+                filename=filename,
+                info_keywords=("episode_index", *diagnostic_columns),
+            )
+
         factories = [
-            partial(TradingEnv, episodes, feature_scaler=feature_scaler)
-            for _ in range(config["n_envs"])
+            partial(
+                monitored_environment,
+                episodes,
+                str(trial.root / f"training-env-{index}.monitor.csv"),
+            )
+            for index in range(config["n_envs"])
         ]
         with (
             TemporaryDirectory() as checkpoint_directory,
@@ -218,6 +253,7 @@ def train_policy(config):
                     norm_reward=True,
                 )
             ) as environment,
+            closing_iterator(configure(str(trial.root), ["csv"])) as logger,
         ):
             model = PPO(
                 "MlpPolicy",
@@ -226,6 +262,7 @@ def train_policy(config):
                 device=config["device"],
                 **parameters,
             )
+            model.set_logger(logger)
             environment.gamma = model.gamma
             callback = None
             best = {}
@@ -235,17 +272,13 @@ def train_policy(config):
                     EvalCallback,
                     StopTrainingOnNoModelImprovement,
                 )
-                from stable_baselines3.common.monitor import Monitor
-
-                def validation_environment(episode):
-                    return Monitor(TradingEnv([episode], feature_scaler=feature_scaler))
 
                 validation = resources.enter_context(
                     closing_iterator(
                         VecNormalize(
                             DummyVecEnv(
                                 [
-                                    partial(validation_environment, episode)
+                                    partial(monitored_environment, [episode])
                                     for episode in validation_episodes
                                 ]
                             ),
@@ -260,13 +293,50 @@ def train_policy(config):
                     def _on_step(self):
                         environment.save(checkpoint / "normalization.pkl")
                         best["selected_timesteps"] = self.num_timesteps
+                        best["selected_updates"] = self.model._n_updates
                         return True
+
+                class EvaluationDiagnostics(EvalCallback):
+                    def _log_success_callback(self, locals_, globals_):
+                        super()._log_success_callback(locals_, globals_)
+                        if locals_["done"]:
+                            info = locals_["info"]
+                            index = int(locals_["i"])
+                            metrics = {key: info[key] for key in diagnostic_columns}
+                            self.logger.record("eval/n_updates", self.model._n_updates)
+                            for key, value in {
+                                "reward": info["episode"]["r"],
+                                "length": info["episode"]["l"],
+                                **metrics,
+                            }.items():
+                                self.logger.record(f"eval/episode_{index}/{key}", value)
+                            self.episode_metrics.append(
+                                {
+                                    "episode_index": index,
+                                    **metrics,
+                                }
+                            )
+
+                    def _on_step(self):
+                        self.episode_metrics = []
+                        keep_training = super()._on_step()
+                        if self.episode_metrics:
+                            best.setdefault("evaluations", []).append(
+                                {
+                                    "timesteps": self.num_timesteps,
+                                    "updates": self.model._n_updates,
+                                    "episode_rewards": self.evaluations_results[-1],
+                                    "episode_lengths": self.evaluations_length[-1],
+                                    "episode_metrics": self.episode_metrics,
+                                }
+                            )
+                        return keep_training
 
                 stopper = StopTrainingOnNoModelImprovement(
                     max_no_improvement_evals=stopping["patience"],
                     min_evals=stopping["min_evals"],
                 )
-                callback = EvalCallback(
+                callback = EvaluationDiagnostics(
                     validation,
                     callback_on_new_best=SaveNormalization(),
                     callback_after_eval=stopper,
@@ -278,6 +348,9 @@ def train_policy(config):
                     verbose=0,
                 )
             model.learn(total_timesteps=config["timesteps"], callback=callback)
+            # SB3 logs before each update; flush the final update as well.
+            logger.record("time/total_timesteps", model.num_timesteps)
+            logger.dump(model.num_timesteps)
             if callback is not None:
                 stopped_early = (
                     stopper.no_improvement_evals > stopper.max_no_improvement_evals
@@ -289,24 +362,25 @@ def train_policy(config):
                 best.update(
                     best_validation_reward=float(callback.best_mean_reward),
                     stopped_early=stopped_early,
-                    evaluations=[
-                        {
-                            "timesteps": int(stamp),
-                            "episode_rewards": [float(value) for value in values],
-                        }
-                        for stamp, values in zip(
-                            callback.evaluations_timesteps,
-                            callback.evaluations_results,
-                            strict=True,
-                        )
-                    ],
                 )
+            separate_final = callback is not None and (
+                best["selected_timesteps"],
+                best["selected_updates"],
+            ) != (model.num_timesteps, model._n_updates)
             facts = {
                 "kind": "ppo_policy",
                 "config": config,
                 "actual_timesteps": model.num_timesteps,
+                "actual_updates": model._n_updates,
                 "device": str(model.device),
+                "trial": str(trial.root),
                 "validation": best or None,
+                "final_checkpoint": {
+                    "policy": "final_policy.zip" if separate_final else "policy.zip",
+                    "normalization": "final_normalization.pkl"
+                    if separate_final
+                    else "normalization.pkl",
+                },
                 "training_decisions": {
                     "start": decision_start.isoformat(),
                     "end": decision_end.isoformat(),
@@ -323,6 +397,9 @@ def train_policy(config):
                     copyfile(
                         checkpoint / "normalization.pkl", staging / "normalization.pkl"
                     )
+                if separate_final:
+                    model.save(staging / "final_policy.zip")
+                    environment.save(staging / "final_normalization.pkl")
                 (staging / "feature_scaler.pkl").write_bytes(
                     pickle.dumps(feature_scaler)
                 )
@@ -351,8 +428,18 @@ def backtest_policy(config, *, portfolio_context=None):
             "inventory_parameters",
             "portfolio_parameters",
             "portfolio_context",
+            "sample_role",
+            "checkpoint",
         },
     )
+    role = config.setdefault("sample_role", "out_of_sample")
+    if role not in {"out_of_sample", "diagnostic"}:
+        raise ValueError("policy_sample_role_invalid")
+    checkpoint = config.get("checkpoint", "selected")
+    if checkpoint not in {"selected", "final"} or (
+        "checkpoint" in config and config["strategy"] != "ppo"
+    ):
+        raise ValueError("policy_checkpoint_invalid")
     episode = _episode(config["episode"])
     strategy = config["strategy"]
     if strategy not in {
@@ -431,7 +518,10 @@ def backtest_policy(config, *, portfolio_context=None):
         lower = pd.Timestamp(
             time_window_timestamp_interval(TimeWindow(**episode["window"]))[0]
         )
-        if pd.Timestamp(facts["config"]["fit_cutoff"]) >= lower:
+        if (
+            role == "out_of_sample"
+            and pd.Timestamp(facts["config"]["fit_cutoff"]) >= lower
+        ):
             raise ValueError("policy_backtest_not_out_of_sample")
         first = facts["config"]["episodes"][0]
         if any(
@@ -441,12 +531,18 @@ def backtest_policy(config, *, portfolio_context=None):
             raise ValueError("policy_backtest_spaces_mismatch")
         # Like the policy itself, this is a trusted local fitted artifact.
         env.feature_scaler = pickle.loads((root / "feature_scaler.pkl").read_bytes())
+        members = (
+            facts["final_checkpoint"]
+            if checkpoint == "final"
+            else {"policy": "policy.zip", "normalization": "normalization.pkl"}
+        )
         normalization = VecNormalize.load(
-            root / "normalization.pkl", DummyVecEnv([lambda: env])
+            root / members["normalization"], DummyVecEnv([lambda: env])
         )
         normalization.training = False
         normalization.norm_reward = False
-        model = PPO.load(root / "policy.zip", device=config.get("device", "cpu"))
+        model = PPO.load(root / members["policy"], device=config.get("device", "cpu"))
+        config["checkpoint"] = checkpoint
     elif episode["task"] == "dynamic_execution":
         if strategy != "immediate":
             raise ValueError("policy_baseline_task_mismatch")
@@ -632,6 +728,7 @@ def backtest_policy(config, *, portfolio_context=None):
                 "kind": "a_share_hft" if episode["kind"] == "hft" else "a_share",
                 "market_id": "a_share",
                 "window": episode["window"],
+                "sample_role": role,
                 "policy": config,
                 "execution": "native_account",
                 **(

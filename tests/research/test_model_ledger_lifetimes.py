@@ -99,10 +99,10 @@ def test_native_selected_refit_failure_preserves_prior_selection_and_model(
     assert set(tmp_path.iterdir()) == existing_roots | {trial}
     assert all(path.read_bytes() == original for path, original in unchanged.items())
     terminal = json.loads((trial / "terminal.json").read_text())
-    # A completed fit remains a completed learning attempt if later publication fails.
+    # A trial completes only after its model is published.
     assert (
         terminal["status"]
-        == {"runtime": "failed", "interrupt": "abandoned", "publication": "completed"}[
+        == {"runtime": "failed", "interrupt": "abandoned", "publication": "failed"}[
             failure
         ]
     )

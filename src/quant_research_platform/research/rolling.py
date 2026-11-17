@@ -539,17 +539,7 @@ def _select(config, fold, session, candidates, calendar):
                 rows.append(
                     {
                         "model_id": model_id,
-                        "hyperparameters": dict(spec.hyperparameters),
-                        **(
-                            {"early_stopping": result.metadata["early_stopping"]}
-                            if patience is not None
-                            else {}
-                        ),
-                        **(
-                            {"learning_curve": result.metadata["learning_curve"]}
-                            if "learning_curve" in result.metadata
-                            else {}
-                        ),
+                        **result.metadata,
                     }
                 )
                 del result
@@ -607,6 +597,68 @@ def _select(config, fold, session, candidates, calendar):
             validation.loc[common, availability].max()
         ).isoformat(),
     }
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.storage.datasets import write_dataset
+
+    validation_path = Path(config["output"]) / fold.fold_id / "validation"
+    unit = session.spec.get("column_units", {}).get(target, config.get("label_unit"))
+    candidate_columns = {}
+    for index, row in enumerate(rows):
+        column = f"prediction_{index}"
+        row["prediction_column"] = column
+        candidate_columns[column] = row
+
+    def validation_chunks():
+        for start in range(0, len(validation), DEFAULT_BATCH_ROWS):
+            stop = start + DEFAULT_BATCH_ROWS
+            paired = (
+                validation.iloc[start:stop]
+                .loc[:, ["timestamp", "asset_id", target, availability]]
+                .rename(columns={target: "label", availability: "label_available_at"})
+            )
+            paired = paired.assign(
+                signal_eligible=signal_domain[start:stop],
+                comparison_sample=common[start:stop],
+            )
+            for column, values in zip(candidate_columns, predictions, strict=True):
+                paired[column] = np.where(
+                    signal_domain[start:stop], values[start:stop], np.nan
+                )
+            yield paired
+
+    write_dataset(
+        validation_path,
+        validation_chunks(),
+        spec=DataSpec(
+            data_id="rolling_validation",
+            frequency=session.spec["frequency"],
+            grain="asset_timestamp",
+            primary_key=("timestamp", "asset_id"),
+            partition_columns=(),
+            column_roles={
+                "timestamp": "timestamp",
+                "asset_id": "key",
+                "label": "label",
+                "label_available_at": "context",
+                "signal_eligible": "mask",
+                "comparison_sample": "mask",
+                **dict.fromkeys(candidate_columns, "prediction"),
+            },
+            column_units=dict.fromkeys(["label", *candidate_columns], unit)
+            if unit is not None
+            else {},
+            label_availability_columns={"label": "label_available_at"},
+        ),
+        metadata={
+            "inputs": config["inputs"],
+            "parameters": {
+                **selection,
+                "market_id": config["market_id"],
+                "target_column": target,
+                "candidates": candidate_columns,
+            },
+        },
+    )
     selected = []
     for model_id in dict.fromkeys(model_id for model_id, _ in candidates):
         spec = next(spec for name, spec in candidates if name == model_id)
@@ -685,6 +737,7 @@ def _run(config, folds, days):
     from quant_research_platform.research.models.production import fit
     from quant_research_platform.research.predictions.runner import predict
     from quant_research_platform.storage.atomic import reject_if_exists
+    from quant_research_platform.storage.manifests import write_qrp_json_file
 
     models = config["models"]
     if (
@@ -742,6 +795,7 @@ def _run(config, folds, days):
     ]
     if len(prediction_columns) != 1:
         raise ValueError("quarterly_one_prediction_signal_required")
+    write_qrp_json_file(root / "config.json", config)
     results = []
     for fold in folds:
         history = TimeWindow(fold.train.start, fold.validation.end)
@@ -807,6 +861,8 @@ def _run(config, folds, days):
                     "model": str(trained),
                     "predictions": str(predicted),
                     "evaluation": str(evaluated),
+                    "validation": str(root / fold.fold_id / "validation"),
                 }
             )
+    write_qrp_json_file(root / "results.json", {"folds": results})
     return results

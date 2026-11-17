@@ -152,6 +152,8 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
         assert info["completion_rate"] == 1
         assert info["implementation_shortfall_bps"] == pytest.approx(10)
         assert total_reward == pytest.approx(-0.001)
+        assert info["economic_reward"] == pytest.approx(total_reward)
+        assert info["reward_penalty"] == 0
     finally:
         env.close()
     output = backtest_policy(
@@ -274,6 +276,22 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
     )
     facts = parse_qrp_json_object((model / "policy.json").read_bytes())
     assert facts["actual_timesteps"] == 8
+    progress = pd.read_csv(model.with_name(model.name + ".trial") / "progress.csv")
+    assert progress["train/n_updates"].max() == facts["actual_updates"]
+    assert progress["train/approx_kl"].notna().any()
+    assert progress["train/value_loss"].notna().any()
+    assert progress["rollout/ep_rew_mean"].notna().any()
+    for index in range(n_envs):
+        episodes = pd.read_csv(
+            model.with_name(model.name + ".trial")
+            / f"training-env-{index}.monitor.csv",
+            comment="#",
+        )
+        assert len(episodes)
+        assert set(episodes.episode_index) == {0}
+        np.testing.assert_allclose(
+            episodes.economic_reward - episodes.reward_penalty, episodes.r, atol=5e-7
+        )
     frozen = (model / "feature_scaler.pkl").read_bytes()
     scaler = pickle.loads(frozen)
     assert scaler.medians == (2.0,)
@@ -292,6 +310,20 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
         }
     )
     assert list(read_portfolio_ledger_artifact(output / "ledger").iter_chunks())
+    diagnostic = backtest_policy(
+        {
+            "episode": episode,
+            "strategy": "ppo",
+            "policy": str(model),
+            "sample_role": "diagnostic",
+            "checkpoint": "final",
+            "output": str(tmp_path / "training-diagnostic"),
+        }
+    )
+    diagnostic_ledger = read_portfolio_ledger_artifact(diagnostic / "ledger")
+    assert diagnostic_ledger.metadata["sample_role"] == "diagnostic"
+    assert diagnostic_ledger.metadata["policy"]["checkpoint"] == "final"
+    assert list(diagnostic_ledger.iter_chunks())
     env = TradingEnv([later], feature_scaler=scaler)
     try:
         observation, _ = env.reset(seed=1)
@@ -308,6 +340,84 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
                 "policy": str(model),
             }
         )
+
+
+@pytest.mark.parametrize("fail_after_learning", [False, True])
+def test_ppo_execution_keeps_completed_validation_economics_on_failure(
+    tmp_path, monkeypatch, fail_after_learning
+):
+    from stable_baselines3 import PPO
+
+    from quant_research_platform.storage.experiments import read_trial_ledger
+
+    episode = hft_episode(tmp_path / "inputs")
+    episode["unfinished_penalty_bps"] = 0.0
+    later = {
+        **episode,
+        "window": {"start": "2024-01-03T01:30:00", "end": "2024-01-03T01:30:06"},
+    }
+    output = tmp_path / "execution-policy"
+    config = {
+        "episodes": [episode],
+        "validation_episodes": [later],
+        "early_stopping": {"eval_freq": 4, "patience": 1, "min_evals": 1},
+        "fit_cutoff": "2024-01-03T07:00:00",
+        "output": str(output),
+        "timesteps": 4,
+        "seed": 1,
+        "device": "cpu",
+        "n_envs": 1,
+        "threads": 1,
+        "ppo": {
+            "n_steps": 4,
+            "batch_size": 4,
+            "n_epochs": 1,
+            "policy_kwargs": {"net_arch": [8]},
+        },
+    }
+    if fail_after_learning:
+        learn = PPO.learn
+
+        def fail_after_validation(self, *args, **kwargs):
+            learn(self, *args, **kwargs)
+            raise RuntimeError("failure after completed validation")
+
+        monkeypatch.setattr(PPO, "learn", fail_after_validation)
+        with pytest.raises(RuntimeError, match="failure after completed validation"):
+            train_policy(config)
+        assert not output.exists()
+    else:
+        train_policy(config)
+        facts = parse_qrp_json_object((output / "policy.json").read_bytes())
+        for point in facts["validation"]["evaluations"]:
+            metrics = point["episode_metrics"][0]
+            assert metrics["unfilled_quantity"] == pytest.approx(
+                100 * (1 - metrics["completion_rate"])
+            )
+            assert metrics["opportunity_cost_bps"] == 0
+    trial = output.with_name(output.name + ".trial")
+    assert read_trial_ledger(trial)[-1]["status"] == (
+        "failed" if fail_after_learning else "completed"
+    )
+    progress = pd.read_csv(trial / "progress.csv")
+    validation = progress.loc[progress["eval/mean_reward"].notna()]
+    assert len(validation)
+    assert validation["eval/n_updates"].notna().all()
+    prefix = "eval/episode_0/"
+    np.testing.assert_allclose(
+        validation[prefix + "filled_quantity"]
+        + validation[prefix + "unfilled_quantity"],
+        100,
+    )
+    np.testing.assert_allclose(
+        validation[prefix + "economic_reward"],
+        -validation[prefix + "implementation_shortfall_bps"] / 10000,
+    )
+    np.testing.assert_allclose(
+        validation[prefix + "total_implementation_shortfall_bps"],
+        validation[prefix + "implementation_shortfall_bps"]
+        + validation[prefix + "opportunity_cost_bps"],
+    )
 
 
 def test_cost_objective_uses_drifted_weights_and_two_sided_cost():
@@ -477,7 +587,10 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
             "output": str(tmp_path / "cost-model"),
         }
     )
-    assert parse_qrp_json_object((model / "model.json").read_bytes())["device"] == "cpu"
+    facts = parse_qrp_json_object((model / "model.json").read_bytes())
+    assert facts["device"] == "cpu"
+    assert [point["epoch"] for point in facts["learning_curve"]] == [1, 2]
+    assert all(np.isfinite(point["objective"]) for point in facts["learning_curve"])
     frozen = (model / "feature_scaler.pkl").read_bytes()
     assert pickle.loads(frozen).medians == (4.0,)
     cost_episode = deepcopy(episode)
@@ -491,6 +604,14 @@ def test_daily_policy_and_cost_model_use_native_account_roundtrip(
         }
     )
     ledger = read_portfolio_ledger_artifact(output)
+    assert (
+        ledger.metadata["episode"]["account"]["inputs"]
+        == cost_episode["account"]["inputs"]
+    )
+    assert (
+        ledger.metadata["episode"]["account"]["candidate"]["candidate_id"]
+        == "cost_allocator"
+    )
     assert any(batch.trades for batch in ledger.iter_chunks())
     assert np.isfinite(
         summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())["nav"]

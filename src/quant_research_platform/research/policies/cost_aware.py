@@ -191,7 +191,8 @@ def fit_cost_model(config):
         features = torch.tensor(x, dtype=torch.float32, device=device)
         returns = torch.tensor(y, dtype=torch.float32, device=device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-        for _ in range(config["epochs"]):
+        learning_curve = []
+        for epoch in range(config["epochs"]):
             optimizer.zero_grad()
             net, _ = differentiable_returns(
                 model, features, returns, config["cost_bps"] / 10000
@@ -199,6 +200,9 @@ def fit_cost_model(config):
             loss = -net.mean() + config["risk_aversion"] * net.var(unbiased=False)
             if not torch.isfinite(loss):
                 raise ValueError("cost_learning_nonfinite_objective")
+            learning_curve.append(
+                {"epoch": epoch + 1, "objective": float(loss.detach())}
+            )
             loss.backward()
             optimizer.step()
         with torch.no_grad():
@@ -210,6 +214,8 @@ def fit_cost_model(config):
             "device": str(device),
             "config": config,
             "periods": len(times),
+            "learning_curve": learning_curve,
+            "training_loss_scope": "full_training_sample_before_update",
             "train_mean_net_return": float(net.mean()),
             "train_mean_turnover": float(turnover.mean()),
             "training_execution": (
@@ -330,6 +336,8 @@ def backtest_cost_model(config):
             "market_id": "a_share",
             "window": episode["window"],
             "model": config["model"],
+            "episode": episode,
+            "device": str(device),
             "training_approximation": facts["training_execution"],
         },
         produce=produce,

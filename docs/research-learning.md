@@ -78,7 +78,10 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 
 训练先遍历有界 episode 的真实决策特征，以公共 `ModelMatrixScaler` 拟合中位数。
 `backtest-policy` 冻结读取 `policy.zip`、`feature_scaler.pkl`、`normalization.pkl` 与 `policy.json`，
-评价窗口必须晚于拟合截止，期间不更新插补或归一化。只加载可信本地模型产物。
+默认 `sample_role="out_of_sample"` 要求评价窗口晚于拟合截止，期间不更新插补或归一化。
+显式 `sample_role="diagnostic"` 可用同一冻结模型回放训练期和验证期，账本保留诊断用途，
+不能作为样本外证据。`checkpoint` 默认 `selected`，也可选择本次产物保存的 `final`。
+只加载可信本地模型产物。
 基线可选：执行任务的 `immediate`、`twap`、`vwap`、`almgren_chriss`、`signal_ac`，库存的 `hold`，组合的
 `hold`、`equal_weight`。TWAP/VWAP 给出截至当前时刻的累计目标，实际成交仍依赖后续报价。
 VWAP 需预先声明 `volume_curve` 的 `as_of`、`fractions`、`cumulative_volume`；
@@ -102,6 +105,41 @@ AC 参数、公式和信号调整的近似边界见上述高频文档。
 复制选股方法或选择事实。持仓归因仍须有实际匹配的候选元数据，
 缺失时明确失败。高频账本按自身 `kind` 使用日终绩效口径，不与日频账本混合统计；
 学习账本也不因缺少 `candidate` 而被误判为高频。
+
+## PPO 检验所需记录
+
+模型目录保留选中策略、与其同时冻结的观测归一化及训练插补参数；
+最终策略与选中策略的采样步数或 SB3 优化 epoch 计数不同时，另存最终策略和对应归一化。
+`policy.json.final_checkpoint` 指明最终文件，二者相同时共用同一份文件。
+`actual_timesteps`、`actual_updates` 与验证记录中的 `selected_timesteps`、`selected_updates`
+分别记录采样步数与 SB3 累计优化 epoch 计数；`updates` 不是 minibatch 的 `optimizer.step()` 次数。
+同一采样步数的优化前、优化后策略可能不同。
+
+SB3 训练日志保存于模型旁的 `.trial/`，验证事实保存在模型目录：
+
+- `progress.csv` 保存策略损失、价值损失、熵、近似 KL、裁剪比例、价值解释度、学习率、优化 epoch 计数及 rollout/验证汇总；最后一次优化也写入。指标含义见 [SB3 Logger](https://stable-baselines3.readthedocs.io/en/master/common/logger.html)。
+- `training-env-*.monitor.csv` 保存各训练环境完成的 episode：原始累计奖励、步数、训练 episode 索引、起末净值、费用、经济奖励和惩罚。索引对应配置中的 episode 次序；这是随机探索轨迹，不等同于冻结策略的训练集评价。
+- `policy.json.validation.evaluations` 保存每次验证的采样步数、优化 epoch 计数、逐 episode 奖励、长度及经济结果。`episode_metrics.episode_index` 对应 `validation_episodes`，不按不同长度 episode 的结束次序猜身份。
+
+每次完成的验证还由同一个 SB3 logger 写入 `progress.csv` 的 `eval/episode_<索引>/...` 列，
+`eval/n_updates` 标明该次优化 epoch 计数；后续训练或模型发布失败时，已写日志仍留在 trial 中。
+成功模型中的验证记录是这些已计算事实的随模型快照，不另算一套指标。
+
+`economic_reward` 与 `reward_penalty` 使用该任务的原始奖励单位：动态执行是初始净值的 bps，
+库存/组合是初始净值的小数比例，母单执行是到达名义金额的小数比例；二者之差为累计奖励。
+母单执行还保存完成率、已成交/未成交量、执行短缺、未成交机会成本及其缺失原因，
+使低成交量或未完成母单造成的低短缺奖励可以识别；这些数值直接来自账户环境已有计算。
+各任务的奖励不能跨单位直接比较。
+
+过拟合判断优先比较同一冻结 checkpoint 在训练、历史验证和随后样本外窗口的逐日经济表现，
+并使用相同费用、账户限制和基线。损失、KL、熵和价值解释度主要诊断优化状态，单独不能证明泛化。
+训练奖励上升、验证收益下降是警示；验证还参与早停和选择，独立结论仍依赖随后评价。
+多随机种子的独立重复与不同市场阶段检验用于区分研究效果与随机波动，参见
+[SB3 评价建议](https://stable-baselines3.readthedocs.io/en/master/guide/rl_tips.html)。
+
+新增日志只影响之后启动的训练。已有冻结模型、预测和账本可补算的检验不要求重训；
+未保存的历史梯度、逐轮损失或旧 checkpoint 无法事后恢复。重训产生新实验，不能冒充旧运行记录。
+不默认保存全部 rollout 张量、每步梯度和每次更新的权重。
 
 ## ETF 动态库存基线
 
@@ -402,6 +440,8 @@ Python 仍可用 `backtest_policy(config, portfolio_context=provider)` 注入已
 `ModelMatrixScaler` 使用训练中位数填补；训练列全空时无法估计并明确失败。
 
 插补与缩放只估计于本次训练域，保存为 `feature_scaler.pkl`，回测冻结复用。
+`model.json.learning_curve` 保存每次更新前的全训练样本目标值；最终净收益与换手单独保存。
+原生回测账本保留实际使用的完整 episode、模型来源与设备，支持按同一账户规则复核。
 每期以漂移后的持仓为起点，双边换手
 `T = sum(abs(w - previous_weight))`，净收益近似为
 `(1-cost_bps/10000 × T) × (1+w·r)-1`，目标为负平均净收益加收益方差惩罚。

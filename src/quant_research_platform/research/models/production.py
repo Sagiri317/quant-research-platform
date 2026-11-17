@@ -545,13 +545,13 @@ def fit(config: Mapping) -> Path:
         )
         from quant_research_platform.research.models.persisted import save_model
 
-        terminal = recorder.finish(result={"model_metadata": result.metadata})
         save_model(
             output,
             result,
             facts={**facts, "trial": str(recorder.root)},
-            trial_id=terminal["trial_id"],
+            trial_id=recorder.record["trial_id"],
         )
+        recorder.finish(result={"model_metadata": result.metadata})
     except BaseException as exc:
         if not (recorder.root / "terminal.json").exists():
             recorder.fail(exc)

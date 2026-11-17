@@ -95,7 +95,8 @@ class TradingEnv(gym.Env):
         if options:
             raise ValueError("policy_reset_options_unused")
         self.close()
-        self.episode = self.episodes[int(self.np_random.integers(len(self.episodes)))]
+        self.episode_index = int(self.np_random.integers(len(self.episodes)))
+        self.episode = self.episodes[self.episode_index]
         self._context = _stream(self.episode)
         self.stream = self._context.__enter__()
         self.fees = self.filled = self.shortfall = 0.0
@@ -301,7 +302,14 @@ class TradingEnv(gym.Env):
         return result
 
     def _info(self):
-        result = {"nav": self.nav, "fees": self.fees}
+        result = {
+            "episode_index": self.episode_index,
+            "initial_nav": self.initial_nav,
+            "nav": self.nav,
+            "fees": self.fees,
+            "economic_reward": self.economic_reward_total,
+            "reward_penalty": self.economic_reward_total - self.reward_total,
+        }
         if self.task == "dynamic_execution":
             result.update(
                 reward_bps=self.reward_total,
@@ -447,10 +455,11 @@ class TradingEnv(gym.Env):
         self._advance(target)
         if self.task == "execution":
             notional = abs(self.episode["order"]["quantity"]) * self.arrival_price
-            reward = (
+            economic = (
                 -(self.shortfall - before_shortfall + self.fees - before_fees)
                 / notional
             )
+            reward = economic
             lower, upper, _ = time_window_timestamp_interval(
                 TimeWindow(**self.episode["window"])
             )
@@ -476,9 +485,9 @@ class TradingEnv(gym.Env):
                 - self.episode["risk_aversion"] * self._inventory_integral
                 - self.episode["target_deviation_bps"] * self._deviation_integral
             )
-            self.economic_reward_total += economic
-            self.reward_total += float(reward)
         else:
-            change = (self.nav - before_nav) / self.initial_nav
-            reward = change - self.episode["risk_aversion"] * change * change
+            economic = (self.nav - before_nav) / self.initial_nav
+            reward = economic - self.episode["risk_aversion"] * economic * economic
+        self.economic_reward_total += economic
+        self.reward_total += float(reward)
         return self._observation(), float(reward), self.done, False, self._info()
