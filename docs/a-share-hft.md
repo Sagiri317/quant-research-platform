@@ -199,4 +199,8 @@ maker 占用的现金和库存不能再给 taker；撤单确认前预留不释�
 
 `analyze-inventory` 明确 `ledger,benchmark,output`，核对同资本、初始持有和账户窗口，从原生账本分解盘中及隔夜库存价格损益、成交相对账本估值的差额、权益股数变化、应收股息变化、股息现金、回收现金和显性费用。输出逐日基准与增量损益、库存暴露、成交等待时间、底仓恢复状态及分解残差。股息到账与应收减少分别列示，合计反映经济收益。
 
+账户净收益率是扣费后的累计损益除以初始资金，包含初始持仓的市场涨跌；它不是相对持有不动的收益。检验交易贡献时，使用相同初始资金、持仓、估值输入与窗口的持有基准：`backtest-hft` 设置 `predictions=[]`、`restore_at=null`，保留原生分红、权益变化和估值处理。基准不再主动交易，也不每日调回固定仓位比例；没有挂单时无需 `passive` 和逐笔 `trades` 输入。随后调用 `analyze-inventory`，直接策略与 PPO 均使用同一份基准账本。
+
+逐日 `incremental_net_pnl = net_pnl - benchmark_net_pnl` 是交易相对持有的扣费后增益，`incremental_cost = cost - benchmark_cost` 是增加的费用；两者相加是扣除显性费用前的增益，成交价差已经包含在成交损益中。`incremental_capital_return` 用共同初始资金作分母，逐日求和等于两种策略累计净收益率的差，展示为百分点；不能把它复利累计，也不能用各自日收益率之差代替金额增益。单个账户的盘中库存损益仍含底仓涨跌，交易贡献应读取相应的 `incremental_*` 分解。`decomposition_residual` 核对金额分解，`incomplete_restorations` 记录未恢复底仓的会话；收益显著性使用有序的逐日增量序列，不能把逐笔成交视作独立日收益样本。
+
 Venvoo 来源入口统一处理已观察到的日间 `HHMMSS` 短编码和 `HHMMSSmmm` 毫秒编码。转换后继续检查时分秒范围，保存到 UTC 时间轴。每个 interim 来源清单记录两类编码的实际行数，修正范围由来源输入决定。
