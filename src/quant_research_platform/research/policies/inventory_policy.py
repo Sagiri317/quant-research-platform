@@ -27,7 +27,12 @@ def prediction_parameters(value):
     parameters = _strict_config(
         value,
         {"paths"},
-        {"horizon_seconds", "decision_interval_seconds", "quote_visibility_delay_ms"},
+        {
+            "horizon_seconds",
+            "decision_interval_seconds",
+            "quote_visibility_delay_ms",
+            "calibration",
+        },
     )
     paths = parameters["paths"]
     if (
@@ -36,6 +41,10 @@ def prediction_parameters(value):
         or any(not isinstance(path, str) or not path for path in paths)
     ):
         raise ValueError("inventory_prediction_paths_required")
+    if "calibration" in parameters and (
+        not isinstance(parameters["calibration"], str) or not parameters["calibration"]
+    ):
+        raise ValueError("prediction_calibration_path_required")
     for key, default in (
         ("horizon_seconds", 30),
         ("decision_interval_seconds", 3),

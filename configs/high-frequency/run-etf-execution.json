@@ -37,6 +37,7 @@
     "decision_interval_seconds": 3,
     "quote_visibility_delay_ms": 1
   },
+  "prediction_calibration": null,
   "account_parameters": {
     "initial_capital": 1000000,
     "participation_rate": 0.1,

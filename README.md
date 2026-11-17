@@ -69,7 +69,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 
 [配置索引](configs/README.md)区分当前研究入口与原生操作示例；示例中的路径需替换为实际已准备输入。
 四只 ETF 的直接策略与 PPO 共用 [执行研究配置](configs/high-frequency/run-etf-execution.json)，
-以 `qrp run-etf-execution --config ... --stage direct/train/ppo` 选择阶段。
+以 `qrp run-etf-execution --config ... --stage calibrate/direct/train/ppo` 选择阶段；历史幅度校准默认关闭，开启方式见[策略学习](docs/research-learning.md#etf-历史预测幅度校准)。
 [选择并组装输入](configs/assemble-selected.json)统一演示分批因子与已有特征的列选择和拼接。
 已有特征保留原变换、资格列和缺值；`feature_recipe=null` 不重复处理。
 该示例生成无标签输入，训练时需另选标签及其成熟时间列。

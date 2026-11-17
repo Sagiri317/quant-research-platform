@@ -25,6 +25,7 @@ CONFIG_OPERATIONS = (
     ("run-quarterly", "research.rolling", "run_quarterly"),
     ("run-sessions", "research.rolling", "run_sessions"),
     ("normalize-book", "research.features.book_normalization", "normalize_book"),
+    ("calibrate-amplitude", "research.predictions.amplitude", "calibrate_amplitude"),
     ("sample-hft", "research.datasets.high_frequency", "sample_hft"),
     (
         "evaluate-time-series",

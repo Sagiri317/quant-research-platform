@@ -14,6 +14,7 @@ CLI 只解析配置并调用同一个 Python 函数。操作之间由调用者�
 | `backtest-policy` | `research.policies.reinforcement.backtest_policy` | 原生 `ledger/` 与 `summary.json` |
 | `search-factors` | `research.factors.search.search_factors` | 完整候选成绩、选中公式与试验记录 |
 | `apply-formula` | `research.factors.search.apply_formula` | 原生因子数据集 |
+| `calibrate-amplitude` | `research.predictions.amplitude.calibrate_amplitude` | 逐证券、逐交易日的收益校准参数数据集 |
 | `calibrate-uncertainty` | `research.predictions.uncertainty.calibrate_uncertainty` | 冻结残差半径 JSON |
 | `apply-uncertainty` | `research.predictions.uncertainty.apply_uncertainty` | 原生区间与保守分数数据集 |
 | `evaluate-uncertainty` | `research.predictions.uncertainty.evaluate_uncertainty` | 成熟样本覆盖率与区间宽度 |
@@ -156,7 +157,7 @@ ETF预测驱动的下单研究采用两条路径：固定规则直接模拟执�
 默认 `prediction.horizon_seconds=30`、`decision_interval_seconds=3`、
 `quote_visibility_delay_ms=1`，并与 PRED 原生目标定义、单位和时钟事实核对。
 仅接受未变换的小数未来中价收益，分类方向/概率分数不能冒充收益预测。
-策略不读取未来标签。PRED 的 timestamp 已是决策 T，不再加一次可见延迟；
+账户回放不读取标签；可选历史校准在独立准备阶段读取当时已成熟的标签。PRED 的 timestamp 已是决策 T，不再加一次可见延迟；
 决策估值与成本盘口只取事件时刻不晚于 T−可见延迟的报价，订单仍需经过独立的
 `latency_ms`（默认 10ms）并在严格后续合格报价执行，不使用激活后的报价反推 T 的目标。
 预测缺行或缺值不产生新信号目标，不当作零收益；持仓保留，原单依原有效期和撤单规则推进，
@@ -202,6 +203,56 @@ maker/taker 使用同一目标算法与预测输入；比较时使用相同的�
 依据见[2026年盘口容量估算](../reports/ETF高频滚动预测报告.md#2026年单次委托容量估算)。这是首轮场景设定，
 没有通过收益验证选成最优值；队列成交和收盘恢复仍不保证完成。
 
+## ETF 历史预测幅度校准
+
+执行研究配置的 `prediction_calibration` 默认为 `null`，省略也关闭。
+开启时，直接策略和 PPO 共用每天开盘前估计、当天冻结的收益预测：
+
+`校准后收益 μ = a + b × 原预测 s`。
+
+逐证券使用此前 `lookback_sessions` 个明确交易会话内的样本外预测及其真实收益，
+做带截距的普通最小二乘回归。建议起点为 20 个会话，与现有滚动节奏一致，并非已验证最优值。
+样本不限定为曾成交的信号，也不再按上游研究池的 `eligible` 筛选。
+预测必须晚于其模型拟合、选型和早停验证截止；标签须有效、有限，
+且实际可用时点严格早于当天北京时间 09:30（UTC 01:30）。未知成熟时间不参与；
+当天标签不参与当天估计，后续交易日可使用当时已成熟的历史结果。
+
+会话轴来自显式交易日历，缺报价或缺预测不延长回看。历史日历不足指定长度、有效配对少于两条，
+或预测全为常数时，当日参数及校准收益保留缺失并保存原因；不回退原预测或补零。
+窗口中部分会话没有有效样本时仍使用固定窗口内的有效配对，保存实际样本数和有样本的会话数。
+若整段准备范围没有任何历史预测，无法建立校准来源，准备操作会报错。
+缺失校准收益沿既有缺预测规则处理，不产生新信号目标；已有订单和独立日终恢复继续按账户规则执行。
+斜率允许负值，不裁剪成正数或统一缩小；实际有效性仍需回放检验。
+
+`prediction_error_scale` 是该历史回归的残差均方根，分母为有效配对数，单位为小数收益。
+它衡量历史残差幅度，不是胜率、均值标准误或置信区间；重叠的 30 秒标签不能视为独立样本。
+开启校准后，动态执行 PPO 自动增加这一观测，插补与标准化继续只在 PPO 训练域估计。
+原始预测保留为 `raw_prediction_score`，账户决策使用校准后的 `prediction_score`，
+账本诊断同时保留原预测与历史误差尺度。原 PRED 文件不改写。
+
+在同一份执行配置中将 `prediction_calibration` 改为下面的对象，并将 `output` 指向新的研究目录：
+
+```json
+{
+  "inputs_root": "data/processed/research/etf",
+  "label": "future_mid_return_30s",
+  "lookback_sessions": 20
+}
+```
+
+`inputs_root/<证券>/model-inputs` 应为包含目标标签及成熟时点的原生输入，按实际路径修改。
+先运行 `qrp run-etf-execution --config <配置.json> --stage calibrate`，
+再分别运行 `--stage direct`、`--stage train` 和 `--stage ppo`；可用 `--asset-id` 限定证券。
+准备阶段覆盖配置中的训练、验证和回放日期，输出 `<output>/<证券>/calibration`。
+其余阶段只读这份日级参数，不在环境 reset 时重复拟合，也不读取标签。
+开启后需要重新训练 PPO；原未校准策略的观测空间不适用于新模式。上游信号模型不因幅度校准而重训。
+
+独立 `calibrate-amplitude --config <配置.json>` 接收 `inputs`、`predictions` 路径列表、`label`、
+`asset_ids`、完整 `sessions` 日期列表、输出 `window`、`lookback_sessions` 和新 `output`。
+原生日表保存截距、斜率、误差尺度、历史范围、实际样本数、资格与缺失原因；元数据保存来源和计算参数。
+通用 `backtest-policy` / `train-policy` 通过 `episode.prediction.calibration` 指向这份日表。
+缺少实际消费日的参数会报错，已计算但不可估计的日则保留缺失；不会悄悄借用前一天参数。
+
 ## ETF 预测驱动的 PPO 执行
 
 `task="dynamic_execution"` 把目标库存与执行分开。`inventory_targets` 继续独占目标选择，
@@ -220,7 +271,7 @@ maker/taker 使用同一目标算法与预测输入；比较时使用相同的�
 | 冻结回放 | `backtest_policy(config)`；明确 `policy`、新的 `episode` 和 `output` | 原生 `ledger/` 与 `summary.json` |
 
 PRED 只检查本次使用的数值收益、单位与时钟定义，以及消费行晚于其模型拟合/选型截止的新关系。
-不消费标签，不以 `data_id` 字面相等、整表范围或未使用字段准入。外部调用者可以换路径、
+账户回放不消费标签，不以 `data_id` 字面相等、整表范围或未使用字段准入。外部调用者可以换路径、
 证券、窗口和数量参数；同一网络的资产与特征顺序仍须与训练一致。
 
 每只 ETF 动作为 `MultiDiscrete(8)`：0 等待；1 撤单；2/3/4 以 maker 执行当前库存到策略目标

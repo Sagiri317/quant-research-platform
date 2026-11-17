@@ -11,11 +11,12 @@
 | --- | --- |
 | [run-quarterly-a-share.json](run-quarterly-a-share.json) | `run-quarterly`：A 股四类预测模型，2022 年起按季度预测，训练和验证向后滚动 |
 | [high-frequency/run-sessions-etf.json](high-frequency/run-sessions-etf.json) | `run-sessions`：ETF 四类预测模型的共同参数。输入路径以 518880 举例，调用者替换真实证券输入和可用起点；137 列特征的顺序保留原协议 |
-| [high-frequency/run-etf-execution.json](high-frequency/run-etf-execution.json) | `run-etf-execution --stage direct/train/ppo`：明确列出 510300、510500、159915、518880，各自独立 100 万元账户，直接策略和 PPO 共用规则，2026 年回放 |
+| [high-frequency/run-etf-execution.json](high-frequency/run-etf-execution.json) | `run-etf-execution --stage calibrate/direct/train/ppo`：明确列出 510300、510500、159915、518880，各自独立 100 万元账户，直接策略和 PPO 共用规则，2026 年回放；历史幅度校准默认关闭 |
 | [factor-analysis-policy.csv](factor-analysis-policy.csv) | 因子检验的去极值、标准化、中性化等处理政策；按分析粒度与因子列区分，不是模型输入清单 |
 
 ETF 执行入口默认依次运行四只证券，`--asset-id` 可限定其中一只；跨证券并行由调用者安排。
 同一证券的直接策略、训练和冻结回放分别保存到 `direct`、`policy`、`ppo`。
+可选 `prediction_calibration` 开启后，先以 `calibrate` 准备共用日参数；用新输出目录重跑直接策略并重新训练 PPO，配置和缺失语义见[历史幅度校准](../docs/research-learning.md#etf-历史预测幅度校准)。
 PPO 使用 2025 年前三季度训练、第四季度验证；训练插补及观察统计不从 2026 年估计。
 金额上限、初始半仓、费用、参与率及恢复时间只在该配置维护一份。
 完整规则和术语见[策略学习](../docs/research-learning.md)与[高频账户](../docs/a-share-hft.md)。

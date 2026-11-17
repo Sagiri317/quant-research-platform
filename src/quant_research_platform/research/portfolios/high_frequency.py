@@ -9,8 +9,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.manifest import read_output_manifest
-from quant_research_platform.artifacts.outputs.prediction import _iter_prediction_member
 from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
@@ -66,6 +64,9 @@ from quant_research_platform.research.portfolios.passive import (
     trade_events,
 )
 from quant_research_platform.research.portfolios.performance import performance_rows
+from quant_research_platform.research.predictions.outputs import (
+    read_rolling_predictions,
+)
 from quant_research_platform.research.signals.processing import (
     process_prediction_signals,
     signal_processing_parameters,
@@ -932,7 +933,7 @@ def inventory_batches(
                     visible_quotes[asset] = row
                     visible_marks[asset] = row.mid
                     for column in decision_columns:
-                        if column != "prediction_score":
+                        if column not in {"prediction_score", "prediction_error_scale"}:
                             visible_features.loc[asset, column] = row[column]
                     if not np.isfinite(row.mid) or row.mid <= 0:
                         continue
@@ -1031,9 +1032,10 @@ def inventory_batches(
             features = visible_features
             for asset in requested:
                 if prediction_rows is not None and (at, asset) in prediction_rows.index:
-                    features.loc[asset, "prediction_score"] = prediction_rows.loc[
-                        (at, asset), "prediction_score"
-                    ]
+                    for column in prediction_rows.columns:
+                        features.loc[asset, column] = prediction_rows.loc[
+                            (at, asset), column
+                        ]
             pending = pd.Series(0.0, index=assets)
             pending_targets = pd.Series(np.nan, index=assets)
             if passive is not None:
@@ -1122,6 +1124,16 @@ def inventory_batches(
                 target[asset] = status_target(asset, target[asset])
             diagnostics = []
             for asset, quantity in target.items():
+                for name in ("raw_prediction_score", "prediction_error_scale"):
+                    if name in features and pd.notna(features.loc[asset, name]):
+                        diagnostics.append(
+                            PortfolioDiagnostic(
+                                asset,
+                                None,
+                                name,
+                                number=float(features.loc[asset, name]),
+                            )
+                        )
                 diagnostics.extend(
                     (
                         *(
@@ -2002,6 +2014,7 @@ def inventory_inputs(
     window,
     *,
     prediction_paths=(),
+    prediction_calibration=None,
     decision_columns=None,
     prediction_validator=None,
 ):
@@ -2063,44 +2076,24 @@ def inventory_inputs(
         content_identity=canonical_json_hash(fee_frame.to_json(date_format="iso")),
     )
     daily_sessions = _daily_market_views(daily, window)
-    prediction_frames = []
-    for path in prediction_paths:
-        manifest = read_output_manifest(Path(path))
-        facts = manifest["metadata"]
+    predictions, metadata = read_rolling_predictions(
+        prediction_paths,
+        window=TimeWindow(start, end),
+        asset_ids=tuple(config["parameters"]["maximum_weights"]),
+    )
+    for facts in metadata:
         if facts["model_facts"]["market_id"] != "a_share":
             raise ValueError("hft_prediction_market_mismatch")
         if prediction_validator is not None:
             prediction_validator(facts)
-        with closing_iterator(
-            _iter_prediction_member(
-                Path(path),
-                facts,
-                columns=("timestamp", "asset_id", "prediction_score"),
-                time_window=TimeWindow(start, end),
-                asset_ids=tuple(config["parameters"]["maximum_weights"]),
-            )
-        ) as chunks:
-            for frame in chunks:
-                cutoffs = [facts["model_facts"]["fit_cutoff"]]
-                selection = facts["model_facts"].get("selection_cutoff")
-                if selection is not None:
-                    cutoffs.append(selection)
-                model_facts = facts["model_facts"]
-                if (
-                    model_facts["candidate_parameters"].get("early_stopping_rounds")
-                    is not None
-                ):
-                    cutoffs.append(model_facts["validation"]["cutoff"])
-                if not frame.empty and frame.timestamp.min() <= max(
-                    pd.Timestamp(value) for value in cutoffs
-                ):
-                    raise ValueError("policy_prediction_not_out_of_sample")
-                prediction_frames.append(frame)
+    if prediction_calibration is not None:
+        from quant_research_platform.research.predictions.amplitude import (
+            apply_amplitude,
+        )
+
+        predictions = apply_amplitude(predictions, metadata, prediction_calibration)
     prediction_days = {}
-    if prediction_frames:
-        predictions = pd.concat(prediction_frames, ignore_index=True)
-        if predictions.duplicated(["timestamp", "asset_id"]).any():
-            raise ValueError("hft_prediction_keys_overlap")
+    if not predictions.empty:
         prediction_days = {
             day: frame
             for day, frame in predictions.groupby(

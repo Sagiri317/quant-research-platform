@@ -94,6 +94,13 @@ def _episode(value):
         ):
             raise ValueError("inventory_prediction_episode_invalid")
         config["prediction"] = prediction_parameters(config["prediction"])
+        if (
+            config["task"] == "dynamic_execution"
+            and "calibration" in config["prediction"]
+        ):
+            config["feature_columns"] = list(
+                dict.fromkeys((*columns, "prediction_error_scale"))
+            )
         scale = 1.0
         if config["task"] == "dynamic_execution":
             if "capital_scale" in config:
@@ -185,11 +192,19 @@ def _stream(episode):
             account,
             window,
             decision_columns=tuple(
-                column for column in columns if column != "prediction_score"
+                column
+                for column in columns
+                if column != "prediction_score"
+                and not (
+                    column == "prediction_error_scale" and "calibration" in prediction
+                )
             )
             if prediction is not None
             else columns,
             prediction_paths=prediction["paths"] if prediction is not None else (),
+            prediction_calibration=prediction.get("calibration")
+            if prediction is not None
+            else None,
             prediction_validator=partial(
                 validate_inventory_prediction, parameters=prediction
             )

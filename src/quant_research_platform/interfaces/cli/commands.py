@@ -280,7 +280,9 @@ def train_policy(config: Config) -> None:
 @app.command("run-etf-execution")
 def run_etf_execution(
     config: Config,
-    stage: Annotated[str, typer.Option("--stage", help="direct, train, or ppo.")],
+    stage: Annotated[
+        str, typer.Option("--stage", help="calibrate, direct, train, or ppo.")
+    ],
     asset_id: Annotated[
         str | None,
         typer.Option("--asset-id", help="One asset, or all configured assets."),
@@ -328,6 +330,16 @@ def calibrate_uncertainty(config: Config) -> None:
     )
 
     _echo_result(calibrate_uncertainty(read_qrp_json_file(config)[1]))
+
+
+@app.command("calibrate-amplitude")
+def calibrate_amplitude(config: Config) -> None:
+    """Fit daily return calibration on mature historical out-of-sample forecasts."""
+    from quant_research_platform.research.predictions.amplitude import (
+        calibrate_amplitude,
+    )
+
+    _echo_result(calibrate_amplitude(read_qrp_json_file(config)[1]))
 
 
 @app.command("apply-uncertainty")

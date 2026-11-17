@@ -1,10 +1,62 @@
 """Select valid prediction rows while retaining causal context for sequence models."""
 
+from pathlib import Path
+
+import pandas as pd
+
+from quant_research_platform.artifacts.outputs.manifest import read_output_manifest
+from quant_research_platform.artifacts.outputs.prediction import _iter_prediction_member
 from quant_research_platform.contracts.models import DEEPLOB_ALGORITHMS
 from quant_research_platform.contracts.time import prediction_window_mask
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.deeplob import complete_book_rows
+
+
+def read_rolling_predictions(paths, *, window, asset_ids):
+    """Join consumed forecasts after their fit and selection cutoffs."""
+    frames, metadata = [], []
+    for path in paths:
+        facts = read_output_manifest(Path(path))["metadata"]
+        model = facts["model_facts"]
+        cutoffs = [model["fit_cutoff"]]
+        if model.get("selection_cutoff") is not None:
+            cutoffs.append(model["selection_cutoff"])
+        if model["candidate_parameters"].get("early_stopping_rounds") is not None:
+            cutoffs.append(model["validation"]["cutoff"])
+        cutoff = max(pd.Timestamp(value) for value in cutoffs)
+        consumed = False
+        with closing_iterator(
+            _iter_prediction_member(
+                Path(path),
+                facts,
+                columns=("timestamp", "asset_id", "prediction_score"),
+                time_window=window,
+                asset_ids=asset_ids,
+            )
+        ) as chunks:
+            for frame in chunks:
+                if frame.timestamp.min() <= cutoff:
+                    raise ValueError("policy_prediction_not_out_of_sample")
+                frames.append(frame)
+                consumed = True
+        if consumed:
+            metadata.append(facts)
+    predictions = (
+        pd.concat(frames, ignore_index=True)
+        if frames
+        else pd.DataFrame(
+            {
+                "timestamp": pd.Series(dtype="datetime64[ns]"),
+                "asset_id": pd.Series(dtype="str"),
+                "prediction_score": pd.Series(dtype="float64"),
+            }
+        )
+    )
+    if predictions.duplicated(["timestamp", "asset_id"]).any():
+        raise ValueError("hft_prediction_keys_overlap")
+    return predictions, metadata
 
 
 def prediction_input_mask(frame, metadata):

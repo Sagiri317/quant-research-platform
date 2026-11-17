@@ -34,6 +34,7 @@ OPERATIONS = {
     "search-factors",
     "apply-formula",
     "calibrate-uncertainty",
+    "calibrate-amplitude",
     "apply-uncertainty",
     "evaluate-uncertainty",
     "fit-cost-model",
