@@ -299,3 +299,42 @@ def test_strict_tracking_error_propagates_nav_normalization_without_zeroing_risk
         "SATISFIED" if risk_shortfall == 0.0 else "BREACHED"
     )
     assert (violation[0] == 0.0) == (risk_shortfall == 0.0)
+
+
+@pytest.mark.parametrize("next_quote", [True, False])
+def test_full_investment_rebalances_despite_lot_cash_and_respects_missing_open(
+    next_quote,
+):
+    inputs = decision_inputs(benchmark=(0.5, 0.5), holdings=(1.0, 0.0))
+    for key in ("panel", "next_panel", "endpoint_panel"):
+        inputs[key]["open"] = inputs[key]["close"] = [1.0, 1.01]
+    if not next_quote:
+        inputs["next_panel"] = inputs["next_panel"].loc[lambda f: f.asset_id.eq("a")]
+    inputs.update(
+        candidate=replace(
+            inputs["candidate"], construction="robust_long_only", benchmark_id=None
+        ),
+        holdings=pd.Series({"a": 10000.0}),
+        held_units=pd.Series({"a": 10000.0}),
+        nav=10000.0,
+        alpha=pd.Series({"a": -0.25, "b": 0.25}),
+        amount_history={k: deque([10000.0] * 20) for k in inputs["amount_history"]},
+        enhanced_decision=replace(
+            inputs["enhanced_decision"],
+            benchmark_weights=pd.Series(dtype=float),
+            calibration=None,
+            expected_alpha=None,
+        ),
+        optimizer_config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, target_turnover_limit=0.2
+        ),
+        robust_config=RobustPortfolioConfig(objective="rank"),
+        decision_reason="robust_optimizer",
+    )
+    account, _, solved, _, ledger = daily._build_session(**inputs)
+    assert solved.weights["b"] == pytest.approx(0.2, abs=1e-7)
+    assert ledger.set_index("asset_id").executed_quantity["b"] == (
+        1900 if next_quote else 0
+    )
+    if next_quote:
+        assert account.post_trade_cash == pytest.approx(81.0)

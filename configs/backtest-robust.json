@@ -124,6 +124,7 @@
     "end": "2017-03-31"
   },
   "robust_config": {
+    "objective": "calibrated_return",
     "confidence": 0.95,
     "risk_aversion": 1.0
   },

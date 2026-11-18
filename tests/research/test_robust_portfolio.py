@@ -1,6 +1,6 @@
 """Independent rank-one robust objectives and native calibrated account flows."""
 
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import numpy as np
 import pandas as pd
@@ -43,6 +43,113 @@ def _solve(assets, loading, *, rate=0.0, **kwargs):
         holding_sessions=kwargs.pop("holding_sessions", 252),
         **kwargs,
     )
+
+
+@pytest.mark.parametrize(
+    ("objective", "target"),
+    [
+        ("rank", [1.0, 0.0]),
+        ("rank_to_risk", [3 / 7, 4 / 7]),
+    ],
+)
+@pytest.mark.parametrize("rate", [0.0, 0.005])
+def test_unscaled_rank_targets_with_actual_fees(objective, target, rate):
+    assets = _assets((0.3, 0.1, 0.0), (0.0, 0.0, 1.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["specific_variance"] = [0.04, 0.01, 0.0]
+    rates = np.where(assets.is_cash, 0.0, rate)
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind=objective,
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda buy, sell: (
+            float((buy + sell) @ rates),
+            rates,
+            rates,
+        ),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+    )
+    # The positive tangency direction is inverse variance times score.
+    assert result.weights.iloc[:2].to_numpy() * (1 + rate) == pytest.approx(
+        target, abs=2e-6
+    )
+    assert result.expected_return is None
+    expected = 0.3 / (1 + rate) if objective == "rank" else np.sqrt(3.25)
+    assert result.objective_value == pytest.approx(expected, abs=1e-7)
+
+
+@pytest.mark.parametrize(
+    ("ranks", "variance", "reason"),
+    [
+        ((-0.2, -0.1, 0.0), (0.04, 0.01, 0.0), "optimizer_no_positive_feasible_rank"),
+        ((0.2, 0.3, 0.0), (0.0, 0.04, 0.0), "optimizer_rank_ratio_zero_volatility"),
+    ],
+)
+def test_rank_ratio_requires_a_finite_positive_opportunity(ranks, variance, reason):
+    assets = _assets(ranks, (0.0, 0.0, 1.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["specific_variance"] = variance
+    with pytest.raises(ValueError, match=reason):
+        optimizer.optimize_portfolio(
+            assets,
+            objective_kind="rank_to_risk",
+            factor_covariance=pd.DataFrame(dtype=float),
+            expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(3), np.zeros(3)),
+            nav=100.0,
+            cash_column="is_cash",
+            config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+        )
+
+
+def test_rank_ratio_respects_frozen_exposure_to_risk():
+    assets = _assets((0.2, 0.3, 0.0), (0.5, 0.5, 0.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["specific_variance"] = [0.0, 0.04, 0.0]
+    assets["trade_capacity_weight"] = 0.0
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(3), np.zeros(3)),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+    )
+    assert result.objective_value == pytest.approx(2.5)
+
+
+def test_calibration_window_uses_market_sessions_or_fixed_start_and_maturity():
+    dates = pd.bdate_range("2020-12-21", periods=12)
+    intervals = calibration.alpha_calibration_intervals(dates, "daily")
+    observations = pd.DataFrame(
+        [
+            (day, rank, slope * rank)
+            for i, day in enumerate(dates)
+            for slope in [0.6 if i < 5 else 0.2]
+            for rank in [-0.25, 0.25]
+        ],
+        columns=["timestamp", "prediction_rank_score", "holding_return"],
+    )
+
+    # At the last close the last two decision dates have no matured holding return.
+    def fit(window):
+        return calibration.calibrate_expected_alpha(
+            observations,
+            as_of=dates[-1],
+            trading_sessions=dates,
+            scheduled_intervals=intervals,
+            window=window,
+            minimum_valid_dates=3,
+        )
+
+    assert fit(7).slope == pytest.approx(0.2)
+    assert fit(dates[0].date().isoformat()).slope == pytest.approx(0.4)
+    assert fit(7).scheduled_rebalance_dates == 5
 
 
 def test_hand_derived_return_robust_risk_fee_objective_and_nonrobust_baseline():
@@ -433,8 +540,8 @@ def test_date_cluster_slope_uncertainty_is_parameter_error_and_excludes_immature
     assert calibration.alpha_uncertainty_loading(zero, ranks).eq(0.0).all()
 
 
-def test_robust_configuration_contains_only_confidence_and_risk_preference():
-    assert asdict(RobustPortfolioConfig()) == {"confidence": 0.95, "risk_aversion": 1.0}
+def test_calibrated_objective_defaults_and_risk_preferences():
+    assert RobustPortfolioConfig().objective == "calibrated_return"
     for values in ({"confidence": 1.0}, {"risk_aversion": -1.0}):
         with pytest.raises(ValueError, match="robust_portfolio_config_invalid"):
             RobustPortfolioConfig(**values)
@@ -613,6 +720,36 @@ def native_case(tmp_path_factory):
         },
     }
     return root, config, str(sources["benchmark_weights"]), pd.DataFrame(observations)
+
+
+@pytest.mark.parametrize("objective", ["rank", "rank_to_risk"])
+def test_native_rank_objective_trades_without_a_calibration_history(
+    native_case, objective
+):
+    from copy import deepcopy
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.research.portfolios.production import backtest
+
+    root, config, _, _ = native_case
+    config = deepcopy(config)
+    del config["calibration"]
+    config["robust_config"] = {"objective": objective}
+    config["optimizer_config"] = {"fully_invested": True}
+    config["output"] = str(root / objective)
+    config["prediction_window"]["start"] = config["output_window"]["start"]
+    config["predictions"][0]["window"]["start"] = config["output_window"]["start"]
+    artifact = read_portfolio_ledger_artifact(backtest(config))
+    assert artifact.final_alpha_calibration is None
+    traded = next(batch for batch in artifact.iter_chunks() if batch.trades)
+    assert any(row.name == "objective_value" for row in traded.diagnostics)
+    assert not any(
+        row.name in {"expected_alpha", "expected_return", "alpha_slope"}
+        and row.number is not None
+        for row in traded.diagnostics
+    )
 
 
 @pytest.mark.parametrize("construction", ["robust_long_only", "benchmark_enhanced"])

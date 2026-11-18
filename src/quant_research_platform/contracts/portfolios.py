@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from math import fsum
 from typing import Literal
 
@@ -60,14 +61,26 @@ class PortfolioTargetBlocked(Exception):
     """A portfolio target cannot be built from currently available facts."""
 
 
+class PortfolioObjective(StrEnum):
+    CALIBRATED = "calibrated_return"
+    RANK = "rank"
+    RANK_TO_RISK = "rank_to_risk"
+
+    @property
+    def signal_column(self) -> str:
+        return "expected_alpha" if self == self.CALIBRATED else "prediction_rank_score"
+
+
 @dataclass(frozen=True, slots=True)
 class RobustPortfolioConfig:
     """Confidence for rank-slope uncertainty and holding-period risk aversion."""
 
     confidence: float = 0.95
     risk_aversion: float = 1.0
+    objective: PortfolioObjective = PortfolioObjective.CALIBRATED
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "objective", PortfolioObjective(self.objective))
         for name in ("confidence", "risk_aversion"):
             value = strict_finite_float(
                 getattr(self, name), error="robust_portfolio_config_invalid"

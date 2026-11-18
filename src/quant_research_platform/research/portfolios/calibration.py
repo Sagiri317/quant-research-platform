@@ -78,8 +78,13 @@ def alpha_calibration_intervals(
     )
 
 
-def alpha_calibration_start(sessions: pd.DatetimeIndex, *, as_of) -> pd.Timestamp:
-    """Start of the 252-session decision window on the complete market clock."""
+DEFAULT_CALIBRATION_WINDOW = 252
+
+
+def alpha_calibration_start(
+    sessions: pd.DatetimeIndex, *, as_of, window=DEFAULT_CALIBRATION_WINDOW
+) -> pd.Timestamp:
+    """First included decision for a trading-session count or a fixed ISO start date."""
     axis = pd.DatetimeIndex(sessions)
     cutoff = pd.Timestamp(as_of).normalize()
     if (
@@ -93,7 +98,13 @@ def alpha_calibration_start(sessions: pd.DatetimeIndex, *, as_of) -> pd.Timestam
     end = axis.searchsorted(cutoff, side="right")
     if not end:
         raise ValueError("alpha_calibration_calendar_invalid")
-    return axis[max(0, end - 252)]
+    if isinstance(window, str):
+        from datetime import date
+
+        return pd.Timestamp(date.fromisoformat(window))
+    if type(window) is not int or window <= 0:
+        raise ValueError("alpha_calibration_window_invalid")
+    return axis[max(0, end - window)]
 
 
 def calibrate_expected_alpha(
@@ -104,6 +115,7 @@ def calibrate_expected_alpha(
     as_of: pd.Timestamp,
     scheduled_intervals: pd.DataFrame,
     trading_sessions: pd.DatetimeIndex,
+    window: int | str = DEFAULT_CALIBRATION_WINDOW,
     minimum_coverage: float = 0.8,
     minimum_valid_dates: int = 6,
 ) -> AlphaCalibration:
@@ -141,7 +153,7 @@ def calibrate_expected_alpha(
     scheduled = pd.DatetimeIndex(
         intervals.loc[
             intervals.timestamp.ge(
-                alpha_calibration_start(trading_sessions, as_of=cutoff)
+                alpha_calibration_start(trading_sessions, as_of=cutoff, window=window)
             )
             & intervals.available_at.le(cutoff),
             "timestamp",

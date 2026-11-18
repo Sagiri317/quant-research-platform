@@ -37,6 +37,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCashFlow,
     PortfolioDiagnostic,
     PortfolioLedgerBatch,
+    PortfolioObjective,
     PortfolioRightsAdjustment,
     PortfolioTargetBlocked,
     PortfolioValuation,
@@ -70,6 +71,7 @@ from quant_research_platform.research.portfolios.accounting import (
     execute_stock_target,
 )
 from quant_research_platform.research.portfolios.calibration import (
+    DEFAULT_CALIBRATION_WINDOW,
     AlphaCalibration,
     alpha_calibration_intervals,
     alpha_calibration_start,
@@ -309,10 +311,10 @@ def _unquoted_assets(frame, phase="open"):
 @dataclass(frozen=True, slots=True)
 class _EnhancedDecision:
     benchmark_weights: pd.Series
-    expected_alpha: pd.Series
+    expected_alpha: pd.Series | None
     exposures: pd.DataFrame
     risk: FactorRiskEstimate | None
-    calibration: AlphaCalibration
+    calibration: AlphaCalibration | None
     holding_sessions: int | None = None
 
 
@@ -328,6 +330,7 @@ def backtest_a_share(
     optimizer_config: OptimizerConfig | AbsoluteRiskConfig | None = None,
     robust_config: RobustPortfolioConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
+    calibration_window: int | str = DEFAULT_CALIBRATION_WINDOW,
     on_final_calibration=None,
     prediction_lookup: object,
     assumptions: ExecutionAssumptions,
@@ -361,6 +364,15 @@ def backtest_a_share(
         raise ValueError("portfolio_robust_configuration_required")
     if decision_columns is not None and enhanced:
         raise ValueError("policy_and_enhanced_optimizer_are_separate_decisions")
+    objective = (
+        robust_config.objective if robust_config else PortfolioObjective.CALIBRATED
+    )
+    calibrated = enhanced and objective == PortfolioObjective.CALIBRATED
+    if not absolute and objective != PortfolioObjective.CALIBRATED:
+        raise ValueError("portfolio_rank_objective_requires_absolute_weights")
+    if not calibrated and frozen_calibration is not None:
+        raise ValueError("portfolio_unused_calibration")
+    rolling = calibrated and frozen_calibration is None
     risk_style_columns = candidate.risk_style_columns
     calendar_root = inputs["calendar"]
     calendar = _read_materialized(calendar_root, _CALENDAR_COLUMNS)
@@ -378,8 +390,10 @@ def backtest_a_share(
     output_start = pd.Timestamp(output_window.start).normalize()
     # Consume the declared history. Union-session slicing can discard required
     # own-market observations when exchanges have asynchronous holidays.
-    calibration_intervals = alpha_calibration_intervals(
-        sessions, candidate.rebalance_schedule
+    calibration_intervals = (
+        alpha_calibration_intervals(sessions, candidate.rebalance_schedule)
+        if calibrated
+        else None
     )
     sessions = sessions[(sessions >= session_start) & (sessions <= session_end)]
     output_intervals = holding_intervals(sessions, output_window).set_index(
@@ -391,7 +405,11 @@ def backtest_a_share(
     prediction_window = prediction_window or TimeWindow(
         max(
             pd.Timestamp(formal_dataset_window.start),
-            alpha_calibration_start(trading_sessions, as_of=output_start),
+            alpha_calibration_start(
+                trading_sessions, as_of=output_start, window=calibration_window
+            )
+            if rolling
+            else output_start,
         ).date(),
         pd.Timestamp(output_window.end).date(),
     )
@@ -474,7 +492,9 @@ def backtest_a_share(
     calibration_rows: list[dict[str, object]] = []
     pending_calibration: tuple[pd.Series, pd.Series, pd.Timestamp] | None = None
     waiting_alpha: tuple[pd.Series, pd.Timestamp] | None = None
-    calibration_dates = calibration_intervals.set_index("timestamp")
+    calibration_dates = (
+        calibration_intervals.set_index("timestamp") if calibrated else None
+    )
     previous_benchmark_assets: frozenset[str] | None = None
     emitted = False
     sequence = 0
@@ -613,17 +633,6 @@ def backtest_a_share(
             current_cross: pd.DataFrame | None = None
             if enhanced:
                 assert factor_risk is not None
-                # The mark producer separates normal carries from accounting-only marks.
-                calibration_valuation = view.valuation.loc[
-                    view.valuation.open.gt(0)
-                    & view.valuation.adj_open.notna()
-                    & (
-                        view.valuation.research_open_mark_at.isna()
-                        | view.valuation.research_open_mark_kind.isin(
-                            ("open", "close", "corporate_action_carry")
-                        )
-                    )
-                ]
                 risk_frames = []
                 for context_at in risk_inputs.values() if not panel.empty else ():
                     context = context_at(decision_timestamp)
@@ -658,44 +667,58 @@ def backtest_a_share(
                 previous_exposures = factor_risk.prepare_exposure_session(
                     current_cross, include_ineligible=True
                 )
-                calibration_start = alpha_calibration_start(
-                    trading_sessions, as_of=decision_timestamp
-                )
-                if (
-                    calibration_rows
-                    and calibration_rows[0]["timestamp"] < calibration_start
-                ):
-                    calibration_rows[:] = [
-                        row
-                        for row in calibration_rows
-                        if row["timestamp"] >= calibration_start
-                    ]
-                if (
-                    pending_calibration is not None
-                    and decision_timestamp
-                    == calibration_dates.loc[pending_calibration[2], "available_at"]
-                ):
-                    calibration_rows.extend(
-                        _completed_calibration_rows(
-                            pending_calibration, calibration_valuation
+                if rolling:
+                    # Exclude accounting-only marks from holding returns.
+                    calibration_valuation = view.valuation.loc[
+                        view.valuation.open.gt(0)
+                        & view.valuation.adj_open.notna()
+                        & (
+                            view.valuation.research_open_mark_at.isna()
+                            | view.valuation.research_open_mark_kind.isin(
+                                ("open", "close", "corporate_action_carry")
+                            )
                         )
+                    ]
+                    calibration_start = alpha_calibration_start(
+                        trading_sessions,
+                        as_of=decision_timestamp,
+                        window=calibration_window,
                     )
-                    pending_calibration = None
-                if (
-                    waiting_alpha is not None
-                    and decision_timestamp
-                    == calibration_dates.loc[waiting_alpha[1], "entry_at"]
-                ):
-                    pending_calibration = (
-                        waiting_alpha[0],
-                        calibration_valuation.set_index(["asset_id", "listing_date"])[
-                            "adj_open"
-                        ].astype("float64"),
-                        waiting_alpha[1],
-                    )
-                    waiting_alpha = None
+                    if (
+                        calibration_rows
+                        and calibration_rows[0]["timestamp"] < calibration_start
+                    ):
+                        calibration_rows[:] = [
+                            row
+                            for row in calibration_rows
+                            if row["timestamp"] >= calibration_start
+                        ]
+                    if (
+                        pending_calibration is not None
+                        and decision_timestamp
+                        == calibration_dates.loc[pending_calibration[2], "available_at"]
+                    ):
+                        calibration_rows.extend(
+                            _completed_calibration_rows(
+                                pending_calibration, calibration_valuation
+                            )
+                        )
+                        pending_calibration = None
+                    if (
+                        waiting_alpha is not None
+                        and decision_timestamp
+                        == calibration_dates.loc[waiting_alpha[1], "entry_at"]
+                    ):
+                        pending_calibration = (
+                            waiting_alpha[0],
+                            calibration_valuation.set_index(
+                                ["asset_id", "listing_date"]
+                            )["adj_open"].astype("float64"),
+                            waiting_alpha[1],
+                        )
+                        waiting_alpha = None
                 calibration_candidate = (
-                    frozen_calibration is None
+                    rolling
                     and decision_timestamp in calibration_dates.index
                     and calibration_dates.loc[decision_timestamp, "available_at"]
                     <= sessions[-1]
@@ -835,8 +858,10 @@ def backtest_a_share(
                         trading_sessions=trading_sessions,
                         as_of=decision_timestamp,
                         frozen_calibration=frozen_calibration,
+                        calibrated=calibrated,
+                        calibration_window=calibration_window,
                     )
-                    if robust_config is not None and scheduled:
+                    if calibrated and robust_config is not None and scheduled:
                         if decision_timestamp not in calibration_dates.index:
                             raise ValueError(
                                 "portfolio_robust_holding_interval_missing"
@@ -849,7 +874,11 @@ def backtest_a_share(
                         enhanced_decision = replace(
                             enhanced_decision, holding_sessions=horizon
                         )
-                    if absolute and enhanced_decision.calibration.undefined_reason:
+                    if (
+                        absolute
+                        and calibrated
+                        and enhanced_decision.calibration.undefined_reason
+                    ):
                         decision_skip_reason = (
                             enhanced_decision.calibration.undefined_reason
                         )
@@ -1001,6 +1030,7 @@ def backtest_a_share(
                 previous_values=previous_values,
                 rights_adjustments=adjustments,
                 prediction_rank_score=alpha,
+                decision_lives=view.valuation.set_index("asset_id").listing_date,
                 adv20=adv,
                 enhanced_decision=enhanced_decision,
                 benchmark_weights=benchmark_weights
@@ -1056,13 +1086,14 @@ def backtest_a_share(
             sequence += 1
         if not emitted:
             raise PortfolioTargetBlocked("portfolio_execution_window_empty")
-        if enhanced and frozen_calibration is None:
+        if rolling:
             if on_final_calibration is None:
                 raise ValueError("portfolio_final_calibration_sink_required")
             calibration = _calibration_fact(
                 calibration_rows,
                 calibration_intervals,
                 as_of=pd.Timestamp(output_window.end),
+                window=calibration_window,
                 trading_sessions=trading_sessions,
             )
             on_final_calibration(
@@ -1072,6 +1103,7 @@ def backtest_a_share(
                     "interval_semantics": alpha_interval_semantics(
                         candidate.rebalance_schedule
                     ),
+                    "calibration_window": calibration_window,
                     "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
                     "inputs": {
                         key: [
@@ -1381,13 +1413,14 @@ def _benchmark_weights(
     )
 
 
-def _calibration_fact(rows, intervals, *, as_of, trading_sessions):
+def _calibration_fact(rows, intervals, *, as_of, trading_sessions, window):
     return calibrate_expected_alpha(
         pd.DataFrame(
             rows, columns=["timestamp", "prediction_rank_score", "holding_return"]
         ),
         as_of=as_of,
         scheduled_intervals=intervals,
+        window=window,
         trading_sessions=trading_sessions,
     )
 
@@ -1399,22 +1432,24 @@ def _enhanced_decision(
     factor_risk: FactorRiskState,
     current_cross: pd.DataFrame | FactorExposureSession,
     calibration_rows: list[dict[str, object]],
-    calibration_intervals: pd.DataFrame,
+    calibration_intervals: pd.DataFrame | None,
     trading_sessions: pd.DatetimeIndex,
     as_of: pd.Timestamp,
     frozen_calibration: AlphaCalibration | None = None,
+    calibrated: bool = True,
+    calibration_window: int | str = DEFAULT_CALIBRATION_WINDOW,
 ) -> _EnhancedDecision:
-    calibration = frozen_calibration or _calibration_fact(
-        calibration_rows,
-        calibration_intervals,
-        as_of=as_of,
-        trading_sessions=trading_sessions,
-    )
-    expected = pd.Series(np.nan, index=alpha.index, dtype="float64")
-    if not calibration.benchmark_only:
-        expected.loc[alpha.notna()] = calibration.slope * alpha.loc[alpha.notna()]
-    else:
-        expected.loc[alpha.notna()] = 0.0
+    calibration = frozen_calibration
+    expected = None
+    if calibrated:
+        calibration = calibration or _calibration_fact(
+            calibration_rows,
+            calibration_intervals,
+            as_of=as_of,
+            trading_sessions=trading_sessions,
+            window=calibration_window,
+        )
+        expected = alpha * (0.0 if calibration.benchmark_only else calibration.slope)
     exposures = factor_risk.current_exposures(current_cross)
     try:
         risk = factor_risk.estimate()
@@ -1443,13 +1478,20 @@ def _optimizer_assets(
     adv: pd.Series,
     eligible: pd.Series,
     receivable: float = 0.0,
+    signal_column: str = "expected_alpha",
     absolute: bool = False,
 ) -> pd.DataFrame:
     assets = pd.Index(
         sorted(
             set(benchmark_weights.index[benchmark_weights.ne(0.0)])
             | set(current_weights.index[current_weights.ne(0.0)])
-            | (set(expected_alpha.index) if absolute else set())
+            | (
+                set(
+                    expected_alpha.dropna().index.intersection(eligible.index[eligible])
+                )
+                if absolute
+                else set()
+            )
         ),
         dtype="string",
     )
@@ -1462,7 +1504,7 @@ def _optimizer_assets(
     result = pd.DataFrame(
         {
             "asset_id": assets,
-            "expected_alpha": expected_alpha.reindex(assets).to_numpy(),
+            signal_column: expected_alpha.reindex(assets).to_numpy(),
             "current_weight": current_weights.reindex(assets, fill_value=0.0).to_numpy(
                 dtype="float64"
             ),
@@ -1484,7 +1526,7 @@ def _optimizer_assets(
         raise ValueError("optimizer_current_state_invalid")
     cash_row = {
         "asset_id": PORTFOLIO_CASH_ASSET_ID,
-        "expected_alpha": 0.0,
+        signal_column: 0.0,
         "current_weight": cash_weight,
         "benchmark_weight": 0.0,
         "specific_variance": 0.0,
@@ -1550,9 +1592,15 @@ def _build_session(
     if initializing:
         config = replace(config, target_turnover_limit=None if absolute else 1.0)
     fully_invested = absolute and config.fully_invested
-    use_signal = (
-        enhanced_decision is not None
-        and not enhanced_decision.calibration.benchmark_only
+    objective = (
+        robust_config.objective if robust_config else PortfolioObjective.CALIBRATED
+    )
+    rank_objective = objective != PortfolioObjective.CALIBRATED
+    risk_aversion = (
+        robust_config.risk_aversion if robust_config and not rank_objective else 0.0
+    )
+    use_signal = enhanced_decision is not None and (
+        rank_objective or not enhanced_decision.calibration.benchmark_only
     )
     optimize_target = use_signal or (
         fully_invested
@@ -1562,7 +1610,8 @@ def _build_session(
     covariance_required = (
         not absolute
         or config.total_volatility_limit is not None
-        or robust_config.risk_aversion > 0.0
+        or risk_aversion > 0.0
+        or objective == PortfolioObjective.RANK_TO_RISK
     )
     if not np.isclose(
         float(holdings.sum()) + cash + decision_receivable,
@@ -1772,7 +1821,7 @@ def _build_session(
             | set(held_units.index)
             | set(raw_target.index[raw_target.ne(0)])
             | (
-                set(enhanced_decision.expected_alpha.index)
+                set(prediction_eligible.index[prediction_eligible])
                 if absolute and enhanced_decision is not None
                 else set()
             )
@@ -1788,9 +1837,9 @@ def _build_session(
     if PORTFOLIO_CASH_ASSET_ID in assets:
         raise ValueError("portfolio_asset_universe_invalid")
     execution_panel = next_panel.set_index("asset_id")
-    missing_panel = [asset for asset in assets if asset not in execution_panel.index]
-    if missing_panel:
+    if not held_units[held_units.ne(0.0)].index.isin(execution_panel.index).all():
         raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
+    execution_panel = execution_panel.reindex(assets)
     decision_panel = panel.set_index("asset_id")
     decision_adv, adv = (
         pd.Series(
@@ -1805,10 +1854,7 @@ def _build_session(
         for frame in (decision_panel, execution_panel)
     )
     missing_execution_quotes = frozenset(
-        execution_panel.loc[assets].index[
-            execution_panel.loc[assets, "open"].isna()
-            | execution_panel.loc[assets, "open"].eq(0)
-        ]
+        assets[execution_panel.open.isna() | execution_panel.open.eq(0)]
     )
     unquoted_assets = unquoted_assets | missing_execution_quotes
     masks = _mask_values(
@@ -1841,7 +1887,10 @@ def _build_session(
             cash=cash,
             nav=nav,
             receivable=decision_receivable,
-            expected_alpha=enhanced_decision.expected_alpha,
+            expected_alpha=alpha
+            if rank_objective
+            else enhanced_decision.expected_alpha,
+            signal_column=objective.signal_column,
             exposures=enhanced_decision.exposures,
             specific_variance=(
                 risk.specific_variance
@@ -1871,7 +1920,7 @@ def _build_session(
         unavailable = assets_frame.asset_id.isin(missing_assets)
         assets_frame["can_enter"] = ~unavailable
         assets_frame["can_exit"] = ~unavailable
-        assets_frame.loc[unavailable, "expected_alpha"] = 0.0
+        assets_frame.loc[unavailable, objective.signal_column] = 0.0
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
         if absolute:
             assets_frame["trade_capacity_weight"] = np.where(
@@ -1934,7 +1983,7 @@ def _build_session(
             return total, *gradients
 
         try:
-            if robust_config is not None and use_signal:
+            if robust_config is not None and not rank_objective and use_signal:
                 ranks = alpha.reindex(assets_frame.asset_id)
                 ranks.loc[assets_frame.is_cash.to_numpy() | unavailable.to_numpy()] = (
                     0.0
@@ -1961,6 +2010,7 @@ def _build_session(
                 financial_column="is_financial",
                 cash_column="is_cash",
                 receivable_weight=float(decision_receivable / nav),
+                objective_kind=objective,
                 **(
                     {
                         "uncertainty_loading": loading,
@@ -1972,7 +2022,7 @@ def _build_session(
                             else {}
                         ),
                     }
-                    if robust_config is not None
+                    if robust_config is not None and not rank_objective
                     else {}
                 ),
             )
@@ -1985,6 +2035,9 @@ def _build_session(
                 "optimizer_turnover_bounds_infeasible",
                 "optimizer_stock_exposure_unavailable",
                 "optimizer_held_risk_unavailable",
+                "optimizer_rank_ratio_risk_unresolved",
+                "optimizer_rank_ratio_zero_volatility",
+                "optimizer_no_positive_feasible_rank",
             }:
                 raise
             if str(error) in {
@@ -2108,15 +2161,13 @@ def _build_session(
                 style_columns = tuple(
                     name for name in columns if not name.startswith("industry_")
                 )
-                risk_aversion = (
-                    robust_config.risk_aversion if robust_config is not None else 0.0
-                )
                 risk_missing, alpha_missing, incomplete = _portfolio_incomplete(
                     assets_frame,
                     industry_columns,
                     style_columns,
                     config,
-                    risk_aversion,
+                    covariance_required,
+                    objective.signal_column,
                 )
                 net_bounds = _net_name_bounds(
                     assets_frame,
@@ -2127,9 +2178,11 @@ def _build_session(
                     incomplete=incomplete.to_numpy(),
                     config=config,
                 )
-                objective_alpha = assets_frame.expected_alpha.where(
-                    ~(incomplete | alpha_missing), 0.0
-                ).to_numpy(dtype="float64")
+                objective_alpha = (
+                    assets_frame[objective.signal_column]
+                    .where(~(incomplete | alpha_missing), 0.0)
+                    .to_numpy(dtype="float64")
+                )
                 objective_exposure = np.where(np.isfinite(exposure), exposure, 0.0)
                 objective_specific = np.where(risk_missing, 0.0, specific)
         else:
@@ -2168,8 +2221,9 @@ def _build_session(
                 / result.nav_before
             )
             weights[cash_mask] = result.post_trade_cash / result.nav_before + cost_ratio
-            return _portfolio_objective(
+            value = _portfolio_objective(
                 weights,
+                objective_kind=objective,
                 benchmark=benchmark,
                 expected_alpha=objective_alpha,
                 loading=None if loading is None else loading.to_numpy(),
@@ -2185,6 +2239,7 @@ def _build_session(
                 covariance=covariance,
                 specific=objective_specific,
             )["objective_value"]
+            return value if value is not None else -np.inf
 
         def evaluate(weights, *, strict=False):
             strict |= optimization is not None
@@ -2329,8 +2384,6 @@ def _build_session(
                 # One joint native candidate; no integer search or per-name accounts.
                 trial = evaluate(candidate_weights, strict=True)
                 if fully_invested:
-                    if baseline[2] < selected[2] and np.isfinite(baseline[2][0]):
-                        selected = baseline
                     if trial[2][:2] == (0.0, 0.0) and trial[2] < selected[2]:
                         selected = trial
                 elif trial[2][:2] == (0.0, 0.0) and actual_utility(
@@ -2360,7 +2413,11 @@ def _build_session(
         account = account_for(execution_target)
         asset_ledger = account.asset_ledger
     asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
-    if robust_config is not None and enhanced_decision is not None:
+    if (
+        robust_config is not None
+        and not rank_objective
+        and enhanced_decision is not None
+    ):
         asset_ledger.attrs["robust_objective"] = {
             "holding_sessions": enhanced_decision.holding_sessions,
             "robust_confidence": robust_config.confidence,
@@ -2646,6 +2703,7 @@ def _ledger_batch(
     endpoint_corporate_events: pd.DataFrame,
     entitlements: EquityEntitlements,
     execution_lives: pd.Series,
+    decision_lives: pd.Series | None = None,
 ) -> PortfolioLedgerBatch:
     """Build economic facts directly from one isolated accounting snapshot."""
     trades, cashflows, valuations, diagnostics = [], [], [], []
@@ -2718,6 +2776,15 @@ def _ledger_batch(
                     .isoformat()
                 )
                 entry_mark = mark_frames["entry"].loc[asset, "open"]
+            elif (
+                decision_lives is not None
+                and asset in decision_lives
+                and not execution_units.get(asset, 0)
+                and not before
+                and not after
+            ):
+                lifecycle = pd.Timestamp(decision_lives[asset]).date().isoformat()
+                entry_mark = 0.0
             elif asset in end_lives and not execution_units.get(asset, 0):
                 lifecycle = pd.Timestamp(end_lives[asset]).date().isoformat()
                 entry_mark = 0.0
@@ -2920,6 +2987,7 @@ def _ledger_batch(
                 "decision_delta_weight": float(decision_delta.loc[asset]),
                 "expected_alpha": enhanced_decision.expected_alpha.get(asset)
                 if enhanced_decision is not None
+                and enhanced_decision.expected_alpha is not None
                 else None,
                 "benchmark_weight": benchmark_weights.get(asset, 0.0)
                 if benchmark_weights is not None and not benchmark_weights.empty
@@ -3040,7 +3108,7 @@ def _ledger_batch(
                     name: getattr(enhanced_decision.calibration, field)
                     for name, field in _ALPHA_DIAGNOSTICS.items()
                 }
-                if enhanced_decision
+                if enhanced_decision and enhanced_decision.calibration is not None
                 else {}
             ),
             "predicted_tracking_error": optimization_result.predicted_tracking_error

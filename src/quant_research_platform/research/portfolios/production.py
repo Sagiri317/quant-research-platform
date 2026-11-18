@@ -15,6 +15,7 @@ from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapsh
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
+    PortfolioObjective,
     RobustPortfolioConfig,
 )
 from quant_research_platform.contracts.risk import FactorRiskModel
@@ -25,6 +26,7 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.calibration import (
+    DEFAULT_CALIBRATION_WINDOW,
     alpha_calibration_intervals,
     alpha_interval_semantics,
     calibrate_expected_alpha,
@@ -87,6 +89,7 @@ def backtest(config: Mapping) -> Path:
         "selection_mode",
         "selection",
         "robust_config",
+        "calibration_window",
     }
     if (
         not isinstance(config, Mapping)
@@ -156,6 +159,14 @@ def backtest(config: Mapping) -> Path:
     )
     if absolute and robust_config is None:
         robust_config = RobustPortfolioConfig()
+    calibrated = enhanced and (
+        robust_config is None
+        or robust_config.objective == PortfolioObjective.CALIBRATED
+    )
+    if not calibrated and ("calibration" in config or "calibration_window" in config):
+        raise ValueError("portfolio_unused_calibration")
+    if "calibration" in config and "calibration_window" in config:
+        raise ValueError("portfolio_frozen_calibration_has_own_window")
     if (candidate.benchmark_id is not None) != ("benchmark" in inputs) or enhanced != (
         "risk_context" in inputs
     ):
@@ -324,6 +335,9 @@ def backtest(config: Mapping) -> Path:
                 optimizer_config=optimizer_config,
                 robust_config=robust_config,
                 frozen_calibration=frozen,
+                calibration_window=config.get(
+                    "calibration_window", DEFAULT_CALIBRATION_WINDOW
+                ),
                 on_final_calibration=final.append,
             )
         ) as batches:
@@ -341,7 +355,11 @@ def backtest(config: Mapping) -> Path:
                 "risk_model": risk_model.to_dict(),
                 "optimizer_config": asdict(optimizer_config),
                 **(
-                    {"robust_config": asdict(robust_config)}
+                    {
+                        "robust_config": asdict(robust_config)
+                        if calibrated
+                        else {"objective": robust_config.objective}
+                    }
                     if robust_config is not None
                     else {}
                 ),
@@ -372,7 +390,7 @@ def backtest(config: Mapping) -> Path:
         ),
         metadata=metadata,
         produce=produce,
-        final_calibration=(lambda: final[0]) if enhanced and frozen is None else None,
+        final_calibration=(lambda: final[0]) if calibrated and frozen is None else None,
     )
 
 
@@ -390,7 +408,7 @@ def calibrate(config: Mapping) -> Path:
         "selection_group",
         "output",
     }
-    if not isinstance(config, Mapping) or set(config) != required:
+    if not required <= set(config) or set(config) - required - {"calibration_window"}:
         raise ValueError("alpha_calibration_config_invalid")
     if type(config["selection_group"]) is not str or not config["selection_group"]:
         raise ValueError("portfolio_selection_group_invalid")
@@ -468,6 +486,7 @@ def calibrate(config: Mapping) -> Path:
         scheduled_intervals=expected,
         trading_sessions=trading_sessions,
         as_of=pd.Timestamp(config["cutoff"]),
+        window=config.get("calibration_window", DEFAULT_CALIBRATION_WINDOW),
     )
     return write_qrp_json_file(
         Path(config["output"]),
@@ -475,6 +494,9 @@ def calibrate(config: Mapping) -> Path:
             "schema_id": "qrp-final-alpha-calibration",
             "selection_group": config["selection_group"],
             "interval_semantics": semantics,
+            "calibration_window": config.get(
+                "calibration_window", DEFAULT_CALIBRATION_WINDOW
+            ),
             "cutoff": pd.Timestamp(config["cutoff"]).isoformat(),
             "inputs": {
                 key: config[key]

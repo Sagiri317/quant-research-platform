@@ -22,6 +22,7 @@ from scipy.sparse.linalg import LinearOperator, lsmr
 
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
+    PortfolioObjective,
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.risk import RiskInputsUnavailable
@@ -128,12 +129,15 @@ def optimize_portfolio(
     config: OptimizerConfig | AbsoluteRiskConfig | None = None,
     eligibility_column: str | None = None,
     receivable_weight: float = 0.0,
+    objective_kind: PortfolioObjective = PortfolioObjective.CALIBRATED,
     uncertainty_loading: pd.Series | None = None,
     risk_aversion: float = 0.0,
     holding_sessions: int | None = None,
     risk_annualization: float = 252.0,
 ) -> OptimizationResult:
-    """Maximize expected alpha less actual costs in a self-financing account.
+    """Optimize calibrated alpha, weighted rank or its annualized risk ratio.
+
+    Rank objectives consume prediction_rank_score and preserve actual fee funding.
 
     Holdings and explicit cash use pre-trade NAV units; cash reserves the true
     fee, while name and risk limits use post-fee NAV. The cost owner supplies
@@ -173,6 +177,12 @@ def optimize_portfolio(
     ):
         raise ValueError("optimizer_risk_horizon_invalid")
     absolute = isinstance(config, AbsoluteRiskConfig)
+    objective_kind = PortfolioObjective(objective_kind)
+    ranks = objective_kind != PortfolioObjective.CALIBRATED
+    ratio = objective_kind == PortfolioObjective.RANK_TO_RISK
+    if ranks and (not absolute or risk_aversion or uncertainty_loading is not None):
+        raise ValueError("optimizer_rank_objective_configuration_invalid")
+    signal_column = objective_kind.signal_column
     risk_limit = (
         config.total_volatility_limit if absolute else config.tracking_error_limit
     )
@@ -182,7 +192,7 @@ def optimize_portfolio(
     style_limit = config.style_exposure_limit if absolute else config.style_active_limit
     required = {
         "asset_id",
-        "expected_alpha",
+        signal_column,
         "current_weight",
         *industry_columns,
         *style_columns,
@@ -220,7 +230,7 @@ def optimize_portfolio(
     columns = tuple(dict.fromkeys((*industry_columns, *style_columns)))
     covariance = None
     if factor_covariance is None:
-        if risk_limit is not None or risk_aversion > 0.0:
+        if risk_limit is not None or risk_aversion > 0.0 or ratio:
             raise RiskInputsUnavailable("optimizer_covariance_unavailable")
     else:
         if (
@@ -241,7 +251,7 @@ def optimize_portfolio(
     if absolute and "specific_variance" not in data:
         data["specific_variance"] = np.nan
     numeric_columns = [
-        "expected_alpha",
+        signal_column,
         "current_weight",
         "specific_variance",
         *columns,
@@ -317,9 +327,16 @@ def optimize_portfolio(
     ):
         raise ValueError("optimizer_risk_invalid")
     risk_missing, alpha_missing, incomplete = _portfolio_incomplete(
-        data, industry_columns, style_columns, config, risk_aversion
+        data,
+        industry_columns,
+        style_columns,
+        config,
+        risk_aversion > 0.0 or ratio,
+        signal_column,
     )
     if absolute:
+        if ranks and (alpha_missing & (current > 0.0)).any():
+            raise RiskInputsUnavailable("robust_held_prediction_unavailable")
         if (incomplete & (current > 0.0)).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
         frozen |= alpha_missing.to_numpy(dtype=bool) & ~cash
@@ -338,14 +355,15 @@ def optimize_portfolio(
             & cannot_reduce
         ).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
-    data["expected_alpha"] = data["expected_alpha"].where(
-        ~(incomplete | alpha_missing), 0.0
+    expected_alpha = (
+        data[signal_column]
+        .where(~(incomplete | alpha_missing), 0.0)
+        .to_numpy(dtype="float64")
     )
     original_specific = data["specific_variance"].to_numpy(dtype="float64")
     original_exposure = data.loc[:, columns].to_numpy(dtype="float64")
     data["specific_variance"] = data["specific_variance"].where(~risk_missing, 0.0)
     exposure = np.where(np.isfinite(original_exposure), original_exposure, 0.0)
-    expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
     loading = np.zeros(len(data))
     if uncertainty_loading is not None:
@@ -467,7 +485,7 @@ def optimize_portfolio(
     if config.target_turnover_limit is None:
         # Cash has no side cost; without turnover its trade auxiliary is unused.
         free_trades = free_trades[~cash[free_trades]]
-    if maximum_cost == 0.0 and config.target_turnover_limit is None:
+    if (ranks or maximum_cost == 0.0) and config.target_turnover_limit is None:
         free_trades = np.empty(0, dtype=int)
     trade_sign = np.where(reachable_lower >= current, 1.0, -1.0)
     fixed_weights = np.clip(current, reachable_lower, reachable_upper)
@@ -521,6 +539,44 @@ def optimize_portfolio(
         return (
             exposure @ ((covariance + covariance.T) @ factor) / 2.0 + specific * active
         )
+
+    def linear_rank(point):
+        weights, _, _ = unpack(point)
+        return float(-expected_alpha @ weights), gradient_point(-expected_alpha)
+
+    def ratio_terms(point):
+        weights, _, _ = unpack(point)
+        score = expected_alpha @ weights
+        variance = sum(_risk_variances(weights, exposure, covariance, specific))
+        # q / sqrt(1 + q^2) preserves ratio ordering and is smooth at zero variance
+        # for a positive score. No artificial volatility enters the reported q.
+        scale = np.hypot(score, np.sqrt(variance))
+        direction = (covariance_product(weights) + score * expected_alpha) / scale
+        return score / scale, direction, scale
+
+    def rank_ratio(point):
+        value, direction, scale = ratio_terms(point)
+        return -value, gradient_point((value * direction - expected_alpha) / scale)
+
+    def ratio_hessian(point):
+        value, direction, scale = ratio_terms(point)
+
+        def product(vector):
+            delta = np.zeros(count)
+            delta[free_weights] = vector[:weight_count]
+            ds, dv = expected_alpha @ delta, direction @ delta
+            curvature = (
+                expected_alpha * dv
+                + direction * ds
+                + value
+                * (covariance_product(delta) + expected_alpha * ds - 3 * direction * dv)
+            )
+            return gradient_point(curvature / scale**2)
+
+        return LinearOperator((variable_count, variable_count), matvec=product)
+
+    def zero_hessian(point):
+        return sparse.csr_matrix((variable_count, variable_count))
 
     def objective(point):
         weights, trades, _ = unpack(point)
@@ -849,7 +905,7 @@ def optimize_portfolio(
         _, buying_gradient, _ = expected_transaction_cost(
             np.zeros(count), np.zeros(count)
         )
-        required_mean = expected_alpha - buying_gradient
+        required_mean = expected_alpha if ranks else expected_alpha - buying_gradient
         available = (~cash) & (reachable_upper > 0.0)
         positive, negative, zero = (
             available & (loading > 0.0),
@@ -863,6 +919,8 @@ def optimize_portfolio(
             1.0, np.min(required_mean[negative] / loading[negative], initial=1.0)
         )
         certified |= np.all(required_mean[zero] <= 0.0) and lower_theta <= upper_theta
+    if ratio:
+        certified = not np.any(expected_alpha[reachable_upper > 0.0])
     converged = False
     complementarity = 0.0
     complementarity_sum = 0.0
@@ -976,23 +1034,28 @@ def optimize_portfolio(
         ):
             funding = solve(
                 lambda point: (unpack(point)[0][cash].item(), cash_gradient),
-                lambda point: sparse.csr_matrix((variable_count, variable_count)),
+                zero_hessian,
                 initial,
             )
             initial = funding.x.copy()
             funding_iterations = funding.nit
         funded_weights, _, fee = unpack(initial)
         idle_cash = max(0.0, funded_weights[cash].item() - fee)
+        exact_cash = maximum_cost == 0 and idle_cash == 0
         add_linear(
             cash_direction[None, :],
-            -np.inf,
-            idle_cash + config.solver_gtol,
+            0.0 if exact_cash else -np.inf,
+            0.0 if exact_cash else idle_cash + config.solver_gtol,
             fee=-1.0,
         )
+        if exact_cash:
+            # The funding equality owns cash; an identical bound has no extra meaning.
+            lower_bounds[:weight_count][cash[free_weights]] = -np.inf
+
     analytic_solution |= (
         certified and np.array_equal(unpack(initial)[0], current) and feasible(initial)
     )
-    if not analytic_solution and maximum_cost == 0.0:
+    if not analytic_solution and not ratio and (ranks or maximum_cost == 0.0):
         # The budget-and-box linear relaxation bounds every remaining target.
         # A feasible maximizer with zero penalties attains that global bound.
         box_weights = reachable_lower.copy()
@@ -1021,12 +1084,35 @@ def optimize_portfolio(
     if analytic_solution:
         result = OptimizeResult(success=True, x=initial, nit=0)
     else:
-        result = solve(
-            objective,
-            objective_hessian,
-            initial,
-            barrier=config.solver_gtol if absolute and config.fully_invested else 0.1,
+        barrier = (
+            config.solver_gtol if ratio or (absolute and config.fully_invested) else 0.1
         )
+        if ratio:
+            if (
+                not feasible(initial, config.solver_gtol)
+                or linear_rank(initial)[0] >= 0.0
+            ):
+                seed = solve(linear_rank, zero_hessian, initial, barrier=barrier)
+                initial = seed.x
+                funding_iterations += seed.nit
+            if linear_rank(initial)[0] >= 0.0:
+                raise RiskInputsUnavailable("optimizer_no_positive_feasible_rank")
+            constraints.append(
+                LinearConstraint(
+                    sparse.csr_matrix(gradient_point(expected_alpha)[None, :]),
+                    -expected_alpha @ fixed_part,
+                    np.inf,
+                    keep_feasible=True,
+                )
+            )
+            result = solve(rank_ratio, ratio_hessian, initial, barrier=barrier)
+        else:
+            result = solve(
+                linear_rank if ranks else objective,
+                zero_hessian if ranks else objective_hessian,
+                initial,
+                barrier=barrier,
+            )
     point = result.x.copy()
     moving = np.arange(weight_count)
     equations = [
@@ -1128,6 +1214,7 @@ def optimize_portfolio(
     )
     objective_facts = _portfolio_objective(
         weights,
+        objective_kind=objective_kind,
         benchmark=benchmark,
         expected_alpha=expected_alpha,
         loading=loading,
@@ -1138,6 +1225,53 @@ def optimize_portfolio(
         covariance=covariance,
         specific=specific,
     )
+    if ratio and expected_alpha @ weights <= 0.0:
+        raise RiskInputsUnavailable("optimizer_no_positive_feasible_rank")
+    if ratio:
+        score = expected_alpha @ weights
+        variance = factor_variance + specific_variance
+        null_candidate = np.any(
+            (specific == 0) & (expected_alpha > 0) & (reachable_upper > 0)
+        ) and not np.any((specific > 0) & (reachable_lower > 0))
+        if null_candidate:
+            # Test the risk-null face in the original account, including actual fees.
+            # Dropping tiny positive-risk holdings and funding the surviving stock mix
+            # supplies a witness only if the same account can hold it.
+            mix = np.where((specific == 0) & ~cash, np.maximum(weights, 0.0), 0.0)
+            if (
+                mix.sum()
+                and expected_alpha @ mix > 0
+                and not sum(_risk_variances(mix, exposure, covariance, specific))
+            ):
+                mix /= mix.sum()
+
+                def null_portfolio(principal):
+                    return principal * mix + (budget - principal) * cash_direction
+
+                idle = max(0.0, weights[cash].item() - cost_ratio)
+                available = budget - idle
+                if available >= actual_cost(null_portfolio(0.0))[0]:
+                    principal = brentq(
+                        lambda v: available - v - actual_cost(null_portfolio(v))[0],
+                        0.0,
+                        available,
+                    )
+                    witness = null_portfolio(principal)
+                    if (
+                        principal > 0
+                        and (witness >= reachable_lower).all()
+                        and (witness <= reachable_upper).all()
+                        and feasible(pack(witness), config.solver_gtol)
+                    ):
+                        raise RiskInputsUnavailable(
+                            "optimizer_rank_ratio_zero_volatility"
+                        )
+        if variance == 0 or (
+            null_candidate
+            and 1 - score / np.hypot(score, np.sqrt(variance))
+            <= max(config.solver_gtol, complementarity_sum + projected_optimality)
+        ):
+            raise RiskInputsUnavailable("optimizer_rank_ratio_risk_unresolved")
     return OptimizationResult(
         weights=pd.Series(weights, index=data["asset_id"], name="weight"),
         predicted_tracking_error=None if absolute else volatility,
@@ -1169,6 +1303,7 @@ def optimize_portfolio(
 def _portfolio_objective(
     weights,
     *,
+    objective_kind=PortfolioObjective.CALIBRATED,
     benchmark,
     expected_alpha,
     loading,
@@ -1182,6 +1317,12 @@ def _portfolio_objective(
     """Value a target or actual allocation in the original pre-fee NAV units."""
     active = weights if benchmark is None else weights - benchmark
     expected_return = float(expected_alpha @ active)
+    if objective_kind != PortfolioObjective.CALIBRATED:
+        value = expected_return
+        if objective_kind == PortfolioObjective.RANK_TO_RISK:
+            vol = np.sqrt(sum(_risk_variances(active, exposure, covariance, specific)))
+            value = float(expected_return / vol) if vol else None
+        return {"objective_value": value}
     robust_penalty = float(abs(loading @ active)) if loading is not None else 0.0
     holding_variance = (
         float(
@@ -1202,16 +1343,23 @@ def _portfolio_objective(
     }
 
 
-def _portfolio_incomplete(data, industry_columns, style_columns, config, risk_aversion):
+def _portfolio_incomplete(
+    data,
+    industry_columns,
+    style_columns,
+    config,
+    objective_needs_covariance,
+    signal_column,
+):
     columns = (*industry_columns, *style_columns)
     risk_missing = data.specific_variance.isna() | data.loc[:, columns].isna().any(
         axis=1
     )
-    alpha_missing = ~np.isfinite(data.expected_alpha)
+    alpha_missing = ~np.isfinite(data[signal_column])
     if not isinstance(config, AbsoluteRiskConfig):
         return risk_missing, alpha_missing, risk_missing | alpha_missing
     incomplete = pd.Series(False, index=data.index)
-    if config.total_volatility_limit is not None or risk_aversion > 0.0:
+    if config.total_volatility_limit is not None or objective_needs_covariance:
         incomplete |= risk_missing
     for names, limit in (
         (industry_columns, config.industry_weight_limit),
