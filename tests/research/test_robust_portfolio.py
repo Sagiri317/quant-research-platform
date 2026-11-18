@@ -666,6 +666,69 @@ def test_calibrated_objective_defaults_and_risk_preferences():
             RobustPortfolioConfig(**values)
 
 
+def test_raw_score_return_uses_only_mature_eligible_cross_sections():
+    at = pd.Timestamp("2022-01-04 07:00")
+    frame = pd.DataFrame(
+        {
+            "eligible": [True, True, False],
+            "forward_return_5d": [-0.01, 0.03, 9.0],
+            "mature": [at - pd.Timedelta(days=1), at, pd.NaT],
+        }
+    )
+    moments = calibration.return_cross_section(frame, "forward_return_5d", "mature")
+    assert moments[0] == at
+    assert moments[1:] == pytest.approx((0.01, 0.02))
+    frame.loc[1, "mature"] = pd.NaT
+    assert (
+        calibration.return_cross_section(frame, "forward_return_5d", "mature") is None
+    )
+    history = [moments] * 251 + [(at + pd.Timedelta(seconds=1), 0.99, 3.0)]
+    scores = pd.Series([-0.5, 1.0, 2.0])
+    args = dict(as_of=at, label_sessions=5, holding_sessions=3)
+    assert calibration.estimate_holding_return(scores, history, **args) is None
+    history.insert(0, moments)
+    assert calibration.estimate_holding_return(
+        scores, history, **args
+    ).tolist() == pytest.approx([0.0, 0.018, 0.03])
+
+
+@pytest.mark.parametrize("rate", [0.0, 0.015])
+def test_net_return_ratio_subtracts_each_candidates_trade_cost_before_selecting_weights(
+    rate,
+):
+    assets = _assets((0.04, 0.02, 0.0), (0.0, 0.0, 1.0))
+    assets["specific_variance"] = [0.04, 0.01, 0.0]
+    rates = np.asarray([rate, 0.0, 0.0])
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="net_return_to_risk",
+        holding_sessions=5,
+        risk_annualization=250.0,
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda buy, sell: (
+            float((buy + sell) @ rates),
+            rates,
+            rates,
+        ),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+    )
+    # From cash the tangency weights are proportional to inverse variance times net mean.
+    direction = np.array([(0.04 - rate) / 0.04, 0.02 / 0.01])
+    stock = direction / (direction.sum() + rate * direction[0])
+    fee = rate * stock[0]
+    gross = stock @ [0.04, 0.02]
+    variance = (stock**2) @ [0.04, 0.01] * 5 / 250
+    assert result.weights.tolist() == pytest.approx([*stock, fee], abs=2e-6)
+    assert result.expected_transaction_cost == pytest.approx(100 * fee, abs=2e-6)
+    assert result.expected_return == pytest.approx(gross, abs=1e-7)
+    assert result.holding_variance == pytest.approx(variance, abs=1e-8)
+    assert result.objective_value == pytest.approx(
+        (gross - fee) / np.sqrt(variance), abs=1e-7
+    )
+
+
 @pytest.fixture(scope="module")
 def native_case(tmp_path_factory):
     from quant_research_platform.artifacts.outputs.prediction import read_predictions
@@ -869,6 +932,194 @@ def test_native_rank_objective_trades_without_a_calibration_history(
         row.name in {"expected_alpha", "expected_return", "alpha_slope"}
         and row.number is not None
         for row in traded.diagnostics
+    )
+
+
+@pytest.mark.parametrize(
+    "asset_means,variances,current,fee",
+    [
+        ([0.001, 0.0008], [0.04, 0.01], [0.4, 0.4, 0.2], 0.0005),
+        ([0.0015, 0.002], [0.0, 0.04], [0.0, 0.0, 1.0], 0.0015),
+        ([-0.0003, -0.0001], [0.04, 0.01], [0.4, 0.4, 0.2], 0.0005),
+    ],
+)
+def test_funded_net_ratio_handles_existing_positions_and_cost_break_even(
+    asset_means, variances, current, fee
+):
+    assets = _assets((*asset_means, 0.0), current)
+    assets["specific_variance"] = [*variances, 0.0]
+    buy = np.array([fee, fee, 0.0])
+    sell = buy * 2.0
+    args = dict(
+        objective_kind="net_return_to_risk",
+        holding_sessions=1,
+        factor_covariance=pd.DataFrame(dtype=float),
+        nav=1e8,
+        cash_column="is_cash",
+        expected_transaction_cost=lambda b, s: (float(b @ buy + s @ sell), buy, sell),
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, total_volatility_limit=0.3
+        ),
+    )
+    if max(asset_means) < 0:
+        with pytest.raises(
+            ValueError, match="optimizer_no_positive_feasible_net_return"
+        ):
+            optimizer.optimize_portfolio(assets, **args)
+        return
+    result = optimizer.optimize_portfolio(assets, **args)
+    if current[0]:
+        # Selling A or increasing A lowers the ratio. Keep A and fund B from cash.
+        b = 0.4 + 0.2 / 1.0005
+        gross = 0.001 * 0.4 + 0.0008 * b
+        expected = (
+            (gross - (b - 0.4) * 0.0005)
+            * np.sqrt(252.0)
+            / np.sqrt(0.04 * 0.4**2 + 0.01 * b**2)
+        )
+    else:
+        # The zero-risk stock exactly covers its buy cost. Every positive-risk mix ties.
+        expected = (asset_means[1] - fee) * np.sqrt(252.0) / 0.2
+    assert result.objective_value == pytest.approx(expected, abs=3e-8)
+
+
+def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income():
+    assets = _assets((0.003, 0.0), (0.0, 0.9))
+    rates = np.array([0.001, 0.0])
+    args = dict(
+        objective_kind="net_return_to_risk",
+        holding_sessions=1,
+        receivable_weight=0.1,
+        factor_covariance=pd.DataFrame(dtype=float),
+        nav=1e8,
+        cash_column="is_cash",
+        expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, total_volatility_limit=0.15
+        ),
+    )
+    result = optimizer.optimize_portfolio(assets, **args)
+    stock = 0.3 / (1 + 0.3 * 0.001)
+    assert result.weights.tolist() == pytest.approx([stock, 0.9 - stock], abs=2e-8)
+    assert result.objective_value == pytest.approx(
+        (0.003 - 0.001) * np.sqrt(252.0) / 0.5
+    )
+    assets.loc[0, "expected_alpha"] = 0.00099
+    with pytest.raises(ValueError, match="optimizer_no_positive_feasible_net_return"):
+        optimizer.optimize_portfolio(assets, **args)
+
+
+def test_net_ratio_with_binding_turnover_invests_available_cash_in_the_best_mix():
+    assets = _assets((0.003, 0.005, 0.0), (0.3, 0.1, 0.6))
+    assets["specific_variance"] = [0.04, 0.16, 0.0]
+    rates = np.array([0.001, 0.001, 0.0])
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="net_return_to_risk",
+        holding_sessions=1,
+        factor_covariance=pd.DataFrame(dtype=float),
+        nav=1e8,
+        cash_column="is_cash",
+        expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, total_volatility_limit=0.3, target_turnover_limit=0.02
+        ),
+    )
+    # All 2% can be invested. On the buy-only segment the net ratio increases with B.
+    assert result.weights.tolist() == pytest.approx([0.3, 0.12, 0.58], abs=5e-8)
+    expected = (0.3 * 0.003 + 0.12 * 0.005 - 0.02 * 0.001) / np.sqrt(
+        (0.3**2 * 0.04 + 0.12**2 * 0.16) / 252.0
+    )
+    assert result.objective_value == pytest.approx(expected, abs=1e-8)
+
+
+def test_native_raw_score_account_records_the_net_holding_ratio(
+    native_case, tmp_path, monkeypatch
+):
+    import json
+    from copy import deepcopy
+    from pathlib import Path
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.research.portfolios.production import backtest
+
+    _, original, _, _ = native_case
+    config = deepcopy(original)
+    del config["calibration"]
+    config["robust_config"] = {"objective": "net_return_to_risk"}
+    config["optimizer_config"] = {"fully_invested": True}
+    config["output"] = str(tmp_path / "account")
+    source = Path(config["inputs"]["dataset"])
+    spec = json.loads((source / "spec.json").read_text(encoding="utf-8"))
+    frame = pd.read_parquet(source / "data")
+    label = "forward_return_5d"
+    clock = label + "_available_at"
+    frame[label] = np.where(frame.asset_id.isin(list("acegik")), 0.02, 0.04)
+    frame[clock] = frame.timestamp + pd.offsets.BDay(6)
+    spec["column_roles"].update({label: "label", clock: "context"})
+    spec.setdefault("column_units", {})[label] = "decimal_return"
+    spec.setdefault("label_availability_columns", {})[label] = clock
+    data = tmp_path / "returns.parquet"
+    frame.to_parquet(data, index=False)
+    config["inputs"]["dataset"] = {
+        "path": str(data),
+        "spec": {
+            k: spec[k]
+            for k in (
+                "data_id",
+                "frequency",
+                "grain",
+                "primary_key",
+                "partition_columns",
+                "column_roles",
+                "column_units",
+                "label_availability_columns",
+            )
+        },
+    }
+    pred = config["predictions"][0]
+    scores, meta = read_predictions(Path(pred["path"]))
+    meta["model_facts"]["model"]["target_column"] = "model_target"
+    meta["model_facts"]["target_definition"] = {
+        "source_label": label,
+        "target_clip": "none",
+        "target_transform": "date_zscore",
+    }
+    scores["prediction_score"] = np.where(
+        scores.asset_id.isin(list("acegik")), 0.5, 2.0
+    )
+    pred["path"] = str(
+        write_prediction_outputs(
+            output_path=tmp_path / "scores", output_chunks=[scores], metadata=meta
+        )
+    )
+    pred["window"]["start"] = config["output_window"]["start"]
+    config["prediction_window"]["start"] = pred["window"]["start"]
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 5)
+    result = read_portfolio_ledger_artifact(backtest(config))
+    first = next(result.iter_chunks())
+    assert any(t.quantity > 0 for t in first.trades)
+    diagnostics = {r.name: r.number for r in first.diagnostics if r.number is not None}
+    period = diagnostics["holding_sessions"]
+    expected = {
+        round(r.number, 8)
+        for r in first.diagnostics
+        if r.name == "expected_alpha" and r.number is not None
+    }
+    assert expected == {round(x * period / 5, 8) for x in (0.035, 0.05)}
+    assert diagnostics["objective_value"] == pytest.approx(
+        (
+            diagnostics["expected_return"]
+            - diagnostics["expected_transaction_cost"]
+            / config["assumptions"]["initial_nav"]
+        )
+        / np.sqrt(diagnostics["holding_variance"])
     )
 
 

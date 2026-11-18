@@ -78,6 +78,8 @@ from quant_research_platform.research.portfolios.calibration import (
     alpha_interval_semantics,
     alpha_uncertainty_loading,
     calibrate_expected_alpha,
+    estimate_holding_return,
+    return_cross_section,
 )
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
@@ -330,6 +332,7 @@ def backtest_a_share(
     risk_config: FactorRiskConfig | None = None,
     optimizer_config: OptimizerConfig | AbsoluteRiskConfig | None = None,
     robust_config: RobustPortfolioConfig | None = None,
+    return_horizon: int | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     calibration_window: int | str = DEFAULT_CALIBRATION_WINDOW,
     on_final_calibration=None,
@@ -369,6 +372,9 @@ def backtest_a_share(
         robust_config.objective if robust_config else PortfolioObjective.CALIBRATED
     )
     calibrated = enhanced and objective == PortfolioObjective.CALIBRATED
+    monetary_ratio = objective == PortfolioObjective.NET_RETURN_TO_RISK
+    if monetary_ratio != (return_horizon is not None):
+        raise ValueError("portfolio_raw_score_return_horizon_required")
     if not absolute and objective != PortfolioObjective.CALIBRATED:
         raise ValueError("portfolio_rank_objective_requires_absolute_weights")
     if not calibrated and frozen_calibration is not None:
@@ -458,6 +464,26 @@ def backtest_a_share(
             *dataset_business_columns,
             *DECISION_CONTEXT_COLUMNS,
         )
+    if monetary_ratio:
+        from quant_research_platform.research.labels.forward_returns import (
+            forward_return_label_column,
+        )
+
+        return_label = forward_return_label_column(return_horizon)
+        if (
+            dataset_session.spec.get("column_units", {}).get(return_label)
+            != "decimal_return"
+        ):
+            raise ValueError("portfolio_raw_score_decimal_return_required")
+        return_available = dataset_session.spec["label_availability_columns"][
+            return_label
+        ]
+        dataset_business_columns = (
+            *dataset_business_columns,
+            return_label,
+            return_available,
+        )
+        return_history = []
     dataset_input_columns = (*_DATASET_COLUMNS, *dataset_business_columns)
     dataset_columns = (
         *dataset_input_columns,
@@ -724,13 +750,17 @@ def backtest_a_share(
                     and calibration_dates.loc[decision_timestamp, "available_at"]
                     <= sessions[-1]
                 )
-                if produces_interval or (
-                    calibration_candidate
-                    and (explicit_decisions or decision_timestamp >= alpha_start)
+                if (
+                    monetary_ratio
+                    or produces_interval
+                    or (
+                        calibration_candidate
+                        and (explicit_decisions or decision_timestamp >= alpha_start)
+                    )
                 ):
                     dataset = (
                         dataset_at(decision_timestamp)
-                        if not panel.empty
+                        if monetary_ratio or not panel.empty
                         else pd.DataFrame(columns=dataset_columns).astype(
                             {"eligible": "bool"}
                         )
@@ -739,7 +769,15 @@ def backtest_a_share(
                         raise PortfolioTargetBlocked(
                             "portfolio_research_dataset_session_missing"
                         )
-                    if not dataset.empty or panel.empty:
+                    if monetary_ratio and not dataset.empty:
+                        moments = return_cross_section(
+                            dataset, return_label, return_available
+                        )
+                        if moments is not None:
+                            return_history.append(moments)
+                    if (produces_interval or calibration_candidate) and (
+                        not dataset.empty or panel.empty
+                    ):
                         _validate_input_keys(dataset, panel)
                         alpha = alpha_for_dataset(dataset)
                     if alpha is not None and calibration_candidate:
@@ -861,7 +899,7 @@ def backtest_a_share(
                         calibration_window=calibration_window,
                     )
                     if (
-                        calibrated
+                        (calibrated or monetary_ratio)
                         and robust_config is not None
                         and (scheduled or initializing)
                     ):
@@ -872,6 +910,27 @@ def backtest_a_share(
                                 next_timestamp,
                                 candidate.rebalance_schedule,
                             ),
+                        )
+                    if monetary_ratio:
+                        # Date-only sessions use information available by the local close.
+                        as_of = (
+                            dataset.decision_at.min()
+                            if explicit_decisions
+                            else decision_timestamp + pd.Timedelta(hours=7)
+                        )
+                        estimate = estimate_holding_return(
+                            alpha,
+                            return_history,
+                            as_of=as_of,
+                            label_sessions=return_horizon,
+                            holding_sessions=enhanced_decision.holding_sessions,
+                        )
+                        if estimate is None:
+                            decision_skip_reason = (
+                                "portfolio_return_moment_history_insufficient"
+                            )
+                        enhanced_decision = replace(
+                            enhanced_decision, expected_alpha=estimate
                         )
                     if (
                         absolute
@@ -1028,7 +1087,7 @@ def backtest_a_share(
                 execution_units=execution_units,
                 previous_values=previous_values,
                 rights_adjustments=adjustments,
-                prediction_rank_score=alpha,
+                prediction_rank_score=alpha.iloc[:0] if monetary_ratio else alpha,
                 decision_lives=view.valuation.set_index("asset_id").listing_date,
                 adv20=adv,
                 enhanced_decision=enhanced_decision,
@@ -1594,12 +1653,10 @@ def _build_session(
     objective = (
         robust_config.objective if robust_config else PortfolioObjective.CALIBRATED
     )
-    rank_objective = objective != PortfolioObjective.CALIBRATED
-    risk_aversion = (
-        robust_config.risk_aversion if robust_config and not rank_objective else 0.0
-    )
+    calibrated = objective == PortfolioObjective.CALIBRATED
+    risk_aversion = robust_config.risk_aversion if robust_config and calibrated else 0.0
     use_signal = enhanced_decision is not None and (
-        rank_objective or not enhanced_decision.calibration.benchmark_only
+        not calibrated or not enhanced_decision.calibration.benchmark_only
     )
     optimize_target = use_signal or (
         fully_invested
@@ -1610,7 +1667,7 @@ def _build_session(
         not absolute
         or config.total_volatility_limit is not None
         or risk_aversion > 0.0
-        or objective == PortfolioObjective.RANK_TO_RISK
+        or objective.is_ratio
     )
     if not np.isclose(
         float(holdings.sum()) + cash + decision_receivable,
@@ -1878,7 +1935,11 @@ def _build_session(
     independent_exits = assets.isin(exit_assets)
     hold_target = execution_weights.where(~independent_exits, 0.0)
     assets_frame = None
-    if nav > 0 and enhanced_decision is not None:
+    if (
+        nav > 0
+        and enhanced_decision is not None
+        and (objective.uses_rank or enhanced_decision.expected_alpha is not None)
+    ):
         risk = enhanced_decision.risk
         assets_frame = _optimizer_assets(
             benchmark_weights=enhanced_decision.benchmark_weights,
@@ -1887,7 +1948,7 @@ def _build_session(
             nav=nav,
             receivable=decision_receivable,
             expected_alpha=alpha
-            if rank_objective
+            if objective.uses_rank
             else enhanced_decision.expected_alpha,
             signal_column=objective.signal_column,
             exposures=enhanced_decision.exposures,
@@ -1982,7 +2043,7 @@ def _build_session(
             return total, *gradients
 
         try:
-            if robust_config is not None and not rank_objective and use_signal:
+            if robust_config is not None and calibrated and use_signal:
                 ranks = alpha.reindex(assets_frame.asset_id)
                 ranks.loc[assets_frame.is_cash.to_numpy() | unavailable.to_numpy()] = (
                     0.0
@@ -2010,18 +2071,16 @@ def _build_session(
                 cash_column="is_cash",
                 receivable_weight=float(decision_receivable / nav),
                 objective_kind=objective,
+                holding_sessions=enhanced_decision.holding_sessions,
+                risk_annualization=risk.annualization_factor
+                if risk is not None
+                else None,
                 **(
                     {
                         "uncertainty_loading": loading,
                         "risk_aversion": robust_config.risk_aversion,
-                        "holding_sessions": enhanced_decision.holding_sessions,
-                        **(
-                            {"risk_annualization": risk.annualization_factor}
-                            if robust_config.risk_aversion > 0.0
-                            else {}
-                        ),
                     }
-                    if robust_config is not None and not rank_objective
+                    if robust_config is not None and calibrated
                     else {}
                 ),
             )
@@ -2037,6 +2096,9 @@ def _build_session(
                 "optimizer_rank_ratio_risk_unresolved",
                 "optimizer_rank_ratio_zero_volatility",
                 "optimizer_no_positive_feasible_rank",
+                "optimizer_no_positive_feasible_net_return",
+                "optimizer_net_ratio_zero_volatility",
+                "optimizer_net_ratio_risk_unresolved",
             }:
                 error.add_note(f"portfolio_decision={decision_timestamp}")
                 raise
@@ -2233,6 +2295,7 @@ def _build_session(
                     enhanced_decision.holding_sessions
                     / enhanced_decision.risk.annualization_factor
                     if risk_aversion > 0.0
+                    or objective == PortfolioObjective.NET_RETURN_TO_RISK
                     else 0.0
                 ),
                 exposure=objective_exposure,
@@ -2415,13 +2478,19 @@ def _build_session(
     asset_ledger.attrs["initial_allocation_attempt"] = float(initializing)
     if (
         robust_config is not None
-        and not rank_objective
         and enhanced_decision is not None
+        and not objective.uses_rank
     ):
         asset_ledger.attrs["robust_objective"] = {
             "holding_sessions": enhanced_decision.holding_sessions,
-            "robust_confidence": robust_config.confidence,
-            "robust_risk_aversion": robust_config.risk_aversion,
+            **(
+                {
+                    "robust_confidence": robust_config.confidence,
+                    "robust_risk_aversion": robust_config.risk_aversion,
+                }
+                if calibrated
+                else {}
+            ),
         }
     if decision_skip_reason:
         target = hold_target

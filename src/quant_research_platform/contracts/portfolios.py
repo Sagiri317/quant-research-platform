@@ -65,10 +65,19 @@ class PortfolioObjective(StrEnum):
     CALIBRATED = "calibrated_return"
     RANK = "rank"
     RANK_TO_RISK = "rank_to_risk"
+    NET_RETURN_TO_RISK = "net_return_to_risk"
+
+    @property
+    def uses_rank(self) -> bool:
+        return self in (self.RANK, self.RANK_TO_RISK)
+
+    @property
+    def is_ratio(self) -> bool:
+        return self in (self.RANK_TO_RISK, self.NET_RETURN_TO_RISK)
 
     @property
     def signal_column(self) -> str:
-        return "expected_alpha" if self == self.CALIBRATED else "prediction_rank_score"
+        return "prediction_rank_score" if self.uses_rank else "expected_alpha"
 
 
 @dataclass(frozen=True, slots=True)

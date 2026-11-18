@@ -30,6 +30,7 @@ from quant_research_platform.research.portfolios.calibration import (
     alpha_calibration_intervals,
     alpha_interval_semantics,
     calibrate_expected_alpha,
+    zscore_return_horizon,
 )
 from quant_research_platform.research.portfolios.daily import (
     _CALENDAR_COLUMNS,
@@ -163,6 +164,14 @@ def backtest(config: Mapping) -> Path:
         robust_config is None
         or robust_config.objective == PortfolioObjective.CALIBRATED
     )
+    monetary_ratio = (
+        robust_config is not None
+        and robust_config.objective == PortfolioObjective.NET_RETURN_TO_RISK
+    )
+    prediction_column = (
+        "prediction_score" if monetary_ratio else "prediction_rank_score"
+    )
+    return_horizon = None
     if not calibrated and ("calibration" in config or "calibration_window" in config):
         raise ValueError("portfolio_unused_calibration")
     if "calibration" in config and "calibration_window" in config:
@@ -209,6 +218,11 @@ def backtest(config: Mapping) -> Path:
         path = Path(item["path"])
         metadata = read_output_manifest(path)["metadata"]
         facts = metadata["model_facts"]
+        if monetary_ratio:
+            horizon = zscore_return_horizon(facts)
+            if return_horizon is not None and horizon != return_horizon:
+                raise ValueError("portfolio_raw_score_return_horizon_conflict")
+            return_horizon = horizon
         target_definition = facts.get("target_definition") or {}
         if enhanced and target_definition.get("target_transform") == "risk_residual":
             label_risk = FactorRiskModel.from_mapping(target_definition["risk_model"])
@@ -281,7 +295,7 @@ def backtest(config: Mapping) -> Path:
             _iter_prediction_member(
                 path,
                 metadata,
-                columns=("timestamp", "asset_id", "prediction_rank_score"),
+                columns=("timestamp", "asset_id", prediction_column),
                 time_window=window,
             )
         ) as batches:
@@ -289,7 +303,7 @@ def backtest(config: Mapping) -> Path:
                 if index.add_float_value_table(
                     pa.Table.from_pandas(frame, preserve_index=False),
                     namespace="prediction",
-                    value_column="prediction_rank_score",
+                    value_column=prediction_column,
                     retain_values=True,
                 ):
                     raise ValueError("portfolio_prediction_keys_invalid")
@@ -298,7 +312,7 @@ def backtest(config: Mapping) -> Path:
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),
-        prediction_column="prediction_rank_score",
+        prediction_column=prediction_column,
     )
     frozen = None
     if "calibration" in config:
@@ -334,6 +348,7 @@ def backtest(config: Mapping) -> Path:
                 risk_config=risk_config,
                 optimizer_config=optimizer_config,
                 robust_config=robust_config,
+                return_horizon=return_horizon,
                 frozen_calibration=frozen,
                 calibration_window=config.get(
                     "calibration_window", DEFAULT_CALIBRATION_WINDOW

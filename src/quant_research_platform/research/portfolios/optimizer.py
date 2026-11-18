@@ -158,13 +158,15 @@ def optimize_portfolio(
     holding_sessions/risk_annualization; it does not resize the uncertainty set.
     """
     config = OptimizerConfig() if config is None else config
+    objective_kind = PortfolioObjective(objective_kind)
+    net_return = objective_kind == PortfolioObjective.NET_RETURN_TO_RISK
     if (
         isinstance(risk_aversion, bool)
         or not isinstance(risk_aversion, int | float)
         or not np.isfinite(risk_aversion)
         or risk_aversion < 0.0
         or (
-            risk_aversion > 0.0
+            (risk_aversion > 0.0 or net_return)
             and (
                 type(holding_sessions) is not int
                 or holding_sessions <= 0
@@ -177,10 +179,18 @@ def optimize_portfolio(
     ):
         raise ValueError("optimizer_risk_horizon_invalid")
     absolute = isinstance(config, AbsoluteRiskConfig)
-    objective_kind = PortfolioObjective(objective_kind)
-    ranks = objective_kind != PortfolioObjective.CALIBRATED
-    ratio = objective_kind == PortfolioObjective.RANK_TO_RISK
-    if ranks and (not absolute or risk_aversion or uncertainty_loading is not None):
+    if net_return and not (absolute and config.fully_invested):
+        raise ValueError("optimizer_net_return_ratio_requires_funded_account")
+    ranks = objective_kind.uses_rank
+    ratio = objective_kind.is_ratio
+    no_positive_score = (
+        "optimizer_no_positive_feasible_net_return"
+        if net_return
+        else "optimizer_no_positive_feasible_rank"
+    )
+    if (ranks or net_return) and (
+        not absolute or risk_aversion or uncertainty_loading is not None
+    ):
         raise ValueError("optimizer_rank_objective_configuration_invalid")
     signal_column = objective_kind.signal_column
     risk_limit = (
@@ -335,7 +345,7 @@ def optimize_portfolio(
         signal_column,
     )
     if absolute:
-        if ranks and (alpha_missing & (current > 0.0)).any():
+        if (ranks or net_return) and (alpha_missing & (current > 0.0)).any():
             raise RiskInputsUnavailable("robust_held_prediction_unavailable")
         if (incomplete & (current > 0.0)).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
@@ -379,7 +389,9 @@ def optimize_portfolio(
         if loading[cash].any():
             raise ValueError("optimizer_cash_uncertainty_invalid")
     horizon_scale = (
-        holding_sessions / risk_annualization if risk_aversion > 0.0 else 0.0
+        holding_sessions / risk_annualization
+        if risk_aversion > 0.0 or net_return
+        else 0.0
     )
     # Side costs at the maximum trades bound every feasible fee. Actual
     # self-financing constraints below still price each candidate's net trades.
@@ -540,38 +552,65 @@ def optimize_portfolio(
             exposure @ ((covariance + covariance.T) @ factor) / 2.0 + specific * active
         )
 
-    def linear_rank(point):
+    # Express the holding-period numerator per unit of annualized volatility.
+    score_scale = np.sqrt(horizon_scale) if net_return else 1.0
+    priced_ratio = net_return and maximum_cost > 0.0
+    signal_gradient = gradient_point(expected_alpha) / score_scale
+
+    def positive_income(weights, fee):
+        gross = expected_alpha @ weights
+        if not net_return:
+            return gross > 0.0
+        # Gross return and aggregate fees accumulate independently at break-even.
+        rounding = np.finfo(float).eps * (np.count_nonzero(weights) + count + 2)
+        return gross - fee > rounding * (
+            np.abs(expected_alpha) @ np.abs(weights) + abs(fee)
+        )
+
+    def negative_score(point):
+        if priced_ratio:
+            # Price the proposed trades directly, including trial points where
+            # the reserved-fee equality has not yet converged.
+            value, gradient = objective(point)
+            return value / score_scale, gradient / score_scale
         weights, _, _ = unpack(point)
-        return float(-expected_alpha @ weights), gradient_point(-expected_alpha)
+        return -float(expected_alpha @ weights) / score_scale, -signal_gradient
 
     def ratio_terms(point):
         weights, _, _ = unpack(point)
-        score = expected_alpha @ weights
+        loss, gradient = negative_score(point)
+        score, slope = -loss, -gradient
         variance = sum(_risk_variances(weights, exposure, covariance, specific))
         # q / sqrt(1 + q^2) preserves ratio ordering and is smooth at zero variance
         # for a positive score. No artificial volatility enters the reported q.
         scale = np.hypot(score, np.sqrt(variance))
-        direction = (covariance_product(weights) + score * expected_alpha) / scale
-        return score / scale, direction, scale
+        direction = (
+            gradient_point(covariance_product(weights)) + score * slope
+        ) / scale
+        return score / scale, direction, scale, slope
 
-    def rank_ratio(point):
-        value, direction, scale = ratio_terms(point)
-        return -value, gradient_point((value * direction - expected_alpha) / scale)
+    def signal_ratio(point):
+        value, direction, scale, slope = ratio_terms(point)
+        return -value, (value * direction - slope) / scale
 
     def ratio_hessian(point):
-        value, direction, scale = ratio_terms(point)
+        value, direction, scale, slope = ratio_terms(point)
 
         def product(vector):
             delta = np.zeros(count)
             delta[free_weights] = vector[:weight_count]
-            ds, dv = expected_alpha @ delta, direction @ delta
+            ds, dv = slope @ vector, direction @ vector
             curvature = (
-                expected_alpha * dv
+                slope * dv
                 + direction * ds
                 + value
-                * (covariance_product(delta) + expected_alpha * ds - 3 * direction * dv)
+                * (
+                    gradient_point(covariance_product(delta))
+                    + slope * ds
+                    - 3 * direction * dv
+                )
             )
-            return gradient_point(curvature / scale**2)
+            return curvature / scale**2
 
         return LinearOperator((variable_count, variable_count), matvec=product)
 
@@ -909,12 +948,15 @@ def optimize_portfolio(
     mean_maximum = np.max(expected_alpha)
     mean_at_maximum = np.all(expected_alpha[current > 0.0] == mean_maximum)
     certified = no_risk_gain and no_robust_loss and mean_at_maximum
+    no_positive_return = not np.any(expected_alpha[reachable_upper > 0.0] > 0.0)
     if not current[~cash].any() and no_risk_gain and no_robust_loss:
         _, buying_gradient, _ = expected_transaction_cost(
             np.zeros(count), np.zeros(count)
         )
         required_mean = expected_alpha if ranks else expected_alpha - buying_gradient
         available = (~cash) & (reachable_upper > 0.0)
+        if net_return:
+            no_positive_return = np.all(required_mean[available] <= 0.0)
         positive, negative, zero = (
             available & (loading > 0.0),
             available & (loading < 0.0),
@@ -983,7 +1025,8 @@ def optimize_portfolio(
         return converged
 
     def solve(fun, hess, start, *, barrier=0.1):
-        solution = minimize(
+        solver = _minimize_in_percentage_points if priced_ratio else minimize
+        solution = solver(
             fun,
             start,
             jac=True,
@@ -1096,6 +1139,8 @@ def optimize_portfolio(
     analytic_solution |= (
         certified and np.array_equal(unpack(initial)[0], current) and feasible(initial)
     )
+    if net_return and no_positive_return:
+        raise RiskInputsUnavailable(no_positive_score)
     if not analytic_solution and not ratio and (ranks or maximum_cost == 0.0):
         # The budget-and-box linear relaxation bounds every remaining target.
         # A feasible maximizer with zero penalties attains that global bound.
@@ -1135,36 +1180,62 @@ def optimize_portfolio(
             upper_bounds[:weight_count][reachable_upper[free_weights] >= budget] = (
                 np.inf
             )
-            rank_domain = LinearConstraint(
-                sparse.csr_matrix(gradient_point(expected_alpha)[None, :]),
-                -expected_alpha @ fixed_part,
-                np.inf,
-                # An all-cash trial has undefined risk ratio. With funding
-                # fixed, allow trial steps across zero and constrain the solution.
-                keep_feasible=not (config.fully_invested and exact_cash),
-            )
+            keep_positive = not (config.fully_invested and exact_cash)
+            if priced_ratio:
+                score_domain = NonlinearConstraint(
+                    lambda p: negative_score(p)[0],
+                    -np.inf,
+                    0.0,
+                    jac=lambda p: sparse.csr_matrix(negative_score(p)[1][None, :]),
+                    hess="2-point",
+                    keep_feasible=keep_positive,
+                )
 
-            def positive_rank(point):
-                return (rank_domain.A @ point)[0] > rank_domain.lb[0]
+                def positive_score(point):
+                    weights, _, _ = unpack(point)
+                    return score_domain.fun(point) < 0.0 and positive_income(
+                        weights, actual_cost(weights)[0]
+                    )
+            else:
+                score_domain = LinearConstraint(
+                    sparse.csr_matrix(signal_gradient[None, :]),
+                    -(expected_alpha @ fixed_part) / score_scale,
+                    np.inf,
+                    keep_feasible=keep_positive,
+                )
 
-            if not feasible(initial, config.solver_gtol) or not positive_rank(initial):
-                seed = solve(linear_rank, zero_hessian, initial, barrier=barrier)
+                def positive_score(point):
+                    return (score_domain.A @ point)[0] > score_domain.lb[0]
+
+            if not feasible(initial, config.solver_gtol) or not positive_score(initial):
+                seed = solve(
+                    negative_score,
+                    "2-point" if priced_ratio else zero_hessian,
+                    initial,
+                    barrier=barrier,
+                )
                 initial = seed.x
                 funding_iterations += seed.nit
-            if not positive_rank(initial):
-                raise RiskInputsUnavailable("optimizer_no_positive_feasible_rank")
+            if not positive_score(initial):
+                raise RiskInputsUnavailable(no_positive_score)
             # With no idle cash, strictly positive stock scores already imply
             # the rank domain. An all-cash start would leave the ratio undefined.
             if (
                 not config.fully_invested
                 or not exact_cash
+                or priced_ratio
                 or np.any((expected_alpha <= 0.0) & (reachable_upper > 0.0) & ~cash)
             ):
-                constraints.append(rank_domain)
-            result = solve(rank_ratio, ratio_hessian, initial, barrier=barrier)
+                constraints.append(score_domain)
+            result = solve(
+                signal_ratio,
+                "2-point" if priced_ratio else ratio_hessian,
+                initial,
+                barrier=barrier,
+            )
         else:
             result = solve(
-                linear_rank if ranks else objective,
+                negative_score if ranks else objective,
                 zero_hessian if ranks else objective_hessian,
                 initial,
                 barrier=config.solver_gtol
@@ -1283,10 +1354,12 @@ def optimize_portfolio(
         covariance=covariance,
         specific=specific,
     )
-    if ratio and expected_alpha @ weights <= 0.0:
-        raise RiskInputsUnavailable("optimizer_no_positive_feasible_rank")
     if ratio:
-        score = expected_alpha @ weights
+        score = (
+            expected_alpha @ weights - (cost_ratio if net_return else 0.0)
+        ) / score_scale
+        if not positive_income(weights, cost_ratio):
+            raise RiskInputsUnavailable(no_positive_score)
         variance = factor_variance + specific_variance
         null_candidate = np.any(
             (specific == 0) & (expected_alpha > 0) & (reachable_upper > 0)
@@ -1317,19 +1390,26 @@ def optimize_portfolio(
                     witness = null_portfolio(principal)
                     if (
                         principal > 0
+                        and positive_income(witness, actual_cost(witness)[0])
                         and (witness >= reachable_lower).all()
                         and (witness <= reachable_upper).all()
                         and feasible(pack(witness), config.solver_gtol)
                     ):
                         raise RiskInputsUnavailable(
-                            "optimizer_rank_ratio_zero_volatility"
+                            "optimizer_net_ratio_zero_volatility"
+                            if net_return
+                            else "optimizer_rank_ratio_zero_volatility"
                         )
         if variance == 0 or (
             null_candidate
             and 1 - score / np.hypot(score, np.sqrt(variance))
             <= max(config.solver_gtol, complementarity_sum + projected_optimality)
         ):
-            raise RiskInputsUnavailable("optimizer_rank_ratio_risk_unresolved")
+            raise RiskInputsUnavailable(
+                "optimizer_net_ratio_risk_unresolved"
+                if net_return
+                else "optimizer_rank_ratio_risk_unresolved"
+            )
     return OptimizationResult(
         weights=pd.Series(weights, index=data["asset_id"], name="weight"),
         predicted_tracking_error=None if absolute else volatility,
@@ -1358,6 +1438,53 @@ def optimize_portfolio(
     )
 
 
+def _minimize_in_percentage_points(
+    fun, start, *, hess, bounds, constraints, callback, **options
+):
+    """Condition small net-return steps while certifying KKT in original NAV units."""
+    unit = 0.01
+    scaled = []
+    for constraint in constraints:
+        lb, ub = constraint.lb / unit, constraint.ub / unit
+        if isinstance(constraint, LinearConstraint):
+            row = LinearConstraint(
+                constraint.A, lb, ub, keep_feasible=constraint.keep_feasible
+            )
+        else:
+            row = NonlinearConstraint(
+                lambda y, c=constraint: c.fun(y * unit) / unit,
+                lb,
+                ub,
+                jac=lambda y, c=constraint: c.jac(y * unit),
+                hess=constraint.hess,
+                keep_feasible=constraint.keep_feasible,
+            )
+        scaled.append(row)
+
+    def objective(y):
+        loss, gradient = fun(y * unit)
+        return loss / unit, gradient
+
+    def convergence(y, state):
+        original = OptimizeResult(state)
+        original.constr = [value * unit for value in state.constr]
+        original.constr_violation = state.constr_violation * unit
+        return callback(y * unit, original)
+
+    result = minimize(
+        objective,
+        start / unit,
+        hess=(lambda y: hess(y * unit) * unit) if callable(hess) else hess,
+        bounds=Bounds(bounds.lb / unit, bounds.ub / unit),
+        constraints=scaled,
+        callback=convergence,
+        **options,
+    )
+    result.x *= unit
+    result.constr_violation *= unit
+    return result
+
+
 def _portfolio_objective(
     weights,
     *,
@@ -1375,6 +1502,17 @@ def _portfolio_objective(
     """Value a target or actual allocation in the original pre-fee NAV units."""
     active = weights if benchmark is None else weights - benchmark
     expected_return = float(expected_alpha @ active)
+    if objective_kind == PortfolioObjective.NET_RETURN_TO_RISK:
+        variance = horizon_scale * sum(
+            _risk_variances(active, exposure, covariance, specific)
+        )
+        return {
+            "expected_return": expected_return,
+            "holding_variance": variance,
+            "objective_value": float((expected_return - cost_ratio) / np.sqrt(variance))
+            if variance
+            else None,
+        }
     if objective_kind != PortfolioObjective.CALIBRATED:
         value = expected_return
         if objective_kind == PortfolioObjective.RANK_TO_RISK:

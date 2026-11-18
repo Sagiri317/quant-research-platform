@@ -1,6 +1,8 @@
-"""Point-in-time calibration of prediction ranks to realized holding returns."""
+"""Point-in-time mappings from prediction signals to holding returns."""
 
 from dataclasses import dataclass
+from itertools import islice
+import re
 
 import numpy as np
 import pandas as pd
@@ -12,6 +14,54 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.validation import strict_real_numeric_series
 from quant_research_platform.research.portfolios.schedules import is_rebalance_session
+
+RETURN_MOMENT_WINDOW = 252
+
+
+def zscore_return_horizon(model_facts):
+    """Identify the unclipped forward-return target of a raw regression score."""
+    target = model_facts.get("target_definition") or {}
+    source = re.fullmatch(
+        r"forward_return_([1-9][0-9]*)d", target.get("source_label") or ""
+    )
+    if (
+        not source
+        or target.get("target_transform") != "date_zscore"
+        or target.get("target_clip") != "none"
+        or model_facts["model"]["target_column"] != "model_target"
+        or model_facts["model"]["model_algorithm"] == "deeplob_classifier"
+    ):
+        raise ValueError("portfolio_raw_score_requires_forward_return_zscore")
+    return int(source[1])
+
+
+def return_cross_section(frame, label, available_column):
+    """A complete eligible cross-section becomes usable at its last contributor's maturity."""
+    members = frame.loc[frame["eligible"].eq(True) & frame[label].notna()]
+    if len(members) < 2 or members[available_column].isna().any():
+        return None
+    returns = members[label]
+    return members[available_column].max(), returns.mean(), returns.std(ddof=0)
+
+
+def estimate_holding_return(
+    scores, history, *, as_of, label_sessions, holding_sessions
+):
+    """Invert the target using equally weighted mature daily cross-sectional moments."""
+    sample = list(
+        islice(
+            (
+                (mean, scale)
+                for mature, mean, scale in reversed(history)
+                if mature <= as_of
+            ),
+            RETURN_MOMENT_WINDOW,
+        )
+    )
+    if len(sample) < RETURN_MOMENT_WINDOW:
+        return None
+    mean, scale = np.mean(sample, axis=0)
+    return (mean + scale * scores) * (holding_sessions / label_sessions)
 
 
 @dataclass(frozen=True)
