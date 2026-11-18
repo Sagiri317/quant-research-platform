@@ -131,8 +131,7 @@
   "optimizer_config": {
     "fully_invested": true,
     "solver_maxiter": null,
-    "name_weight_limit": 0.02,
-    "total_volatility_limit": 0.3
+    "name_weight_limit": 0.02
   },
   "assumptions": {
     "initial_nav": 100000000.0,

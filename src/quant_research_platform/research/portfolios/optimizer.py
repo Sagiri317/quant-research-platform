@@ -1193,9 +1193,11 @@ def optimize_portfolio(
         result = OptimizeResult(success=True, x=initial, nit=0)
     else:
         if ratio:
+            # A funded rank target can place many names on their post-fee caps.
+            capped_rank = ranks and config.name_weight_limit not in (None, 1.0)
             barrier = (
                 0.1
-                if config.fully_invested and risk_limit is not None
+                if config.fully_invested and (risk_limit is not None or capped_rank)
                 else config.solver_gtol
             )
             # A long-only budget already bounds each weight by the whole account.

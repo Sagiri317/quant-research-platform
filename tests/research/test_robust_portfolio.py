@@ -252,6 +252,35 @@ def test_funded_rank_ratio_on_a_binding_risk_frontier():
     assert result.objective_value == pytest.approx(score @ expected / 0.3, abs=1e-7)
 
 
+def test_funded_rank_ratio_with_binding_name_limits_and_no_volatility_cap():
+    scores = np.linspace(-0.05, 0.10, 4)
+    assets = _assets((*scores, 0.0), (0, 0, 0, 0, 1)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["style"] = [1, 1, 1, 1, 0]
+    assets["specific_variance"] = [0.04] * 4 + [0.0]
+    rates = np.r_[np.linspace(0.0005, 0.001, 4), 0.0]
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        style_columns=("style",),
+        factor_covariance=pd.DataFrame([[0.16]], index=["style"], columns=["style"]),
+        expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, name_weight_limit=1 / 3
+        ),
+    )
+    # The common factor dominates risk. Each of the top three fills its post-fee cap.
+    rate = rates[1:4].mean()
+    expected = np.array([0.0, 1 / 3, 1 / 3, 1 / 3, rate]) / (1 + rate)
+    assert result.weights.to_numpy() == pytest.approx(expected, abs=2e-7)
+    assert result.objective_value == pytest.approx(
+        scores[1:].mean() / np.sqrt(0.16 + 0.04 / 3), abs=1e-7
+    )
+
+
 @pytest.mark.parametrize("binding", ["turnover", "volatility"])
 def test_funded_rank_rebalance_with_asymmetric_fees(binding):
     mix = np.arange(1, 4)
