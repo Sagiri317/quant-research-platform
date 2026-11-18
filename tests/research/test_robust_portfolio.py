@@ -109,6 +109,27 @@ def test_rank_ratio_requires_a_finite_positive_opportunity(ranks, variance, reas
         )
 
 
+def test_rank_ratio_finds_the_tangency_portfolio_from_a_negative_rank_holding():
+    assets = _assets((0.10, 0.15, -0.20, 0.0), (0.0, 0.0, 1.0, 0.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["specific_variance"] = [0.01, 0.09, 0.01, 0.0]
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(4), np.zeros(4)),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, total_volatility_limit=0.3
+        ),
+    )
+    # Long-only tangency weights are proportional to positive rank / variance.
+    assert result.weights.tolist() == pytest.approx([6 / 7, 1 / 7, 0.0, 0.0], abs=2e-7)
+    assert result.objective_value == pytest.approx(np.sqrt(1.25), abs=1e-7)
+
+
 def test_rank_ratio_respects_frozen_exposure_to_risk():
     assets = _assets((0.2, 0.3, 0.0), (0.5, 0.5, 0.0)).rename(
         columns={"expected_alpha": "prediction_rank_score"}

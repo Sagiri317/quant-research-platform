@@ -971,14 +971,13 @@ def optimize_portfolio(
         certified |= np.all(required_mean[zero] <= 0.0) and lower_theta <= upper_theta
     if ratio:
         certified = not np.any(expected_alpha[reachable_upper > 0.0])
-    converged = False
     complementarity = 0.0
     complementarity_sum = 0.0
     complementarity_count = 0
     projected_optimality = 0.0
 
     def numerical_convergence(point, state):
-        nonlocal converged, complementarity
+        nonlocal complementarity
         nonlocal complementarity_sum, complementarity_count
         nonlocal projected_optimality
         complementarity = 0.0
@@ -1017,14 +1016,24 @@ def optimize_portfolio(
                 complementarity_sum += float(residual.sum())
                 complementarity = max(complementarity, float(residual.max(initial=0.0)))
         projected_optimality = float(abs(lagrangian).max(initial=0.0))
-        converged = (
+        return (
             projected_optimality <= config.solver_gtol
             and state.constr_violation <= config.solver_gtol
             and complementarity_sum <= complementarity_count * config.solver_gtol
         )
-        return converged
 
-    def solve(fun, hess, start, *, barrier=0.1):
+    def solve(fun, hess, start, *, barrier=0.1, witness=None):
+        accepted = False
+
+        def stop(point, state):
+            nonlocal accepted
+            accepted = numerical_convergence(point, state) or (
+                witness is not None
+                and state.constr_violation <= config.solver_gtol
+                and witness(point)
+            )
+            return accepted
+
         solver = _minimize_in_percentage_points if priced_ratio else minimize
         solution = solver(
             fun,
@@ -1034,7 +1043,7 @@ def optimize_portfolio(
             method="trust-constr",
             bounds=Bounds(lower_bounds, upper_bounds),
             constraints=constraints,
-            callback=numerical_convergence,
+            callback=stop,
             options={
                 "gtol": 0.0,
                 "xtol": config.solver_xtol,
@@ -1046,7 +1055,7 @@ def optimize_portfolio(
                 "factorization_method": "AugmentedSystem",
             },
         )
-        if not converged:
+        if not accepted:
             error = ValueError("optimizer_failed_closed")
             error.add_note(
                 f"stage={fun.__name__}; {solution.message}; iterations={solution.nit}; "
@@ -1208,11 +1217,14 @@ def optimize_portfolio(
                     return (score_domain.A @ point)[0] > score_domain.lb[0]
 
             if not feasible(initial, config.solver_gtol) or not positive_score(initial):
+                # Any feasible positive numerator starts the ratio problem.
+                # Only proving its absence requires optimizing the seed objective.
                 seed = solve(
                     negative_score,
                     "2-point" if priced_ratio else zero_hessian,
                     initial,
                     barrier=barrier,
+                    witness=positive_score,
                 )
                 initial = seed.x
                 funding_iterations += seed.nit
