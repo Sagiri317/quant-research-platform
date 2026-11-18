@@ -2,11 +2,37 @@
 
 import numpy as np
 
-from quant_research_platform.compute.portfolio_economics import _nav_return_roundoff
+from quant_research_platform.compute.portfolio_economics import (
+    _nav_return_roundoff,
+    wealth_drawdown,
+)
 from quant_research_platform.research.statistics import (
     _return_sharpes,
     return_standard_deviation,
 )
+
+
+def drawdown_episodes(times, wealth):
+    """Rank disjoint peak-to-recovery episodes on a dated path including inception."""
+    values = np.asarray(wealth, dtype="float64")
+    path = wealth_drawdown(values, values[0])
+    underwater = path < 0.0
+    starts = np.flatnonzero(underwater[1:] & ~underwater[:-1]) + 1
+    recoveries = np.flatnonzero(~underwater[1:] & underwater[:-1]) + 1
+    if underwater[-1]:
+        recoveries = np.append(recoveries, len(path))
+    episodes = []
+    for start, end in zip(starts, recoveries, strict=True):
+        trough = start + np.argmin(path[start:end])
+        episodes.append(
+            dict(
+                peak_at=times[start - 1],
+                trough_at=times[trough],
+                recovery_at=times[end] if end < len(path) else None,
+                drawdown=path[trough],
+            )
+        )
+    return sorted(episodes, key=lambda episode: episode["drawdown"])
 
 
 def performance_rows(
@@ -49,11 +75,7 @@ def performance_rows(
             * np.sqrt(252)
         ),
         "max_drawdown": float(
-            (
-                selected.nav_end
-                / selected.nav_end.cummax().clip(lower=capital.initial_capital)
-                - 1
-            ).min()
+            wealth_drawdown(selected.nav_end, capital.initial_capital).min()
         ),
         "mean_cash_weight_post": float(selected.cash_weight_post.mean(skipna=False)),
         "terminal_cash_weight_post": float(selected.cash_weight_post.iloc[-1]),

@@ -15,6 +15,7 @@ from textwrap import fill
 import pandas as pd
 
 from quant_research_platform.artifacts.statistics import _COMPARISON_IDENTITY
+from quant_research_platform.compute.portfolio_economics import wealth_drawdown
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.share_safety import sanitize_shared_text
 
@@ -297,11 +298,7 @@ def plot_portfolio_curve(curve, *, sample_role, timezone):
         peak = _number(curve["initial_capital"])
         if peak <= 0:
             raise ValueError("plot_initial_capital_invalid")
-        drawdowns = []
-        for value in values:
-            peak = max(peak, value)
-            ratio = value / peak - 1 if peak > 0 else math.nan
-            drawdowns.append(ratio if math.isfinite(ratio) else math.nan)
+        drawdowns = wealth_drawdown(values, peak)
         dd_axis.plot(
             times, drawdowns, color="#934b4b", marker=".", markersize=3, linewidth=1
         )

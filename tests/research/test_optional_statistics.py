@@ -22,6 +22,26 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.research import statistics
 from quant_research_platform.research.factors.statistics import factor_statistics
 from quant_research_platform.research.portfolios.diagnostics import portfolio_statistics
+from quant_research_platform.research.portfolios.performance import drawdown_episodes
+
+
+def test_drawdown_episodes_use_independent_peaks_and_keep_open_losses():
+    days = pd.date_range("2022-01-01", periods=8)
+    episodes = drawdown_episodes(days, [100, 90, 80, 80, 100, 100, 60, 70])
+    assert episodes == [
+        dict(
+            peak_at=days[5],
+            trough_at=days[6],
+            recovery_at=None,
+            drawdown=pytest.approx(-0.4),
+        ),
+        dict(
+            peak_at=days[0],
+            trough_at=days[2],
+            recovery_at=days[4],
+            drawdown=pytest.approx(-0.2),
+        ),
+    ]
 
 
 def _cash_ledger(root, *, candidate=None, dates=None):
@@ -147,7 +167,11 @@ def test_ledger_only_analyses_do_not_open_market_inputs(
         config["statistics"] = {"cscv_blocks": 4}
     artifact = read_statistics_artifact(portfolio_statistics(config))
     expected = {
-        "performance": {"portfolio_daily.parquet", "portfolio_performance.parquet"},
+        "performance": {
+            "portfolio_daily.parquet",
+            "portfolio_performance.parquet",
+            "portfolio_drawdowns.parquet",
+        },
         "capacity": {
             "portfolio_capacity.parquet",
             "portfolio_capacity_summary.parquet",

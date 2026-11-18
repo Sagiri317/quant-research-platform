@@ -7,6 +7,13 @@ import numpy as np
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 
 
+def wealth_drawdown(values, initial):
+    """Return fractional losses from the running high, including initial wealth."""
+    peaks = np.fmax.accumulate(np.r_[initial, np.asarray(values, dtype="float64")])[1:]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return values / peaks - 1.0
+
+
 def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
     """Bound ordinary NAV-ratio roundoff in dimensionless return units."""
     before = np.asarray(start, dtype="float64")

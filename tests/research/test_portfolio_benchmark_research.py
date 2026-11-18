@@ -86,6 +86,7 @@ def test_defaults_to_performance_and_accepts_two_references(tmp_path, monkeypatc
     default = read_statistics_artifact(portfolio_statistics(config))
     assert set(default._members) == {
         "portfolio_daily.parquet",
+        "portfolio_drawdowns.parquet",
         "portfolio_performance.parquet",
     }
     monkeypatch.setattr(comparison, "open_dataset_session", original)

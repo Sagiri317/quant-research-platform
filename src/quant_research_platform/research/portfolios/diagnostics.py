@@ -14,6 +14,7 @@ from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMN
 from quant_research_platform.compute.portfolio_economics import (
     _LedgerEconomics,
     _nav_return_roundoff,
+    wealth_drawdown,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
@@ -38,7 +39,10 @@ from quant_research_platform.research.portfolios.comparison import (
 from quant_research_platform.research.portfolios.comparison import (
     endpoint_return as comparison_endpoint_return,
 )
-from quant_research_platform.research.portfolios.performance import performance_rows
+from quant_research_platform.research.portfolios.performance import (
+    drawdown_episodes,
+    performance_rows,
+)
 from quant_research_platform.research.portfolios.schedules import holding_intervals
 from quant_research_platform.research.risk import (
     FactorRiskState,
@@ -993,11 +997,7 @@ def _portfolio_statistics_tables(
                     ratio if np.isfinite(ratio) else np.nan
                 )
                 values[f"{prefix}_max_drawdown"] = float(
-                    (
-                        stressed
-                        / stressed.cummax().clip(lower=artifact.capital.initial_capital)
-                        - 1
-                    ).min()
+                    wealth_drawdown(stressed, artifact.capital.initial_capital).min()
                 )
         summary_rows.extend(
             performance_rows(
@@ -1394,6 +1394,25 @@ def portfolio_statistics(config):
             inputs=config.get("inputs", {}),
             iter_portfolio_sessions=portfolio_sessions.iter_portfolio_sessions,
             comparison_metadata=comparison_metadata,
+        )
+    if "performance" in analyses:
+        episodes = []
+        for candidate_id, daily in tables["portfolio_daily"].groupby(
+            "candidate_id", sort=False
+        ):
+            times = pd.DatetimeIndex([daily.entry_at.iloc[0], *daily.end_at])
+            wealth = np.r_[daily.nav_before.iloc[0], daily.nav_end]
+            for rank, episode in enumerate(drawdown_episodes(times, wealth), start=1):
+                episodes.append(
+                    dict(
+                        candidate_id=candidate_id,
+                        rank=rank,
+                        **episode,
+                        sample_role=config["sample_role"],
+                    )
+                )
+        tables["portfolio_drawdowns"] = pd.DataFrame.from_records(
+            episodes, columns=STATISTICS_TABLE_COLUMNS["portfolio_drawdowns.parquet"]
         )
     metadata = {key: value for key, value in config.items() if key != "output"}
     if {"sharpe_inference", "cscv"}.intersection(analyses):

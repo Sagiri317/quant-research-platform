@@ -7,7 +7,10 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.portfolio_economics import _nav_return_roundoff
+from quant_research_platform.compute.portfolio_economics import (
+    _nav_return_roundoff,
+    wealth_drawdown,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.statistics import (
     _hac_linear_regression,
@@ -551,10 +554,7 @@ def comparison_tables(
                     "relative_wealth": relative[-1],
                     "relative_wealth_return": relative[-1] - 1,
                     "maximum_relative_drawdown": float(
-                        np.min(
-                            relative / np.maximum.accumulate(np.r_[1.0, relative])[1:]
-                            - 1
-                        )
+                        np.min(wealth_drawdown(relative, 1.0))
                     )
                     if np.isfinite(relative).all()
                     else np.nan,

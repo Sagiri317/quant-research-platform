@@ -375,6 +375,17 @@ _ARROW_SCHEMAS = {
             pa.field("sample_role", pa.string()),
         ]
     ),
+    "portfolio_drawdowns.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("rank", pa.int64()),
+            pa.field("peak_at", pa.timestamp("ns")),
+            pa.field("trough_at", pa.timestamp("ns")),
+            pa.field("recovery_at", pa.timestamp("ns")),
+            pa.field("drawdown", pa.float64()),
+            pa.field("sample_role", pa.string()),
+        ]
+    ),
     "portfolio_performance.parquet": pa.schema(
         [
             pa.field("candidate_id", pa.string()),
@@ -577,6 +588,7 @@ STATISTICS_TABLE_GROUPS = {
     "portfolio": (
         *_COMPARISON_MEMBERS,
         "portfolio_daily.parquet",
+        "portfolio_drawdowns.parquet",
         "portfolio_performance.parquet",
         "portfolio_capacity.parquet",
         "portfolio_capacity_summary.parquet",
