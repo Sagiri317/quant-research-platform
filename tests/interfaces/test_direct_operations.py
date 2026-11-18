@@ -281,6 +281,8 @@ def test_cli_main_classifies_operation_errors(
 
     def fail(config):
         assert config == {}
+        if isinstance(error, ValueError):
+            error.add_note(f"decision=2022-01-13 at {path}")
         raise error from cause
 
     monkeypatch.setattr(production, "fit", fail)
@@ -290,5 +292,11 @@ def test_cli_main_classifies_operation_errors(
 
     assert caught.value.code == expected
     output = capsys.readouterr().err
-    assert output == ("required_input_missing\n" if expected == 3 else f"{error}\n")
+    if expected == 2:
+        assert output.splitlines() == [
+            str(error),
+            "decision=2022-01-13 at [local-path]",
+        ]
+    else:
+        assert output == ("required_input_missing\n" if expected == 3 else f"{error}\n")
     assert "private_source" not in output

@@ -4,7 +4,7 @@
     "selection_group": "quarterly",
     "construction": "robust_long_only",
     "prediction_selector": "lasso",
-    "rebalance_schedule": "daily",
+    "rebalance_schedule": "weekly-last-trading-day",
     "top_quantile": null,
     "benchmark_id": null,
     "risk_style_columns": [
@@ -131,8 +131,7 @@
   "optimizer_config": {
     "fully_invested": true,
     "name_weight_limit": 0.02,
-    "total_volatility_limit": 0.3,
-    "target_turnover_limit": 0.2
+    "total_volatility_limit": 0.3
   },
   "assumptions": {
     "initial_nav": 100000000.0,

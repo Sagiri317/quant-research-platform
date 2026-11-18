@@ -127,6 +127,38 @@ def test_rank_ratio_respects_frozen_exposure_to_risk():
     assert result.objective_value == pytest.approx(2.5)
 
 
+def test_optional_cash_preserves_the_positive_risk_ratio_direction():
+    assets = _assets((-0.25, 0.25, 0.0), (0.0, 0.0, 1.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["specific_variance"] = [0.0, 0.04, 0.0]
+    fees = np.where(assets.is_cash, 0.0, 0.0005)
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda b, s: (float((b + s) @ fees), fees, fees),
+        nav=1e8,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(total_volatility_limit=0.3),
+    )
+    assert result.objective_value == pytest.approx(0.25 / np.sqrt(0.04), abs=1e-7)
+
+
+def _funded_frontier_weights(score, style, specific, limit):
+    # On the budget plane move from minimum variance in the zero-budget
+    # return direction until volatility reaches its limit.
+    covariance = np.diag(specific) + 0.04 * np.outer(style, style)
+    minimum = np.linalg.solve(covariance, np.ones(len(score)))
+    minimum /= minimum.sum()
+    direction = np.linalg.solve(covariance, score - minimum @ score)
+    scale = np.sqrt(
+        (limit**2 - minimum @ covariance @ minimum)
+        / (direction @ covariance @ direction)
+    )
+    return minimum + scale * direction
+
+
 def test_funded_rank_ratio_on_a_binding_risk_frontier():
     score = np.array([-1 / 3, 0.0, 1 / 3])
     style = np.array([0.7, 1.0, 1.3])
@@ -153,20 +185,61 @@ def test_funded_rank_ratio_on_a_binding_risk_frontier():
             fully_invested=True, total_volatility_limit=0.3
         ),
     )
-    # On the budget plane the efficient frontier is the minimum-variance
-    # portfolio plus its zero-budget return direction, scaled to 30% volatility.
-    covariance = np.diag(specific) + 0.04 * np.outer(style, style)
-    minimum = np.linalg.solve(covariance, np.ones(3))
-    minimum /= minimum.sum()
-    direction = np.linalg.solve(covariance, score - minimum @ score)
-    scale = np.sqrt(
-        (0.3**2 - minimum @ covariance @ minimum) / (direction @ covariance @ direction)
-    )
-    expected = minimum + scale * direction
+    expected = _funded_frontier_weights(score, style, specific, 0.3)
     assert result.weights.iloc[:3].to_numpy() * 1.0005 == pytest.approx(
         expected, abs=2e-6
     )
     assert result.objective_value == pytest.approx(score @ expected / 0.3, abs=1e-7)
+
+
+@pytest.mark.parametrize("binding", ["turnover", "volatility"])
+def test_funded_rank_rebalance_with_asymmetric_fees(binding):
+    mix = np.arange(1, 4)
+    stock = 0.92 * (mix[::-1] if binding == "turnover" else mix) / mix.sum()
+    stock[-1] += 0.025
+    cash = 1 - stock.sum()
+    assets = _assets((*np.linspace(-0.45, 0.45, 3), 0), (*stock, cash)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["style"] = np.r_[np.linspace(0.7, 1.3, 3), 0]
+    assets["specific_variance"] = np.r_[np.linspace(0.01, 0.15, 3), 0]
+    buy = np.where(assets.is_cash, 0.0, 0.0005)
+    sell = 2 * buy
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        style_columns=("style",),
+        factor_covariance=pd.DataFrame([[0.04]], index=["style"], columns=["style"]),
+        expected_transaction_cost=lambda b, s: (float(b @ buy + s @ sell), buy, sell),
+        nav=1e8,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True,
+            total_volatility_limit=0.3,
+            target_turnover_limit=0.2,
+            name_weight_limit=2 / 3,
+        ),
+    )
+    if binding == "turnover":
+        # Spend the buy budget on the best stock, funded by cash and the worst stock.
+        fee = (0.0005 * 0.2 + 0.001 * (0.2 - cash)) / (1 - 0.001)
+        expected = np.r_[stock + [cash - 0.2 - fee, 0, 0.2], fee]
+        assert result.weights.to_numpy() == pytest.approx(expected, abs=2e-7)
+        assert result.target_turnover == pytest.approx(0.2, abs=2e-7)
+    else:
+        assert result.predicted_total_volatility == pytest.approx(0.3, abs=2e-8)
+        # Initial inventory lies close enough to reach the fully invested
+        # efficient frontier, whose optimum is independent of trading costs.
+        stocks = assets.iloc[:3]
+        frontier = _funded_frontier_weights(
+            stocks.prediction_rank_score, stocks["style"], stocks.specific_variance, 0.3
+        )
+        assert result.objective_value == pytest.approx(
+            stocks.prediction_rank_score @ frontier / 0.3, abs=2e-7
+        )
+        assert result.weights.iloc[-1] == pytest.approx(
+            result.expected_transaction_cost / 1e8, abs=2e-9
+        )
 
 
 def test_calibration_window_uses_market_sessions_or_fixed_start_and_maturity():

@@ -2038,6 +2038,7 @@ def _build_session(
                 "optimizer_rank_ratio_zero_volatility",
                 "optimizer_no_positive_feasible_rank",
             }:
+                error.add_note(f"portfolio_decision={decision_timestamp}")
                 raise
             if str(error) in {
                 "optimizer_frozen_constraints_infeasible",

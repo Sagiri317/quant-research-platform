@@ -578,12 +578,24 @@ def optimize_portfolio(
     def zero_hessian(point):
         return sparse.csr_matrix((variable_count, variable_count))
 
-    def objective(point):
+    net_trades = ~one_sided
+    net_trades[free_trades] = False
+
+    def side_cost(point):
         weights, trades, _ = unpack(point)
         delta = weights - current
+        trades[one_sided] = trade_sign[one_sided] * delta[one_sided]
         cost, buy_gradient, sell_gradient = expected_transaction_cost(
             ((trades + delta) / 2.0) * nav, ((trades - delta) / 2.0) * nav
         )
+        spread = (buy_gradient + sell_gradient) / 2.0
+        gradient = (buy_gradient - sell_gradient) / 2.0
+        gradient[net_trades] += np.sign(delta[net_trades]) * spread[net_trades]
+        return cost / nav, gradient_point(gradient, spread)
+
+    def objective(point):
+        weights, _, _ = unpack(point)
+        cost, cost_gradient = side_cost(point)
         active = weights - reference
         penalty, risk_gradient = 0.0, np.zeros(count)
         if risk_aversion > 0.0:
@@ -595,22 +607,11 @@ def optimize_portfolio(
             )
             risk_gradient = risk_aversion * horizon_scale * covariance_product(active)
         robust = loading_scale * point[-1] if loading_scale > 0.0 else 0.0
-        return float(
-            -expected_alpha @ active + cost / nav + penalty + robust
-        ), gradient_point(
-            -expected_alpha + (buy_gradient - sell_gradient) / 2.0 + risk_gradient,
-            (buy_gradient + sell_gradient) / 2.0,
-            robust_gradient=loading_scale,
-        )
-
-    def cost_gradient(point):
-        weights, trades, _ = unpack(point)
-        delta = weights - current
-        _, buy_gradient, sell_gradient = expected_transaction_cost(
-            ((trades + delta) / 2.0) * nav, ((trades - delta) / 2.0) * nav
-        )
-        return gradient_point(
-            (buy_gradient - sell_gradient) / 2.0, (buy_gradient + sell_gradient) / 2.0
+        return float(-expected_alpha @ active + cost + penalty + robust), (
+            cost_gradient
+            + gradient_point(
+                -expected_alpha + risk_gradient, robust_gradient=loading_scale
+            )
         )
 
     def objective_hessian(point):
@@ -620,8 +621,8 @@ def optimize_portfolio(
                 return np.zeros(variable_count)
             step = np.cbrt(np.finfo(float).eps) * (1.0 + np.linalg.norm(point)) / norm
             value = (
-                cost_gradient(point + step * vector)
-                - cost_gradient(point - step * vector)
+                side_cost(point + step * vector)[1]
+                - side_cost(point - step * vector)[1]
             ) / (2.0 * step)
             if risk_aversion > 0.0:
                 weights = np.zeros(count)
@@ -797,19 +798,25 @@ def optimize_portfolio(
             )
     if maximum_cost > 0.0:
 
-        def fee_value(point):
-            weights, _, fee = unpack(point)
-            return fee - actual_cost(weights)[0]
-
-        def fee_jacobian(point):
+        def net_cost(point):
             weights, _, _ = unpack(point)
-            return sparse.csr_matrix(
-                gradient_point(-actual_cost(weights)[1], fee_gradient=1.0)[None, :]
-            )
+            cost, gradient = actual_cost(weights)
+            return cost, gradient_point(gradient)
 
-        constraints.append(
-            NonlinearConstraint(fee_value, 0.0, 0.0, jac=fee_jacobian, hess="2-point")
-        )
+        def fee_constraint(cost, upper):
+            fee_gradient = gradient_point(np.zeros(count), fee_gradient=1.0)
+
+            def value(point):
+                return unpack(point)[2] - cost(point)[0]
+
+            def jacobian(point):
+                return sparse.csr_matrix((fee_gradient - cost(point)[1])[None, :])
+
+            return NonlinearConstraint(value, 0.0, upper, jac=jacobian, hess="2-point")
+
+        fee_row = len(constraints)
+        actual_fee = fee_constraint(net_cost, 0.0)
+        constraints.append(actual_fee)
     # Constant risk is checked in the original units after solving, like fixed
     # linear rows; an infeasible zero-Jacobian constraint cannot guide a step.
     if risk_limit is not None and (
@@ -999,7 +1006,7 @@ def optimize_portfolio(
         if not converged:
             error = ValueError("optimizer_failed_closed")
             error.add_note(
-                f"{solution.message}; iterations={solution.nit}; "
+                f"stage={fun.__name__}; {solution.message}; iterations={solution.nit}; "
                 f"projected_gradient={projected_optimality}; "
                 f"constraint_violation={solution.constr_violation}; "
                 f"complementarity_sum={complementarity_sum}; "
@@ -1054,16 +1061,26 @@ def optimize_portfolio(
         if start_weights[cash].item() - start_fee > config.solver_gtol or not feasible(
             initial, config.solver_gtol
         ):
-            funding = solve(
-                lambda point: (unpack(point)[0][cash].item(), cash_gradient),
-                zero_hessian,
-                initial,
-            )
+            # While maximizing invested principal, reserving more than the
+            # true fee only tightens long-only cash, name and risk limits.
+            if maximum_cost > 0.0:
+                constraints[fee_row] = fee_constraint(side_cost, np.inf)
+
+            def reserved_cash(point):
+                return unpack(point)[0][cash].item(), cash_gradient
+
+            funding = solve(reserved_cash, zero_hessian, initial)
             initial = funding.x.copy()
+            if maximum_cost > 0.0:
+                constraints[fee_row] = actual_fee
+                if fee_variable:
+                    initial[fee_position] = actual_cost(unpack(initial)[0])[0]
             funding_iterations = funding.nit
         allocated, _, fee = unpack(initial)
         idle_cash = max(0.0, allocated[cash].item() - fee)
-        exact_cash = full_funding or idle_cash == 0.0
+        exact_cash = full_funding or (
+            idle_cash == 0.0 and feasible(initial, config.solver_gtol)
+        )
         if cash_fee_floor is not None:
             constraints.remove(cash_fee_floor)
         add_linear(
@@ -1122,7 +1139,9 @@ def optimize_portfolio(
                 sparse.csr_matrix(gradient_point(expected_alpha)[None, :]),
                 -expected_alpha @ fixed_part,
                 np.inf,
-                keep_feasible=True,
+                # An all-cash trial has undefined risk ratio. With funding
+                # fixed, allow trial steps across zero and constrain the solution.
+                keep_feasible=not (config.fully_invested and exact_cash),
             )
 
             def positive_rank(point):

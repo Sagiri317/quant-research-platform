@@ -446,7 +446,8 @@ def main() -> None:
         if isinstance(exc.__cause__, (FileNotFoundError, NotADirectoryError)):
             typer.echo("required_input_missing", err=True)
             raise SystemExit(3) from None
-        typer.echo(sanitize_shared_text(str(exc)), err=True)
+        for message in (str(exc), *getattr(exc, "__notes__", ())):
+            typer.echo(sanitize_shared_text(message), err=True)
         raise SystemExit(2) from None
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
