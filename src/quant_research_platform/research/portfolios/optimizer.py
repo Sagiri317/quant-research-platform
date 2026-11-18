@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import fsum
 
 import numpy as np
 import pandas as pd
@@ -1089,7 +1090,7 @@ def optimize_portfolio(
         # Once fully funded, different allocations can reserve their own true fee.
         cash_gradient = gradient_point(cash_direction)
 
-        def funded_weights(buyable, inventory):
+        def funded_weights(buyable, inventory, *, income_order=None):
             def allocate(fee):
                 ceiling = np.clip(
                     net_upper * (1.0 - fee), reachable_lower, reachable_upper
@@ -1103,7 +1104,14 @@ def optimize_portfolio(
                 remaining = budget - fee - weights[stock].sum()
                 capacity_left = room.sum()
                 if remaining > 0.0 and capacity_left > 0.0:
-                    weights += room * min(1.0, remaining / capacity_left)
+                    if income_order is None:
+                        weights += room * min(1.0, remaining / capacity_left)
+                    else:
+                        retained = np.minimum(room, np.maximum(current - weights, 0.0))
+                        tranches = np.r_[retained, room - retained][income_order]
+                        used = np.r_[0.0, tranches[:-1].cumsum()]
+                        addition = np.clip(remaining - used, 0.0, tranches)
+                        np.add.at(weights, income_order % count, addition)
                 weights[cash] = budget - weights[stock].sum()
                 return weights
 
@@ -1239,14 +1247,32 @@ def optimize_portfolio(
                     return (score_domain.A @ point)[0] > score_domain.lb[0]
 
             if net_return and exact_cash and not positive_score(initial):
-                # Sell available nonpositive holdings to fund a positive net-return seed.
-                positive = expected_alpha > 0.0
-                weights, _ = funded_weights(positive, np.where(positive, current, 0.0))
-                candidate = pack(weights)
-                if feasible(candidate, config.solver_gtol) and positive_score(
-                    candidate
+                if _funded_income_is_negative(
+                    expected_alpha, cash, budget, reachable_lower, reachable_upper
                 ):
-                    initial = candidate
+                    raise RiskInputsUnavailable(no_positive_score)
+
+                def income_starts():
+                    # Spreading purchases across positive forecasts limits nonlinear impact.
+                    positive = expected_alpha > 0.0
+                    yield funded_weights(positive, np.where(positive, current, 0.0))
+                    # Keeping a share saves a sale fee; adding one incurs a purchase fee.
+                    _, buy_rate, sell_rate = expected_transaction_cost(
+                        np.zeros(count), np.zeros(count)
+                    )
+                    order = np.argsort(
+                        -np.r_[expected_alpha + sell_rate, expected_alpha - buy_rate],
+                        kind="stable",
+                    )
+                    yield funded_weights(~cash, reachable_lower, income_order=order)
+
+                for weights, _ in income_starts():
+                    candidate = pack(weights)
+                    if feasible(candidate, config.solver_gtol) and positive_score(
+                        candidate
+                    ):
+                        initial = candidate
+                        break
             if not feasible(initial, config.solver_gtol) or not positive_score(initial):
                 # Any feasible positive numerator starts the ratio problem.
                 # Only proving its absence requires optimizing the seed objective.
@@ -1478,6 +1504,21 @@ def optimize_portfolio(
         if analytic_solution and not funding_iterations
         else "converged",
     )
+
+
+def _funded_income_is_negative(alpha, cash, budget, lower, upper):
+    """Certify negative net income even with only the budget and stock bounds."""
+    # In a fully funded account the cash leg equals the fee paid.
+    rates = alpha - cash
+    order = np.argsort(-rates)
+    room = (upper - lower)[order].cumsum()
+    marginal = np.searchsorted(room, budget - lower.sum())
+    cutoff = rates[order[min(marginal, len(order) - 1)]]
+    # Any cutoff bounds income: sum(w) = budget and lower <= w <= upper.
+    edge = np.where(rates > cutoff, upper, lower)
+    bound = fsum((cutoff * budget, *((rates - cutoff) * edge)))
+    scale = abs(cutoff) * (budget + abs(edge).sum()) + abs(rates) @ abs(edge)
+    return bound < -8 * np.finfo(float).eps * scale
 
 
 def _minimize_in_percentage_points(

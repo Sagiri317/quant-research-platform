@@ -1072,12 +1072,22 @@ def test_funded_net_ratio_handles_existing_positions_and_cost_break_even(
     assert result.objective_value == pytest.approx(expected, abs=3e-8)
 
 
-def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_holding():
-    assets = _assets((-0.02, 0.04, 0.0), (1.0, 0.0, 0.0))
-    assets["specific_variance"] = [0.04, 0.01, 0.0]
-    assets["sellable_weight"] = [0.8, 0.0, 0.0]
-    buy = np.array([0.0005, 0.0005, 0.0])
-    sell = np.array([0.001, 0.001, 0.0])
+def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_holding(
+    monkeypatch,
+):
+    assets = _assets((-0.02, 0.04, 0.041, 0.0), (1.0, 0.0, 0.0, 0.0))
+    assets["specific_variance"] = [0.04, 0.01, 0.01, 0.0]
+    assets["sellable_weight"] = [0.8, 0.0, 0.0, 0.0]
+    buy = np.array([0.0005, 0.0005, 0.08, 0.0])
+    sell = np.array([0.001, 0.001, 0.001, 0.0])
+    minimize = optimizer._minimize_in_percentage_points
+
+    def solve(fun, *args, **kwargs):
+        # Equal purchases of the two positive forecasts lose money after fees.
+        assert fun.__name__ != "negative_score"
+        return minimize(fun, *args, **kwargs)
+
+    monkeypatch.setattr(optimizer, "_minimize_in_percentage_points", solve)
     result = optimizer.optimize_portfolio(
         assets,
         objective_kind="net_return_to_risk",
@@ -1092,10 +1102,39 @@ def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_hold
     bought = 0.8 * (1 - 0.001) / (1 + 0.0005)
     fee = 0.8 - bought
     volatility = np.sqrt((0.04 * 0.2**2 + 0.01 * bought**2) * 5 / 252)
-    assert result.weights.to_numpy() == pytest.approx([0.2, bought, fee], abs=2e-7)
+    assert result.weights.to_numpy() == pytest.approx([0.2, bought, 0.0, fee], abs=2e-7)
     assert result.objective_value == pytest.approx(
         (-0.02 * 0.2 + 0.04 * bought - fee) / volatility, abs=2e-7
     )
+
+
+def test_full_funding_and_name_limit_rule_out_positive_net_income(monkeypatch):
+    assets = _assets((0.01, -0.02, -0.02, 0.0), (0.4, 0.3, 0.3, 0.0))
+    zero = np.zeros(4)
+    # At most 40% earns 1%, and the remaining 60% loses at least 2%.
+    # When cash only pays fees its net contribution per unit is -1.
+    minimize = optimizer.minimize
+
+    def solve(fun, *args, **kwargs):
+        assert fun.__name__ != "negative_score", (
+            "the budget bound already rules out a positive seed"
+        )
+        return minimize(fun, *args, **kwargs)
+
+    monkeypatch.setattr(optimizer, "minimize", solve)
+    with pytest.raises(ValueError, match="optimizer_no_positive_feasible_net_return"):
+        optimizer.optimize_portfolio(
+            assets,
+            objective_kind="net_return_to_risk",
+            holding_sessions=5,
+            factor_covariance=pd.DataFrame(dtype=float),
+            expected_transaction_cost=lambda b, s: (0.0, zero, zero),
+            nav=100.0,
+            cash_column="is_cash",
+            config=optimizer.AbsoluteRiskConfig(
+                fully_invested=True, name_weight_limit=0.4
+            ),
+        )
 
 
 def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income():
