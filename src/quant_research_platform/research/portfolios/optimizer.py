@@ -45,7 +45,7 @@ class OptimizerConfig:
     solver_gtol: float = 1e-10
     solver_xtol: float = 1e-12
     solver_barrier_tol: float = 1e-12
-    solver_maxiter: int = 1000
+    solver_maxiter: int | None = 1000
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -71,7 +71,7 @@ class AbsoluteRiskConfig:
     solver_gtol: float = 1e-10
     solver_xtol: float = 1e-12
     solver_barrier_tol: float = 1e-12
-    solver_maxiter: int = 1000
+    solver_maxiter: int | None = 1000
     fully_invested: bool = False
 
     def __post_init__(self) -> None:
@@ -345,11 +345,22 @@ def optimize_portfolio(
         signal_column,
     )
     if absolute:
-        if (ranks or net_return) and (alpha_missing & (current > 0.0)).any():
+        # An enforced zero target has no signal or risk contribution. Only a
+        # holding that can actually be sold in full may use that observation.
+        zero_target = np.zeros(len(data), dtype=bool)
+        if ratio:
+            zero_target |= incomplete
+            if "maximum_weight" in data:
+                zero_target |= data.maximum_weight.eq(0.0)
+        can_liquidate = (sellable >= current) & (capacity >= current)
+        if "can_exit" in data:
+            can_liquidate &= data.can_exit.fillna(False).to_numpy(dtype=bool)
+        required = (current > 0.0) & ~(zero_target & can_liquidate)
+        if (ranks or net_return) and (alpha_missing & required).any():
             raise RiskInputsUnavailable("robust_held_prediction_unavailable")
-        if (incomplete & (current > 0.0)).any():
+        if (incomplete & required).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
-        frozen |= alpha_missing.to_numpy(dtype=bool) & ~cash
+        frozen |= alpha_missing.to_numpy(dtype=bool) & ~zero_target & ~cash
     else:
         if risk_aversion > 0.0 and (risk_missing & (benchmark > 0.0)).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
@@ -1048,7 +1059,9 @@ def optimize_portfolio(
                 "gtol": 0.0,
                 "xtol": config.solver_xtol,
                 "barrier_tol": config.solver_barrier_tol,
-                "maxiter": config.solver_maxiter,
+                "maxiter": np.inf
+                if config.solver_maxiter is None
+                else config.solver_maxiter,
                 "initial_barrier_parameter": barrier,
                 "initial_barrier_tolerance": barrier,
                 "sparse_jacobian": True,
@@ -1305,7 +1318,6 @@ def optimize_portfolio(
             fee_upper,
             xtol=np.finfo(float).eps * fee_upper,
             rtol=4 * np.finfo(float).eps,
-            maxiter=config.solver_maxiter,
         )
         point = base + direction_fee * closed_fee
     else:
@@ -2210,7 +2222,9 @@ def _validate_config(config: OptimizerConfig | AbsoluteRiskConfig) -> None:
         or config.target_turnover_limit <= 0.0
     ):
         raise ValueError("optimizer_config_invalid")
-    if type(config.solver_maxiter) is not int or config.solver_maxiter <= 0:
+    if config.solver_maxiter is not None and (
+        type(config.solver_maxiter) is not int or config.solver_maxiter <= 0
+    ):
         raise ValueError("optimizer_config_invalid")
 
 

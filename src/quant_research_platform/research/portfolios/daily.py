@@ -1005,6 +1005,17 @@ def backtest_a_share(
                             pd.Series(dtype="datetime64[ns]"),
                             pd.Timestamp(record_at),
                         )
+            locked_fractions = (
+                entitlements.locked_fractions_at_open(
+                    view.corporate_events,
+                    held_units,
+                    held_lives,
+                    decision_timestamp,
+                    next_timestamp,
+                )
+                if absolute and enhanced_decision is not None
+                else {}
+            )
             execution_units, execution_lives, recoveries, adjustments = (
                 entitlements.process(
                     next_view.corporate_events,
@@ -1046,6 +1057,7 @@ def backtest_a_share(
                 decision_receivable=decision_receivable,
                 receivable=sum(entitlements.receivables.values()),
                 locked_quantities=entitlements.locked_quantities,
+                locked_fractions=locked_fractions,
                 nav=nav,
                 amount_history=amount_history,
                 alpha=alpha,
@@ -1350,6 +1362,11 @@ def _risk_exposure_cross(
     result["industry_level1_code"] = (
         panel_by_asset["industry_level1_code"].astype("string").reindex(assets)
     )
+    # The two A-share classifications share the same 19 top-level sectors.
+    common = result.industry_standard_id.isin(("CSRC2012", "CAPCO")) & (
+        result.industry_level1_code.isin(tuple("ABCDEFGHIJKLMNOPQRS"))
+    )
+    result.loc[common, "industry_standard_id"] = "CN_LISTED_LEVEL1"
     result["eligible"] = a_share_eligibility(panel_by_asset, "a_share_all").reindex(
         assets
     )
@@ -1617,6 +1634,7 @@ def _build_session(
     decision_receivable: float,
     receivable: float,
     locked_quantities: Mapping,
+    locked_fractions: Mapping | None = None,
     nav: float,
     amount_history: Mapping[tuple[str, pd.Timestamp], deque[float]],
     alpha: pd.Series,
@@ -1730,6 +1748,8 @@ def _build_session(
     missing_assets = missing_scores.index[missing_scores]
     if robust_config is not None and enhanced_decision is not None:
         unknown = alpha.reindex(holdings.index).isna() & holdings.ne(0.0)
+        if objective.is_ratio:
+            unknown &= ~holdings.index.isin(exit_assets)
         reference = enhanced_decision.benchmark_weights
         unknown_reference = alpha.reindex(reference.index).isna() & reference.ne(0.0)
         if (use_signal or not fully_invested) and (
@@ -1983,11 +2003,20 @@ def _build_session(
         assets_frame.loc[unavailable, objective.signal_column] = 0.0
         adv_values = assets_frame["adv"].to_numpy(dtype="float64")
         if absolute:
+            if locked_fractions:
+                locked = assets_frame.asset_id.map(locked_fractions).fillna(0.0)
+                assets_frame["sellable_weight"] = assets_frame.current_weight * (
+                    1.0 - locked
+                )
             assets_frame["trade_capacity_weight"] = np.where(
                 np.isfinite(adv_values) & (adv_values > 0.0),
                 assumptions.adv_participation * adv_values / nav,
                 0.0,
             )
+            if objective.is_ratio:
+                assets_frame["maximum_weight"] = (
+                    ~assets_frame.asset_id.isin(exit_assets)
+                ).astype("float64")
         decision_markets = {
             str(asset): market_name_for_type(market_type)
             for asset, market_type in decision_panel.market_type.astype("Int64")
@@ -2090,9 +2119,11 @@ def _build_session(
                 "optimizer_trade_adv_unavailable",
                 "optimizer_budget_bounds_infeasible",
                 "optimizer_capacity_bounds_infeasible",
+                "optimizer_inventory_bounds_infeasible",
                 "optimizer_turnover_bounds_infeasible",
                 "optimizer_stock_exposure_unavailable",
                 "optimizer_held_risk_unavailable",
+                "robust_held_prediction_unavailable",
                 "optimizer_rank_ratio_risk_unresolved",
                 "optimizer_rank_ratio_zero_volatility",
                 "optimizer_no_positive_feasible_rank",
@@ -2106,6 +2137,7 @@ def _build_session(
                 "optimizer_frozen_constraints_infeasible",
                 "optimizer_budget_bounds_infeasible",
                 "optimizer_capacity_bounds_infeasible",
+                "optimizer_inventory_bounds_infeasible",
                 "optimizer_turnover_bounds_infeasible",
             }:
                 risk_repair_reason = str(error)
@@ -2283,6 +2315,11 @@ def _build_session(
                 / result.nav_before
             )
             weights[cash_mask] = result.post_trade_cash / result.nav_before + cost_ratio
+            if (
+                objective.is_ratio
+                and ((incomplete | alpha_missing) & (weights != 0)).any()
+            ):
+                return -np.inf
             value = _portfolio_objective(
                 weights,
                 objective_kind=objective,

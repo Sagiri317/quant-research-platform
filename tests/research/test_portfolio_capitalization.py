@@ -104,6 +104,44 @@ def test_production_risk_cross_consumes_only_selected_capitalization():
         )
 
 
+def test_portfolio_risk_retains_level_one_history_when_reporting_standard_changes():
+    from tests.helpers.portfolio_inputs import portfolio_inputs
+
+    frames, _, _ = portfolio_inputs()
+    panel = (
+        frames["panel"]
+        .loc[lambda x: x.timestamp.eq(x.timestamp.min())]
+        .assign(
+            period_return=0.01,
+            industry_standard_id="CSRC2012",
+            industry_level1_code="C",
+        )
+    )
+
+    def columns(frame):
+        cross = _enhanced_risk_cross(panel=frame, risk_frames=[], style_columns=())
+        return (
+            FactorRiskState(style_columns=())
+            .current_exposures(cross)
+            .set_index("asset_id")
+        )
+
+    old = columns(panel)
+    current = columns(
+        panel.assign(industry_standard_id="CAPCO", industry_level1_code=["C", "J"])
+    )
+    shared = "industry_CN_LISTED_LEVEL1:C"
+    assert old[shared].tolist() == [1, 1]
+    assert current[shared].tolist() == [1, 0]
+    assert current["industry_CN_LISTED_LEVEL1:J"].tolist() == [0, 1]
+    other = columns(
+        panel.assign(
+            industry_standard_id=["other", "CAPCO"], industry_level1_code=["C", "C01"]
+        )
+    )
+    assert {"industry_other:C", "industry_CAPCO:C01"} <= set(other)
+
+
 def test_simple_size_neutrality_preserves_float_reference_and_can_select_float():
     assets = pd.Index(list("abcd"))
     floating = pd.Series([1.0, 2.0, 1.0, 2.0], index=assets)

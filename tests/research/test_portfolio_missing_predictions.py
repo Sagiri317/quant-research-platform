@@ -190,8 +190,10 @@ def test_numerical_or_input_failure_is_never_a_skipped_decision(monkeypatch, err
         raise ValueError(error)
 
     monkeypatch.setattr(daily, "optimize_portfolio", invalid)
-    with pytest.raises(ValueError, match=f"^{error}$"):
+    with pytest.raises(ValueError) as failure:
         daily._build_session(**_decision_inputs())
+    assert failure.value.args == (error,)
+    assert "portfolio_decision=2023-01-03 00:00:00" in failure.value.__notes__
 
 
 def test_partial_missing_neutral_decision_projects_with_fixed_missing_weight():

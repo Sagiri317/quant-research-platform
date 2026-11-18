@@ -109,6 +109,45 @@ def test_rank_ratio_requires_a_finite_positive_opportunity(ranks, variance, reas
         )
 
 
+@pytest.mark.parametrize("objective", ["rank_to_risk", "net_return_to_risk"])
+@pytest.mark.parametrize("missing", ["risk", "exit_signal"])
+def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
+    objective, missing
+):
+    from quant_research_platform.contracts.portfolios import PortfolioObjective
+
+    signal = PortfolioObjective(objective).signal_column
+    assets = _assets((0.05, 0.1, 0.0), (0.2, 0.8, 0.0)).rename(
+        columns={"expected_alpha": signal}
+    )
+    if missing == "risk":
+        assets.loc[0, "specific_variance"] = np.nan
+        reason = "optimizer_held_risk_unavailable"
+    else:
+        assets.loc[0, signal] = np.nan
+        assets["maximum_weight"] = [0.0, 1.0, 1.0]
+        reason = "robust_held_prediction_unavailable"
+    rates = np.array([0.001, 0.001, 0.0])
+    kwargs = dict(
+        objective_kind=objective,
+        holding_sessions=5,
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
+        cash_column="is_cash",
+        nav=100.0,
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True, solver_maxiter=None),
+    )
+    result = optimizer.optimize_portfolio(assets, **kwargs)
+    assert result.weights.iloc[0] == 0.0
+    assert result.weights.iloc[1] == pytest.approx((1.0 + 0.6 * 0.001) / 1.001)
+    assert result.expected_transaction_cost == pytest.approx(
+        100.0 * (1 - result.weights.iloc[1])
+    )
+    assets["trade_capacity_weight"] = [0.1, 1.0, 1.0]
+    with pytest.raises(ValueError, match=reason):
+        optimizer.optimize_portfolio(assets, **kwargs)
+
+
 def test_rank_ratio_finds_the_tangency_portfolio_from_a_negative_rank_holding():
     assets = _assets((0.10, 0.15, -0.20, 0.0), (0.0, 0.0, 1.0, 0.0)).rename(
         columns={"expected_alpha": "prediction_rank_score"}

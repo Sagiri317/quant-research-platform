@@ -211,6 +211,43 @@ def test_frozen_nonzero_missing_risk_skips_target_and_keeps_real_account(missing
     )
 
 
+@pytest.mark.parametrize("objective", ["rank_to_risk", "net_return_to_risk"])
+def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objective):
+    inputs = _decision_inputs(holdings=(0.2, 0.8))
+    inputs["candidate"] = replace(
+        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+    )
+    inputs["optimizer_config"] = daily.AbsoluteRiskConfig(fully_invested=True)
+    inputs["robust_config"] = daily.RobustPortfolioConfig(objective=objective)
+    inputs["dataset"].loc[0, "eligible"] = False
+    inputs["alpha"] = pd.Series({"a": np.nan, "b": 0.1})
+    inputs["enhanced_decision"] = replace(
+        inputs["enhanced_decision"],
+        benchmark_weights=pd.Series(dtype=float),
+        expected_alpha=inputs["alpha"],
+        holding_sessions=5,
+    )
+    _, _, target, _, book = daily._build_session(**inputs)
+    assert target.weights.loc["a"] == 0
+    assert book.set_index("asset_id").at["a", "post_trade_notional"] == 0
+    inputs["execution"].loc[0, "can_exit"] = False
+    _, _, blocked, _, book = daily._build_session(**inputs)
+    pd.testing.assert_series_equal(blocked.weights, target.weights)
+    assert book.set_index("asset_id").at["a", "post_trade_notional"] == pytest.approx(
+        20.0
+    )
+    inputs["locked_fractions"] = {"a": 0.05}
+    assert daily._build_session(**inputs)[2] is None
+    inputs.pop("locked_fractions")
+    inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
+    _, _, skipped, _, book = daily._build_session(**inputs)
+    assert skipped is None
+    assert (
+        book.attrs["decision_availability"]["decision_skip_reason"]
+        == "robust_held_prediction_unavailable"
+    )
+
+
 def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
     inputs = _decision_inputs()
     inputs.update(

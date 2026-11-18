@@ -50,6 +50,9 @@ def test_registered_cash_and_stock_use_original_shares_and_sold_shares_keep_divi
     lives = pd.Series({"a": pd.Timestamp("2000-01-01")})
     registration = state.register(events, shares, lives, pd.Timestamp("2024-01-02"))
     assert [row.entitlement_quantity for row in registration] == [100, 100]
+    assert state.locked_fractions_at_open(
+        events, shares, lives, pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")
+    ) == {"a": 1 / 3}
     shares, lives, cash, adjustments = state.process(
         events, pd.DataFrame(), shares, lives, pd.Timestamp("2024-01-03")
     )
@@ -57,6 +60,19 @@ def test_registered_cash_and_stock_use_original_shares_and_sold_shares_keep_divi
     assert cash == 0
     assert state.receivables["a"] == 100
     assert state.locked_quantities["a"] == 50
+    assert state.locked_fractions_at_open(
+        events, shares, lives, pd.Timestamp("2024-01-03"), pd.Timestamp("2024-01-04")
+    ) == {"a": 1 / 3}
+    assert (
+        state.locked_fractions_at_open(
+            events,
+            shares,
+            lives,
+            pd.Timestamp("2024-01-04"),
+            pd.Timestamp("2024-01-05"),
+        )
+        == {}
+    )
     assert sum(row.quantity_after - row.quantity_before for row in adjustments) == 50
     shares["a"] = 50  # Original 100 shares sold, distributed 50 remain locked.
     shares, lives, cash, _ = state.process(

@@ -469,6 +469,30 @@ class EquityEntitlements:
         self.locked_quantities[asset] = record.locked_quantity_after
         return record
 
+    def locked_fractions_at_open(self, events, units, lives, as_of, next_open):
+        """Project known distributions in next-open share units, before pricing."""
+        from copy import deepcopy
+
+        if events.empty:
+            return {}
+        known = events.loc[
+            events.kind.eq("stock_distribution")
+            & events.available_at.le(as_of)
+            & events.effective_at.le(next_open)
+            & events.event_id.map(self.registered).gt(0)
+        ]
+        if known.empty:
+            return {}
+        projection = deepcopy(self)
+        shares, _, _, _ = projection.process(
+            known, pd.DataFrame(), units, lives, next_open
+        )
+        return {
+            asset: locked / shares[asset]
+            for asset, locked in projection.locked_quantities.items()
+            if locked
+        }
+
     def register(self, corporate_events, units, lives, timestamp, *, phase="end"):
         """Snapshot holdings after record-date trading, before any ex-date changes."""
         adjustments = []
