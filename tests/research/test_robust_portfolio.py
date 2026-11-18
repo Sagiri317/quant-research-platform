@@ -743,7 +743,8 @@ def test_native_rank_objective_trades_without_a_calibration_history(
     config["predictions"][0]["window"]["start"] = config["output_window"]["start"]
     artifact = read_portfolio_ledger_artifact(backtest(config))
     assert artifact.final_alpha_calibration is None
-    traded = next(batch for batch in artifact.iter_chunks() if batch.trades)
+    traded = next(artifact.iter_chunks())
+    assert any(trade.quantity > 0 for trade in traded.trades)
     assert any(row.name == "objective_value" for row in traded.diagnostics)
     assert not any(
         row.name in {"expected_alpha", "expected_return", "alpha_slope"}
@@ -810,13 +811,14 @@ def test_native_prediction_calibration_robust_account_and_frozen_reuse(
     artifact = read_portfolio_ledger_artifact(output)
     batches = list(artifact.iter_chunks())
     assert calibration_path.read_bytes() == before
-    # The first decision is Monday; the weekly calibration first applies Friday.
-    assert all(not batch.trades for batch in batches[:4])
-    first = next(batch for batch in batches if batch.trades)
+    # Monday's signal buys Tuesday, four sessions before the next weekly open.
+    first = batches[0]
+    assert any(trade.quantity > 0 for trade in first.trades)
+    assert all(not batch.trades for batch in batches[1:4])
     facts = {
         row.name: row.number for row in first.diagnostics if row.asset_id == "__cash__"
     }
-    assert facts["holding_sessions"] == 5.0
+    assert facts["holding_sessions"] == 4.0
     assert facts["robust_penalty"] >= 0.0
     assert facts["risk_penalty"] >= 0.0
     assert facts["solver_iterations"] > 0.0
@@ -861,11 +863,18 @@ def test_robust_index_membership_maintenance_is_independent_of_calibration_sched
     config["output"] = str(root / "maintenance")
     output = backtest(config)
     artifact = read_portfolio_ledger_artifact(output)
-    first = next(batch for batch in artifact.iter_chunks() if batch.trades)
-    assert pd.Timestamp(first.trades[0].timestamp_ns) == pd.Timestamp("2023-01-05")
-    reasons = {row.text for row in first.diagnostics if row.name == "decision_reason"}
-    assert reasons == {"benchmark_maintenance"}
-    assert not any(row.name == "solver_iterations" for row in first.diagnostics)
+    maintenance = next(
+        batch
+        for batch in artifact.iter_chunks()
+        if any(
+            row.name == "decision_reason" and row.text == "benchmark_maintenance"
+            for row in batch.diagnostics
+        )
+    )
+    assert pd.Timestamp(maintenance.trades[0].timestamp_ns) == pd.Timestamp(
+        "2023-01-05"
+    )
+    assert not any(row.name == "solver_iterations" for row in maintenance.diagnostics)
 
 
 @pytest.mark.parametrize("risk_aversion", [0.0, 1.0])

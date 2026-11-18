@@ -100,6 +100,7 @@ from quant_research_platform.research.portfolios.optimizer import (
 from quant_research_platform.research.portfolios.schedules import (
     holding_intervals,
     is_rebalance_session,
+    sessions_to_next_rebalance_open,
 )
 from quant_research_platform.research.risk import (
     FactorExposureSession,
@@ -802,6 +803,7 @@ def backtest_a_share(
                 nav = float(
                     holdings.sum() + cash + sum(entitlements.receivables.values())
                 )
+            initializing = not capital_allocated and decision_columns is None
             if enhanced:
                 assert alpha is not None and current_cross is not None
                 decision_reason = (
@@ -821,9 +823,6 @@ def backtest_a_share(
                 )
                 if not benchmark_weights.empty:
                     previous_benchmark_assets = frozenset(benchmark_weights.index)
-                initializing = not capital_allocated
-                if robust_config is not None:
-                    initializing &= scheduled
                 maintenance = membership_changed and (not scheduled)
                 has_predictions = bool(
                     (dataset.set_index("asset_id").eligible & alpha.notna()).any()
@@ -861,18 +860,18 @@ def backtest_a_share(
                         calibrated=calibrated,
                         calibration_window=calibration_window,
                     )
-                    if calibrated and robust_config is not None and scheduled:
-                        if decision_timestamp not in calibration_dates.index:
-                            raise ValueError(
-                                "portfolio_robust_holding_interval_missing"
-                            )
-                        interval = calibration_dates.loc[decision_timestamp]
-                        horizon = int(
-                            trading_sessions.get_loc(interval.available_at)
-                            - trading_sessions.get_loc(interval.entry_at)
-                        )
+                    if (
+                        calibrated
+                        and robust_config is not None
+                        and (scheduled or initializing)
+                    ):
                         enhanced_decision = replace(
-                            enhanced_decision, holding_sessions=horizon
+                            enhanced_decision,
+                            holding_sessions=sessions_to_next_rebalance_open(
+                                trading_sessions,
+                                next_timestamp,
+                                candidate.rebalance_schedule,
+                            ),
                         )
                     if (
                         absolute
@@ -1000,7 +999,7 @@ def backtest_a_share(
                 decision_skip_reason=decision_skip_reason,
                 optimizer_config=optimizer_config,
                 robust_config=robust_config,
-                initializing=enhanced and initializing,
+                initializing=initializing,
                 assumptions=assumptions,
                 fee_schedule=fee_schedule,
                 fee_identity=fee_identity,

@@ -1782,6 +1782,34 @@ def test_simple_producer_uses_only_executable_decision_sessions(
     ) <= pd.Timestamp("2023-01-04")
 
 
+def test_weekly_equal_weight_buys_at_the_first_available_open(tmp_path, monkeypatch):
+    frames, fees, window = _inputs()
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="weekly",
+        construction="quantile_equal_weight",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=0.5,
+        benchmark_id=None,
+    )
+    batches, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fees,
+        output_window=window,
+        candidate=candidate,
+        typed_batches=True,
+    )
+    first, second = batches
+    assert any(trade.quantity > 0 for trade in first.trades)
+    assert {pd.Timestamp(trade.timestamp_ns) for trade in first.trades} == {
+        pd.Timestamp("2023-01-04")
+    }
+    assert not second.trades
+
+
 @pytest.mark.parametrize("unknown_quote", (False, True))
 def test_simple_producer_unknown_held_quote_carries_without_fabricated_trade(
     tmp_path: Path, monkeypatch, unknown_quote
