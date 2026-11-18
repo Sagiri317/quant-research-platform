@@ -203,7 +203,9 @@ _ALPHA_DIAGNOSTICS = {
 }
 
 
-def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evaluate):
+def _repair_stock_allocation(
+    target, hold, benchmark, minimum, increment, evaluate, *, single_name_limit=None
+):
     """Repair risk violations in native lots, using the account score to break ties."""
     requested = evaluate(target)
     if requested[2][:2] == (0.0, 0.0):
@@ -227,6 +229,18 @@ def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evalua
             proportional = hold + scale * change
             alternatives.append((proportional, evaluate(proportional)))
     best_weights, best = min(alternatives, key=lambda item: item[1][2])
+    adjustable = minimum.gt(0.0)
+    if single_name_limit is not None and best[2][0] > 0.0:
+        account = requested[0]
+        rows = account.asset_ledger.set_index("asset_id").reindex(target.index)
+        # Repair execution of the requested book without opening unrelated positions.
+        adjustable &= rows.pre_trade_notional.gt(0.0) | target.ge(minimum)
+        overweight = rows.post_trade_notional.gt(single_name_limit * account.nav_after)
+        if (overweight & target.gt(0.0)).any():
+            reduced = target.mask(overweight, 0.0)
+            trial = evaluate(reduced)
+            if trial[2] < best[2]:
+                best_weights, best = reduced, trial
     if not np.isfinite(best[2][0]):
         return alternatives[1][1]
     if best[2][0] == 0.0:
@@ -248,9 +262,7 @@ def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evalua
     # add an integer solver only when an exact discrete optimum is required.
     while True:
         prior_risk = best[2][:2]
-        for asset in target.index:
-            if minimum[asset] <= 0.0:
-                continue
+        for asset in target.index[adjustable]:
             for direction in (-1, 1):
                 lots = 1
                 while True:
@@ -264,9 +276,12 @@ def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evalua
                         if rows.loc[asset, "executed_quantity"] != 0
                         else minimum[asset]
                     )
-                    weights.loc[asset] = max(
-                        0.0, weights[asset] + direction * step * lots
-                    )
+                    proposed = max(0.0, weights[asset] + direction * step * lots)
+                    if single_name_limit is not None and direction > 0:
+                        proposed = min(proposed, target[asset])
+                        if proposed <= weights[asset]:
+                            break
+                    weights.loc[asset] = proposed
                     stock_budget = 1.0 - best[0].receivable / best[0].nav_before
                     shortage = weights.sum() - stock_budget
                     if shortage > 1e-12:
@@ -2453,6 +2468,15 @@ def _build_session(
                 minimum,
                 increment,
                 evaluate,
+                single_name_limit=(
+                    config.name_weight_limit
+                    if absolute
+                    and optimization is not None
+                    and config.total_volatility_limit is None
+                    and config.industry_weight_limit is None
+                    and config.style_exposure_limit is None
+                    else None
+                ),
             )
             if optimization is not None:
                 quantities = held_units.reindex(assets, fill_value=0.0)

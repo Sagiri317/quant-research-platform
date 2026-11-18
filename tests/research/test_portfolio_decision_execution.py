@@ -248,6 +248,50 @@ def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objec
     )
 
 
+@pytest.mark.parametrize("can_sell", [True, False])
+def test_single_name_repair_only_trades_the_requested_book(can_sell, monkeypatch):
+    inputs = _decision_inputs(
+        benchmark=(0.45, 0.45, 0.1), holdings=(0.5, 0.5, 0.0), fee_rate=0.0002
+    )
+    inputs["candidate"] = replace(
+        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+    )
+    inputs["optimizer_config"] = daily.AbsoluteRiskConfig(
+        fully_invested=True, name_weight_limit=0.55
+    )
+    inputs["robust_config"] = daily.RobustPortfolioConfig(objective="rank_to_risk")
+    inputs["alpha"] = pd.Series([0.9, 0.25, 0.4], index=list("abc"))
+    enhanced = inputs["enhanced_decision"]
+    enhanced.risk.specific_variance["c"] = np.nan
+    inputs["enhanced_decision"] = replace(
+        enhanced, benchmark_weights=pd.Series(dtype=float), holding_sessions=5
+    )
+    inputs["next_panel"].loc[0, "open"] = 0.023
+    inputs["execution"].loc[0, "can_exit"] = can_sell
+    execute = daily.execute_stock_target
+
+    def execute_requested_book(orders, **kwargs):
+        # C has no position and is excluded from the target by missing risk.
+        assert orders.at["c", "target_quantity"] == 0
+        return execute(orders, **kwargs)
+
+    monkeypatch.setattr(daily, "execute_stock_target", execute_requested_book)
+    account, _, target, _, book = daily._build_session(**inputs)
+    assert target.weights["c"] == 0.0
+    # The price jump makes A worth 115 of 165. A 1000-share sale leaves 92,
+    # above 55% even before fees; selling 1100 shares brings it down to 89.7.
+    assert book.set_index("asset_id").at["a", "executed_quantity"] == (
+        -1100 if can_sell else 0
+    )
+    facts = book.attrs["realized_constraints"]
+    assert facts["realized_name_weight"] == pytest.approx(
+        (89.7 if can_sell else 115.0) / account.nav_after
+    )
+    assert facts["realized_constraints_status"] == (
+        "SATISFIED" if can_sell else "BREACHED"
+    )
+
+
 def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():
     inputs = _decision_inputs()
     inputs.update(
