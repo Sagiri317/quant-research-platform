@@ -616,7 +616,9 @@ def test_unreachable_risk_repair_does_not_scan_every_available_lot():
         # available lot uniquely minimizes the remaining squared deviation.
         return account, {}, (1.0, float((capacity - quantity) ** 2), float(quantity**2))
 
-    selected = daily._repair_stock_allocation(empty, empty, empty, step, step, evaluate)
+    selected, _ = daily._repair_stock_allocation(
+        empty, empty, empty, step, step, evaluate
+    )
     assert selected[0].asset_ledger.executed_quantity.tolist() == [capacity]
     assert selected[2][:2] == (1.0, 0.0)
 

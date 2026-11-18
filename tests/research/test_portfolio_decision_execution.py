@@ -251,8 +251,9 @@ def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objec
 @pytest.mark.parametrize("can_sell", [True, False])
 def test_single_name_repair_only_trades_the_requested_book(can_sell, monkeypatch):
     inputs = _decision_inputs(
-        benchmark=(0.45, 0.45, 0.1), holdings=(0.5, 0.5, 0.0), fee_rate=0.0002
+        benchmark=(0.45, 0.45, 0.1), holdings=(0.45, 0.30, 0.0), fee_rate=0.0002
     )
+    inputs["cash"] = 25.0
     inputs["candidate"] = replace(
         inputs["candidate"], construction="robust_long_only", benchmark_id=None
     )
@@ -278,18 +279,54 @@ def test_single_name_repair_only_trades_the_requested_book(can_sell, monkeypatch
     monkeypatch.setattr(daily, "execute_stock_target", execute_requested_book)
     account, _, target, _, book = daily._build_session(**inputs)
     assert target.weights["c"] == 0.0
-    # The price jump makes A worth 115 of 165. A 1000-share sale leaves 92,
-    # above 55% even before fees; selling 1100 shares brings it down to 89.7.
+    # A is worth 103.5 of 158.5. Selling 700 shares leaves 87.4, above 55%;
+    # selling 800 brings it to 85.1. If A is frozen the 25 cash can still buy B.
     assert book.set_index("asset_id").at["a", "executed_quantity"] == (
-        -1100 if can_sell else 0
+        -800 if can_sell else 0
     )
+    if not can_sell:
+        assert book.set_index("asset_id").at["b", "executed_quantity"] == 2400
     facts = book.attrs["realized_constraints"]
     assert facts["realized_name_weight"] == pytest.approx(
-        (89.7 if can_sell else 115.0) / account.nav_after
+        (85.1 if can_sell else 103.5) / account.nav_after
     )
     assert facts["realized_constraints_status"] == (
         "SATISFIED" if can_sell else "BREACHED"
     )
+
+
+@pytest.mark.parametrize("sellable_lots", [0, 5])
+def test_adjacent_lot_improves_other_positions_with_a_frozen_overweight(sellable_lots):
+    inputs = _decision_inputs(benchmark=(0.5, 0.2, 0.3), holdings=(0.45, 0.15, 0.0))
+    inputs["cash"] = 40.0
+    inputs["candidate"] = replace(
+        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+    )
+    inputs["optimizer_config"] = daily.AbsoluteRiskConfig(
+        fully_invested=True, name_weight_limit=0.55
+    )
+    inputs["robust_config"] = daily.RobustPortfolioConfig(objective="rank_to_risk")
+    inputs["alpha"] = 0.1 * (1.0 + pd.Series([0.54, 0.1615, 0.2985], index=list("abc")))
+    inputs["enhanced_decision"] = replace(
+        inputs["enhanced_decision"],
+        benchmark_weights=pd.Series(dtype=float),
+        holding_sessions=5,
+    )
+    inputs["next_panel"].loc[0, "open"] = 0.03
+    inputs["execution"].loc[0, "can_exit"] = bool(sellable_lots)
+    if sellable_lots:
+        inputs["amount_history"]["a", pd.Timestamp("2000-01-01")] = [15.0] * 20
+    inputs["execution"].loc[2, "can_enter"] = False
+    _, _, target, _, book = daily._build_session(**inputs)
+    assert target.weights["b"] == pytest.approx(0.1615, abs=1e-6)
+    # B's target is 3068.5 shares at the open. Buying 1600, from 1500,
+    # invests the adjacent lot. Each 100-share lot sold reduces A by 3.
+    assert book.executed_quantity.tolist() == [-100 * sellable_lots, 1600, 0]
+    facts = book.attrs["realized_constraints"]
+    assert facts["realized_name_weight"] == pytest.approx(
+        (135.0 - 3.0 * sellable_lots) / 190.0
+    )
+    assert facts["realized_constraints_status"] == "BREACHED"
 
 
 def test_zero_nav_neutrality_has_no_defined_weights_or_exposures():

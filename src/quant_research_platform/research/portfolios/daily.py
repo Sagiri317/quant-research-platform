@@ -11,6 +11,7 @@ from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from math import fsum
+from operator import itemgetter
 from statistics import mean
 
 import numpy as np
@@ -93,6 +94,7 @@ from quant_research_platform.research.portfolios.optimizer import (
     _net_name_bounds,
     _neutrality_bands,
     _neutrality_risk_limits,
+    _normalized_risk_excess,
     _portfolio_incomplete,
     _portfolio_objective,
     _portfolio_risk_limits,
@@ -206,16 +208,40 @@ _ALPHA_DIAGNOSTICS = {
 def _repair_stock_allocation(
     target, hold, benchmark, minimum, increment, evaluate, *, single_name_limit=None
 ):
-    """Repair risk violations in native lots, using the account score to break ties."""
+    """Return the repaired account and the same score for its adjacent lot candidate."""
     requested = evaluate(target)
     if requested[2][:2] == (0.0, 0.0):
-        return requested
+        return requested, itemgetter(2)
     alternatives = [
         (target, requested),
         (hold, evaluate(hold)),
         (benchmark, evaluate(benchmark)),
     ]
     benchmark_account = alternatives[-1][1][0]
+    floor = None
+    if single_name_limit is not None and not benchmark.any():
+        # Fee-heavy odd-lot sells compete for cash; their joint residual is not a floor.
+        sales = benchmark_account.asset_ledger.set_index("asset_id")
+        remaining = sales.post_trade_notional.mask(sales.reason.eq("cash_limit"), 0.0)
+        unavoidable = remaining > single_name_limit * benchmark_account.nav_before
+        if unavoidable.any():
+            floor = remaining.where(unavoidable, 0.0)
+
+    def score(candidate):
+        account, _, raw = candidate
+        if floor is None or not np.isfinite(raw[0]):
+            return raw
+        notionals = account.asset_ledger.set_index("asset_id").post_trade_notional
+        limits = (floor.reindex(notionals.index) / account.nav_after).clip(
+            lower=single_name_limit
+        )
+        excess = _normalized_risk_excess(
+            notionals / account.nav_after, limits, strict=True
+        ).max()
+        return (excess, excess**2, *raw[2:])
+
+    if score(requested)[:2] == (0.0, 0.0):
+        return requested, score
     change = benchmark - hold
     moving = change.ne(0.0)
     if moving.any():
@@ -228,9 +254,10 @@ def _repair_stock_allocation(
             # Preserve the stock-leg mix when per-name capacities differ.
             proportional = hold + scale * change
             alternatives.append((proportional, evaluate(proportional)))
-    best_weights, best = min(alternatives, key=lambda item: item[1][2])
+    best_weights, best = min(alternatives, key=lambda item: score(item[1]))
+    best_score = score(best)
     adjustable = minimum.gt(0.0)
-    if single_name_limit is not None and best[2][0] > 0.0:
+    if single_name_limit is not None and best_score[0] > 0.0:
         account = requested[0]
         rows = account.asset_ledger.set_index("asset_id").reindex(target.index)
         # Repair execution of the requested book without opening unrelated positions.
@@ -239,11 +266,11 @@ def _repair_stock_allocation(
         if (overweight & target.gt(0.0)).any():
             reduced = target.mask(overweight, 0.0)
             trial = evaluate(reduced)
-            if trial[2] < best[2]:
-                best_weights, best = reduced, trial
-    if not np.isfinite(best[2][0]):
-        return alternatives[1][1]
-    if best[2][0] == 0.0:
+            if (trial_score := score(trial)) < best_score:
+                best_weights, best, best_score = reduced, trial, trial_score
+    if not np.isfinite(best_score[0]):
+        return alternatives[1][1], score
+    if best_score[0] == 0.0:
         # Search the feasible endpoint toward the signal, pricing every rounded fill.
         low, high = 0.0, 1.0
         anchor = best_weights
@@ -251,17 +278,18 @@ def _repair_stock_allocation(
         while ((target - anchor).abs() * (high - low) >= steps).any():
             middle = (low + high) / 2.0
             trial = evaluate(anchor + middle * (target - anchor))
-            if trial[2][0] == 0.0:
+            trial_score = score(trial)
+            if trial_score[0] == 0.0:
                 low = middle
-                if trial[2] < best[2]:
-                    best = trial
+                if trial_score < best_score:
+                    best, best_score = trial, trial_score
             else:
                 high = middle
-        return best
+        return best, score
     # shortcut: local lot improvements are not a global integer feasibility proof;
     # add an integer solver only when an exact discrete optimum is required.
     while True:
-        prior_risk = best[2][:2]
+        prior_risk = best_score[:2]
         for asset in target.index[adjustable]:
             for direction in (-1, 1):
                 lots = 1
@@ -301,15 +329,16 @@ def _repair_stock_allocation(
                             break
                         weights.loc[donor] -= reduction
                     trial = evaluate(weights)
-                    if trial[2] >= best[2]:
+                    trial_score = score(trial)
+                    if trial_score >= best_score:
                         break
-                    best = trial
-                    if best[2][0] == 0.0:
-                        return best
+                    best, best_score = trial, trial_score
+                    if best_score[0] == 0.0:
+                        return best, score
                     # Cross long improving stretches without scanning every lot.
                     lots *= 2
-        if best[2][:2] == prior_risk:
-            return best
+        if best_score[:2] == prior_risk:
+            return best, score
 
 
 def _unit_values(units, prices):
@@ -2461,7 +2490,7 @@ def _build_session(
                 else 1.0,
             )
             benchmark_target = hold_target + scale * corrective_delta
-            selected = _repair_stock_allocation(
+            selected, execution_score = _repair_stock_allocation(
                 requested,
                 hold_target,
                 benchmark_target,
@@ -2507,10 +2536,13 @@ def _build_session(
 
                 # One joint native candidate; no integer search or per-name accounts.
                 trial = evaluate(candidate_weights, strict=True)
+                trial_score = execution_score(trial)
                 if fully_invested:
-                    if trial[2][:2] == (0.0, 0.0) and trial[2] < selected[2]:
+                    if trial_score[:2] == (0.0, 0.0) and trial_score < execution_score(
+                        selected
+                    ):
                         selected = trial
-                elif trial[2][:2] == (0.0, 0.0) and actual_utility(
+                elif trial_score[:2] == (0.0, 0.0) and actual_utility(
                     trial[0]
                 ) >= actual_utility(selected[0]):
                     selected = trial
