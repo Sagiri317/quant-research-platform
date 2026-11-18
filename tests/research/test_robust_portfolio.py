@@ -46,14 +46,17 @@ def _solve(assets, loading, *, rate=0.0, **kwargs):
 
 
 @pytest.mark.parametrize(
-    ("objective", "target"),
+    ("objective", "fully_invested", "target"),
     [
-        ("rank", [1.0, 0.0]),
-        ("rank_to_risk", [3 / 7, 4 / 7]),
+        ("rank", True, [1.0, 0.0]),
+        ("rank_to_risk", True, [3 / 7, 4 / 7]),
+        ("rank_to_risk", False, [3 / 7, 4 / 7]),
     ],
 )
 @pytest.mark.parametrize("rate", [0.0, 0.005])
-def test_unscaled_rank_targets_with_actual_fees(objective, target, rate):
+def test_unscaled_rank_targets_with_actual_fees(
+    objective, fully_invested, target, rate
+):
     assets = _assets((0.3, 0.1, 0.0), (0.0, 0.0, 1.0)).rename(
         columns={"expected_alpha": "prediction_rank_score"}
     )
@@ -70,12 +73,13 @@ def test_unscaled_rank_targets_with_actual_fees(objective, target, rate):
         ),
         nav=100.0,
         cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+        config=optimizer.AbsoluteRiskConfig(fully_invested=fully_invested),
     )
     # The positive tangency direction is inverse variance times score.
-    assert result.weights.iloc[:2].to_numpy() * (1 + rate) == pytest.approx(
-        target, abs=2e-6
-    )
+    stock = result.weights.iloc[:2].to_numpy()
+    if fully_invested:
+        assert stock.sum() == pytest.approx(1 / (1 + rate), abs=2e-6)
+    assert stock / stock.sum() == pytest.approx(target, abs=2e-6)
     assert result.expected_return is None
     expected = 0.3 / (1 + rate) if objective == "rank" else np.sqrt(3.25)
     assert result.objective_value == pytest.approx(expected, abs=1e-7)
@@ -121,6 +125,48 @@ def test_rank_ratio_respects_frozen_exposure_to_risk():
         config=optimizer.AbsoluteRiskConfig(fully_invested=True),
     )
     assert result.objective_value == pytest.approx(2.5)
+
+
+def test_funded_rank_ratio_on_a_binding_risk_frontier():
+    score = np.array([-1 / 3, 0.0, 1 / 3])
+    style = np.array([0.7, 1.0, 1.3])
+    specific = np.array([0.01, 0.08, 0.15])
+    assets = _assets((*score, 0.0), (0.0, 0.0, 0.0, 1.0)).rename(
+        columns={"expected_alpha": "prediction_rank_score"}
+    )
+    assets["style"] = np.r_[style, 0.0]
+    assets["specific_variance"] = np.r_[specific, 0.0]
+    rates = np.where(assets.is_cash, 0.0, 0.0005)
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="rank_to_risk",
+        style_columns=("style",),
+        factor_covariance=pd.DataFrame([[0.04]], index=["style"], columns=["style"]),
+        expected_transaction_cost=lambda buy, sell: (
+            float((buy + sell) @ rates),
+            rates,
+            rates,
+        ),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True, total_volatility_limit=0.3
+        ),
+    )
+    # On the budget plane the efficient frontier is the minimum-variance
+    # portfolio plus its zero-budget return direction, scaled to 30% volatility.
+    covariance = np.diag(specific) + 0.04 * np.outer(style, style)
+    minimum = np.linalg.solve(covariance, np.ones(3))
+    minimum /= minimum.sum()
+    direction = np.linalg.solve(covariance, score - minimum @ score)
+    scale = np.sqrt(
+        (0.3**2 - minimum @ covariance @ minimum) / (direction @ covariance @ direction)
+    )
+    expected = minimum + scale * direction
+    assert result.weights.iloc[:3].to_numpy() * 1.0005 == pytest.approx(
+        expected, abs=2e-6
+    )
+    assert result.objective_value == pytest.approx(score @ expected / 0.3, abs=1e-7)
 
 
 def test_calibration_window_uses_market_sessions_or_fixed_start_and_maturity():

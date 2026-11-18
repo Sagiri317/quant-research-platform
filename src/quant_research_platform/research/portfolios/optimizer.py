@@ -657,19 +657,20 @@ def optimize_portfolio(
         moving = coefficients.getnnz(axis=1) > 0
         # Constant rows remain covered by the original economic post-checks.
         if moving.any():
-            constraints.append(
-                LinearConstraint(
-                    coefficients[moving],
-                    (np.broadcast_to(lower_value, (rows,)) - constant)[moving],
-                    (np.broadcast_to(upper_value, (rows,)) - constant)[moving],
-                )
+            constraint = LinearConstraint(
+                coefficients[moving],
+                (np.broadcast_to(lower_value, (rows,)) - constant)[moving],
+                (np.broadcast_to(upper_value, (rows,)) - constant)[moving],
             )
+            constraints.append(constraint)
+            return constraint
 
     add_linear(np.ones((1, count)), budget, budget)
     stock = np.flatnonzero(~cash)
     selector = sparse.csr_matrix(
         (np.ones(len(stock)), (np.arange(len(stock)), stock)), shape=(len(stock), count)
     )
+    cash_fee_floor = None
     if maximum_cost > 0.0:
         exact_names = net_lower[stock] == net_upper[stock]
         add_linear(
@@ -692,7 +693,7 @@ def optimize_portfolio(
             net_upper[stock][upper_names],
             fee=net_upper[stock][upper_names],
         )
-        add_linear(cash_direction[None, :], 0.0, np.inf, fee=-1.0)
+        cash_fee_floor = add_linear(cash_direction[None, :], 0.0, np.inf, fee=-1.0)
     if trade_count:
         selection = sparse.csr_matrix(
             (np.ones(trade_count), (np.arange(trade_count), free_trades)),
@@ -1015,19 +1016,40 @@ def optimize_portfolio(
         # Maximize invested principal; fees paid are never a way to buy exposure.
         # Once fully funded, different allocations can reserve their own true fee.
         cash_gradient = gradient_point(cash_direction)
-        cash_available = current[cash].item()
-        room = np.where(cash, 0.0, np.maximum(0.0, reachable_upper - current))
-        # A feasible cash-funded purchase proves zero idle cash is attainable.
-        if cash_available > 0.0 and room.sum() >= cash_available:
-            mix = room / room.sum() - cash_direction
-            principal = brentq(
-                lambda buy: cash_available - buy - actual_cost(current + buy * mix)[0],
-                0.0,
-                cash_available,
+
+        def funded_weights(fee, buyable):
+            ceiling = np.clip(net_upper * (1.0 - fee), reachable_lower, reachable_upper)
+            weights = np.clip(
+                np.maximum(current, net_lower * (1.0 - fee)), reachable_lower, ceiling
             )
-            candidate = pack(current + principal * mix)
-            if feasible(candidate, config.solver_gtol):
+            room = np.where(buyable & ~cash, ceiling - weights, 0.0)
+            remaining = budget - fee - weights[stock].sum()
+            capacity_left = room.sum()
+            if remaining > 0.0 and capacity_left > 0.0:
+                weights += room * min(1.0, remaining / capacity_left)
+            weights[cash] = budget - weights[stock].sum()
+            return weights
+
+        # A feasible allocation paying its own fee proves full funding.
+        full_funding = False
+        for buyable in (expected_alpha > 0.0, ~cash) if ratio else (~cash,):
+            fee = (
+                brentq(
+                    lambda paid: paid - actual_cost(funded_weights(paid, buyable))[0],
+                    0.0,
+                    maximum_cost / nav,
+                )
+                if maximum_cost
+                else 0.0
+            )
+            weights = funded_weights(fee, buyable)
+            candidate = pack(weights)
+            if abs(weights[cash].item() - fee) <= config.solver_gtol and feasible(
+                candidate, config.solver_gtol
+            ):
                 initial = candidate
+                full_funding = True
+                break
         start_weights, _, start_fee = unpack(initial)
         if start_weights[cash].item() - start_fee > config.solver_gtol or not feasible(
             initial, config.solver_gtol
@@ -1039,12 +1061,14 @@ def optimize_portfolio(
             )
             initial = funding.x.copy()
             funding_iterations = funding.nit
-        funded_weights, _, fee = unpack(initial)
-        idle_cash = max(0.0, funded_weights[cash].item() - fee)
-        exact_cash = maximum_cost == 0 and idle_cash == 0
+        allocated, _, fee = unpack(initial)
+        idle_cash = max(0.0, allocated[cash].item() - fee)
+        exact_cash = full_funding or idle_cash == 0.0
+        if cash_fee_floor is not None:
+            constraints.remove(cash_fee_floor)
         add_linear(
             cash_direction[None, :],
-            0.0 if exact_cash else -np.inf,
+            0.0 if exact_cash or maximum_cost else -np.inf,
             0.0 if exact_cash else idle_cash + config.solver_gtol,
             fee=-1.0,
         )
@@ -1084,34 +1108,49 @@ def optimize_portfolio(
     if analytic_solution:
         result = OptimizeResult(success=True, x=initial, nit=0)
     else:
-        barrier = (
-            config.solver_gtol if ratio or (absolute and config.fully_invested) else 0.1
-        )
         if ratio:
-            if (
-                not feasible(initial, config.solver_gtol)
-                or linear_rank(initial)[0] >= 0.0
-            ):
+            barrier = (
+                0.1
+                if config.fully_invested and risk_limit is not None
+                else config.solver_gtol
+            )
+            # A long-only budget already bounds each weight by the whole account.
+            upper_bounds[:weight_count][reachable_upper[free_weights] >= budget] = (
+                np.inf
+            )
+            rank_domain = LinearConstraint(
+                sparse.csr_matrix(gradient_point(expected_alpha)[None, :]),
+                -expected_alpha @ fixed_part,
+                np.inf,
+                keep_feasible=True,
+            )
+
+            def positive_rank(point):
+                return (rank_domain.A @ point)[0] > rank_domain.lb[0]
+
+            if not feasible(initial, config.solver_gtol) or not positive_rank(initial):
                 seed = solve(linear_rank, zero_hessian, initial, barrier=barrier)
                 initial = seed.x
                 funding_iterations += seed.nit
-            if linear_rank(initial)[0] >= 0.0:
+            if not positive_rank(initial):
                 raise RiskInputsUnavailable("optimizer_no_positive_feasible_rank")
-            constraints.append(
-                LinearConstraint(
-                    sparse.csr_matrix(gradient_point(expected_alpha)[None, :]),
-                    -expected_alpha @ fixed_part,
-                    np.inf,
-                    keep_feasible=True,
-                )
-            )
+            # With no idle cash, strictly positive stock scores already imply
+            # the rank domain. An all-cash start would leave the ratio undefined.
+            if (
+                not config.fully_invested
+                or not exact_cash
+                or np.any((expected_alpha <= 0.0) & (reachable_upper > 0.0) & ~cash)
+            ):
+                constraints.append(rank_domain)
             result = solve(rank_ratio, ratio_hessian, initial, barrier=barrier)
         else:
             result = solve(
                 linear_rank if ranks else objective,
                 zero_hessian if ranks else objective_hessian,
                 initial,
-                barrier=barrier,
+                barrier=config.solver_gtol
+                if absolute and config.fully_invested
+                else 0.1,
             )
     point = result.x.copy()
     moving = np.arange(weight_count)
