@@ -199,7 +199,7 @@ _ALPHA_DIAGNOSTICS = {
 
 
 def _repair_stock_allocation(target, hold, benchmark, minimum, increment, evaluate):
-    """Keep risk bands first, then stay close to the requested allocation."""
+    """Repair risk violations in native lots, using the account score to break ties."""
     requested = evaluate(target)
     if requested[2][:2] == (0.0, 0.0):
         return requested
@@ -942,17 +942,6 @@ def backtest_a_share(
                 .all()
             ):
                 raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
-            effective_optimizer_config = optimizer_config
-            if enhanced and initializing:
-                ordinary_config = optimizer_config or (
-                    AbsoluteRiskConfig() if absolute else OptimizerConfig()
-                )
-                effective_optimizer_config = replace(
-                    ordinary_config,
-                    target_turnover_limit=max(
-                        1.0, ordinary_config.target_turnover_limit or 0.0
-                    ),
-                )
             account, adv, _optimization, decision_delta, asset_ledger = _build_session(
                 candidate=candidate,
                 decision_timestamp=decision_timestamp,
@@ -980,7 +969,7 @@ def backtest_a_share(
                 target_override=target_override,
                 decision_reason=decision_reason,
                 decision_skip_reason=decision_skip_reason,
-                optimizer_config=effective_optimizer_config,
+                optimizer_config=optimizer_config,
                 robust_config=robust_config,
                 initializing=enhanced and initializing,
                 assumptions=assumptions,
@@ -1558,6 +1547,18 @@ def _build_session(
     config = optimizer_config or (
         AbsoluteRiskConfig() if absolute else OptimizerConfig()
     )
+    if initializing:
+        config = replace(config, target_turnover_limit=None if absolute else 1.0)
+    fully_invested = absolute and config.fully_invested
+    use_signal = (
+        enhanced_decision is not None
+        and not enhanced_decision.calibration.benchmark_only
+    )
+    optimize_target = use_signal or (
+        fully_invested
+        and enhanced_decision is not None
+        and enhanced_decision.calibration.status == "DEFINED"
+    )
     covariance_required = (
         not absolute
         or config.total_volatility_limit is not None
@@ -1626,12 +1627,14 @@ def _build_session(
         unknown = alpha.reindex(holdings.index).isna() & holdings.ne(0.0)
         reference = enhanced_decision.benchmark_weights
         unknown_reference = alpha.reindex(reference.index).isna() & reference.ne(0.0)
-        if unknown.any() or unknown_reference.any():
+        if (use_signal or not fully_invested) and (
+            unknown.any() or unknown_reference.any()
+        ):
             decision_skip_reason = "robust_held_prediction_unavailable"
         if (
             absolute
             and covariance_required
-            and not enhanced_decision.calibration.benchmark_only
+            and optimize_target
             and enhanced_decision.risk is None
             and decision_skip_reason is None
         ):
@@ -1853,9 +1856,8 @@ def _build_session(
         nav > 0
         and not decision_skip_reason
         and target_override is None
-        and enhanced_decision is not None
+        and optimize_target
         and (enhanced_decision.risk is not None or not covariance_required)
-        and (not enhanced_decision.calibration.benchmark_only)
     ):
         assets_frame["is_financial"] = False
         stock = ~assets_frame.is_cash
@@ -1932,7 +1934,7 @@ def _build_session(
             return total, *gradients
 
         try:
-            if robust_config is not None:
+            if robust_config is not None and use_signal:
                 ranks = alpha.reindex(assets_frame.asset_id)
                 ranks.loc[assets_frame.is_cash.to_numpy() | unavailable.to_numpy()] = (
                     0.0
@@ -1942,7 +1944,6 @@ def _build_session(
                     ranks.fillna(0.0),
                     confidence=robust_config.confidence,
                 )
-                asset_ledger_horizon = enhanced_decision.holding_sessions
             optimization = optimize_portfolio(
                 assets_frame,
                 factor_covariance=risk.factor_covariance if risk is not None else None,
@@ -1964,7 +1965,7 @@ def _build_session(
                     {
                         "uncertainty_loading": loading,
                         "risk_aversion": robust_config.risk_aversion,
-                        "holding_sessions": asset_ledger_horizon,
+                        "holding_sessions": enhanced_decision.holding_sessions,
                         **(
                             {"risk_annualization": risk.annualization_factor}
                             if robust_config.risk_aversion > 0.0
@@ -2142,7 +2143,7 @@ def _build_session(
         turnover_cap = (
             (
                 1.0
-                if initializing or assets_frame is None
+                if assets_frame is None
                 else max(
                     config.target_turnover_limit
                     if config.target_turnover_limit is not None
@@ -2153,6 +2154,37 @@ def _build_session(
             if execution_nav > 0
             else 0.0
         )
+
+        def actual_utility(result):
+            rows = result.asset_ledger
+            weights = (
+                rows.set_index("asset_id")
+                .post_trade_notional.reindex(assets_frame.asset_id, fill_value=0.0)
+                .to_numpy()
+                / result.nav_before
+            )
+            cost_ratio = float(
+                rows.loc[:, PORTFOLIO_LEDGER_COST_COLUMNS].to_numpy().sum()
+                / result.nav_before
+            )
+            weights[cash_mask] = result.post_trade_cash / result.nav_before + cost_ratio
+            return _portfolio_objective(
+                weights,
+                benchmark=benchmark,
+                expected_alpha=objective_alpha,
+                loading=None if loading is None else loading.to_numpy(),
+                cost_ratio=cost_ratio,
+                risk_aversion=risk_aversion,
+                horizon_scale=(
+                    enhanced_decision.holding_sessions
+                    / enhanced_decision.risk.annualization_factor
+                    if risk_aversion > 0.0
+                    else 0.0
+                ),
+                exposure=objective_exposure,
+                covariance=covariance,
+                specific=objective_specific,
+            )["objective_value"]
 
         def evaluate(weights, *, strict=False):
             strict |= optimization is not None
@@ -2209,12 +2241,17 @@ def _build_session(
                 cash_roundoff = 8 * np.finfo(float).eps * fsum(map(abs, cash_terms))
                 if fsum(cash_terms) < -cash_roundoff:
                     violation = (np.inf, np.inf)
-            distance = float(
-                np.square(
-                    notionals.reindex(assets, fill_value=0.0) / result.nav_before
-                    - requested
-                ).sum()
+            stock_weights = (
+                notionals.reindex(assets, fill_value=0.0) / result.nav_before
             )
+            distance = float(np.square(stock_weights - requested).sum())
+            if fully_invested and optimization is not None:
+                shortfall = max(0.0, requested.sum() - stock_weights.sum())
+                return (
+                    result,
+                    facts,
+                    (*violation, shortfall, -actual_utility(result), distance),
+                )
             return result, facts, (*violation, distance)
 
         repair = (
@@ -2289,44 +2326,14 @@ def _build_session(
                     / execution_nav
                 )
 
-                def actual_utility(result):
-                    rows = result.asset_ledger
-                    weights = (
-                        rows.set_index("asset_id")
-                        .post_trade_notional.reindex(
-                            assets_frame.asset_id, fill_value=0.0
-                        )
-                        .to_numpy()
-                        / result.nav_before
-                    )
-                    cost_ratio = float(
-                        rows.loc[:, PORTFOLIO_LEDGER_COST_COLUMNS].to_numpy().sum()
-                        / result.nav_before
-                    )
-                    weights[cash_mask] = (
-                        result.post_trade_cash / result.nav_before + cost_ratio
-                    )
-                    return _portfolio_objective(
-                        weights,
-                        benchmark=benchmark,
-                        expected_alpha=objective_alpha,
-                        loading=None if loading is None else loading.to_numpy(),
-                        cost_ratio=cost_ratio,
-                        risk_aversion=risk_aversion,
-                        horizon_scale=(
-                            enhanced_decision.holding_sessions
-                            / enhanced_decision.risk.annualization_factor
-                            if risk_aversion > 0.0
-                            else 0.0
-                        ),
-                        exposure=objective_exposure,
-                        covariance=covariance,
-                        specific=objective_specific,
-                    )["objective_value"]
-
                 # One joint native candidate; no integer search or per-name accounts.
                 trial = evaluate(candidate_weights, strict=True)
-                if trial[2][:2] == (0.0, 0.0) and actual_utility(
+                if fully_invested:
+                    if baseline[2] < selected[2] and np.isfinite(baseline[2][0]):
+                        selected = baseline
+                    if trial[2][:2] == (0.0, 0.0) and trial[2] < selected[2]:
+                        selected = trial
+                elif trial[2][:2] == (0.0, 0.0) and actual_utility(
                     trial[0]
                 ) >= actual_utility(selected[0]):
                     selected = trial

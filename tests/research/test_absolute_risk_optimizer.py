@@ -46,6 +46,37 @@ def _solve(assets, *, config=None, cost=None, **kwargs):
     )
 
 
+def test_fully_invested_uses_available_principal_and_avoids_an_uneconomic_switch():
+    assets = _assets([0.0, 0.0, 0.9], [-0.03, -0.01, 0.0])
+    choice = optimizer.AbsoluteRiskConfig(fully_invested=True)
+    result = _solve(assets, config=choice, cost=_cost(0.01), receivable_weight=0.1)
+    assert result.weights.tolist() == pytest.approx(
+        [0, 0.9 / 1.01, 0.9 - 0.9 / 1.01], abs=1e-7
+    )
+    assets["current_weight"] = [0.0, 0.9, 0.0]
+    assets["expected_alpha"] = [0.001, 0.0, 0.0]
+    result = _solve(assets, config=choice, cost=_cost(0.01), receivable_weight=0.1)
+    assert result.weights.tolist() == pytest.approx([0.0, 0.9, 0.0], abs=1e-7)
+
+
+@pytest.mark.parametrize(("turnover_limit", "target"), [(None, 0.60), (0.20, 0.30)])
+def test_fully_invested_respects_volatility_and_rebalance_turnover(
+    turnover_limit, target
+):
+    assets = _assets([0.10, 0.90], [-0.01, 0.0])
+    assets["specific_variance"] = [0.25, 0.0]
+    result = _solve(
+        assets,
+        config=optimizer.AbsoluteRiskConfig(
+            fully_invested=True,
+            total_volatility_limit=0.30,
+            target_turnover_limit=turnover_limit,
+        ),
+        factor_covariance=pd.DataFrame(index=[], columns=[], dtype=float),
+    )
+    assert result.weights.tolist() == pytest.approx([target, 1.0 - target], abs=1e-7)
+
+
 def test_absolute_defaults_are_unset_and_require_neither_benchmark_nor_daily_adv():
     config = optimizer.AbsoluteRiskConfig()
     assert all(value is None for key, value in asdict(config).items() if "limit" in key)

@@ -145,6 +145,22 @@ def test_actual_utility_rejects_a_nearest_buy_with_a_loss_from_minimum_commissio
     assert account.post_trade_cash == 1500.0
 
 
+def test_fully_invested_buys_the_affordable_lot_despite_negative_net_utility():
+    inputs = _inputs(
+        nav=100.04, config=optimizer.AbsoluteRiskConfig(fully_invested=True)
+    )
+    decision = inputs["enhanced_decision"]
+    inputs["enhanced_decision"] = replace(
+        decision,
+        calibration=replace(decision.calibration, slope=0.0),
+        expected_alpha=decision.expected_alpha * 0.0,
+    )
+    account, _, solved, _, ledger = daily._build_session(**inputs)
+    assert solved.objective_value < 0.0
+    assert ledger.executed_quantity.tolist() == [100]
+    assert account.post_trade_cash == pytest.approx(0.0, abs=1e-12)
+
+
 def test_nearest_market_quantity_handles_both_regular_and_odd_sale_grids():
     requested = np.array([99.999997, 100.0, 149.999997, 350.0, 1.0, 0.0, 125.0])
     minimum = np.full(len(requested), 100)

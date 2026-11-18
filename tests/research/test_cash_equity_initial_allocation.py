@@ -55,22 +55,6 @@ def test_initial_actual_purchase_exempts_turnover_but_preserves_fees_capacity_an
         frames["execution"].loc[
             frames["execution"].timestamp.eq("2023-01-03"), "can_enter"
         ] = False
-    attempts = []
-    original = daily._build_session
-
-    def observe(**kwargs):
-        result = original(**kwargs)
-        attempts.append(
-            (
-                kwargs["decision_timestamp"],
-                kwargs["initializing"],
-                kwargs["optimizer_config"],
-                result[0],
-            )
-        )
-        return result
-
-    monkeypatch.setattr(daily, "_build_session", observe)
     calibration = daily.AlphaCalibration(
         1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
     )
@@ -129,19 +113,25 @@ def test_initial_actual_purchase_exempts_turnover_but_preserves_fees_capacity_an
         assert 90.0 < bought <= 100.0 / 1.01
     else:
         assert bought == pytest.approx(20.0)
-    assert attempts[0][1] is True
-    assert attempts[0][2].target_turnover_limit >= 1.0
     if blocked_first:
         assert not first.trades
-        assert attempts[1][1] is True
-        assert attempts[1][2].target_turnover_limit >= 1.0
-    after_initial = attempts[2 if blocked_first else 1 :]
-    assert after_initial
-    assert all(not initializing for _, initializing, _, _ in after_initial)
-    assert all(
-        config is None or config.target_turnover_limit < 1.0
-        for _, _, config, _ in after_initial
-    )
+    assert batches[-1].sequence > first_fill.sequence
+    for batch in batches:
+        initializing = next(
+            row.number
+            for row in batch.diagnostics
+            if row.name == "initial_allocation_attempt"
+        )
+        assert initializing == (batch.sequence <= first_fill.sequence)
+        if not initializing:
+            buys = sum(trade.notional for trade in batch.trades if trade.quantity > 0)
+            sells = sum(
+                abs(trade.notional) for trade in batch.trades if trade.quantity < 0
+            )
+            nav = sum(row.value for row in batch.valuations if row.phase == "before")
+            assert (
+                max(buys, sells) <= OptimizerConfig().target_turnover_limit * nav + 1e-8
+            )
 
 
 def test_first_purchase_on_ex_date_does_not_inherit_prior_record_date_dividend(

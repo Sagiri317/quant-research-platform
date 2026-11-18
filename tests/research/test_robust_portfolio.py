@@ -794,7 +794,7 @@ def test_native_robust_risk_window_only_blocks_a_consumed_covariance(
     assert skipped
 
 
-@pytest.mark.parametrize("mode", ["active", "cash", "benchmark"])
+@pytest.mark.parametrize("mode", ["active", "cash", "funded", "benchmark"])
 def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
     native_case, mode
 ):
@@ -825,8 +825,8 @@ def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
             construction="benchmark_enhanced", benchmark_id="csi500"
         )
         config["inputs"]["benchmark"] = benchmark_path
-    elif mode == "cash":
-        observation_path = root / "nonpositive_observations.parquet"
+    elif mode in {"cash", "funded"}:
+        observation_path = root / f"observations_{mode}.parquet"
         observations.assign(
             holding_return=-0.1 * observations.prediction_rank_score
         ).to_parquet(observation_path, index=False)
@@ -839,11 +839,19 @@ def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
                     "cutoff": "2022-12-30",
                     "rebalance_schedule": "weekly-last-trading-day",
                     "selection_group": "research",
-                    "output": str(root / "nonpositive_calibration.json"),
+                    "output": str(root / f"calibration_{mode}.json"),
                 }
             )
         )
-        config["risk_model"]["config"].update(factor_window=80, minimum_factor_dates=60)
+        if mode == "cash":
+            config["risk_model"]["config"].update(
+                factor_window=80, minimum_factor_dates=60
+            )
+        else:
+            config["optimizer_config"] = {
+                "fully_invested": True,
+                "target_turnover_limit": 0.2,
+            }
     batches = list(read_portfolio_ledger_artifact(backtest(config)).iter_chunks())
     assert batches
     facts = [
@@ -882,6 +890,19 @@ def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
         if any(row.name == "solver_iterations" for row in batch.diagnostics)
     ]
     assert optimized and any(batch.trades for batch in optimized)
+    if mode == "funded":
+        first = next(batch for batch in optimized if batch.trades)
+        assert (
+            sum(trade.notional for trade in first.trades)
+            > 0.95 * config["assumptions"]["initial_nav"]
+        )
+        diagnostics = {
+            row.name: row.number
+            for row in first.diagnostics
+            if row.asset_id == "__cash__"
+        }
+        assert diagnostics["alpha_slope"] < 0
+        assert diagnostics["expected_return"] == diagnostics["robust_penalty"] == 0.0
     assert all(trade.asset_id != "b" for batch in batches for trade in batch.trades)
     assert all(
         row.quantity == 0.0

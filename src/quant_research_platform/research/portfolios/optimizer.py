@@ -71,6 +71,7 @@ class AbsoluteRiskConfig:
     solver_xtol: float = 1e-12
     solver_barrier_tol: float = 1e-12
     solver_maxiter: int = 1000
+    fully_invested: bool = False
 
     def __post_init__(self) -> None:
         _validate_config(self)
@@ -785,12 +786,16 @@ def optimize_portfolio(
                 net_risk, 0.0, np.inf, jac=net_risk_jacobian, hess="2-point"
             )
         )
-    initial = np.r_[
-        fixed_weights[free_weights],
-        np.abs(fixed_weights - current)[free_trades],
-        [actual_cost(fixed_weights)[0]] if fee_variable else [],
-        [abs(direction @ (fixed_weights - reference))] if loading_scale > 0.0 else [],
-    ]
+
+    def pack(weights):
+        return np.r_[
+            weights[free_weights],
+            np.abs(weights - current)[free_trades],
+            [actual_cost(weights)[0]] if fee_variable else [],
+            [abs(direction @ (weights - reference))] if loading_scale > 0.0 else [],
+        ]
+
+    initial = pack(fixed_weights)
     if affine_solution is not None:
         initial[:weight_count] = affine_solution[:weight_count]
         if fee_variable:
@@ -814,19 +819,19 @@ def optimize_portfolio(
         [np.inf] if loading_scale > 0.0 else [],
     ]
 
-    def feasible(point):
+    def feasible(point, atol=tolerance):
         for constraint in constraints:
             values = (
                 constraint.A @ point
                 if isinstance(constraint, LinearConstraint)
                 else constraint.fun(point)
             )
-            if np.any(values < constraint.lb - tolerance) or np.any(
-                values > constraint.ub + tolerance
+            if np.any(values < constraint.lb - atol) or np.any(
+                values > constraint.ub + atol
             ):
                 return False
-        return np.all(point >= lower_bounds - tolerance) and np.all(
-            point <= upper_bounds + tolerance
+        return np.all(point >= lower_bounds - atol) and np.all(
+            point <= upper_bounds + atol
         )
 
     # Preserve the no-trade optimum on flat objectives using a global support
@@ -911,10 +916,81 @@ def optimize_portfolio(
         )
         return converged
 
-    analytic_solution = (
-        not weight_count
-        or (affine_solution is not None and feasible(initial))
-        or (certified and np.array_equal(fixed_weights, current) and feasible(initial))
+    def solve(fun, hess, start, *, barrier=0.1):
+        solution = minimize(
+            fun,
+            start,
+            jac=True,
+            hess=hess,
+            method="trust-constr",
+            bounds=Bounds(lower_bounds, upper_bounds),
+            constraints=constraints,
+            callback=numerical_convergence,
+            options={
+                "gtol": 0.0,
+                "xtol": config.solver_xtol,
+                "barrier_tol": config.solver_barrier_tol,
+                "maxiter": config.solver_maxiter,
+                "initial_barrier_parameter": barrier,
+                "initial_barrier_tolerance": barrier,
+                "sparse_jacobian": True,
+                "factorization_method": "AugmentedSystem",
+            },
+        )
+        if not converged:
+            error = ValueError("optimizer_failed_closed")
+            error.add_note(
+                f"{solution.message}; iterations={solution.nit}; "
+                f"projected_gradient={projected_optimality}; "
+                f"constraint_violation={solution.constr_violation}; "
+                f"complementarity_sum={complementarity_sum}; "
+                f"complementarity_count={complementarity_count}"
+            )
+            raise error
+        return solution
+
+    analytic_solution = not weight_count or (
+        affine_solution is not None and feasible(initial)
+    )
+    funding_iterations = 0
+    if absolute and config.fully_invested and not analytic_solution:
+        # Maximize invested principal; fees paid are never a way to buy exposure.
+        # Once fully funded, different allocations can reserve their own true fee.
+        cash_gradient = gradient_point(cash_direction)
+        cash_available = current[cash].item()
+        room = np.where(cash, 0.0, np.maximum(0.0, reachable_upper - current))
+        # A feasible cash-funded purchase proves zero idle cash is attainable.
+        if cash_available > 0.0 and room.sum() >= cash_available:
+            mix = room / room.sum() - cash_direction
+            principal = brentq(
+                lambda buy: cash_available - buy - actual_cost(current + buy * mix)[0],
+                0.0,
+                cash_available,
+            )
+            candidate = pack(current + principal * mix)
+            if feasible(candidate, config.solver_gtol):
+                initial = candidate
+        start_weights, _, start_fee = unpack(initial)
+        if start_weights[cash].item() - start_fee > config.solver_gtol or not feasible(
+            initial, config.solver_gtol
+        ):
+            funding = solve(
+                lambda point: (unpack(point)[0][cash].item(), cash_gradient),
+                lambda point: sparse.csr_matrix((variable_count, variable_count)),
+                initial,
+            )
+            initial = funding.x.copy()
+            funding_iterations = funding.nit
+        funded_weights, _, fee = unpack(initial)
+        idle_cash = max(0.0, funded_weights[cash].item() - fee)
+        add_linear(
+            cash_direction[None, :],
+            -np.inf,
+            idle_cash + config.solver_gtol,
+            fee=-1.0,
+        )
+    analytic_solution |= (
+        certified and np.array_equal(unpack(initial)[0], current) and feasible(initial)
     )
     if not analytic_solution and maximum_cost == 0.0:
         # The budget-and-box linear relaxation bounds every remaining target.
@@ -930,13 +1006,7 @@ def optimize_portfolio(
                 remaining -= change
                 if remaining <= 0.0:
                     break
-            box_point = initial.copy()
-            box_point[:weight_count] = box_weights[free_weights]
-            box_point[weight_count:fee_position] = abs(box_weights - current)[
-                free_trades
-            ]
-            if loading_scale > 0.0:
-                box_point[-1] = abs(direction @ (box_weights - reference))
+            box_point = pack(box_weights)
             zero_penalties = loading @ (box_weights - reference) == 0.0 and (
                 risk_aversion == 0.0
                 or sum(
@@ -951,36 +1021,12 @@ def optimize_portfolio(
     if analytic_solution:
         result = OptimizeResult(success=True, x=initial, nit=0)
     else:
-        result = minimize(
+        result = solve(
             objective,
+            objective_hessian,
             initial,
-            jac=True,
-            hess=objective_hessian,
-            method="trust-constr",
-            bounds=Bounds(lower_bounds, upper_bounds),
-            constraints=constraints,
-            callback=numerical_convergence,
-            options={
-                "gtol": 0.0,
-                "xtol": config.solver_xtol,
-                "barrier_tol": config.solver_barrier_tol,
-                "maxiter": config.solver_maxiter,
-                "initial_barrier_parameter": 0.1,
-                "initial_barrier_tolerance": 0.1,
-                "sparse_jacobian": True,
-                "factorization_method": "AugmentedSystem",
-            },
+            barrier=config.solver_gtol if absolute and config.fully_invested else 0.1,
         )
-    if not analytic_solution and not converged:
-        error = ValueError("optimizer_failed_closed")
-        error.add_note(
-            f"{result.message}; iterations={result.nit}; "
-            f"projected_gradient={projected_optimality}; "
-            f"constraint_violation={result.constr_violation}; "
-            f"complementarity_sum={complementarity_sum}; "
-            f"complementarity_count={complementarity_count}"
-        )
-        raise error
     point = result.x.copy()
     moving = np.arange(weight_count)
     equations = [
@@ -1105,7 +1151,7 @@ def optimize_portfolio(
         predicted_total_volatility=volatility if absolute else None,
         risk_mode="absolute" if absolute else "benchmark_relative",
         **objective_facts,
-        solver_iterations=int(result.nit),
+        solver_iterations=int(result.nit + funding_iterations),
         solver_variables=variable_count,
         solver_optimality=projected_optimality,
         solver_constraint_violation=0.0
@@ -1114,7 +1160,9 @@ def optimize_portfolio(
         solver_complementarity=complementarity,
         solver_complementarity_sum=complementarity_sum,
         solver_complementarity_count=complementarity_count,
-        solver_termination="analytic_optimum" if analytic_solution else "converged",
+        solver_termination="analytic_optimum"
+        if analytic_solution and not funding_iterations
+        else "converged",
     )
 
 
@@ -1763,6 +1811,11 @@ def _verify_solution(
 
 
 def _validate_config(config: OptimizerConfig | AbsoluteRiskConfig) -> None:
+    if (
+        isinstance(config, AbsoluteRiskConfig)
+        and type(config.fully_invested) is not bool
+    ):
+        raise ValueError("optimizer_config_invalid")
     if any(
         type(value) is not float or not np.isfinite(value) or value <= 0.0
         for value in (config.solver_gtol, config.solver_xtol, config.solver_barrier_tol)

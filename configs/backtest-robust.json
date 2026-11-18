@@ -128,6 +128,7 @@
     "risk_aversion": 1.0
   },
   "optimizer_config": {
+    "fully_invested": true,
     "name_weight_limit": 0.02,
     "total_volatility_limit": 0.3,
     "target_turnover_limit": 0.2
