@@ -1072,6 +1072,32 @@ def test_funded_net_ratio_handles_existing_positions_and_cost_break_even(
     assert result.objective_value == pytest.approx(expected, abs=3e-8)
 
 
+def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_holding():
+    assets = _assets((-0.02, 0.04, 0.0), (1.0, 0.0, 0.0))
+    assets["specific_variance"] = [0.04, 0.01, 0.0]
+    assets["sellable_weight"] = [0.8, 0.0, 0.0]
+    buy = np.array([0.0005, 0.0005, 0.0])
+    sell = np.array([0.001, 0.001, 0.0])
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="net_return_to_risk",
+        holding_sessions=5,
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda b, s: (float(b @ buy + s @ sell), buy, sell),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
+    )
+    # The losing asset has negative net carry even after saving its sale fee.
+    bought = 0.8 * (1 - 0.001) / (1 + 0.0005)
+    fee = 0.8 - bought
+    volatility = np.sqrt((0.04 * 0.2**2 + 0.01 * bought**2) * 5 / 252)
+    assert result.weights.to_numpy() == pytest.approx([0.2, bought, fee], abs=2e-7)
+    assert result.objective_value == pytest.approx(
+        (-0.02 * 0.2 + 0.04 * bought - fee) / volatility, abs=2e-7
+    )
+
+
 def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income():
     assets = _assets((0.003, 0.0), (0.0, 0.9))
     rates = np.array([0.001, 0.0])

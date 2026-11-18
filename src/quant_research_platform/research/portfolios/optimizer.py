@@ -1089,32 +1089,39 @@ def optimize_portfolio(
         # Once fully funded, different allocations can reserve their own true fee.
         cash_gradient = gradient_point(cash_direction)
 
-        def funded_weights(fee, buyable):
-            ceiling = np.clip(net_upper * (1.0 - fee), reachable_lower, reachable_upper)
-            weights = np.clip(
-                np.maximum(current, net_lower * (1.0 - fee)), reachable_lower, ceiling
-            )
-            room = np.where(buyable & ~cash, ceiling - weights, 0.0)
-            remaining = budget - fee - weights[stock].sum()
-            capacity_left = room.sum()
-            if remaining > 0.0 and capacity_left > 0.0:
-                weights += room * min(1.0, remaining / capacity_left)
-            weights[cash] = budget - weights[stock].sum()
-            return weights
+        def funded_weights(buyable, inventory):
+            def allocate(fee):
+                ceiling = np.clip(
+                    net_upper * (1.0 - fee), reachable_lower, reachable_upper
+                )
+                weights = np.clip(
+                    np.maximum(inventory, net_lower * (1.0 - fee)),
+                    reachable_lower,
+                    ceiling,
+                )
+                room = np.where(buyable & ~cash, ceiling - weights, 0.0)
+                remaining = budget - fee - weights[stock].sum()
+                capacity_left = room.sum()
+                if remaining > 0.0 and capacity_left > 0.0:
+                    weights += room * min(1.0, remaining / capacity_left)
+                weights[cash] = budget - weights[stock].sum()
+                return weights
 
-        # A feasible allocation paying its own fee proves full funding.
-        full_funding = False
-        for buyable in (expected_alpha > 0.0, ~cash) if ratio else (~cash,):
             fee = (
                 brentq(
-                    lambda paid: paid - actual_cost(funded_weights(paid, buyable))[0],
+                    lambda paid: paid - actual_cost(allocate(paid))[0],
                     0.0,
                     maximum_cost / nav,
                 )
                 if maximum_cost
                 else 0.0
             )
-            weights = funded_weights(fee, buyable)
+            return allocate(fee), fee
+
+        # A feasible allocation paying its own fee proves full funding.
+        full_funding = False
+        for buyable in (expected_alpha > 0.0, ~cash) if ratio else (~cash,):
+            weights, fee = funded_weights(buyable, current)
             candidate = pack(weights)
             if abs(weights[cash].item() - fee) <= config.solver_gtol and feasible(
                 candidate, config.solver_gtol
@@ -1231,6 +1238,15 @@ def optimize_portfolio(
                 def positive_score(point):
                     return (score_domain.A @ point)[0] > score_domain.lb[0]
 
+            if net_return and exact_cash and not positive_score(initial):
+                # Sell available nonpositive holdings to fund a positive net-return seed.
+                positive = expected_alpha > 0.0
+                weights, _ = funded_weights(positive, np.where(positive, current, 0.0))
+                candidate = pack(weights)
+                if feasible(candidate, config.solver_gtol) and positive_score(
+                    candidate
+                ):
+                    initial = candidate
             if not feasible(initial, config.solver_gtol) or not positive_score(initial):
                 # Any feasible positive numerator starts the ratio problem.
                 # Only proving its absence requires optimizing the seed objective.
