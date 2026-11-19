@@ -1288,7 +1288,8 @@ def optimize_portfolio(
                 negative_score,
                 "2-point" if priced_ratio else zero_hessian,
                 initial,
-                barrier=barrier,
+                # Start the fee-aware income search with a moderate interior barrier.
+                barrier=0.1 if priced_ratio else barrier,
                 witness=positive_score,
             )
             initial = seed.x
