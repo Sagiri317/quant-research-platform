@@ -91,12 +91,7 @@ def trade_statistics(trades, config, *, columns=None):
                 result["trade_interval_return_interaction"] = (
                     price / price.shift(window - 1) - 1
                 ) * mean
-    if "trade_intensity" in columns:
-        elapsed = (work.timestamp - work.timestamp.shift(window - 1)).dt.total_seconds()
-        result["trade_intensity"] = ((window - 1) / elapsed.where(elapsed.gt(0))).where(
-            known.rolling(window).sum().eq(window)
-        )
-    flow_columns = columns - interval_columns - {"trade_intensity"}
+    flow_columns = columns - interval_columns
     if flow_columns:
         side = work.side.map({"buy": 1.0, "sell": -1.0}).astype(float).where(known)
         volume = work.volume.where(work.volume.gt(0) & known)

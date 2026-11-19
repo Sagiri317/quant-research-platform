@@ -10,16 +10,14 @@
 | 配置 | 操作与范围 |
 | --- | --- |
 | [run-quarterly-a-share.json](run-quarterly-a-share.json) | `run-quarterly`：A 股四类预测模型，2022 年起按季度预测，训练和验证向后滚动 |
-| [high-frequency/run-sessions-etf.json](high-frequency/run-sessions-etf.json) | `run-sessions`：ETF 四类预测模型的共同参数。输入路径以 518880 举例，调用者替换真实证券输入和可用起点；137 列特征的顺序保留原协议 |
-| [high-frequency/run-etf-execution.json](high-frequency/run-etf-execution.json) | `run-etf-execution --stage calibrate/direct/train/ppo`：明确列出 510300、510500、159915、518880，各自独立 100 万元账户，直接策略和 PPO 共用规则，2026 年回放；历史幅度校准默认关闭 |
-| [factor-analysis-policy.csv](factor-analysis-policy.csv) | 因子检验的去极值、标准化、中性化等处理政策；按分析粒度与因子列区分，不是模型输入清单 |
+| [high-frequency/run-sessions-etf.json](high-frequency/run-sessions-etf.json) | 单只 ETF 的四种预测模型。每折只用当时已成熟的历史选特征和参数。 |
+| [high-frequency/backtest-policy-etf.json](high-frequency/backtest-policy-etf.json) | 单只 ETF、一个预测来源、一个账户。示例使用 100 万元、初始半仓，14:50 起恢复最初的份额。 |
+| [backtest-stock-weekly.json](backtest-stock-weekly.json) | 单个股票模型的周频回测，配置单股上限和方差惩罚。 |
+| [factor-analysis-policy.csv](factor-analysis-policy.csv) | 按研究粒度和因子记录处理方法与研究用途，组装配置选择使用的行及表示。 |
 
-ETF 执行入口默认依次运行四只证券，`--asset-id` 可限定其中一只；跨证券并行由调用者安排。
-同一证券的直接策略、训练和冻结回放分别保存到 `direct`、`policy`、`ppo`。
-可选 `prediction_calibration` 开启后，先以 `calibrate` 准备共用日参数；用新输出目录重跑直接策略并重新训练 PPO，配置和缺失语义见[历史幅度校准](../docs/research-learning.md#etf-历史预测幅度校准)。
-PPO 使用 2025 年前三季度训练、第四季度验证；训练插补及观察统计不从 2026 年估计。
-金额上限、初始半仓、费用、参与率及恢复时间只在该配置维护一份。
-完整规则和术语见[策略学习](../docs/research-learning.md)与[高频账户](../docs/a-share-hft.md)。
+ETF 示例使用 518880。510300、510500 的盘口历史从 2022 年起，159915、518880 从 2023 年 9 月起。换证券时按该证券实际滚动产生的会话块填写预测路径。
+
+ETF 底仓单独运行同一账户的 `hold` 策略，使用新的输出路径。将两个输出目录各自的 `ledger/` 交给 `analyze-inventory` 比较。股票配置的 `risk_aversion=0` 优先成本后收益，正值惩罚持有期方差。收益优先账户的独立调用见[模型与账户设置](../docs/low-frequency-models.md#股票组合和-etf-底仓)。两种账户均保留 2% 的单股上限，可以留现金。
 
 ## 数据与因子示例
 
@@ -27,6 +25,11 @@ PPO 使用 2025 年前三季度训练、第四季度验证；训练插补及观�
 | --- | --- |
 | `prepare-source.json`、`prepare-source-hft.json` | 分别读取结构化日频和逐笔来源；不下载或整理 raw |
 | `prepare-financial.json` | 结构化财务事实的 PIT 计算接口；当前研究不启用 Choice 财务或分析师预期 |
+| [prepare-cash-distributions.json](prepare-cash-distributions.json) | 从实际现金分红和除息前价格准备股息收益，持续分红交互还需要决策面板的 `volatility_60d`。 |
+| [prepare-calendar-seasonality.json](prepare-calendar-seasonality.json)、[prepare-size-volatility-interaction.json](prepare-size-volatility-interaction.json) | 用实际股票行情、交易日历及收盘市值和残差波动计算两个收盘信号。 |
+| [assemble-stock-close-signals.json](assemble-stock-close-signals.json)、[prepare-stock-signal-decisions.json](prepare-stock-signal-decisions.json) | 收盘观测与下一会话开盘前的决策时点。这里的输入窗口按信号日填写，首尾分别取目标决策区间之前的一个实际交易日。 |
+| [assemble-stock-model-inputs.json](assemble-stock-model-inputs.json) | 合并同一决策时点的因子，选用每项因子的一种表示，形成四个模型的共同候选输入。 |
+| [prepare-quote-trade-pressure.json](high-frequency/prepare-quote-trade-pressure.json)、[assemble-etf-signals.json](high-frequency/assemble-etf-signals.json)、[sample-etf-model-inputs.json](high-frequency/sample-etf-model-inputs.json) | 单只 ETF 的报价因子、逐报价组装与 3 秒决策时钟采样。各操作均可单独调用。 |
 | `prepare-on-id.json` | 隔夜与日内收益 |
 | `prepare-hft-panel.json`、`prepare-hft-factors.json`、`prepare-hft-labels.json` | 共同高频面板、盘口因子、收益标签，各阶段独立 |
 | `assemble-selected.json`、`assemble-hft.json` | 已有列的拼接与高频研究数据集组装 |

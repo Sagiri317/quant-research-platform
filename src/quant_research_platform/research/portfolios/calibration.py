@@ -1,8 +1,8 @@
 """Point-in-time mappings from prediction signals to holding returns."""
 
+import re
 from dataclasses import dataclass
 from itertools import islice
-import re
 
 import numpy as np
 import pandas as pd
@@ -36,7 +36,7 @@ def zscore_return_horizon(model_facts):
 
 
 def return_cross_section(frame, label, available_column):
-    """A complete eligible cross-section becomes usable at its last contributor's maturity."""
+    """The eligible cross-section matures with its last contributor."""
     members = frame.loc[frame["eligible"].eq(True) & frame[label].notna()]
     if len(members) < 2 or members[available_column].isna().any():
         return None
@@ -62,6 +62,50 @@ def estimate_holding_return(
         return None
     mean, scale = np.mean(sample, axis=0)
     return (mean + scale * scores) * (holding_sessions / label_sessions)
+
+
+def score_return_cross_section(frame, scores, label, available_column):
+    """Sufficient statistics for an equal-date regression on issued forecasts."""
+    pairs = frame.set_index("asset_id").assign(score=scores)
+    pairs = pairs.loc[pairs.eligible & pairs.score.notna() & pairs[label].notna()]
+    if len(pairs) < 2 or pairs[available_column].isna().any():
+        return None
+    x, y = pairs.score, pairs[label]
+    xc, yc = x - x.mean(), y - y.mean()
+    return (
+        pairs[available_column].max(),
+        y.mean(),
+        x.mean(),
+        (xc * yc).mean(),
+        xc.pow(2).mean(),
+    )
+
+
+def calibrated_cash_return(
+    scores,
+    history,
+    *,
+    as_of,
+    label_sessions,
+    holding_sessions,
+    lookback_sessions,
+    min_sessions,
+):
+    """Estimate the market return and score slope using mature out-of-sample dates."""
+    sample = list(
+        islice(
+            (row[1:] for row in reversed(history) if row[0] <= as_of),
+            lookback_sessions,
+        )
+    )
+    if len(sample) < min_sessions:
+        return None
+    mean_return, mean_score, covariance, variance = np.mean(sample, axis=0)
+    if variance <= 0:
+        return None
+    return (mean_return + covariance / variance * (scores - mean_score)) * (
+        holding_sessions / label_sessions
+    )
 
 
 @dataclass(frozen=True)

@@ -39,7 +39,7 @@ from quant_research_platform.research.portfolios.daily import (
     backtest_a_share,
 )
 from quant_research_platform.research.portfolios.optimizer import (
-    WEEKLY_STOCK_RISK,
+    AbsoluteRiskConfig,
     OptimizerConfig,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -90,6 +90,7 @@ def backtest(config: Mapping) -> Path:
         "selection",
         "robust_config",
         "calibration_window",
+        "return_calibration",
     }
     if (
         not isinstance(config, Mapping)
@@ -150,8 +151,8 @@ def backtest(config: Mapping) -> Path:
     for key, value in inputs.items():
         for source in value if key == "risk_context" else (value,):
             _dataset_input_options(source)
-    absolute = candidate.construction == "maximum_sharpe"
-    enhanced = candidate.construction in {"benchmark_enhanced", "maximum_sharpe"}
+    absolute = candidate.absolute
+    enhanced = candidate.uses_optimizer
     robust_config = (
         RobustPortfolioConfig(**config["robust_config"])
         if "robust_config" in config
@@ -160,25 +161,33 @@ def backtest(config: Mapping) -> Path:
     calibrated = candidate.construction == "benchmark_enhanced"
     if robust_config is not None and not calibrated:
         raise ValueError("portfolio_unused_configuration")
-    prediction_column = "prediction_rank_score" if calibrated else "prediction_score"
+    prediction_column = (
+        "prediction_score" if candidate.uses_monetary_score else "prediction_rank_score"
+    )
     return_horizon = None
     if not calibrated and ("calibration" in config or "calibration_window" in config):
         raise ValueError("portfolio_unused_calibration")
     if "calibration" in config and "calibration_window" in config:
         raise ValueError("portfolio_frozen_calibration_has_own_window")
-    if (candidate.benchmark_id is not None) != ("benchmark" in inputs) or enhanced != (
-        "risk_context" in inputs
-    ):
+    if (candidate.benchmark_id is not None) != (
+        "benchmark" in inputs
+    ) or candidate.needs_risk != ("risk_context" in inputs):
         raise ValueError("portfolio_enhanced_inputs_invalid")
     if not enhanced and (
         "risk_model" in config
-        or "optimizer_config" in config
+        or (
+            "optimizer_config" in config
+            and (
+                candidate.neutrality != "none"
+                or set(config["optimizer_config"]) - {"name_weight_limit"}
+            )
+        )
         or "calibration" in config
         or "robust_config" in config
     ):
         raise ValueError("portfolio_unused_configuration")
     risk_model = None
-    if enhanced:
+    if candidate.needs_risk:
         risk_model = declared_risk or FactorRiskModel(candidate.risk_style_columns)
         if risk_model.style_columns != candidate.risk_style_columns:
             raise ValueError("portfolio_risk_model_conflict")
@@ -208,7 +217,7 @@ def backtest(config: Mapping) -> Path:
         path = Path(item["path"])
         metadata = read_output_manifest(path)["metadata"]
         facts = metadata["model_facts"]
-        if not calibrated:
+        if candidate.uses_monetary_score:
             horizon = zscore_return_horizon(facts)
             if return_horizon is not None and horizon != return_horizon:
                 raise ValueError("portfolio_raw_score_return_horizon_conflict")
@@ -318,14 +327,12 @@ def backtest(config: Mapping) -> Path:
             rebalance_schedule=candidate.rebalance_schedule,
         )
     final = []
-    risk_config = risk_model.config if enhanced else None
-    if absolute and "optimizer_config" in config:
-        raise ValueError("portfolio_unused_configuration")
+    risk_config = risk_model.config if risk_model is not None else None
     optimizer_config = (
-        WEEKLY_STOCK_RISK
-        if absolute
-        else OptimizerConfig(**config.get("optimizer_config", {}))
-        if enhanced
+        OptimizerConfig(**config.get("optimizer_config", {}))
+        if candidate.construction == "benchmark_enhanced"
+        else AbsoluteRiskConfig(**config.get("optimizer_config", {}))
+        if absolute or "optimizer_config" in config
         else None
     )
 
@@ -341,6 +348,7 @@ def backtest(config: Mapping) -> Path:
                 optimizer_config=optimizer_config,
                 robust_config=robust_config,
                 return_horizon=return_horizon,
+                return_calibration=config.get("return_calibration"),
                 frozen_calibration=frozen,
                 calibration_window=config.get(
                     "calibration_window", DEFAULT_CALIBRATION_WINDOW
@@ -359,7 +367,11 @@ def backtest(config: Mapping) -> Path:
         "candidate": asdict(candidate),
         **(
             {
-                "risk_model": risk_model.to_dict(),
+                **(
+                    {"risk_model": risk_model.to_dict()}
+                    if risk_model is not None
+                    else {}
+                ),
                 "optimizer_config": asdict(optimizer_config),
                 **(
                     {"robust_config": asdict(robust_config)}
@@ -375,7 +387,9 @@ def backtest(config: Mapping) -> Path:
         "initial_holding_convention": "cash",
         **(
             {
-                "initial_turnover_policy": "first_actual_buy_exempt_fees_and_capacity_apply"
+                "initial_turnover_policy": (
+                    "first_actual_buy_exempt_fees_and_capacity_apply"
+                )
             }
             if calibrated
             else {}

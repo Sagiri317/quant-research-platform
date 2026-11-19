@@ -771,6 +771,7 @@ def inventory_batches(
             units=units,
             passive=passive,
             status_target=status_target,
+            marks=marks,
         ):
             targets, activation_times = {}, {}
             limits = maximum_quantities(marks)

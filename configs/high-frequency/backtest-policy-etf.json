@@ -1,0 +1,84 @@
+{
+  "episode": {
+    "kind": "hft",
+    "task": "dynamic_execution",
+    "asset_ids": [
+      "518880"
+    ],
+    "feature_columns": [
+      "prediction_score",
+      "mid",
+      "bid_px1",
+      "ask_px1",
+      "bid_vol1",
+      "ask_vol1",
+      "observed_trade_volume",
+      "observed_signed_trade_volume",
+      "observed_order_volume",
+      "observed_signed_order_volume",
+      "observed_cancel_volume",
+      "observed_signed_cancel_volume"
+    ],
+    "window": {
+      "start": "2026-01-01",
+      "end": "2026-10-30"
+    },
+    "prediction": {
+      "horizon_seconds": 30,
+      "decision_interval_seconds": 3,
+      "quote_visibility_delay_ms": 1,
+      "paths": [
+        "results/a_share/etf/intraday/518880/exposure-models/2025-12-31/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-01-30/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-03-09/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-04-07/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-05-08/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-06-05/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-07-06/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-08-03/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-08-31/xgboost/predictions",
+        "results/a_share/etf/intraday/518880/exposure-models/2026-09-29/xgboost/predictions"
+      ]
+    },
+    "inventory_parameters": {
+      "inventory_risk_bps": 0
+    },
+    "risk_aversion": 0,
+    "target_deviation_bps": 0,
+    "unfinished_penalty_bps": 0,
+    "account": {
+      "panel": "data/processed/etf-high-frequency/518880/panel",
+      "trades": "data/interim/etf-high-frequency/518880/hft_trades",
+      "fee_schedule": "data/interim/etf-execution/fees",
+      "daily_inputs": {
+        "panel": "data/interim/etf-execution/panel",
+        "calendar": "data/interim/csmar-20261110/trading_calendar",
+        "market_bars": "data/interim/etf-execution/market-bars",
+        "stock_master": "data/interim/etf-execution/instruments",
+        "corporate_actions": "data/interim/etf-execution/corporate-actions",
+        "equity_events": "data/interim/etf-execution/equity-events"
+      },
+      "parameters": {
+        "initial_capital": 1000000,
+        "participation_rate": 0.1,
+        "minimum_commission": 5,
+        "latency_ms": 10,
+        "taker_depth_levels": 1,
+        "restore_at": "14:50:00",
+        "passive": {
+          "queue_model": "conservative",
+          "cancel_latency_ms": 10,
+          "quote_level": 1
+        },
+        "initial_weights": {
+          "518880": 0.5
+        },
+        "maximum_weights": {
+          "518880": 1.0
+        }
+      }
+    }
+  },
+  "strategy": "immediate",
+  "output": "results/a_share/etf/execution/518880/xgboost/direct"
+}

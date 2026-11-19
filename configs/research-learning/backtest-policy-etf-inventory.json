@@ -15,7 +15,6 @@
       "start": "2024-01-02",
       "end": "2024-03-29"
     },
-    "capital_scale": 1,
     "prediction": {
       "paths": [
         "results/etf/rolling-return-predictions"
@@ -48,7 +47,9 @@
         "maximum_weights": {
           "510300": 1.0,
           "518880": 1.0
-        }
+        },
+        "initial_capital": 2000000,
+        "restore_at": "14:50:00"
       }
     },
     "risk_aversion": 0,

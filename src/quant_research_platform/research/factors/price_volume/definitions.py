@@ -19,6 +19,7 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "momentum_120_20": (("adj_close",), (120, 20)),
     "momentum_252_20": (("adj_close",), (252, 20)),
     "return_acceleration_6m6m": (("adj_close",), (1,)),
+    "calendar_month_return_5y": (("adj_close",), (1,)),
     "volatility_20d": (("period_return",), (20,)),
     "volatility_60d": (("period_return",), (60,)),
     "downside_volatility_20d": (("period_return",), (20,)),
@@ -316,6 +317,11 @@ for _name, _formula in PRICE_VOLUME_PROFILE_DESCRIPTIONS.items():
     )
 
 _PUBLISHED_PRICE_VOLUME_DESCRIPTIONS = {
+    "calendar_month_return_5y": (
+        "Mean adjusted close-to-close return in this same month one to five years "
+        "ago, requiring three observed month-end pairs in the same listing. "
+        "Adapted from Heston and Sadka (2008), doi:10.1016/j.jfineco.2007.02.003."
+    ),
     "return_acceleration_6m6m": (
         "Xiong-Ibbotson-inspired monthly acceleration: mean simple returns in "
         "the latest six fully completed calendar months minus the preceding six; "
@@ -434,7 +440,11 @@ _PRICE_VOLUME_INPUT_WINDOWS.update(
 )
 
 PRICE_VOLUME_UNITS = dict.fromkeys(_PRICE_VOLUME_INPUT_WINDOWS, "dimensionless")
-PRICE_VOLUME_UNITS["return_acceleration_6m6m"] = "decimal_return"
+PRICE_VOLUME_UNITS.update(
+    dict.fromkeys(
+        ("return_acceleration_6m6m", "calendar_month_return_5y"), "decimal_return"
+    )
+)
 PRICE_VOLUME_UNITS.update(
     {f"overnight_intraday_spread_{w}d": "log_return" for w in (20, 60)}
 )
@@ -588,7 +598,12 @@ def price_volume_factor_definitions(
                 family=PRICE_VOLUME_FACTOR_FAMILY,
                 required_windows=windows,
                 lookback_window=lookback,
-                full_history=column in {"return_acceleration_6m6m", "limit_up_streak"}
+                full_history=column
+                in {
+                    "return_acceleration_6m6m",
+                    "calendar_month_return_5y",
+                    "limit_up_streak",
+                }
                 or column.startswith(
                     (
                         "signed_breakout_",

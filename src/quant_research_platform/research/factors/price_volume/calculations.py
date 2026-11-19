@@ -14,6 +14,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlations,
 )
 from quant_research_platform.compute.dataframe.history import (
+    calendar_month_return,
     completed_month_return_acceleration,
     path_efficiency,
     quadratic_log_trend,
@@ -136,6 +137,10 @@ def calculate_price_volume_factors(
                 )
             )
         sums, statistical_sums = {}, {}
+        if "calendar_month_return_5y" in requested:
+            sums["calendar_month_return_5y"] = calendar_month_return(
+                values["adj_close"], group.timestamp
+            )
         if "return_acceleration_6m6m" in requested:
             sums["return_acceleration_6m6m"] = completed_month_return_acceleration(
                 values["adj_close"], group.timestamp
@@ -209,7 +214,7 @@ def _calculate_values(
             result[reset] = 0.0
         result[no_event] = 0.0
         return result[start:stop].copy()
-    if factor == "return_acceleration_6m6m":
+    if factor in {"return_acceleration_6m6m", "calendar_month_return_5y"}:
         return sums[factor][start:stop].copy()
     if factor.startswith("breakout_activity_divergence_"):
         width = windows[0] - 1

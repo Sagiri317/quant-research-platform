@@ -506,7 +506,9 @@ def test_nonpositive_full_book_exits_to_cash_and_missing_holding_freezes(constru
         if sharpe
         else None
     )
-    inputs["optimizer_config"] = daily.WEEKLY_STOCK_RISK if sharpe else None
+    inputs["optimizer_config"] = daily.AbsoluteRiskConfig(
+        name_weight_limit=0.02, fully_invested=sharpe, solver_maxiter=None
+    )
     _, _, _, _, book = daily._build_session(**inputs)
     fills = book.set_index("asset_id").executed_delta_notional
     assert fills["a"] == 0 and fills["b"] > 0 and fills["c"] < 0
@@ -535,7 +537,9 @@ def test_limited_sale_does_not_reverse_direction_after_opening_gap(
     inputs.update(
         alpha=alpha,
         holding_returns=alpha,
-        optimizer_config=daily.WEEKLY_STOCK_RISK if sharpe else None,
+        optimizer_config=daily.AbsoluteRiskConfig(
+            name_weight_limit=0.02, fully_invested=sharpe, solver_maxiter=None
+        ),
     )
     inputs["candidate"] = replace(
         inputs["candidate"],
@@ -568,3 +572,85 @@ def test_limited_sale_does_not_reverse_direction_after_opening_gap(
     assert book.set_index("asset_id").at[
         "a", "executed_delta_notional"
     ] == pytest.approx(-0.09)
+
+
+def test_cash_utility_uses_holding_period_variance_and_can_choose_cash():
+    from quant_research_platform.research.portfolios.optimizer import AbsoluteRiskConfig
+
+    def allocate(penalty, expected):
+        inputs = _decision_inputs(holdings=(0.0, 0.0))
+        inputs["cash"] = 100.0
+        expected = pd.Series(expected, index=["a", "b"])
+        inputs["alpha"] = expected
+        risk = inputs["enhanced_decision"].risk
+        inputs["candidate"] = replace(
+            inputs["candidate"],
+            construction="mean_variance",
+            risk_aversion=penalty,
+            benchmark_id=None,
+            risk_style_columns=("style",) if penalty else (),
+        )
+        inputs["enhanced_decision"] = replace(
+            inputs["enhanced_decision"],
+            expected_alpha=expected,
+            calibration=None,
+            holding_sessions=5,
+            benchmark_weights=pd.Series(dtype=float),
+            exposures=inputs["enhanced_decision"].exposures
+            if penalty
+            else pd.DataFrame(columns=["asset_id"]),
+            risk=risk if penalty else None,
+        )
+        inputs["optimizer_config"] = AbsoluteRiskConfig(name_weight_limit=0.75)
+        _, _, _, _, book = daily._build_session(**inputs)
+        return book.executed_delta_notional.sum()
+
+    assert allocate(0.0, [-0.01, -0.02]) == pytest.approx(0.0)
+    gross = allocate(0.0, [0.01, 0.005])
+    assert gross > 0
+    assert 0 <= allocate(1000.0, [0.01, 0.005]) < gross
+
+
+def test_cash_return_calibration_uses_only_mature_issued_scores():
+    from quant_research_platform.research.portfolios.calibration import (
+        calibrated_cash_return,
+        score_return_cross_section,
+    )
+
+    days = pd.date_range("2022-01-01", periods=21)
+    scores = pd.Series([-1.0, 1.0], index=["a", "b"])
+    history = []
+    for day in days:
+        frame = pd.DataFrame(
+            dict(
+                asset_id=["a", "b"],
+                eligible=True,
+                realized=[-0.01, 0.03],
+                published=day,
+            )
+        )
+        history.append(
+            score_return_cross_section(frame, scores, "realized", "published")
+        )
+    assert (
+        calibrated_cash_return(
+            scores,
+            history,
+            as_of=days[18],
+            lookback_sessions=252,
+            min_sessions=20,
+            label_sessions=5,
+            holding_sessions=5,
+        )
+        is None
+    )
+    result = calibrated_cash_return(
+        scores,
+        history,
+        as_of=days[19],
+        lookback_sessions=252,
+        min_sessions=20,
+        label_sessions=5,
+        holding_sessions=4,
+    )
+    np.testing.assert_allclose(result, [-0.008, 0.024])

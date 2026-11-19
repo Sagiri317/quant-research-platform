@@ -1,0 +1,53 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "stock_exposure_inputs",
+  "base_input_data_id": "existing",
+  "inputs": {
+    "existing": "data/research/a_share/stock/daily/factors",
+    "close_signals": {
+      "path": "data/processed/a_share/stock/daily/signal-decisions",
+      "columns": [
+        "calendar_month_return_5y",
+        "large_cap_low_vol_leadership_20d"
+      ]
+    },
+    "dividends": "data/processed/a_share/stock/daily/cash-distributions"
+  },
+  "input_policy": {
+    "policy": "code/main/configs/factor-analysis-policy.csv",
+    "grains": [
+      "daily_stock_cross_section",
+      "stock_conditional"
+    ],
+    "research_roles": [
+      "retained",
+      "interaction"
+    ],
+    "column_prefixes": [
+      "feature_pre_neutral_",
+      ""
+    ]
+  },
+  "feature_recipe": null,
+  "label_columns": [
+    "forward_return_5d",
+    "model_target"
+  ],
+  "target_label_column": "forward_return_5d",
+  "target_transform": "date_zscore",
+  "target_clip": "none",
+  "filter_columns": [
+    "eligible"
+  ],
+  "context_columns": [
+    "listing_date",
+    "market_type",
+    "industry_standard_id",
+    "industry_level1_code"
+  ],
+  "time_window": {
+    "start": "2014-01-01",
+    "end": "2026-10-30"
+  },
+  "output_root": "data/research/a_share/stock/daily/exposure-model-inputs"
+}

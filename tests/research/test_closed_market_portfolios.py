@@ -45,7 +45,7 @@ def one_mature_return_for_fixture(monkeypatch):
     monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
 
 
-def _ledger(layout, roots):
+def _ledger(layout, roots, *, positive_returns_only=False):
     candidate = PortfolioCandidateSpec(
         selection_group="global",
         prediction_selector="champion",
@@ -53,6 +53,7 @@ def _ledger(layout, roots):
         construction="quantile_equal_weight",
         rebalance_schedule="daily",
         top_quantile=0.5,
+        positive_returns_only=positive_returns_only,
         benchmark_id=None,
     )
 
@@ -66,8 +67,11 @@ def _ledger(layout, roots):
             return 0, 0
 
     return daily.backtest_a_share(
-        return_horizon=1,
         candidate=candidate,
+        return_horizon=1 if positive_returns_only else None,
+        optimizer_config=daily.AbsoluteRiskConfig(name_weight_limit=0.02)
+        if positive_returns_only
+        else None,
         inputs=layout,
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
         input_window=TimeWindow("2022-12-01", "2023-01-06"),
@@ -609,7 +613,7 @@ def test_native_daily_fees_follow_actual_order_side_and_session(tmp_path):
     layout, roots, _, _ = _native_inputs(
         tmp_path / "inputs", fault="normal_open", open_assets=0
     )
-    expected = list(_ledger(layout, roots))
+    expected = list(_ledger(layout, roots, positive_returns_only=True))
     assert [len(batch.trades) for batch in expected] == [3, 3, 0, 0]
     assert all(trade.quantity == 100 for batch in expected for trade in batch.trades)
     # The account buys on January 2/3, then holds. Neither a sell fee nor a
@@ -622,5 +626,7 @@ def test_native_daily_fees_follow_actual_order_side_and_session(tmp_path):
     write_dataset(
         fee_root, restricted, spec=_interim_specs().get("a_share_fee_schedule")
     )
-    actual = list(_ledger({**layout, "fees": fee_root}, roots))
+    actual = list(
+        _ledger({**layout, "fees": fee_root}, roots, positive_returns_only=True)
+    )
     assert actual == expected

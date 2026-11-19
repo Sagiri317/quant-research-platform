@@ -1,0 +1,41 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "etf_quote_exposures",
+  "base_input_data_id": "existing",
+  "inputs": {
+    "existing": "data/research/a_share/etf/intraday/518880/factors",
+    "quote_trade": "data/processed/etf-high-frequency/518880/quote-trade-pressure"
+  },
+  "input_policy": {
+    "policy": "code/main/configs/factor-analysis-policy.csv",
+    "grains": [
+      "intraday_etf_time_series"
+    ],
+    "research_roles": [
+      "retained",
+      "interaction"
+    ],
+    "column_prefixes": [
+      ""
+    ]
+  },
+  "feature_recipe": null,
+  "label_columns": [
+    "future_mid_return_30s"
+  ],
+  "filter_columns": [
+    "eligible"
+  ],
+  "context_columns": [
+    "session_date",
+    "segment_id",
+    "exchange",
+    "instrument_type",
+    "mid"
+  ],
+  "time_window": {
+    "start": "2023-09-07",
+    "end": "2026-10-30"
+  },
+  "output_root": "data/research/a_share/etf/intraday/518880/quote-exposures"
+}

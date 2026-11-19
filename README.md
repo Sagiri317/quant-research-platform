@@ -55,7 +55,7 @@ from quant_research_platform.research.models.production import fit
 model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 ```
 
-直接拟合示例用单列说明接口；当前完整模型研究使用季度或会话滚动配置，纳入对应原生产物的全部独立输入。
+直接拟合示例用单列说明接口；当前完整模型研究使用季度或会话滚动配置，按配置选择一种可用表示，并在每折成熟训练样本上确定代表列。
 各阶段需要分别配置。评分操作（score）通过 validation_windows 指定完整验证窗口；
 选择操作（select）通过 refit_windows 与 refit_cutoff 记录最终重新拟合的窗口和截止时刻。
 最终拟合只使用这些窗口中、截至拟合时已成熟的样本；可以加入符合条件的新日期，但不会填平窗口间的空档。
@@ -68,8 +68,7 @@ model_path = fit(read_qrp_json_file("configs/fit-a-share.json")[1])
 计算会检查拟合截止、标签成熟和校准时点。直接使用 Parquet 时，还需声明列角色、单位、主键和信息可用时间。
 
 [配置索引](configs/README.md)区分当前研究入口与原生操作示例；示例中的路径需替换为实际已准备输入。
-四只 ETF 的直接策略与 PPO 共用 [执行研究配置](configs/high-frequency/run-etf-execution.json)，
-以 `qrp run-etf-execution --config ... --stage calibrate/direct/train/ppo` 选择阶段；历史幅度校准默认关闭，开启方式见[策略学习](docs/research-learning.md#etf-历史预测幅度校准)。
+一只 ETF 的一个模型对应一个账户。调用者在原生配置中指定证券、预测和输出。用同一组初始份额单独回放持有基准，随后用两份账本计算日内净增益。[ETF 账户配置](configs/high-frequency/backtest-policy-etf.json) · [策略学习](docs/research-learning.md)
 [选择并组装输入](configs/assemble-selected.json)统一演示分批因子与已有特征的列选择和拼接。
 已有特征保留原变换、资格列和缺值；`feature_recipe=null` 不重复处理。
 该示例生成无标签输入，训练时需另选标签及其成熟时间列。

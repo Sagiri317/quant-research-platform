@@ -141,7 +141,11 @@ def _training_daily(
     def values():
         with closing_iterator(
             iter_frozen_predictions(
-                frames(), result, read_window=span, output_window=span
+                frames(),
+                result,
+                read_window=span,
+                output_window=span,
+                target_definition=facts["target_definition"],
             )
         ) as predictions:
             for frame in predictions:

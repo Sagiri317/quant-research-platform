@@ -39,13 +39,13 @@ def is_rebalance_session(
 
 def sessions_to_next_rebalance_open(
     sessions: pd.DatetimeIndex, entry_at: pd.Timestamp, schedule: str
-) -> int:
-    """Count open-to-open sessions until the next planned execution."""
+) -> int | None:
+    """Count holding sessions when the calendar includes the next execution."""
     entry = sessions.get_loc(entry_at)
     for execution in range(entry + 1, len(sessions)):
         if is_rebalance_session(sessions[execution - 1], sessions[execution], schedule):
             return execution - entry
-    raise ValueError("portfolio_robust_holding_interval_missing")
+    return None
 
 
 def _validate_schedule(schedule: str) -> None:

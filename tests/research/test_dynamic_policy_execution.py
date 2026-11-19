@@ -269,6 +269,8 @@ def execution_episode(
         output_path=root / "predictions", output_chunks=[frame], metadata=metadata
     )
     parameters = {
+        "initial_capital": 1_000_000 * len(assets) if capital is None else capital,
+        "restore_at": "14:50:00",
         "initial_inventory": dict.fromkeys(assets, 100),
         "maximum_weights": dict.fromkeys(
             assets, min(1.0, 3000 / (capital or 1_000_000 * len(assets)))
@@ -278,8 +280,6 @@ def execution_episode(
         "minimum_commission": 5,
         "passive": {"queue_model": "conservative", "cancel_latency_ms": cancel_ms},
     }
-    if capital is not None:
-        parameters["initial_capital"] = capital
     return {
         "kind": "hft",
         "task": "dynamic_execution",
@@ -597,7 +597,6 @@ def test_inventory_action_waits_for_a_known_money_cap(monkeypatch):
         "feature_columns": ["prediction_score"],
         "prediction": {"paths": ["memory"]},
         "window": {"start": "2024-01-02T01:30:00", "end": "2024-01-02T01:30:07"},
-        "capital_scale": 0.01,
         "account": memory_account(
             monkeypatch, [(daily_view(panel), panel, signals)], etf_schedule(), params
         ),
@@ -1279,3 +1278,17 @@ def test_real_ppo_historical_early_stop_best_pair_and_frozen_backtest(
                 "output": str(tmp_path / "shared-endpoint"),
             }
         )
+
+
+def test_hold_baseline_keeps_the_initial_shares_on_the_same_signal_clock(tmp_path):
+    episode = execution_episode(tmp_path / "inputs", capital=10_000)
+    episode["account"]["parameters"]["restore_at"] = "14:45:00"
+    fills = {}
+    for strategy in ("hold", "immediate"):
+        root = backtest_policy(
+            dict(episode=episode, strategy=strategy, output=str(tmp_path / strategy))
+        )
+        ledger = read_portfolio_ledger_artifact(root / "ledger")
+        fills[strategy] = sum(len(batch.trades) for batch in ledger.iter_chunks())
+    assert fills["hold"] == 0
+    assert fills["immediate"] > 0

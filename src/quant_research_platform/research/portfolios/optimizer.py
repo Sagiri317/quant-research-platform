@@ -22,7 +22,6 @@ from scipy.optimize import (
 from scipy.sparse.linalg import LinearOperator, lsmr
 
 from quant_research_platform.contracts.portfolios import (
-    STOCK_NAME_WEIGHT_LIMIT,
     ExecutionAssumptions,
     PortfolioObjective,
     PortfolioTargetBlocked,
@@ -340,16 +339,16 @@ def optimize_portfolio(
     if absolute:
         pool_exit = (
             data["pool_exit"].to_numpy(dtype=bool)
-            if net_return and "pool_exit" in data
+            if "pool_exit" in data
             else np.zeros(len(data), dtype=bool)
         )
         if net_return:
             pool_exit = pool_exit | (
                 data[signal_column].le(0.0).to_numpy(dtype=bool) & ~cash
             )
-        zero_target = np.zeros(len(data), dtype=bool)
+        zero_target = pool_exit.copy()
         if net_return:
-            zero_target |= incomplete | pool_exit
+            zero_target |= incomplete
             if "maximum_weight" in data:
                 zero_target |= data.maximum_weight.eq(0.0)
         can_liquidate = (sellable >= current) & (capacity >= current)
@@ -1767,7 +1766,7 @@ def _portfolio_risk_limits(
     has_stocks = weights[~cash].sum() > 0.0
     stock_positive = has_stocks and benchmark[~cash].sum() > 0.0
     factor_active = _stock_leg_active_exposure(weights, benchmark, exposure, cash)
-    industry = np.array([name.startswith("industry_") for name in columns])
+    industry = np.array([name.startswith("industry_") for name in columns], dtype=bool)
     exposure_complete = stock_positive and np.isfinite(factor_active).all()
     exposure_roundoff = np.zeros(len(columns))
     if strict and stock_positive:
@@ -1905,7 +1904,7 @@ def _absolute_portfolio_risk_limits(
 ):
     """Evaluate the absolute optimizer's limits on actual post-fee holdings."""
     held = weights != 0.0
-    industry = np.array([name.startswith("industry_") for name in columns])
+    industry = np.array([name.startswith("industry_") for name in columns], dtype=bool)
     complete = (
         covariance is not None
         and np.isfinite(exposure[held]).all()
@@ -2511,8 +2510,3 @@ def _project_neutral_target(
     return pd.Series(
         weights, index=context.index, dtype="float64", name="target_weight"
     )
-
-
-WEEKLY_STOCK_RISK = AbsoluteRiskConfig(
-    name_weight_limit=STOCK_NAME_WEIGHT_LIMIT, fully_invested=True, solver_maxiter=None
-)

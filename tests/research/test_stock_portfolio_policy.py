@@ -14,7 +14,6 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.policies import PolicyDecision
-from quant_research_platform.research.policies.accounts import _episode
 from quant_research_platform.research.policies.portfolio_policy import (
     portfolio_policy_parameters,
     portfolio_targets,
@@ -209,10 +208,13 @@ def write_replay(tmp_path):
         output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
     )
     params = parameters()
-    for key in ("buy_threshold", "sell_threshold", "initial_capital", "restore_at"):
+    for key in ("buy_threshold", "sell_threshold"):
         del params[key]
     params.update(
-        initial_inventory={"a": 0, "b": 0}, maximum_weights={"a": 1.0, "b": 1.0}
+        initial_capital=10_000,
+        restore_at=None,
+        initial_inventory={"a": 0, "b": 0},
+        maximum_weights={"a": 1.0, "b": 1.0},
     )
     return {
         "strategy": "stock_portfolio",
@@ -224,7 +226,6 @@ def write_replay(tmp_path):
             "feature_columns": ["prediction_score"],
             "risk_aversion": 0.0,
             "unfinished_penalty_bps": 0.0,
-            "capital_scale": 0.00001,
             "window": {"start": "2024-01-02", "end": "2024-01-03"},
             "prediction": {"paths": [str(pred)]},
             "account": {
@@ -267,7 +268,4 @@ def test_native_stock_pred_cross_day_t1_no_restore_and_finite_capacity(
     assert facts["forecast_horizon_seconds"] == 30
     assert facts["decision_interval_seconds"] == 3
     assert facts["holding_period"] == "continuous_cross_session_holdings"
-    default = {**config["episode"]}
-    default.pop("capital_scale")
-    assert _episode(default)["account"]["parameters"]["initial_capital"] == 1e9
-    assert _episode(default)["account"]["parameters"]["restore_at"] is None
+    assert ledger.capital.initial_capital == 10_000

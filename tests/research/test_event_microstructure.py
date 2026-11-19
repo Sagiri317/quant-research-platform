@@ -70,7 +70,6 @@ def test_partial_first_trade_in_volume_window_and_same_millisecond_intervals():
         result.trade_volume_flow_imbalance.iloc[1:], [-1 / 3, 1 / 3, 1]
     )
     assert result.trade_interval_seconds.iloc[2] == 0
-    assert np.isnan(result.trade_intensity.iloc[2])
     assert result.trade_signed_run.tolist() == [1, -1, 1, 2]
     _, prefix = trade_statistics(trades.iloc[:3], config)
     pd.testing.assert_frame_equal(prefix, result.iloc[:3])
@@ -597,3 +596,30 @@ def test_multilevel_flow_missing_unused_quantity_survives_native_publication(tmp
     changed = compute_factors(observed, columns=columns)
     assert changed.loc[2:3, columns[:3]].isna().all().all()
     assert changed.bid_replenishment_30s.iloc[10:].isna().all()
+
+
+def test_quote_trade_pressure_gap_is_segment_local_and_requires_both_flows():
+    rows = []
+    for segment, start in enumerate(("2024-01-02 09:30", "2024-01-02 13:00")):
+        for i in range(12):
+            rows.append(
+                dict(
+                    market_id="a_share",
+                    asset_id="etf",
+                    segment_id=segment,
+                    timestamp=pd.Timestamp(start) + pd.Timedelta(seconds=3 * i),
+                    bid_px1=10.0,
+                    ask_px1=10.1,
+                    bid_vol1=100.0 + i,
+                    ask_vol1=100.0,
+                    observed_trade_volume=10.0 if segment == 0 else 0.0,
+                    observed_signed_trade_volume=-5.0 if segment == 0 else 0.0,
+                )
+            )
+    result = compute_factors(
+        pd.DataFrame(rows), columns=("quote_trade_pressure_gap_30s",)
+    )
+    x = result.quote_trade_pressure_gap_30s
+    assert x.iloc[:10].isna().all()
+    np.testing.assert_allclose(x.iloc[10:12], [1.5, 1.5])
+    assert x.iloc[12:].isna().all()

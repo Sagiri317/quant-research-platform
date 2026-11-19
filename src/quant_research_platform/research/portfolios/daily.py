@@ -32,7 +32,6 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_SIMPLE,
     PORTFOLIO_LEDGER_COST_COLUMNS,
     RESEARCH_VALUATION_POLICY,
-    STOCK_NAME_WEIGHT_LIMIT,
     ExecutedTrade,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
@@ -80,8 +79,10 @@ from quant_research_platform.research.portfolios.calibration import (
     alpha_interval_semantics,
     alpha_uncertainty_loading,
     calibrate_expected_alpha,
+    calibrated_cash_return,
     estimate_holding_return,
     return_cross_section,
+    score_return_cross_section,
 )
 from quant_research_platform.research.portfolios.construction import (
     _neutrality_context,
@@ -90,7 +91,6 @@ from quant_research_platform.research.portfolios.construction import (
     fund_stock_weights,
 )
 from quant_research_platform.research.portfolios.optimizer import (
-    WEEKLY_STOCK_RISK,
     AbsoluteRiskConfig,
     OptimizationResult,
     OptimizerConfig,
@@ -382,6 +382,7 @@ def backtest_a_share(
     optimizer_config: OptimizerConfig | AbsoluteRiskConfig | None = None,
     robust_config: RobustPortfolioConfig | None = None,
     return_horizon: int | None = None,
+    return_calibration: Mapping[str, int] | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     calibration_window: int | str = DEFAULT_CALIBRATION_WINDOW,
     on_final_calibration=None,
@@ -411,19 +412,29 @@ def backtest_a_share(
     if not isinstance(assumptions, ExecutionAssumptions):
         raise ValueError("portfolio_assumptions_invalid")
     _validate_windows(output_window, input_window, formal_dataset_window)
-    absolute = candidate.construction == "maximum_sharpe"
-    enhanced = candidate.construction in {"benchmark_enhanced", "maximum_sharpe"}
+    absolute = candidate.absolute
+    enhanced = candidate.uses_optimizer
     if decision_columns is not None and enhanced:
         raise ValueError("policy_and_enhanced_optimizer_are_separate_decisions")
     calibrated = candidate.construction == "benchmark_enhanced"
-    monetary = not calibrated and decision_columns is None
+    monetary = return_horizon is not None and decision_columns is None
+    if candidate.cash_utility:
+        if (
+            not isinstance(return_calibration, Mapping)
+            or set(return_calibration) != {"lookback_sessions", "min_sessions"}
+            or any(type(v) is not int for v in return_calibration.values())
+            or not 1
+            <= return_calibration["min_sessions"]
+            <= return_calibration["lookback_sessions"]
+        ):
+            raise ValueError("portfolio_return_calibration_invalid")
+    elif return_calibration is not None:
+        raise ValueError("portfolio_unused_return_calibration")
     if monetary and candidate.neutrality != "none":
         raise ValueError("positive_stock_portfolio_neutrality_unsupported")
-    if absolute:
-        if optimizer_config is not None and optimizer_config != WEEKLY_STOCK_RISK:
-            raise ValueError("maximum_sharpe_requires_weekly_stock_risk")
-        optimizer_config = WEEKLY_STOCK_RISK
-    if monetary != (return_horizon is not None):
+    if (
+        candidate.uses_monetary_score and decision_columns is None and not monetary
+    ) or (monetary and candidate.construction == "benchmark_enhanced"):
         raise ValueError("portfolio_raw_score_return_horizon_required")
     if not calibrated and frozen_calibration is not None:
         raise ValueError("portfolio_unused_calibration")
@@ -558,7 +569,7 @@ def backtest_a_share(
     amount_history: dict[tuple[str, pd.Timestamp], deque[float]] = {}
     factor_risk = (
         FactorRiskState(style_columns=risk_style_columns, config=risk_config)
-        if enhanced
+        if candidate.needs_risk
         else None
     )
     previous_risk_cross: pd.DataFrame | None = None
@@ -577,7 +588,7 @@ def backtest_a_share(
         history = TimeWindow(sessions[0], sessions[-1])
         panel_columns = (
             (*_ENHANCED_PANEL_COLUMNS, factor_risk.config.weight_column)
-            if enhanced
+            if candidate.needs_risk
             else _PANEL_COLUMNS
         )
         if candidate.construction == "quantile_float_cap" and decision_columns is None:
@@ -653,7 +664,7 @@ def backtest_a_share(
                 time_window=history,
                 retained=input_channels,
             )
-            if enhanced
+            if candidate.needs_risk
             else {}
         )
         risk_inputs = {
@@ -709,8 +720,8 @@ def backtest_a_share(
             produces_interval = decision_timestamp in output_intervals.index
             alpha: pd.Series | None = None
             current_cross: pd.DataFrame | None = None
-            if enhanced:
-                assert factor_risk is not None
+            if factor_risk is not None:
+                assert candidate.needs_risk
                 risk_frames = []
                 for context_at in risk_inputs.values() if not panel.empty else ():
                     context = context_at(decision_timestamp)
@@ -821,13 +832,20 @@ def backtest_a_share(
                         "portfolio_research_dataset_session_missing"
                     )
                 if monetary and not dataset.empty:
-                    moments = return_cross_section(
-                        dataset, return_label, return_available
-                    )
+                    if candidate.cash_utility:
+                        alpha = alpha_for_dataset(dataset)
+                        moments = score_return_cross_section(
+                            dataset, alpha, return_label, return_available
+                        )
+                    else:
+                        moments = return_cross_section(
+                            dataset, return_label, return_available
+                        )
                     if moments is not None:
                         return_history.append(moments)
                 if (
-                    decision_columns is None
+                    alpha is None
+                    and decision_columns is None
                     and (produces_interval or calibration_candidate)
                     and (not dataset.empty or panel.empty)
                 ):
@@ -880,15 +898,25 @@ def backtest_a_share(
                 nav = float(
                     holdings.sum() + cash + sum(entitlements.receivables.values())
                 )
-            initializing = not initial_decision_complete and decision_columns is None
+            initializing = (
+                not initial_decision_complete
+                and decision_columns is None
+                and (monetary or enhanced)
+            )
             scheduled = is_rebalance_session(
                 decision_timestamp, next_timestamp, candidate.rebalance_schedule
             )
             holding_sessions = None
-            if monetary and (scheduled or initializing) and alpha.notna().any():
+            if (
+                (monetary or robust_config is not None)
+                and (scheduled or initializing)
+                and alpha.notna().any()
+            ):
                 holding_sessions = sessions_to_next_rebalance_open(
                     trading_sessions, next_timestamp, candidate.rebalance_schedule
                 )
+                if holding_sessions is None:
+                    decision_skip_reason = "portfolio_holding_interval_unknown"
             holding_returns = None
             if monetary and holding_sessions is not None:
                 as_of = (
@@ -896,22 +924,32 @@ def backtest_a_share(
                     if explicit_decisions
                     else decision_timestamp + pd.Timedelta(hours=7)
                 )
-                holding_returns = estimate_holding_return(
+                estimate = (
+                    calibrated_cash_return
+                    if candidate.cash_utility
+                    else estimate_holding_return
+                )
+                holding_returns = estimate(
                     alpha,
                     return_history,
                     as_of=as_of,
                     label_sessions=return_horizon,
                     holding_sessions=holding_sessions,
+                    **(return_calibration or {}),
                 )
                 if holding_returns is None:
                     decision_skip_reason = (
-                        "portfolio_return_moment_history_insufficient"
+                        "portfolio_score_calibration_history_insufficient"
+                        if candidate.cash_utility
+                        else "portfolio_return_moment_history_insufficient"
                     )
             if enhanced:
-                assert alpha is not None and current_cross is not None
+                assert alpha is not None
                 decision_reason = (
-                    PORTFOLIO_DECISION_REASON_ROBUST
-                    if absolute or robust_config is not None
+                    candidate.construction
+                    if absolute
+                    else PORTFOLIO_DECISION_REASON_ROBUST
+                    if robust_config is not None
                     else PORTFOLIO_DECISION_REASON_BENCHMARK
                 )
                 membership_changed = (
@@ -973,16 +1011,6 @@ def backtest_a_share(
                         enhanced_decision = replace(
                             enhanced_decision, marked_size_assets=marked_size
                         )
-                    if (
-                        robust_config is not None
-                        and not absolute
-                        and (scheduled or initializing)
-                    ):
-                        holding_sessions = sessions_to_next_rebalance_open(
-                            trading_sessions,
-                            next_timestamp,
-                            candidate.rebalance_schedule,
-                        )
                     if holding_sessions is not None:
                         enhanced_decision = replace(
                             enhanced_decision, holding_sessions=holding_sessions
@@ -991,8 +1019,6 @@ def backtest_a_share(
                         enhanced_decision = replace(
                             enhanced_decision, expected_alpha=holding_returns
                         )
-                    if absolute or robust_config is not None:
-                        decision_reason = PORTFOLIO_DECISION_REASON_ROBUST
                     if maintenance:
                         target_override = benchmark_weights.copy(deep=True)
                         decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
@@ -1001,11 +1027,6 @@ def backtest_a_share(
                         holdings.div(nav).copy(deep=True)
                         if nav > 0
                         else holdings.multiply(0.0)
-                    )
-                    decision_reason = (
-                        PORTFOLIO_DECISION_REASON_ROBUST
-                        if absolute or robust_config is not None
-                        else PORTFOLIO_DECISION_REASON_BENCHMARK
                     )
                     if membership_changed:
                         # The proved membership snapshot authorizes independent
@@ -1606,6 +1627,14 @@ def _enhanced_decision(
             window=calibration_window,
         )
         expected = alpha * (0.0 if calibration.benchmark_only else calibration.slope)
+    if factor_risk is None:
+        return _EnhancedDecision(
+            benchmark_weights,
+            expected,
+            pd.DataFrame(columns=["asset_id"]),
+            None,
+            calibration,
+        )
     exposures = factor_risk.current_exposures(current_cross)
     try:
         risk = factor_risk.estimate()
@@ -1635,6 +1664,7 @@ def _optimizer_assets(
     eligible: pd.Series,
     receivable: float = 0.0,
     absolute: bool = False,
+    all_scored: bool = False,
 ) -> pd.DataFrame:
     assets = pd.Index(
         sorted(
@@ -1642,9 +1672,9 @@ def _optimizer_assets(
             | set(current_weights.index[current_weights.ne(0.0)])
             | (
                 set(
-                    expected_alpha.index[expected_alpha.gt(0.0)].intersection(
-                        eligible.index[eligible]
-                    )
+                    expected_alpha.index[
+                        expected_alpha.notna() if all_scored else expected_alpha.gt(0.0)
+                    ].intersection(eligible.index[eligible])
                 )
                 if absolute
                 else set()
@@ -1744,24 +1774,34 @@ def _build_session(
     pd.DataFrame,
 ]:
     dataset = dataset.set_index("asset_id", drop=False)
-    absolute = candidate.construction == "maximum_sharpe"
-    config = optimizer_config or (WEEKLY_STOCK_RISK if absolute else OptimizerConfig())
+    absolute = candidate.absolute
+    config = optimizer_config or (
+        OptimizerConfig()
+        if candidate.construction == "benchmark_enhanced"
+        else AbsoluteRiskConfig()
+    )
+    name_limit = (
+        config.name_weight_limit if isinstance(config, AbsoluteRiskConfig) else None
+    )
     if initializing:
         config = replace(config, target_turnover_limit=None if absolute else 1.0)
     fully_invested = absolute and config.fully_invested
     objective = (
         PortfolioObjective.NET_RETURN_TO_RISK
-        if absolute
+        if candidate.construction == "maximum_sharpe"
         else PortfolioObjective.CALIBRATED
     )
-    calibrated = objective == PortfolioObjective.CALIBRATED
-    risk_aversion = robust_config.risk_aversion if robust_config and calibrated else 0.0
+    calibrated = candidate.construction == "benchmark_enhanced"
+    risk_aversion = candidate.risk_aversion or (
+        robust_config.risk_aversion if robust_config and calibrated else 0.0
+    )
     use_signal = enhanced_decision is not None and (
         not calibrated or not enhanced_decision.calibration.benchmark_only
     )
     optimize_target = use_signal or (
         fully_invested
         and enhanced_decision is not None
+        and enhanced_decision.calibration is not None
         and enhanced_decision.calibration.status == "DEFINED"
     )
     if not np.isclose(
@@ -1842,6 +1882,7 @@ def _build_session(
         if (
             absolute
             and optimize_target
+            and candidate.needs_risk
             and enhanced_decision.risk is None
             and decision_skip_reason is None
         ):
@@ -1888,7 +1929,7 @@ def _build_session(
                 scheduled = False
         if neutrality is not None:
             prediction_eligible &= prediction_eligible.index.isin(neutrality.index)
-    if holding_returns is not None:
+    if holding_returns is not None and not candidate.cash_utility:
         exit_assets = exit_assets.union(holding_returns.index[holding_returns.le(0.0)])
     optimization: OptimizationResult | None = None
     loading = None
@@ -1896,6 +1937,11 @@ def _build_session(
     simple = (
         candidate.neutrality == "none"
         and candidate.construction in {"quantile_equal_weight", "quantile_float_cap"}
+        and (
+            holding_returns is not None
+            or candidate.positive_returns_only
+            or name_limit is not None
+        )
         and not external_target
         and target_override is None
     )
@@ -1974,7 +2020,7 @@ def _build_session(
                 capacity.mask(missing_adv, 1.0),
                 locked,
                 stock_budget,
-                STOCK_NAME_WEIGHT_LIMIT,
+                1.0 if name_limit is None else name_limit,
             )
             blocked_demand = ((before_adv - current_weights) * nav).loc[missing_adv]
             blocked_demand = blocked_demand.loc[blocked_demand.ne(0)]
@@ -1984,7 +2030,7 @@ def _build_session(
             capacity,
             locked,
             stock_budget,
-            STOCK_NAME_WEIGHT_LIMIT,
+            1.0 if name_limit is None else name_limit,
         )
     elif not simple:
         if missing_scores.any() and not decision_skip_reason and nav > 0:
@@ -2098,13 +2144,14 @@ def _build_session(
             adv=average_volume(decision_panel.reindex(assets)),
             eligible=eligible,
             absolute=absolute,
+            all_scored=candidate.cash_utility,
         )
     if (
         nav > 0
         and not decision_skip_reason
         and target_override is None
         and optimize_target
-        and enhanced_decision.risk is not None
+        and (enhanced_decision.risk is not None or not candidate.needs_risk)
     ):
         assets_frame["is_financial"] = False
         stock = ~assets_frame.is_cash
@@ -2216,6 +2263,7 @@ def _build_session(
                 cash_column="is_cash",
                 receivable_weight=float(decision_receivable / nav),
                 objective_kind=objective,
+                risk_aversion=risk_aversion,
                 holding_sessions=enhanced_decision.holding_sessions,
                 risk_annualization=risk.annualization_factor
                 if risk is not None
@@ -2223,7 +2271,6 @@ def _build_session(
                 **(
                     {
                         "uncertainty_loading": loading,
-                        "risk_aversion": robust_config.risk_aversion,
                     }
                     if robust_config is not None and calibrated
                     else {}
@@ -2383,7 +2430,7 @@ def _build_session(
                     industry_columns,
                     style_columns,
                     config,
-                    True,
+                    candidate.needs_risk,
                     "expected_alpha",
                 )
                 net_bounds = _net_name_bounds(
@@ -2501,7 +2548,7 @@ def _build_session(
             elif simple and neutrality is None:
                 realized = rows.post_trade_notional.to_numpy() / result.nav_after
                 excess = _normalized_risk_excess(
-                    realized, STOCK_NAME_WEIGHT_LIMIT, strict=strict
+                    realized, 1.0 if name_limit is None else name_limit, strict=strict
                 )
                 worst = float(np.max(excess, initial=0.0))
                 facts = {
@@ -2548,6 +2595,8 @@ def _build_session(
                     facts,
                     (*violation, shortfall, -actual_utility(result), distance),
                 )
+            if candidate.cash_utility and optimization is not None:
+                return result, facts, (*violation, -actual_utility(result), distance)
             return result, facts, (*violation, distance)
 
         repair = (
@@ -2600,7 +2649,7 @@ def _build_session(
                 increment,
                 evaluate,
                 single_name_limit=(
-                    STOCK_NAME_WEIGHT_LIMIT
+                    name_limit
                     if simple and neutrality is None
                     else config.name_weight_limit
                     if absolute
@@ -2681,7 +2730,9 @@ def _build_session(
                     "robust_confidence": robust_config.confidence,
                     "robust_risk_aversion": robust_config.risk_aversion,
                 }
-                if calibrated
+                if robust_config is not None and calibrated
+                else {"risk_aversion": risk_aversion}
+                if candidate.cash_utility
                 else {}
             ),
         }
@@ -2695,7 +2746,11 @@ def _build_session(
                 "realized_constraints_reason": decision_skip_reason,
             },
         )
-    if enhanced_decision is not None and enhanced_decision.risk is None:
+    if (
+        candidate.needs_risk
+        and enhanced_decision is not None
+        and enhanced_decision.risk is None
+    ):
         asset_ledger.attrs.setdefault(
             "realized_constraints",
             {

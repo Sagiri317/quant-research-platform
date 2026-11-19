@@ -19,7 +19,7 @@ from quant_research_platform.research.models.scaler import (
 )
 
 
-def _network(algorithm, width, parameters):
+def _network(algorithm, width, parameters, *, columns=()):
     if algorithm in DEEPLOB_ALGORITHMS:
         from quant_research_platform.research.models.deeplob import network
 
@@ -28,13 +28,18 @@ def _network(algorithm, width, parameters):
     from torch import nn
 
     hidden = parameters["hidden_size"]
+    snapshots = set(parameters.get("snapshot_columns", ()))
+    static = [i for i, column in enumerate(columns) if column in snapshots]
+    dynamic = [i for i in range(width) if i not in static]
 
     class Network(nn.Module):
         def __init__(self):
             super().__init__()
-            if algorithm == "lstm_regressor":
+            if not dynamic:
+                self.encoder = None
+            elif algorithm == "lstm_regressor":
                 self.encoder = nn.LSTM(
-                    width,
+                    len(dynamic),
                     hidden,
                     parameters["num_layers"],
                     batch_first=True,
@@ -43,7 +48,7 @@ def _network(algorithm, width, parameters):
                     else 0,
                 )
             else:
-                self.projection = nn.Linear(width, hidden)
+                self.projection = nn.Linear(len(dynamic), hidden)
                 self.position = nn.Embedding(parameters["sequence_length"], hidden)
                 layer_parameters = dict(
                     d_model=hidden,
@@ -66,14 +71,23 @@ def _network(algorithm, width, parameters):
                         self.encoder.layers[index] = nn.TransformerEncoderLayer(
                             **layer_parameters
                         )
-            self.output = nn.Linear(hidden, 1)
-            if algorithm == "lstm_regressor" and parameters.get(
-                "input_gate_xavier_initialization", False
+            self.dropout = nn.Dropout(parameters.get("head_dropout", 0.0))
+            self.output = nn.Linear((hidden if dynamic else 0) + len(static), 1)
+            if (
+                dynamic
+                and algorithm == "lstm_regressor"
+                and parameters.get("input_gate_xavier_initialization", False)
             ):
                 for gate in self.encoder.weight_ih_l0.chunk(4, dim=0):
                     nn.init.xavier_uniform_(gate)
 
         def forward(self, values, lengths):
+            if static:
+                rows = torch.arange(len(values), device=values.device)
+                snapshot = values[rows, lengths.to(values.device) - 1][:, static]
+                if not dynamic:
+                    return self.output(self.dropout(snapshot)).squeeze(-1)
+                values = values[:, :, dynamic]
             if algorithm == "lstm_regressor":
                 packed = nn.utils.rnn.pack_padded_sequence(
                     values, lengths.cpu(), batch_first=True, enforce_sorted=False
@@ -90,7 +104,9 @@ def _network(algorithm, width, parameters):
                 final = encoded[
                     torch.arange(len(values), device=values.device), lengths - 1
                 ]
-            return self.output(final).squeeze(-1)
+            if static:
+                final = torch.cat((final, snapshot), dim=1)
+            return self.output(self.dropout(final)).squeeze(-1)
 
     return Network()
 
@@ -154,7 +170,10 @@ class SequencePredictor:
         # Loading weights must not consume the caller's random stream.
         with torch.random.fork_rng():
             network = _network(
-                self.algorithm, len(self.scaler.columns), self.parameters
+                self.algorithm,
+                len(self.scaler.columns),
+                self.parameters,
+                columns=self.scaler.columns,
             )
         network.load_state_dict(self.state)
         network.to(device).eval()
@@ -424,7 +443,9 @@ def fit_sequence(prepared, spec, validation=None, *, fit_inputs=None):
     rng = np.random.default_rng(spec.random_seed)
     with torch.random.fork_rng():
         torch.manual_seed(spec.random_seed)
-        network = _network(spec.model_algorithm, matrix.shape[1], parameters).to(device)
+        network = _network(
+            spec.model_algorithm, matrix.shape[1], parameters, columns=scaler.columns
+        ).to(device)
         optimizer = torch.optim.AdamW(
             network.parameters(),
             lr=parameters["learning_rate"],

@@ -54,6 +54,9 @@ def _inference_blocker(manifest):
 
 
 def factor_catalog() -> FactorCatalog:
+    from quant_research_platform.research.factors.distributions import (
+        definitions as distribution_definitions,
+    )
     from quant_research_platform.research.factors.financing import (
         factor_definitions as financing_definitions,
     )
@@ -79,6 +82,7 @@ def factor_catalog() -> FactorCatalog:
             *financing_definitions(),
             *linked_definitions(),
             *fund_definitions(),
+            *distribution_definitions(),
             *factor_definitions(),
             *market_structure_definitions(),
             *style_definitions(),

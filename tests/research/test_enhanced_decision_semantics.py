@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from dataclasses import asdict, replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -726,6 +725,8 @@ def test_every_construction_reserves_receivable_in_executable_target(
             neutrality=neutrality,
         )
         args["enhanced_decision"] = None
+        if neutrality == "none":
+            args["optimizer_config"] = daily.AbsoluteRiskConfig(name_weight_limit=0.02)
     account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
     if construction != "benchmark_enhanced" and neutrality == "none":
@@ -764,6 +765,7 @@ def test_partial_missing_target_keeps_held_weight_and_reserves_receivable():
         risk_style_columns=(),
     )
     args["alpha"].loc["a"] = np.nan
+    args["optimizer_config"] = daily.AbsoluteRiskConfig(name_weight_limit=0.02)
     account, _, _, _, ledger = daily._build_session(**args)
     assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
         [0.45, 0.02]
@@ -849,30 +851,8 @@ def _simple_native_config(enhanced_config, tmp_path, construction):
     return config
 
 
-def test_native_missing_selected_float_cap_preserves_account(
-    enhanced_config, tmp_path, monkeypatch
-):
-    from quant_research_platform.artifacts.outputs.prediction import (
-        read_predictions,
-        write_prediction_outputs,
-    )
-    from quant_research_platform.research.portfolios import calibration
-
-    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
+def test_native_missing_selected_float_cap_preserves_account(enhanced_config, tmp_path):
     config = _simple_native_config(enhanced_config, tmp_path, "quantile_float_cap")
-    pred = config["predictions"][0]
-    scores, meta = read_predictions(Path(pred["path"]))
-    meta["model_facts"]["model"]["target_column"] = "model_target"
-    meta["model_facts"]["target_definition"] = {
-        "source_label": "forward_return_1d",
-        "target_transform": "date_zscore",
-        "target_clip": "none",
-    }
-    pred["path"] = str(
-        write_prediction_outputs(
-            output_path=tmp_path / "scores", output_chunks=[scores], metadata=meta
-        )
-    )
     panel = read_dataset(config["inputs"]["panel"])
     panel.loc[
         panel.timestamp.eq("2023-01-04") & panel.asset_id.eq("a0"), "float_market_cap"

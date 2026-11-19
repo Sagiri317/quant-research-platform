@@ -166,6 +166,7 @@ def _build_producer(
     frozen_calibration: daily.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "quantile_equal_weight",
+    positive_returns_only: bool = False,
     raw_bar_orders=None,
     initial_nav=100.0,
     risk_config=None,
@@ -189,17 +190,15 @@ def _build_producer(
             prediction_selector="champion",
             candidate_id="synthetic_quantile_equal_weight",
             construction=construction,
+            positive_returns_only=positive_returns_only,
             rebalance_schedule="daily",
             top_quantile=0.5,
             benchmark_id=None,
         )
     frames = dict(frames)
-    if not enhanced:
+    if candidate.positive_returns_only:
         from quant_research_platform.research.portfolios import calibration
 
-        # Exercise order/ledger boundary cases at the intended notionals in this
-        # two-name market. Formal strategy tests use the real 2% concentration.
-        monkeypatch.setattr(daily, "STOCK_NAME_WEIGHT_LIMIT", 1.0)
         # This short accounting fixture needs one mature prior cross-section.
         monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
         frames["dataset"] = frames["dataset"].assign(
@@ -415,7 +414,7 @@ def _build_producer(
 
     def output():
         chunks = daily.backtest_a_share(
-            return_horizon=None if enhanced else 1,
+            return_horizon=1 if candidate.positive_returns_only else None,
             candidate=candidate,
             inputs={
                 "dataset": roots["dataset"],
@@ -1809,6 +1808,7 @@ def test_weekly_equal_weight_buys_at_the_first_available_open(tmp_path, monkeypa
         selection_group="global",
         prediction_selector="champion",
         candidate_id="weekly",
+        positive_returns_only=True,
         construction="quantile_equal_weight",
         rebalance_schedule="weekly-last-trading-day",
         top_quantile=0.5,
@@ -2134,6 +2134,7 @@ def test_simple_producer_keeps_short_adv_history_unknown(
     output, _calls = _build_producer(
         tmp_path,
         monkeypatch,
+        positive_returns_only=True,
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
@@ -2537,6 +2538,7 @@ def test_feature_missing_held_asset_keeps_saved_prediction(
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
+        positive_returns_only=True,
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
@@ -3003,6 +3005,7 @@ def test_simple_producer_retains_order_and_unknown_adv_window(
     output, _calls = _build_producer(
         tmp_path,
         monkeypatch,
+        positive_returns_only=True,
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,

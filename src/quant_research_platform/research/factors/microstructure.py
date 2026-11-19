@@ -51,6 +51,14 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
         )
     requested = set(columns)
     needed = requested.copy()
+    if "quote_trade_pressure_gap_30s" in requested:
+        needed.update(
+            (
+                "book_ofi_30s",
+                "observed_trade_volume_30s",
+                "observed_signed_trade_volume_30s",
+            )
+        )
     if "trade_activity_ratio_30_300s" in requested:
         needed.add("observed_trade_volume_30s")
     if requested & {"flow_absorption_30s", "drawdown_sell_pressure_300s"}:
@@ -111,6 +119,10 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                 np.array([1, -1]),
             )
             ofi = pd.Series(flow[:, 0] - flow[:, 1])
+            if "quote_trade_pressure_gap_30s" in needed:
+                gross_quote_flow = _trailing_sum(
+                    pd.Series(np.abs(flow).sum(axis=1)), work.timestamp, 30
+                )
             if "book_ofi" in needed:
                 values["book_ofi"] = ofi
             if "depth_normalized_ofi" in needed:
@@ -152,6 +164,11 @@ def compute_factors(panel, *, columns=None, ofi_halflife_seconds=30):
                 values[f"{column}_30s"] = _trailing_sum(
                     work[column], work.timestamp, 30
                 )
+        if "quote_trade_pressure_gap_30s" in needed:
+            volume = values.observed_trade_volume_30s
+            values["quote_trade_pressure_gap_30s"] = values.book_ofi_30s / np.where(
+                gross_quote_flow > 0, gross_quote_flow, np.nan
+            ) - values.observed_signed_trade_volume_30s / volume.where(volume > 0)
         extended = (
             requested - set(values.columns) - protocol.INTRADAY_THEME_FACTORS.keys()
         )

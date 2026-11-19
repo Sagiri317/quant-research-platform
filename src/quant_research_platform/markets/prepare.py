@@ -130,7 +130,11 @@ def prepare(config: Mapping) -> Path:
                     )
                 },
             )
-        elif spec.data_id in {"linked_market_factors", "fund_flow_factors"}:
+        elif spec.data_id in {
+            "linked_market_factors",
+            "fund_flow_factors",
+            "cash_distribution_factors",
+        }:
             from .implementations.a_share.processed import public_factors as recipe
 
             producer, configure_spec, kwargs = (

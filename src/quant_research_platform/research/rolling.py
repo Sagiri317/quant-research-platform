@@ -19,6 +19,7 @@ from quant_research_platform.contracts.models import (
     DEEPLOB_ALGORITHMS,
     SEQUENCE_ALGORITHMS,
     _model_spec,
+    _target_definition,
     model_spec_payload,
     sequence_context_columns,
     validate_model_input_roles,
@@ -31,6 +32,9 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations.time_series import (
     daily_signal_metrics,
 )
+from quant_research_platform.research.factors.selection import (
+    cluster_exposures,
+)
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.models.fitting import (
     model_training_read_columns,
@@ -39,7 +43,10 @@ from quant_research_platform.research.models.fitting import (
 from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
 )
-from quant_research_platform.research.predictions.outputs import prediction_input_mask
+from quant_research_platform.research.predictions.outputs import (
+    centered_target_scores,
+    prediction_input_mask,
+)
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     iter_dataset_chunks,
@@ -146,6 +153,7 @@ def _config(config, *, session_mode):
             "sessions",
             "validation_sessions",
             "parameter_candidates",
+            "absolute_rank_correlation",
             "selection_metric",
             *({"min_train_sessions", "prediction_sessions"} if session_mode else ()),
         },
@@ -155,6 +163,10 @@ def _config(config, *, session_mode):
         "daily_rank_ic",
     ):
         raise ValueError("rolling_selection_metric_invalid")
+    if "absolute_rank_correlation" in config:
+        threshold = config["absolute_rank_correlation"]
+        if type(threshold) not in (int, float) or not 0 < threshold <= 1:
+            raise ValueError("rolling_exposure_correlation_invalid")
     return config
 
 
@@ -285,7 +297,46 @@ def _historical_validation(fold, session, candidates, days, count):
     )
 
 
-def _select_inputs(fold, session, candidates):
+def _training_exposures(session, fold, spec, availability, axis):
+    cutoff = pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns")
+    columns = model_training_read_columns(
+        ("timestamp", "asset_id"),
+        spec.input_columns,
+        label_column=spec.target_column,
+        sample_filter_mode=spec.sample_filter_mode,
+        availability_column=availability,
+    )
+    if (
+        axis == "single_asset_time_series"
+        and "segment_id" in session.spec["column_roles"]
+    ):
+        columns = (*columns, "segment_id")
+    start, end = pd.Timestamp(fold.train.start), pd.Timestamp(fold.train.end)
+    for month in pd.period_range(start, end, freq="M"):
+        window = TimeWindow(
+            max(start, month.start_time).date(), min(end, month.end_time).date()
+        )
+        frame = materialize_dataset_session(
+            session.filtered_view(window).projected_view(columns)
+        )
+        mature = label_maturity_mask(
+            frame,
+            fitting_cutoff=cutoff,
+            availability_column=availability,
+            target_column=spec.target_column,
+        )
+        legal, _ = apply_filter_mode(
+            frame.loc[mature],
+            mode=spec.sample_filter_mode,
+            metadata_key="sample_filter_mode",
+        )
+        for _, day in legal.groupby(legal.timestamp.dt.normalize(), sort=True):
+            yield day
+
+
+def _select_inputs(
+    fold, session, candidates, *, correlation_threshold=None, axis=None, preferred=()
+):
     groups = {}
     for _, spec in candidates:
         if spec.model_algorithm in DEEPLOB_ALGORITHMS:
@@ -300,6 +351,15 @@ def _select_inputs(fold, session, candidates):
         availability = session.spec.get("label_availability_columns", {}).get(
             spec.target_column, training_availability_columns(spec.target_column)[0]
         )
+        if correlation_threshold is not None:
+            groups[key] = cluster_exposures(
+                _training_exposures(session, fold, spec, availability, axis),
+                spec.input_columns,
+                axis=axis,
+                threshold=correlation_threshold,
+                preferred=preferred,
+            )
+            continue
         pending, first, varying = set(spec.input_columns), {}, set()
         cutoff = pd.Timestamp(fold.validation.start) - pd.Timedelta(1, "ns")
         training = session.filtered_view(fold.train)
@@ -410,7 +470,7 @@ def _validation_predictions(frames, spec, prediction_model):
     return values
 
 
-def _select(config, fold, session, candidates, calendar):
+def _select(config, fold, session, candidates, calendar, preferred=()):
     from quant_research_platform.research.models.production import (
         _fit_input_key,
         _fit_prepared,
@@ -419,7 +479,14 @@ def _select(config, fold, session, candidates, calendar):
         _prepare_model_inputs,
     )
 
-    candidates, input_groups = _select_inputs(fold, session, candidates)
+    candidates, input_groups = _select_inputs(
+        fold,
+        session,
+        candidates,
+        correlation_threshold=config.get("absolute_rank_correlation"),
+        axis=config["evaluation"].get("evaluation_axis", "cross_sectional"),
+        preferred=preferred,
+    )
     target = candidates[0][1].target_column
     availability = session.spec.get("label_availability_columns", {}).get(
         target, training_availability_columns(target)[0]
@@ -476,6 +543,7 @@ def _select(config, fold, session, candidates, calendar):
             validation, mode=mode, metadata_key="sample_filter_mode"
         )
         signal_domain &= validation.index.isin(filtered.index)
+    definition = _target_definition(session.spec, target, session.manifest)
     predictions, rows = [], []
     for _, family in groupby(
         candidates,
@@ -532,9 +600,19 @@ def _select(config, fold, session, candidates, calendar):
                 values = _validation_predictions(
                     validation_frames, spec, result.prediction_model
                 )
-                signal_domain &= prediction_input_mask(
-                    validation, result.metadata
+                valid = prediction_input_mask(validation, result.metadata)
+                eligible, _ = apply_filter_mode(
+                    validation,
+                    mode=spec.sample_filter_mode,
+                    metadata_key="sample_filter_mode",
+                )
+                valid &= validation.index.isin(eligible.index)
+                values[valid] = centered_target_scores(
+                    pd.Series(values[valid], index=validation.index[valid]),
+                    validation.timestamp.loc[valid],
+                    definition,
                 ).to_numpy()
+                signal_domain &= valid.to_numpy()
                 predictions.append(values)
                 rows.append(
                     {
@@ -797,6 +875,7 @@ def _run(config, folds, days):
         raise ValueError("quarterly_one_prediction_signal_required")
     write_qrp_json_file(root / "config.json", config)
     results = []
+    preferred = ()
     for fold in folds:
         history = TimeWindow(fold.train.start, fold.validation.end)
         selected_fold = _historical_validation(
@@ -811,8 +890,9 @@ def _run(config, folds, days):
         window = _window_payload(fold.prediction)
         cutoff = pd.Timestamp(fold.prediction.start) - pd.Timedelta(nanoseconds=1)
         for model, parameters, selection in _select(
-            config, fold, session, candidates, calendar
+            config, fold, session, candidates, calendar, preferred
         ):
+            preferred = selection["inputs"]["retained"]
             destination = root / fold.fold_id / model["model_id"]
             trained = fit(
                 {

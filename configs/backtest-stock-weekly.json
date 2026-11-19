@@ -1,8 +1,8 @@
 {
   "candidate": {
-    "candidate_id": "stock_weekly_maximum_sharpe",
+    "candidate_id": "xgboost_mean_variance",
     "selection_group": "quarterly",
-    "construction": "maximum_sharpe",
+    "construction": "mean_variance",
     "prediction_selector": "xgboost",
     "rebalance_schedule": "weekly-last-trading-day",
     "top_quantile": null,
@@ -13,10 +13,11 @@
       "momentum_252_20",
       "residual_volatility_60d",
       "amihud_60d"
-    ]
+    ],
+    "risk_aversion": 5.0
   },
   "inputs": {
-    "dataset": "data/research/a_share/stock/daily/factors",
+    "dataset": "data/research/a_share/stock/daily/exposure-model-inputs",
     "panel": "data/interim/portfolio-suspension-inputs/market_panel",
     "execution": "data/processed/a_share/stock/daily/execution",
     "calendar": "data/interim/csmar-20261110/trading_calendar",
@@ -30,140 +31,140 @@
   },
   "predictions": [
     {
-      "path": "results/a_share/stock/daily/models/2022Q1/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2022Q1/xgboost/predictions",
       "window": {
         "end": "2022-03-31",
         "start": "2022-01-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2022Q2/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2022Q2/xgboost/predictions",
       "window": {
         "end": "2022-06-30",
         "start": "2022-04-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2022Q3/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2022Q3/xgboost/predictions",
       "window": {
         "end": "2022-09-30",
         "start": "2022-07-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2022Q4/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2022Q4/xgboost/predictions",
       "window": {
         "end": "2022-12-31",
         "start": "2022-10-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2023Q1/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2023Q1/xgboost/predictions",
       "window": {
         "end": "2023-03-31",
         "start": "2023-01-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2023Q2/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2023Q2/xgboost/predictions",
       "window": {
         "end": "2023-06-30",
         "start": "2023-04-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2023Q3/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2023Q3/xgboost/predictions",
       "window": {
         "end": "2023-09-30",
         "start": "2023-07-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2023Q4/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2023Q4/xgboost/predictions",
       "window": {
         "end": "2023-12-31",
         "start": "2023-10-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2024Q1/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2024Q1/xgboost/predictions",
       "window": {
         "end": "2024-03-31",
         "start": "2024-01-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2024Q2/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2024Q2/xgboost/predictions",
       "window": {
         "end": "2024-06-30",
         "start": "2024-04-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2024Q3/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2024Q3/xgboost/predictions",
       "window": {
         "end": "2024-09-30",
         "start": "2024-07-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2024Q4/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2024Q4/xgboost/predictions",
       "window": {
         "end": "2024-12-31",
         "start": "2024-10-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2025Q1/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2025Q1/xgboost/predictions",
       "window": {
         "end": "2025-03-31",
         "start": "2025-01-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2025Q2/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2025Q2/xgboost/predictions",
       "window": {
         "end": "2025-06-30",
         "start": "2025-04-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2025Q3/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2025Q3/xgboost/predictions",
       "window": {
         "end": "2025-09-30",
         "start": "2025-07-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2025Q4/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2025Q4/xgboost/predictions",
       "window": {
         "end": "2025-12-31",
         "start": "2025-10-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2026Q1/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2026Q1/xgboost/predictions",
       "window": {
         "end": "2026-03-31",
         "start": "2026-01-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2026Q2/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2026Q2/xgboost/predictions",
       "window": {
         "end": "2026-06-30",
         "start": "2026-04-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2026Q3/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2026Q3/xgboost/predictions",
       "window": {
         "end": "2026-09-30",
         "start": "2026-07-01"
       }
     },
     {
-      "path": "results/a_share/stock/daily/models/2026Q4/xgboost/predictions",
+      "path": "results/a_share/stock/daily/exposure-models/2026Q4/xgboost/predictions",
       "window": {
         "end": "2026-10-30",
         "start": "2026-10-01"
@@ -196,5 +197,12 @@
     ],
     "minimum_commission": 5.0
   },
-  "output": "results/a_share/stock/weekly/portfolios/maximum_sharpe"
+  "output": "results/a_share/stock/weekly/utility/xgboost/mean_variance",
+  "optimizer_config": {
+    "name_weight_limit": 0.02
+  },
+  "return_calibration": {
+    "lookback_sessions": 252,
+    "min_sessions": 20
+  }
 }

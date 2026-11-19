@@ -98,8 +98,9 @@ def lookup(arguments, state):
                         )
                         if owner != name:
                             continue
+                        relative = example.relative_to(examples).as_posix()
                         text += (
-                            f"\nNative config example: {example.relative_to(examples).as_posix()}. "
+                            f"\nNative config example: {relative}. "
                             "Paths and dates are examples, not task inputs.\n"
                             + example.read_text(encoding="utf-8")
                         )

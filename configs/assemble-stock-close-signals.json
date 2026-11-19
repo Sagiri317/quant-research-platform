@@ -1,0 +1,29 @@
+{
+  "market_id": "a_share",
+  "dataset_id": "stock_close_signals",
+  "base_input_data_id": "market",
+  "inputs": {
+    "market": {
+      "path": "data/interim/portfolio-suspension-inputs/market_panel",
+      "columns": [
+        "market_type"
+      ]
+    },
+    "seasonality": "data/processed/a_share/stock/daily/calendar-seasonality",
+    "leadership": "data/processed/a_share/stock/daily/size-volatility-interaction"
+  },
+  "factor_columns": [
+    "calendar_month_return_5y",
+    "large_cap_low_vol_leadership_20d"
+  ],
+  "feature_columns": [],
+  "label_columns": [],
+  "context_columns": [
+    "market_type"
+  ],
+  "time_window": {
+    "start": "2013-12-31",
+    "end": "2026-10-29"
+  },
+  "output_root": "data/processed/a_share/stock/daily/close-signals"
+}

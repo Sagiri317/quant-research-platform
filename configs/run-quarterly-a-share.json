@@ -1,6 +1,6 @@
 {
-  "inputs": "data/research/a_share/stock/daily/factors",
-  "output": "results/a_share/stock/daily/models",
+  "inputs": "data/research/a_share/stock/daily/exposure-model-inputs",
+  "output": "results/a_share/stock/daily/exposure-models",
   "market_id": "a_share",
   "models": [
     {
@@ -53,16 +53,35 @@
         "early_stopping_rounds": 5,
         "sequence_length": 60,
         "hidden_size": 64,
-        "num_layers": 2,
+        "num_layers": 1,
         "input_gate_xavier_initialization": true,
         "batch_size": 4096,
-        "learning_rate": 0.00003,
+        "learning_rate": 3e-05,
         "weight_decay": 0.01,
-        "dropout": 0.3,
+        "dropout": 0.0,
         "device": "cuda",
         "preload_inputs": false,
         "sequence_group_columns": [
           "listing_date"
+        ],
+        "head_dropout": 0.1,
+        "snapshot_columns": [
+          "feature_pre_neutral_log_total_market_cap",
+          "log_total_market_cap",
+          "feature_pre_neutral_log_float_market_cap",
+          "log_float_market_cap",
+          "feature_pre_neutral_calendar_month_return_5y",
+          "calendar_month_return_5y",
+          "feature_pre_neutral_cash_dividend_yield_1y",
+          "cash_dividend_yield_1y",
+          "feature_pre_neutral_persistent_dividend_low_risk",
+          "persistent_dividend_low_risk",
+          "feature_pre_neutral_cn_fund_ownership_float_share",
+          "cn_fund_ownership_float_share",
+          "feature_pre_neutral_cn_fund_holder_concentration",
+          "cn_fund_holder_concentration",
+          "feature_pre_neutral_cn_disclosed_ownership_change",
+          "cn_disclosed_ownership_change"
         ]
       },
       "random_seed": 42,
@@ -78,18 +97,35 @@
         "early_stopping_rounds": 5,
         "sequence_length": 60,
         "hidden_size": 64,
-        "num_layers": 2,
+        "num_layers": 1,
         "n_heads": 4,
         "norm_first": true,
-        "independent_layer_initialization": true,
         "batch_size": 2048,
         "learning_rate": 0.0001,
         "weight_decay": 0.01,
-        "dropout": 0.2,
+        "dropout": 0.1,
         "device": "cuda",
         "preload_inputs": false,
         "sequence_group_columns": [
           "listing_date"
+        ],
+        "snapshot_columns": [
+          "feature_pre_neutral_log_total_market_cap",
+          "log_total_market_cap",
+          "feature_pre_neutral_log_float_market_cap",
+          "log_float_market_cap",
+          "feature_pre_neutral_calendar_month_return_5y",
+          "calendar_month_return_5y",
+          "feature_pre_neutral_cash_dividend_yield_1y",
+          "cash_dividend_yield_1y",
+          "feature_pre_neutral_persistent_dividend_low_risk",
+          "persistent_dividend_low_risk",
+          "feature_pre_neutral_cn_fund_ownership_float_share",
+          "cn_fund_ownership_float_share",
+          "feature_pre_neutral_cn_fund_holder_concentration",
+          "cn_fund_holder_concentration",
+          "feature_pre_neutral_cn_disclosed_ownership_change",
+          "cn_disclosed_ownership_change"
         ]
       },
       "random_seed": 42,
@@ -110,7 +146,7 @@
   "evaluation": {
     "evaluation_id": "stock_quarterly_models",
     "market_id": "a_share",
-    "research_dataset_id": "stock_model_inputs",
+    "research_dataset_id": "stock_exposure_inputs",
     "signals": [
       {
         "signal_id": "model",
@@ -140,34 +176,24 @@
       }
     ],
     "xgboost": [
+      {},
       {
-        "max_depth": 3,
-        "reg_lambda": 10.0
-      },
-      {
-        "max_depth": 6,
-        "reg_lambda": 10.0
-      },
-      {
-        "max_depth": 6,
-        "reg_lambda": 100.0
-      },
-      {
-        "max_depth": 8,
-        "reg_lambda": 100.0
+        "max_depth": 4,
+        "reg_lambda": 30.0
       }
     ],
     "lstm": [
       {},
       {
-        "hidden_size": 128
+        "learning_rate": 1e-05
       }
     ],
     "transformer": [
       {},
       {
-        "hidden_size": 128
+        "learning_rate": 3.3333333333333335e-05
       }
     ]
-  }
+  },
+  "absolute_rank_correlation": 0.9
 }

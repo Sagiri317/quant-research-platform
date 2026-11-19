@@ -1,0 +1,18 @@
+{
+  "market_id": "a_share",
+  "data_id": "decision_panel",
+  "inputs": {
+    "daily_dataset": "data/processed/a_share/stock/daily/close-signals",
+    "trading_calendar": "data/interim/csmar-20261110/trading_calendar"
+  },
+  "parameters": {
+    "mode": "preopen",
+    "local_time": "09:00:00",
+    "latency_seconds": 1
+  },
+  "time_window": {
+    "start": "2013-12-31",
+    "end": "2026-10-29"
+  },
+  "output_root": "data/processed/a_share/stock/daily/signal-decisions"
+}

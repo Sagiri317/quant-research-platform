@@ -1,0 +1,15 @@
+{
+  "market_id": "a_share",
+  "data_id": "hft_factors",
+  "inputs": {
+    "hft_panel": "data/processed/etf-high-frequency/518880/panel"
+  },
+  "factor_columns": [
+    "quote_trade_pressure_gap_30s"
+  ],
+  "time_window": {
+    "start": "2023-09-07",
+    "end": "2026-10-30"
+  },
+  "output_root": "data/processed/etf-high-frequency/518880/quote-trade-pressure"
+}

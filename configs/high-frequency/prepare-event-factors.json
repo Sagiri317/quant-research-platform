@@ -8,7 +8,6 @@
   },
   "factor_columns": [
     "trade_interval_seconds",
-    "trade_intensity",
     "trade_event_flow_imbalance",
     "trade_volume_flow_imbalance",
     "large_trade_pressure",

@@ -1,0 +1,16 @@
+{
+  "market_id": "a_share",
+  "data_id": "price_volume_facts",
+  "inputs": {
+    "market_panel_1d": "data/interim/portfolio-suspension-inputs/market_panel",
+    "trading_calendar": "data/interim/csmar-20261110/trading_calendar"
+  },
+  "factor_columns": [
+    "calendar_month_return_5y"
+  ],
+  "time_window": {
+    "start": "2013-12-31",
+    "end": "2026-10-29"
+  },
+  "output_root": "data/processed/a_share/stock/daily/calendar-seasonality"
+}

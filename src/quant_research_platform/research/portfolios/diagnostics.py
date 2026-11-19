@@ -374,7 +374,7 @@ def _portfolio_risk_models(ledgers, candidates, config):
     )
     result = {}
     for candidate in candidates:
-        if candidate.construction in {"benchmark_enhanced", "maximum_sharpe"}:
+        if candidate.needs_risk:
             model = FactorRiskModel.from_mapping(
                 ledgers[candidate.candidate_id].metadata["risk_model"]
             )

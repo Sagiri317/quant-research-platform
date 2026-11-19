@@ -399,7 +399,9 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
     panel_root = layout.processed_data_root(
         "a_share", specs.get("market_panel_1d").kind, "market_panel_1d"
     )
-    write_dataset(panel_root, _panel(assets, dates), spec=specs.get("market_panel_1d"))
+    market = _panel(assets, dates)
+    market["float_market_cap"] = market.asset_id.map({"large": 1e12, "small": 3e8})
+    write_dataset(panel_root, market, spec=specs.get("market_panel_1d"))
     panel = read_dataset(panel_root)
     dataset = pd.DataFrame(
         {
@@ -409,7 +411,6 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
             "eligible": True,
             "signal": 1.0,
             "label": 0.0,
-            "float_market_cap": [1e12, 3e8],
         }
     )
     dataset_spec = make_demo_research_dataset_spec(
@@ -417,7 +418,7 @@ def test_native_simple_production_and_ledger_keep_positive_capital_target(
         factor_columns=("signal",),
         label_columns=("label",),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap",),
+        context_columns=(),
     )
     dataset_root = layout.research_dataset_root("a_share", dataset_spec.data_id)
     write_dataset(dataset_root, dataset, spec=dataset_spec)

@@ -503,7 +503,7 @@ def test_net_return_ratio_subtracts_each_candidates_trade_cost_before_selecting_
         cash_column="is_cash",
         config=optimizer.AbsoluteRiskConfig(fully_invested=True),
     )
-    # From cash the tangency weights are proportional to inverse variance times net mean.
+    # Tangency weights from cash are proportional to inverse variance times net mean.
     direction = np.array([(0.04 - rate) / 0.04, 0.02 / 0.01])
     stock = direction / (direction.sum() + rate * direction[0])
     fee = rate * stock[0]
@@ -873,19 +873,22 @@ def test_native_weekly_stock_accounts_share_positive_forecasts(
     config = deepcopy(original)
     del config["calibration"]
     config.pop("robust_config", None)
-    config.pop("optimizer_config", None)
+    config["optimizer_config"] = {"name_weight_limit": 0.02}
+    if construction == "maximum_sharpe":
+        config["optimizer_config"].update(fully_invested=True, solver_maxiter=None)
     config["output"] = str(tmp_path / "account")
     source = Path(config["inputs"]["dataset"])
     spec = json.loads((source / "spec.json").read_text(encoding="utf-8"))
     frame = pd.read_parquet(source / "data")
     if construction != "maximum_sharpe":
         config["candidate"].update(
-            construction=construction, top_quantile=0.2, risk_style_columns=[]
+            construction=construction,
+            top_quantile=0.2,
+            risk_style_columns=[],
+            positive_returns_only=True,
         )
         config["inputs"].pop("risk_context")
         config.pop("risk_model", None)
-        frame["float_market_cap"] = 1e8
-        spec["column_roles"]["float_market_cap"] = "context"
     label = "forward_return_5d"
     clock = label + "_available_at"
     frame[label] = np.where(frame.asset_id.isin(list("acegik")), 0.02, 0.04)
@@ -944,6 +947,9 @@ def test_native_weekly_stock_accounts_share_positive_forecasts(
     if construction != "maximum_sharpe":
         assert "objective_value" not in diagnostics
         return
+    assert {r.text for r in first.diagnostics if r.name == "decision_reason"} == {
+        construction
+    }
     period = diagnostics["holding_sessions"]
     expected = {
         round(r.number, 8)

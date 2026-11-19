@@ -27,6 +27,7 @@ from quant_research_platform.research.models.fitting import (
 )
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.predictions.outputs import (
+    centered_target_scores,
     prediction_input_mask,
     prediction_rows,
 )
@@ -38,7 +39,9 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 
-def iter_frozen_predictions(frames, result, *, read_window, output_window):
+def iter_frozen_predictions(
+    frames, result, *, read_window, output_window, target_definition=None
+):
     """Forward one ordered stream, retaining sequence state and input context."""
     from quant_research_platform.policy.lifecycle import closing_iterator
 
@@ -86,6 +89,9 @@ def iter_frozen_predictions(frames, result, *, read_window, output_window):
                 ]
                 if output.empty:
                     continue
+            output["prediction_score"] = centered_target_scores(
+                output.prediction_score, output.timestamp, target_definition
+            )
             yield output
 
 
@@ -147,7 +153,11 @@ def predict(config: Mapping) -> Path:
     def outputs():
         with closing_iterator(
             iter_frozen_predictions(
-                frames, result, read_window=read_window, output_window=window
+                frames,
+                result,
+                read_window=read_window,
+                output_window=window,
+                target_definition=facts.get("target_definition"),
             )
         ) as predictions:
             for output in predictions:

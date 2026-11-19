@@ -38,7 +38,6 @@ def _episode(value):
         {
             "order",
             "prediction",
-            "capital_scale",
             "inventory_parameters",
             "target_deviation_bps",
         },
@@ -101,41 +100,10 @@ def _episode(value):
             config["feature_columns"] = list(
                 dict.fromkeys((*columns, "prediction_error_scale"))
             )
-        scale = 1.0
-        if config["task"] == "dynamic_execution":
-            if "capital_scale" in config:
-                raise ValueError("dynamic_execution_uses_initial_capital")
-        else:
-            scale = strict_finite_float(
-                config.get("capital_scale", 1), error="inventory_capital_scale_invalid"
-            )
-            if scale <= 0:
-                raise ValueError("inventory_capital_scale_invalid")
-            config["capital_scale"] = scale
-        account = {
-            **config["account"],
-            "parameters": dict(config["account"]["parameters"]),
-        }
+        account = config["account"]
         parameters = account["parameters"]
-        capital = (
-            1_000_000.0 * len(assets)
-            if config["task"] in {"inventory", "dynamic_execution"}
-            else 1_000_000_000.0
-        ) * scale
-        if (
-            parameters.setdefault("initial_capital", capital) != capital
-            and config["task"] != "dynamic_execution"
-        ):
-            raise ValueError("inventory_capital_scale_mismatch")
-        if config["task"] in {"inventory", "dynamic_execution"}:
-            if parameters.setdefault("restore_at", "14:50:00") not in {
-                "14:50",
-                "14:50:00",
-            }:
-                raise ValueError("inventory_restore_clock_must_be_1450")
-        elif parameters.setdefault("restore_at", None) is not None:
+        if config["task"] == "portfolio" and parameters.get("restore_at") is not None:
             raise ValueError("stock_portfolio_restoration_unused")
-        config["account"] = account
         if config["task"] == "dynamic_execution":
             if "passive" not in parameters or "trades" not in account:
                 raise ValueError("dynamic_execution_order_input_required")
@@ -147,8 +115,6 @@ def _episode(value):
             )
             if config["target_deviation_bps"] < 0:
                 raise ValueError("policy_penalty_invalid")
-    elif "capital_scale" in config:
-        raise ValueError("inventory_capital_scale_unused")
     if config["task"] == "dynamic_execution" and "prediction" not in config:
         raise ValueError("dynamic_execution_prediction_required")
     if config["task"] != "dynamic_execution" and (

@@ -24,6 +24,7 @@ RECIPES = {
 }
 RECIPES.update(
     {
+        "large_cap_low_vol_leadership_20d": ("size", None, 20),
         "style_size_momentum_correlation_60d": ("size", "momentum", 60),
         "style_volatility_illiquidity_correlation_60d": (
             "residual_volatility",
@@ -48,13 +49,21 @@ def factor_definitions():
                 "period_return",
                 "is_a_share_scope",
                 *(STYLES[s] for s in recipe[:2] if s),
+                *(
+                    ("residual_volatility_60d",)
+                    if name == "large_cap_low_vol_leadership_20d"
+                    else ()
+                ),
             ),
             output_column=name,
             required_input_data_id="style_structure_factors",
             required_windows=(recipe[2] + 1,),
             lookback_window=recipe[2],
             description=(
-                "Market state: trailing sum of equal-weight high-minus-low "
+                "Size and low residual-volatility percentiles times "
+                "the trailing 20-session large-minus-small return."
+                if name == "large_cap_low_vol_leadership_20d"
+                else "Market state: trailing sum of equal-weight high-minus-low "
                 "quintile returns on prior-session style exposures; paired "
                 "style-return correlation for correlation columns. Ties retained "
                 "at selection boundaries; each style has its own finite domain."
@@ -105,4 +114,13 @@ def calculate(panel, *, factor_columns, history_keys=("asset_id",)):
         value = rolling.corr(daily[right]) if right else rolling.sum()
         value.iloc[: window - 1] = np.nan
         out[name] = frame.timestamp.map(value)
+        if name == "large_cap_low_vol_leadership_20d":
+            exposure = frame[["log_total_market_cap", "residual_volatility_60d"]].where(
+                frame.is_a_share_scope.eq(True), axis=0
+            )
+            size = exposure.log_total_market_cap.groupby(frame.timestamp).rank(pct=True)
+            defensive = exposure.residual_volatility_60d.groupby(frame.timestamp).rank(
+                pct=True, ascending=False
+            )
+            out[name] *= size * defensive
     return out

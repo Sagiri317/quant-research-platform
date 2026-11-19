@@ -518,12 +518,8 @@ def test_native_pred_to_policy_to_persisted_ledger(tmp_path, empty_prediction):
         output_path=tmp_path / "pred", output_chunks=[frame], metadata=metadata
     )
     params = parameters(("a",))
-    del (
-        params["buy_threshold"],
-        params["sell_threshold"],
-        params["initial_capital"],
-        params["restore_at"],
-    )
+    del params["buy_threshold"], params["sell_threshold"]
+    params.update(initial_capital=1_000_000, restore_at="14:50:00")
     params["maximum_weights"] = {"a": 0.003}
     config = {
         "strategy": "etf_inventory",
@@ -554,7 +550,6 @@ def test_native_pred_to_policy_to_persisted_ledger(tmp_path, empty_prediction):
     )
     assert ledger.metadata["inventory_policy"]["forecast_horizon_seconds"] == 30
     assert ledger.metadata["inventory_policy"]["decision_interval_seconds"] == 3
-    assert ledger.metadata["inventory_policy"]["capital_scale"] == 1
 
 
 @pytest.mark.parametrize("capital,filled", [(3500.0, 0), (1_000_000.0, 200)])

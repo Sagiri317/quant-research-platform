@@ -121,10 +121,8 @@ def test_unavailable_selected_cap_blocks_only_dependent_target_and_keeps_exit(
         top_quantile=1.0,
         risk_style_columns=(),
     )
-    args["dataset"]["float_market_cap"] = args["dataset"]["float_market_cap"].astype(
-        dtype
-    )
-    args["dataset"].loc[args["dataset"].asset_id.eq("a"), "float_market_cap"] = cap
+    args["panel"]["float_market_cap"] = args["panel"]["float_market_cap"].astype(dtype)
+    args["panel"].loc[args["panel"].asset_id.eq("a"), "float_market_cap"] = cap
     args["dataset"].loc[args["dataset"].asset_id.eq("b"), "eligible"] = False
     account, _, _, _, ledger = daily._build_session(**args)
     availability = ledger.attrs["decision_availability"]

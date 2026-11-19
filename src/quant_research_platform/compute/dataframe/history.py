@@ -55,14 +55,27 @@ def quadratic_log_trend(prices):
     return slope, curvature
 
 
-def completed_month_return_acceleration(prices, timestamps):
-    """Mean returns in the last six completed months minus the preceding six."""
+def _month_returns(prices, timestamps):
+    """Keep exact month ends, including missing closing observations."""
     months = pd.DatetimeIndex(timestamps).to_period("M")
-    observed = pd.Series(prices, index=months)
+    observed = pd.Series(np.asarray(prices, dtype=float), index=months)
     closes = observed.groupby(level=0, sort=False).tail(1)
     axis = pd.period_range(months.min(), months.max(), freq="M")
     closes = closes.reindex(axis)
     returns = closes / closes.shift().where(closes.shift() > 0) - 1
+    return months, returns
+
+
+def calendar_month_return(prices, timestamps):
+    """Mean return in the same calendar month 1-5 years ago, with three known years."""
+    months, returns = _month_returns(prices, timestamps)
+    past = pd.concat([returns.shift(years * 12) for years in range(1, 6)], axis=1)
+    return past.mean(axis=1).where(past.count(axis=1) >= 3).reindex(months).to_numpy()
+
+
+def completed_month_return_acceleration(prices, timestamps):
+    """Mean returns in the last six completed months minus the preceding six."""
+    months, returns = _month_returns(prices, timestamps)
     acceleration = (
         returns.rolling(6, min_periods=6).mean()
         - returns.shift(6).rolling(6, min_periods=6).mean()

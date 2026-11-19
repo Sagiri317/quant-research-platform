@@ -637,7 +637,7 @@ def test_public_prediction_selection_keeps_end_day_intraday_values(
             mark_matched=False,
         )
         assert all(present)
-        np.testing.assert_allclose(values, rows.prediction_score)
+        np.testing.assert_allclose(values, rows.prediction_rank_score)
         seen.append(len(values))
         yield from original(**kwargs)
 

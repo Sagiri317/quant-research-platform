@@ -40,7 +40,6 @@ REBALANCE_SCHEDULES = {
     "weekly-last-trading-day",
     "monthly-last-trading-day",
 }
-STOCK_NAME_WEIGHT_LIMIT = 0.02
 PORTFOLIO_CASH_ASSET_ID = "__cash__"
 RESEARCH_VALUATION_POLICY = "evidenced_rights_or_confirmed_delisting_zero"
 PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
@@ -219,6 +218,7 @@ class PortfolioCandidateSpec:
     candidate_id: str
     selection_group: str
     construction: Literal[
+        "mean_variance",
         "quantile_equal_weight",
         "quantile_float_cap",
         "benchmark_enhanced",
@@ -236,7 +236,50 @@ class PortfolioCandidateSpec:
     industry_neutrality_limit: float = 0.02
     size_neutrality_limit: float = 0.2
 
+    risk_aversion: float | None = None
+    positive_returns_only: bool = False
+
+    @property
+    def absolute(self):
+        return self.construction in {
+            "maximum_sharpe",
+            "mean_variance",
+        }
+
+    @property
+    def uses_optimizer(self):
+        return self.absolute or self.construction == "benchmark_enhanced"
+
+    @property
+    def needs_risk(self):
+        return self.construction in {"maximum_sharpe", "benchmark_enhanced"} or (
+            self.cash_utility
+            and (self.risk_aversion > 0 or bool(self.risk_style_columns))
+        )
+
+    @property
+    def cash_utility(self):
+        return self.construction == "mean_variance"
+
+    @property
+    def uses_monetary_score(self):
+        return self.absolute or self.positive_returns_only
+
     def __post_init__(self) -> None:
+        if type(self.positive_returns_only) is not bool or (
+            self.positive_returns_only
+            and (self.uses_optimizer or self.neutrality != "none")
+        ):
+            raise ValueError("portfolio_positive_return_filter_invalid")
+        if self.construction == "mean_variance":
+            value = strict_finite_float(
+                self.risk_aversion, error="portfolio_risk_aversion_invalid"
+            )
+            if value < 0:
+                raise ValueError("portfolio_risk_aversion_invalid")
+            object.__setattr__(self, "risk_aversion", value)
+        elif self.risk_aversion is not None:
+            raise ValueError("portfolio_unused_risk_aversion")
         if type(self.selection_group) is not str or not self.selection_group:
             raise ValueError("portfolio_selection_group_invalid")
         for value in (
@@ -246,6 +289,7 @@ class PortfolioCandidateSpec:
             if type(value) is not str or not value:
                 raise ValueError("portfolio_candidate_dependency_invalid")
         if type(self.construction) is not str or self.construction not in {
+            "mean_variance",
             "quantile_equal_weight",
             "quantile_float_cap",
             "benchmark_enhanced",
@@ -290,7 +334,7 @@ class PortfolioCandidateSpec:
             if value < 0:
                 raise ValueError("portfolio_candidate_neutrality_limit_invalid")
             object.__setattr__(self, name, value)
-        if self.construction in {"benchmark_enhanced", "maximum_sharpe"}:
+        if self.uses_optimizer:
             if self.neutrality != "none":
                 raise ValueError("portfolio_candidate_neutrality_invalid")
             if self.top_quantile is not None or (
@@ -298,7 +342,7 @@ class PortfolioCandidateSpec:
                 != (self.construction == "benchmark_enhanced")
             ):
                 raise ValueError("portfolio_candidate_construction_invalid")
-            if not self.risk_style_columns:
+            if bool(self.risk_style_columns) != self.needs_risk:
                 raise ValueError("portfolio_candidate_risk_styles_invalid")
         else:
             if self.top_quantile is None or (

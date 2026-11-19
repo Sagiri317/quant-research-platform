@@ -163,8 +163,7 @@ ETF预测驱动的下单研究采用两条路径：固定规则直接模拟执�
 预测缺行或缺值不产生新信号目标，不当作零收益；持仓保留，原单依原有效期和撤单规则推进，
 撤单确认前仍可能成交。完全没有预测的窗口也能保留实际账户与独立收盘恢复。
 
-每只 ETF 初始净资产默认 100 万元，`episode.capital_scale` 默认 1；
-总初始资本为 ETF 数量 × 100 万 × scale，**包括开盘底仓市值，不是额外赠送底仓**。
+初始净资产由账户的 `initial_capital` 指定，包含开盘底仓市值。
 初始使用资金半仓：`initial_weights` 给出占账户总初始资本的权重，单只为0.5，多只等分总计0.5。
 账户按起始已知估值换算份额，复用交易单位向下取整，余款保留为现金；也可用 `initial_inventory` 明确给出份额，二者只能选一。
 `maximum_weights` 是各证券占当前账户净值的金额比例上限，ETF 为 1，允许满仓。账户按当时可见价格换算份额，随实际净值和价格变化；直接策略、PPO 目标及其观察量共用这一事实。各证券上限可合计超过 1，最终仍受共享现金约束。初始持仓市值不得超过初始金额上限；价格上涨造成已有持仓超过较低上限时，允许保持或减仓，禁止继续增加。
@@ -230,23 +229,6 @@ maker/taker 使用同一目标算法与预测输入；比较时使用相同的�
 原始预测保留为 `raw_prediction_score`，账户决策使用校准后的 `prediction_score`，
 账本诊断同时保留原预测与历史误差尺度。原 PRED 文件不改写。
 
-在同一份执行配置中将 `prediction_calibration` 改为下面的对象，并将 `output` 指向新的研究目录：
-
-```json
-{
-  "inputs_root": "data/processed/research/etf",
-  "label": "future_mid_return_30s",
-  "lookback_sessions": 20
-}
-```
-
-`inputs_root/<证券>/model-inputs` 应为包含目标标签及成熟时点的原生输入，按实际路径修改。
-先运行 `qrp run-etf-execution --config <配置.json> --stage calibrate`，
-再分别运行 `--stage direct`、`--stage train` 和 `--stage ppo`；可用 `--asset-id` 限定证券。
-准备阶段覆盖配置中的训练、验证和回放日期，输出 `<output>/<证券>/calibration`。
-其余阶段只读这份日级参数，不在环境 reset 时重复拟合，也不读取标签。
-开启后需要重新训练 PPO；原未校准策略的观测空间不适用于新模式。上游信号模型不因幅度校准而重训。
-
 独立 `calibrate-amplitude --config <配置.json>` 接收 `inputs`、`predictions` 路径列表、`label`、
 `asset_ids`、完整 `sessions` 日期列表、输出 `window`、`lookback_sessions` 和新 `output`。
 原生日表保存截距、斜率、误差尺度、历史范围、实际样本数、资格与缺失原因；元数据保存来源和计算参数。
@@ -309,40 +291,9 @@ PRED 只检查本次使用的数值收益、单位与时钟定义，以及消费
 保存评估成绩、选中步数与是否早停，`training_decisions` 保存实际首末决策和数量。
 `ppo.target_kl` 只限制单轮策略更新，不代替整段训练早停。
 
-[ETF 执行研究配置](../configs/high-frequency/run-etf-execution.json)统一列出
-510300、510500、159915、518880。每只证券是独立的 100 万元账户，初始半仓，
-最高持仓市值为当前账户净值的 100%；不是四只证券共用一份资金。直接策略、PPO 训练、
-验证和冻结回放从这一份配置展开，账户、费用、决策时钟和日终恢复规则相同。
+本轮对 510300、510500、159915、518880 分别使用模型预测。每次回放只指定一只证券、一个预测来源和一个账户。示例以 518880 为例，初始资金 100 万元，初始半仓，14:50 起尽量恢复原有份额。调用者提供本次窗口实际发布的预测路径。[ETF 账户配置](../configs/high-frequency/backtest-policy-etf.json)
 
-```text
-qrp run-etf-execution --config configs/high-frequency/run-etf-execution.json --stage direct
-qrp run-etf-execution --config configs/high-frequency/run-etf-execution.json --stage train --asset-id 518880
-qrp run-etf-execution --config configs/high-frequency/run-etf-execution.json --stage ppo --asset-id 518880
-```
-
-省略 `--asset-id` 时依次运行配置内全部证券；并行进程和资源由调用者安排。
-预测路径从各证券已发布的 XGBoost 预测元数据按本次窗口选取，不手写季度路径列表，
-不因证券顺序选择或丢弃模型。每个阶段写入各证券独立的新输出，已有输出不覆盖。
-
-本轮 PPO 使用 2025 年前三季度分别作为训练 episode，2025 年第四季度验证并保存最佳
-策略，冻结到 2026-01-01—2026-10-30 回放。直接策略使用相同 2026 年窗口。
-前三季度分段提供多个训练起点，各 episode 独立初始化；不把这些训练账户拼成回测收益。
-参数起点为 CPU 上 8 个环境、每轮 2048 步/环境、batch 256、最多 200 万次交互，
-actor/critic 各两层 64 单元、Tanh 和正交初始化，学习率 0.0003、gamma 0.999、GAE 0.95。
-3 秒一步时 gamma 的约 1000 步有效尺度对应约 50 分钟；验证仍比较整段未折扣净收益。
-每累计 25 万步评价完整验证期，最少 2 次评价后按 patience=3 早停，末次更新也评价。
-具体参数由同一配置维护；这些是待验证的起点，不是已证明最优的参数。
-
-本轮不另加绝对持仓或偏离底仓的风险惩罚，避免额外压低有利交易的持仓。
-直接基线按预测收益与实际规模的进出成本选择目标，随后尽可能 taker 成交；
-PPO 学习等待、撤单以及 maker/taker 的不同执行比例。价格、现金、交易单位、可卖库存、
-盘口参与率和真实费用仍由同一账户约束。训练时 VecNormalize 同时归一化观察与奖励，
-折扣系数与 PPO 一致；插补只使用训练样本，验证和回放冻结观察统计并使用原始奖励。
-选中的策略与对应归一化参数一起保存。原生 `train-policy`、`backtest-policy` 仍可接收
-其他明确的实验窗口；不会因本研究入口引入配置继承或调度系统。
-
-上游预测保持自己的 60 个训练会话起步、20 个验证会话和随后 20 会话预测协议，
-137 个适用因子及预测模型训练不受本次账户配置整理影响。
+`backtest-policy` 的 `immediate` 按预测与成交成本选择目标并尝试主动成交。`hold` 从相同的份额和现金开始持有。两次回放分别写入明确指定的新目录，再由 `analyze-inventory` 比较两本账的净值差、费用和成交情况。PPO 训练或历史预测幅度校准各有独立入口，可按研究需要调用。
 
 示例依赖服务器的结构化账户事实 `data/interim/etf-execution/*`，包括真实上市/市场/交易状态、
 权益与 ETF 费用；这些事实必须先由已有结构化来源准备。股票费率和缺失上市/停牌信息
@@ -363,7 +314,7 @@ PPO 学习等待、撤单以及 maker/taker 的不同执行比例。价格、现
 `build_simple_target_weights` 的前 20% 等权选股；`portfolio_parameters.top_quantile`
 可调整分位，`construction="quantile_float_cap"` 使用同一低频市值加权实现。
 输入仍是共同决策 T 上的数值 PRED，默认每 3 秒、预测未来 30 秒；不把预测期限当持有期。
-初始净资产为 10 亿元 × `capital_scale`，包含已有持仓，单账户跨日持有且不恢复底仓。
+示例初始净资产为 10 亿元，由账户参数指定，包含已有持仓，单账户跨日持有且不恢复底仓。
 示例中的股票、数量上限和参与率只是可替换假设，不是全市场规模或成交能力结论。
 
 缺预测保留 NaN 目标与旧单。简单组合先保留缺预测持仓、尚未冻结的旧买单资金和

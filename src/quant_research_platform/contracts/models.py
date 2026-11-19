@@ -137,6 +137,9 @@ def sequence_parameters(algorithm, parameters):
         "device": "cuda",
         "preload_inputs": False,
     }
+    if algorithm in {"transformer_regressor", "lstm_regressor"}:
+        defaults["snapshot_columns"] = []
+        defaults["head_dropout"] = 0.0
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
         defaults["independent_layer_initialization"] = False
@@ -156,6 +159,17 @@ def sequence_parameters(algorithm, parameters):
     ):
         raise ValueError("sequence_parameters_unknown")
     defaults.update(parameters)
+    if "snapshot_columns" in defaults:
+        if type(defaults["snapshot_columns"]) not in (list, tuple):
+            raise ValueError("snapshot_columns_invalid")
+        if (
+            type(defaults["head_dropout"]) not in (float, int)
+            or not 0 <= defaults["head_dropout"] < 1
+        ):
+            raise ValueError("sequence_head_dropout_invalid")
+        _validate_column_tuple(
+            tuple(defaults["snapshot_columns"]), "snapshot_columns", required=False
+        )
     groups = defaults.get("sequence_group_columns", ())
     if (
         type(groups) not in (tuple, list)
@@ -486,12 +500,23 @@ def _model_spec(value, *, declared=None):
     }.intersection(value):
         roles = declared["column_roles"]
         factors, features = [], []
-        for column in sorted(name for name, role in roles.items() if role == "factor"):
+        raw_columns = sorted(name for name, role in roles.items() if role == "factor")
+        paired = {
+            prefix + name
+            for name in raw_columns
+            for prefix in ("feature_", "feature_pre_neutral_")
+        }
+        for column in raw_columns:
             transformed = f"feature_{column}"
             if roles.get(transformed) == "feature":
                 features.append(transformed)
             else:
                 factors.append(column)
+        features.extend(
+            column
+            for column in declared.get("feature_columns", ())
+            if column not in paired
+        )
         value.update(input_factor_columns=factors, input_feature_columns=features)
     for name in ("input_factor_columns", "input_feature_columns"):
         if name in value:

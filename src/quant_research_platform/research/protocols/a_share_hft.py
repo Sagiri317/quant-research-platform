@@ -70,6 +70,14 @@ FACTOR_INPUTS = {
     },
     "microprice_deviation": ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1", "mid"),
     "book_ofi": ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1"),
+    "quote_trade_pressure_gap_30s": (
+        "bid_px1",
+        "ask_px1",
+        "bid_vol1",
+        "ask_vol1",
+        "observed_trade_volume",
+        "observed_signed_trade_volume",
+    ),
     "depth_normalized_ofi": ("bid_px1", "ask_px1", "bid_vol1", "ask_vol1"),
     **{f"return_{seconds}s": ("mid",) for seconds in (3, 30, 60)},
     "realized_volatility_60s": ("mid",),
@@ -153,6 +161,10 @@ FACTOR_INPUTS.update(INTRADAY_THEME_FACTORS)
 FACTOR_INPUTS.update(PATH_INPUTS)
 
 INTRADAY_THEME_DESCRIPTIONS = {
+    "quote_trade_pressure_gap_30s": (
+        "Best-level net order flow divided by total absolute bid/ask flow over 30s, "
+        "minus signed traded volume divided by traded volume over the same segment."
+    ),
     "price_position_300s": (
         "(mid-prior300s low)/(prior300s high-low); flat range undefined"
     ),
@@ -189,7 +201,6 @@ EVENT_FACTORS = {
     "trade_interval_seconds": "seconds",
     "trade_interval_mean_seconds": "seconds",
     "trade_interval_cv": "dimensionless",
-    "trade_intensity": "events_per_second",
     "trade_activity_ratio": "dimensionless",
     "trade_signed_run": "events",
     "trade_signed_run_volume": "shares",
@@ -240,7 +251,7 @@ EVENT_INPUTS = {
             "hft_trades": ("price",)
             if name == "trade_interval_return_interaction"
             else ()
-            if name in TRADE_INTERVAL_FACTORS or name == "trade_intensity"
+            if name in TRADE_INTERVAL_FACTORS
             else ("side", "volume")
         }
         for name in TRADE_EVENT_FACTORS

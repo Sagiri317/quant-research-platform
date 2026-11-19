@@ -4,6 +4,7 @@ labels.
 
 from __future__ import annotations
 
+import csv
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import replace
@@ -328,6 +329,36 @@ def _required_input_columns(spec: ResearchDatasetSpec) -> tuple[str, ...]:
     return tuple(dict.fromkeys(columns))
 
 
+def _policy_inputs(selection, roles):
+    """Choose the first available configured representation for each measurement."""
+    grains, included_roles, prefixes = (
+        selection[key] for key in ("grains", "research_roles", "column_prefixes")
+    )
+    if any(
+        not isinstance(items, list) or not items
+        for items in (grains, included_roles, prefixes)
+    ):
+        raise ValueError("factor_input_policy_invalid")
+    with Path(selection["policy"]).open(encoding="utf-8-sig", newline="") as stream:
+        names = dict.fromkeys(
+            row["factor_column"]
+            for row in csv.DictReader(stream)
+            if row["analysis_grain"] in grains
+            and row["research_role"] in included_roles
+        )
+    selected = {"factor": [], "feature": []}
+    for name in names:
+        for prefix in prefixes:
+            column = prefix + name
+            role = roles.get(column)
+            if role in selected:
+                selected[role].append(column)
+                break
+    if not any(selected.values()):
+        raise ValueError("factor_input_policy_no_matching_columns")
+    return selected["factor"], selected["feature"]
+
+
 def _processed_input_columns(
     dataset_spec: ResearchDatasetSpec,
     processed_spec: ProcessedDataSpec,
@@ -621,6 +652,7 @@ def assemble(config: Mapping) -> Path:
     required = {"market_id", "dataset_id", "inputs", "time_window", "output_root"}
     optional = {
         "factor_columns",
+        "input_policy",
         "feature_columns",
         "label_columns",
         "feature_recipe",
@@ -742,6 +774,12 @@ def assemble(config: Mapping) -> Path:
         "factor_columns",
         [column for column in selected_roles if column in selected_factors],
     )
+    if "input_policy" in config:
+        if {"factor_columns", "feature_columns"}.intersection(config):
+            raise ValueError("assemble_explicit_and_policy_inputs_conflict")
+        factors, reused_features = _policy_inputs(
+            config["input_policy"], selected_roles
+        )
     default_target, default_transform = DEFAULT_MODEL_TARGET_LABEL, "date_zscore"
     if (
         config["market_id"] == "a_share"
@@ -1176,6 +1214,11 @@ def assemble(config: Mapping) -> Path:
             },
             "parameters": {
                 "base_input_data_id": base_input,
+                **(
+                    {"input_policy": config["input_policy"]}
+                    if "input_policy" in config
+                    else {}
+                ),
                 "input_data_ids": {
                     name: session.spec["data_id"] for name, session in sessions.items()
                 },

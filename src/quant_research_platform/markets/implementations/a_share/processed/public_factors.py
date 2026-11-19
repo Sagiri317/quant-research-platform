@@ -11,7 +11,11 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
-from quant_research_platform.research.factors import fund_flows, linked_markets
+from quant_research_platform.research.factors import (
+    distributions,
+    fund_flows,
+    linked_markets,
+)
 from quant_research_platform.storage.datasets.reading import (
     _dataset_input_options,
     materialize_dataset_session,
@@ -19,7 +23,11 @@ from quant_research_platform.storage.datasets.reading import (
 )
 
 KEY = ("market_id", "asset_id", "timestamp")
-LIBRARIES = {"linked_market_factors": linked_markets, "fund_flow_factors": fund_flows}
+LIBRARIES = {
+    "linked_market_factors": linked_markets,
+    "fund_flow_factors": fund_flows,
+    "cash_distribution_factors": distributions,
+}
 
 
 def processed_spec(data_id):
@@ -71,6 +79,8 @@ def configured_spec(spec, config):
             "index_group",
         }
     )
+    if spec.data_id == "cash_distribution_factors":
+        allowed = set()
     if type(params) is not dict or set(params) - allowed:
         raise ValueError("linked_market_parameters_invalid")
     if "index_group" in params:
@@ -162,47 +172,55 @@ def produce(spec, *, inputs, time_window):
         pd.Timestamp.min, end if closed else end - pd.Timedelta(1, "ns")
     )
     source = open_dataset_session(**_dataset_input_options(inputs["decision_panel"]))
-    if not {"signal_session", "execution_session", "return_available_at"} <= set(
-        source.logical_columns
-    ):
-        raise ValueError("linked_markets_require_explicit_decision_panel")
-    context = (
-        *KEY,
-        "signal_session",
-        *(
-            ("listing_date",)
-            if spec.data_id == "linked_market_factors"
-            and set(spec.column_roles)
-            & {
-                "basis_shock_x_hedging_exposure",
-                "oi_shock_x_hedging_exposure",
-                "us_sector_own_beta",
-                "us_sector_shock_x_own_beta",
-                "us_relative_sector_shock_x_own_beta",
-            }
-            else ()
-        ),
-        "period_return",
-        "market_return",
-        "industry_level1_code",
-        "industry_standard_id",
-        "hedging_beta",
-        "implied_variance_20d",
-        "implied_variance_60d",
-        "volatility_20d",
-        "volatility_60d",
-        "close",
-        "secondary_flow_imbalance",
-        "a_float_shares",
-        "avg_volume_20d",
-        "peak_drawdown_20d",
-        "amihud_20d",
-        "amihud_60d",
-    )
-    frame = materialize_dataset_session(
-        source.filtered_view(prefix).projected_view(
-            tuple(c for c in context if c in source.logical_columns)
+    if spec.data_id == "cash_distribution_factors":
+        # Each dividend is priced against the preceding session of the same listing.
+        context = (*KEY, "signal_session", "execution_session", "listing_date")
+        if (
+            "persistent_dividend_low_risk" in spec.column_roles
+            and "volatility_60d" in source.logical_columns
+        ):
+            context = (*context, "volatility_60d")
+    else:
+        if not {"signal_session", "execution_session", "return_available_at"} <= set(
+            source.logical_columns
+        ):
+            raise ValueError("linked_markets_require_explicit_decision_panel")
+        context = (
+            *KEY,
+            "signal_session",
+            *(
+                ("listing_date",)
+                if spec.data_id == "linked_market_factors"
+                and set(spec.column_roles)
+                & {
+                    "basis_shock_x_hedging_exposure",
+                    "oi_shock_x_hedging_exposure",
+                    "us_sector_own_beta",
+                    "us_sector_shock_x_own_beta",
+                    "us_relative_sector_shock_x_own_beta",
+                }
+                else ()
+            ),
+            "period_return",
+            "market_return",
+            "industry_level1_code",
+            "industry_standard_id",
+            "hedging_beta",
+            "implied_variance_20d",
+            "implied_variance_60d",
+            "volatility_20d",
+            "volatility_60d",
+            "close",
+            "secondary_flow_imbalance",
+            "a_float_shares",
+            "avg_volume_20d",
+            "peak_drawdown_20d",
+            "amihud_20d",
+            "amihud_60d",
         )
+        context = tuple(c for c in context if c in source.logical_columns)
+    frame = materialize_dataset_session(
+        source.filtered_view(prefix).projected_view(context)
     )
     for width in (20, 60):
         iv, rv = f"implied_variance_{width}d", f"volatility_{width}d"
@@ -225,7 +243,11 @@ def produce(spec, *, inputs, time_window):
         session = open_dataset_session(**_dataset_input_options(path)).filtered_view(
             prefix
         )
-        if name == "market_panel_1d":
+        if name == "market_panel_1d" and spec.data_id == "cash_distribution_factors":
+            session = session.projected_view(
+                ("asset_id", "timestamp", "listing_date", "close")
+            )
+        elif name == "market_panel_1d":
             session = session.projected_view(
                 (
                     "asset_id",
@@ -242,6 +264,10 @@ def produce(spec, *, inputs, time_window):
                         else ()
                     ),
                 )
+            )
+        elif name == "corporate_actions":
+            session = session.projected_view(
+                ("source_asset_id", "timestamp", "kind", "announcement_date", "amount")
             )
         value = materialize_dataset_session(session)
         if name == "market_panel_1d" and "signal_session" in value:

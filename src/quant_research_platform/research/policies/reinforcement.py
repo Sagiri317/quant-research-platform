@@ -544,7 +544,7 @@ def backtest_policy(config, *, portfolio_context=None):
         model = PPO.load(root / members["policy"], device=config.get("device", "cpu"))
         config["checkpoint"] = checkpoint
     elif episode["task"] == "dynamic_execution":
-        if strategy != "immediate":
+        if strategy not in {"immediate", "hold"}:
             raise ValueError("policy_baseline_task_mismatch")
     elif (strategy in {"immediate", "twap", "vwap", "almgren_chriss", "signal_ac"}) != (
         episode["task"] == "execution"
@@ -660,7 +660,11 @@ def backtest_policy(config, *, portfolio_context=None):
                     observation, _, done, _, info = env.step_targets(target)
                     continue
                 elif episode["task"] == "dynamic_execution":
-                    action = np.full(len(env.assets), 7, dtype=np.int64)
+                    action = np.full(
+                        len(env.assets),
+                        7 if strategy == "immediate" else 0,
+                        dtype=np.int64,
+                    )
                 elif episode["task"] == "execution":
                     lower, upper, _ = time_window_timestamp_interval(
                         TimeWindow(**episode["window"])
@@ -772,8 +776,6 @@ def backtest_policy(config, *, portfolio_context=None):
                                 "decision_interval_seconds"
                             ],
                             "holding_period": "realized_inventory_path",
-                            "capital_per_etf": 1_000_000.0 * episode["capital_scale"],
-                            "capital_scale": episode["capital_scale"],
                             "capital_basis": "cash_plus_opening_inventory",
                             "decision_cost": (
                                 "candidate_fees_plus_visible_spread_or_explicit_bps"
@@ -799,7 +801,6 @@ def backtest_policy(config, *, portfolio_context=None):
                                 "decision_interval_seconds"
                             ],
                             "holding_period": "continuous_cross_session_holdings",
-                            "capital_scale": episode["capital_scale"],
                             "benchmark": None,
                             "risk_limits": portfolio_parameters.get("risk_limits"),
                             "risk_scope": "target_only_not_guaranteed_realized_fills",

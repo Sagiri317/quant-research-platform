@@ -175,6 +175,7 @@ def processed_catalog() -> ProcessedDataCatalog:
             state_spec(),
             public_spec("linked_market_factors"),
             public_spec("fund_flow_factors"),
+            public_spec("cash_distribution_factors"),
             *daily_quote_specs(),
             *processed_specs(),
             *macro_specs(),

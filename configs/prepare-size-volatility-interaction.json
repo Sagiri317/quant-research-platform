@@ -1,0 +1,28 @@
+{
+  "market_id": "a_share",
+  "data_id": "style_structure_factors",
+  "inputs": {
+    "market_panel_1d": "data/interim/portfolio-suspension-inputs/market_panel",
+    "trading_calendar": "data/interim/csmar-20261110/trading_calendar",
+    "price_volume_facts": {
+      "path": "data/research/a_share/stock/daily/close-factors",
+      "columns": [
+        "log_total_market_cap"
+      ]
+    },
+    "market_model_factors": {
+      "path": "data/research/a_share/stock/daily/close-factors",
+      "columns": [
+        "residual_volatility_60d"
+      ]
+    }
+  },
+  "factor_columns": [
+    "large_cap_low_vol_leadership_20d"
+  ],
+  "time_window": {
+    "start": "2013-12-31",
+    "end": "2026-10-29"
+  },
+  "output_root": "data/processed/a_share/stock/daily/size-volatility-interaction"
+}

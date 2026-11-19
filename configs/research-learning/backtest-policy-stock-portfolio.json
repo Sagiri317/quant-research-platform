@@ -15,7 +15,6 @@
       "start": "2024-01-02",
       "end": "2024-03-29"
     },
-    "capital_scale": 1,
     "prediction": {
       "paths": [
         "results/stock/rolling-return-predictions"
@@ -45,7 +44,9 @@
         "maximum_weights": {
           "000001": 1.0,
           "600000": 1.0
-        }
+        },
+        "initial_capital": 1000000000,
+        "restore_at": null
       },
       "stock_status": {
         "stock_master": "data/processed/a_share/stock_master_pit",

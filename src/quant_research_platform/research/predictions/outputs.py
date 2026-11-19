@@ -91,3 +91,10 @@ def prediction_rows(frame, metadata, window, *, include_context=False):
     if not include_context:
         filtered = filtered.loc[prediction_input_mask(filtered, metadata)]
     return filtered.sort_values(["timestamp", "asset_id"], kind="stable")
+
+
+def centered_target_scores(scores, timestamps, definition):
+    """Center only a date-standardized target, over all eligible scored rows."""
+    if (definition or {}).get("target_transform") != "date_zscore":
+        return scores
+    return scores - scores.groupby(timestamps, sort=False).transform("mean")

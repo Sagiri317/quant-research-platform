@@ -1,0 +1,13 @@
+{
+  "inputs": "data/research/a_share/etf/intraday/518880/quote-exposures",
+  "output": "data/research/a_share/etf/intraday/518880/exposure-model-inputs",
+  "dataset_id": "etf_exposure_inputs",
+  "time_window": {
+    "start": "2023-09-07",
+    "end": "2026-10-30"
+  },
+  "interval_seconds": 3,
+  "quote_visibility_delay_ms": 1,
+  "max_quote_age_seconds": 6,
+  "label_tolerance_seconds": 6
+}

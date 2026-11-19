@@ -30,6 +30,38 @@ from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.manifests import write_qrp_json_file
 
 
+def _formula_identity(expression):
+    """Canonicalize proposals without assuming nonzero inputs or changing their sign."""
+
+    def key(node):
+        if isinstance(node, ast.Expression):
+            return key(node.body)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and not node.keywords
+        ):
+            return ("call", node.func.id, *(key(arg) for arg in node.args))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+            child = key(node.operand)
+            return child[1] if child[0] == "neg" else ("neg", child)
+        if isinstance(node, ast.Constant) and type(node.value) in (float, int):
+            return ("number", node.value)
+        if isinstance(node, ast.BinOp):
+            left, right = key(node.left), key(node.right)
+            if isinstance(node.op, (ast.Add, ast.Mult)):
+                neutral = ("number", 0 if isinstance(node.op, ast.Add) else 1)
+                if left == neutral:
+                    return right
+                if right == neutral:
+                    return left
+                left, right = sorted((left, right))
+            return (type(node.op).__name__, left, right)
+        return ("leaf", ast.dump(node))
+
+    return key(ast.parse(expression, mode="eval"))
+
+
 def formula_values(frame, expression, columns):
     """Evaluate causal arithmetic, cross-sectional ranks and observed-row windows."""
     tree = ast.parse(expression, mode="eval")
@@ -227,7 +259,7 @@ def search_factors(config):
     rng = np.random.default_rng(config["seed"])
 
     def candidate(expression):
-        identity = ast.dump(ast.parse(expression, mode="eval"))
+        identity = _formula_identity(expression)
         if identity in seen or len(records) >= config["budget"]:
             return 0.0
         seen.add(identity)
