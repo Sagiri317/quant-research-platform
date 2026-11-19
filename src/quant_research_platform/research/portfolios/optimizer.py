@@ -1349,11 +1349,11 @@ def optimize_portfolio(
                 success=True, x=stay if not current[~cash].any() else initial, nit=0
             )
         else:
+            # The default initial barrier lets the iterate move off full funding.
             result = solve(
                 negative_score,
                 "2-point" if priced_ratio else zero_hessian,
                 initial,
-                barrier=config.solver_gtol,
             )
     point = result.x.copy()
     moving = np.arange(weight_count)
