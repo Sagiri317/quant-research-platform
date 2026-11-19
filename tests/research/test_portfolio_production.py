@@ -1704,8 +1704,10 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
                 "missing_prediction_count": 0.0,
             }
         else:
-            with pytest.raises(ValueError, match=f"^{optimizer_error}$"):
+            with pytest.raises(ValueError) as caught:
                 build()
+            assert str(caught.value) == optimizer_error
+            assert "portfolio_decision=2023-01-06 00:00:00" in caught.value.__notes__
         return
     account, adv, optimized, delta, _snapshot = build()
     assert optimized is solver_results[-1] and "__cash__" in optimized.weights

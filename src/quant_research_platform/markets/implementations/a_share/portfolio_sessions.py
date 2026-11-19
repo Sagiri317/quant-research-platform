@@ -188,6 +188,10 @@ def iter_portfolio_sessions(
     )
     if "face_value_per_share" in panel.logical_columns:
         panel_columns = tuple(dict.fromkeys((*panel_columns, "face_value_per_share")))
+    if "total_shares" in panel_columns and "total_shares" not in panel.logical_columns:
+        panel_columns = tuple(
+            column for column in panel_columns if column != "total_shares"
+        )
     rights_root = equity_events_root
     rights_session = (
         open_dataset_session(

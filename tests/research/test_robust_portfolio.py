@@ -125,8 +125,7 @@ def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
         reason = "optimizer_held_risk_unavailable"
     else:
         assets.loc[0, signal] = np.nan
-        assets["maximum_weight"] = [0.0, 1.0, 1.0]
-        reason = "robust_held_prediction_unavailable"
+        assets["pool_exit"] = [True, False, False]
     rates = np.array([0.001, 0.001, 0.0])
     kwargs = dict(
         objective_kind=objective,
@@ -144,8 +143,15 @@ def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
         100.0 * (1 - result.weights.iloc[1])
     )
     assets["trade_capacity_weight"] = [0.1, 1.0, 1.0]
-    with pytest.raises(ValueError, match=reason):
-        optimizer.optimize_portfolio(assets, **kwargs)
+    if missing == "risk":
+        with pytest.raises(ValueError, match=reason):
+            optimizer.optimize_portfolio(assets, **kwargs)
+    else:
+        result = optimizer.optimize_portfolio(assets, **kwargs)
+        assert result.weights.iloc[0] == pytest.approx(0.1)
+        assert result.unscored_target_weight == pytest.approx(0.1)
+        assert result.weights.iloc[1] > 0.89
+        assert result.specific_variance > 0.0
 
 
 def test_rank_ratio_finds_the_tangency_portfolio_from_a_negative_rank_holding():
@@ -1050,13 +1056,14 @@ def test_funded_net_ratio_handles_existing_positions_and_cost_break_even(
             fully_invested=True, total_volatility_limit=0.3
         ),
     )
-    if max(asset_means) < 0:
-        with pytest.raises(
-            ValueError, match="optimizer_no_positive_feasible_net_return"
-        ):
-            optimizer.optimize_portfolio(assets, **args)
-        return
     result = optimizer.optimize_portfolio(assets, **args)
+    if max(asset_means) < 0:
+        # Selling either position costs more than the expected loss on that stock.
+        assert result.cash_on_nonpositive_return
+        assert result.weights.tolist() == pytest.approx(current, abs=3e-7)
+        assert result.objective_value == pytest.approx(-0.00016, abs=2e-9)
+        return
+    assert not result.cash_on_nonpositive_return
     if current[0]:
         # Selling A or increasing A lowers the ratio. Keep A and fund B from cash.
         b = 0.4 + 0.2 / 1.0005
@@ -1108,33 +1115,24 @@ def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_hold
     )
 
 
-def test_full_funding_and_name_limit_rule_out_positive_net_income(monkeypatch):
+def test_only_losing_funded_combinations_release_cash():
     assets = _assets((0.01, -0.02, -0.02, 0.0), (0.4, 0.3, 0.3, 0.0))
     zero = np.zeros(4)
     # At most 40% earns 1%, and the remaining 60% loses at least 2%.
     # When cash only pays fees its net contribution per unit is -1.
-    minimize = optimizer.minimize
-
-    def solve(fun, *args, **kwargs):
-        assert fun.__name__ != "negative_score", (
-            "the budget bound already rules out a positive seed"
-        )
-        return minimize(fun, *args, **kwargs)
-
-    monkeypatch.setattr(optimizer, "minimize", solve)
-    with pytest.raises(ValueError, match="optimizer_no_positive_feasible_net_return"):
-        optimizer.optimize_portfolio(
-            assets,
-            objective_kind="net_return_to_risk",
-            holding_sessions=5,
-            factor_covariance=pd.DataFrame(dtype=float),
-            expected_transaction_cost=lambda b, s: (0.0, zero, zero),
-            nav=100.0,
-            cash_column="is_cash",
-            config=optimizer.AbsoluteRiskConfig(
-                fully_invested=True, name_weight_limit=0.4
-            ),
-        )
+    result = optimizer.optimize_portfolio(
+        assets,
+        objective_kind="net_return_to_risk",
+        holding_sessions=5,
+        factor_covariance=pd.DataFrame(dtype=float),
+        expected_transaction_cost=lambda b, s: (0.0, zero, zero),
+        nav=100.0,
+        cash_column="is_cash",
+        config=optimizer.AbsoluteRiskConfig(fully_invested=True, name_weight_limit=0.4),
+    )
+    assert result.cash_on_nonpositive_return
+    assert result.weights.tolist() == pytest.approx([0.4, 0.0, 0.0, 0.6], abs=2e-7)
+    assert result.objective_value == pytest.approx(0.004, abs=1e-9)
 
 
 def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income():
@@ -1159,8 +1157,10 @@ def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income()
         (0.003 - 0.001) * np.sqrt(252.0) / 0.5
     )
     assets.loc[0, "expected_alpha"] = 0.00099
-    with pytest.raises(ValueError, match="optimizer_no_positive_feasible_net_return"):
-        optimizer.optimize_portfolio(assets, **args)
+    result = optimizer.optimize_portfolio(assets, **args)
+    assert result.cash_on_nonpositive_return
+    assert result.weights.tolist() == pytest.approx([0.0, 0.9])
+    assert result.objective_value == 0.0
 
 
 def test_net_ratio_with_binding_turnover_invests_available_cash_in_the_best_mix():

@@ -363,6 +363,7 @@ class _EnhancedDecision:
     risk: FactorRiskEstimate | None
     calibration: AlphaCalibration | None
     holding_sessions: int | None = None
+    marked_size_assets: frozenset[str] = frozenset()
 
 
 def backtest_a_share(
@@ -577,6 +578,8 @@ def backtest_a_share(
             if enhanced
             else _PANEL_COLUMNS
         )
+        if objective.is_ratio and "log_total_market_cap" in risk_style_columns:
+            panel_columns = (*panel_columns, "total_shares")
         if candidate.neutrality in {"industry", "industry_size"}:
             panel_columns = tuple(
                 dict.fromkeys(
@@ -929,11 +932,23 @@ def backtest_a_share(
                         else None
                     )
                 if needs_target and decision_skip_reason is None:
+                    projection = previous_exposures
+                    marked_size = frozenset()
+                    if (
+                        objective.is_ratio
+                        and "log_total_market_cap" in risk_style_columns
+                    ):
+                        exits = holdings.index[holdings.gt(0)].intersection(
+                            dataset.loc[~dataset.eligible, "asset_id"]
+                        )
+                        projection, marked_size = _exit_size_projection(
+                            current_cross, projection, panel, view.valuation, exits
+                        )
                     enhanced_decision = _enhanced_decision(
                         benchmark_weights=benchmark_weights,
                         alpha=alpha,
                         factor_risk=factor_risk,
-                        current_cross=previous_exposures,
+                        current_cross=projection,
                         calibration_rows=calibration_rows,
                         calibration_intervals=calibration_intervals,
                         trading_sessions=trading_sessions,
@@ -942,6 +957,10 @@ def backtest_a_share(
                         calibrated=calibrated,
                         calibration_window=calibration_window,
                     )
+                    if marked_size:
+                        enhanced_decision = replace(
+                            enhanced_decision, marked_size_assets=marked_size
+                        )
                     if (
                         (calibrated or monetary_ratio)
                         and robust_config is not None
@@ -1427,6 +1446,28 @@ def _risk_exposure_cross(
         for column in style_columns:
             result[column] = pd.Series(dtype="float64")
     return result.reset_index(names="asset_id")
+
+
+def _exit_size_projection(cross, prepared, panel, valuation, exits):
+    """Mark a held exit's missing size with its account price and outstanding shares."""
+    if exits.empty or "total_shares" not in panel:
+        return prepared, frozenset()
+    missing = (
+        cross.log_total_market_cap.isna() & ~cross.eligible & cross.asset_id.isin(exits)
+    )
+    if not missing.any():
+        return prepared, frozenset()
+    rows = cross.loc[missing, ["asset_id", "listing_date"]]
+    keys = pd.MultiIndex.from_frame(rows)
+    shares = panel.set_index(["asset_id", "listing_date"]).total_shares.reindex(keys)
+    closes = valuation.set_index(["asset_id", "listing_date"]).close.reindex(keys)
+    cap = (closes * shares).set_axis(rows.index)
+    cap = cap.loc[cap.gt(0)]
+    if cap.empty:
+        return prepared, frozenset()
+    projected = cross.copy()
+    projected.loc[cap.index, "log_total_market_cap"] = np.log(cap)
+    return projected, frozenset(rows.loc[cap.index, "asset_id"])
 
 
 def _factor_return_cross(
@@ -2058,9 +2099,7 @@ def _build_session(
                 0.0,
             )
             if objective.is_ratio:
-                assets_frame["maximum_weight"] = (
-                    ~assets_frame.asset_id.isin(exit_assets)
-                ).astype("float64")
+                assets_frame["pool_exit"] = assets_frame.asset_id.isin(exit_assets)
         decision_markets = {
             str(asset): market_name_for_type(market_type)
             for asset, market_type in decision_panel.market_type.astype("Int64")
@@ -2262,7 +2301,7 @@ def _build_session(
     execution_target = execution_target.where(
         ~execution_target.index.isin(exit_assets), 0.0
     )
-    if nav > 0:
+    if nav > 0 and (optimization is None or not objective.is_ratio):
         decision_delta.loc[independent_exits] = (
             -current.div(nav).reindex(assets, fill_value=0.0).loc[independent_exits]
         ).astype("float64")
@@ -2346,6 +2385,10 @@ def _build_session(
             else 0.0
         )
 
+        cash_on_loss = (
+            optimization is not None and optimization.cash_on_nonpositive_return
+        )
+
         def actual_utility(result):
             rows = result.asset_ledger
             weights = (
@@ -2361,9 +2404,14 @@ def _build_session(
             weights[cash_mask] = result.post_trade_cash / result.nav_before + cost_ratio
             if (
                 objective.is_ratio
-                and ((incomplete | alpha_missing) & (weights != 0)).any()
+                and (
+                    (incomplete | (alpha_missing & ~assets_frame.pool_exit))
+                    & (weights != 0)
+                ).any()
             ):
                 return -np.inf
+            if cash_on_loss:
+                return float(objective_alpha @ weights - cost_ratio)
             value = _portfolio_objective(
                 weights,
                 objective_kind=objective,
@@ -2444,7 +2492,9 @@ def _build_session(
                 notionals.reindex(assets, fill_value=0.0) / result.nav_before
             )
             distance = float(np.square(stock_weights - requested).sum())
-            if fully_invested and optimization is not None:
+            if cash_on_loss:
+                return result, facts, (*violation, -actual_utility(result), distance)
+            if fully_invested and optimization is not None and not cash_on_loss:
                 shortfall = max(0.0, requested.sum() - stock_weights.sum())
                 return (
                     result,
@@ -2507,6 +2557,8 @@ def _build_session(
                     else None
                 ),
             )
+            if cash_on_loss:
+                selected = min((selected, baseline), key=execution_score)
             if optimization is not None:
                 quantities = held_units.reindex(assets, fill_value=0.0)
                 change = (
@@ -3146,6 +3198,10 @@ def _ledger_batch(
                     row, "adv20_missing_observations", None
                 ),
                 "prediction_rank_score": prediction_rank_score.get(asset),
+                "size_exposure_source": "account_mark_and_total_shares"
+                if enhanced_decision is not None
+                and asset in enhanced_decision.marked_size_assets
+                else None,
                 "decision_delta_weight": float(decision_delta.loc[asset]),
                 "expected_alpha": enhanced_decision.expected_alpha.get(asset)
                 if enhanced_decision is not None
@@ -3263,6 +3319,18 @@ def _ledger_batch(
                     )
                 }
                 if optimization_result is not None
+                else {}
+            ),
+            **(
+                {"unscored_target_weight": optimization_result.unscored_target_weight}
+                if optimization_result is not None
+                and optimization_result.unscored_target_weight
+                else {}
+            ),
+            **(
+                {"decision_objective": "net_return_with_cash"}
+                if optimization_result is not None
+                and optimization_result.cash_on_nonpositive_return
                 else {}
             ),
             **(

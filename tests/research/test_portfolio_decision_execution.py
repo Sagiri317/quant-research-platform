@@ -237,15 +237,40 @@ def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objec
         20.0
     )
     inputs["locked_fractions"] = {"a": 0.05}
-    assert daily._build_session(**inputs)[2] is None
+    _, _, partial, delta, _ = daily._build_session(**inputs)
+    assert partial.weights["a"] == pytest.approx(0.01)
+    assert partial.unscored_target_weight == pytest.approx(0.01)
+    assert delta["a"] == pytest.approx(-0.19)
     inputs.pop("locked_fractions")
     inputs["amount_history"].pop(("a", pd.Timestamp("2000-01-01")))
-    _, _, skipped, _, book = daily._build_session(**inputs)
-    assert skipped is None
-    assert (
-        book.attrs["decision_availability"]["decision_skip_reason"]
-        == "robust_held_prediction_unavailable"
+    _, _, frozen, delta, book = daily._build_session(**inputs)
+    assert frozen.weights["a"] == pytest.approx(0.2)
+    assert delta["a"] == pytest.approx(0)
+    assert book.attrs["decision_availability"]["decision_skip_reason"] is None
+
+
+def test_cash_week_keeps_stock_when_actual_minimum_commission_exceeds_expected_loss():
+    inputs = _decision_inputs(holdings=(0.5, 0.5), fee_rate=0.0001)
+    inputs["candidate"] = replace(
+        inputs["candidate"], construction="robust_long_only", benchmark_id=None
     )
+    inputs["optimizer_config"] = daily.AbsoluteRiskConfig(fully_invested=True)
+    inputs["robust_config"] = daily.RobustPortfolioConfig(
+        objective="net_return_to_risk"
+    )
+    inputs["assumptions"] = replace(inputs["assumptions"], minimum_commission=5.0)
+    alpha = pd.Series({"a": -0.02, "b": -0.02})
+    inputs["alpha"] = alpha
+    inputs["enhanced_decision"] = replace(
+        inputs["enhanced_decision"],
+        expected_alpha=alpha,
+        benchmark_weights=pd.Series(dtype=float),
+        holding_sessions=5,
+    )
+    _, _, target, _, book = daily._build_session(**inputs)
+    assert target.cash_on_nonpositive_return
+    assert target.weights.loc[["a", "b"]].sum() == pytest.approx(0, abs=2e-7)
+    assert book.executed_delta_notional.eq(0).all()
 
 
 @pytest.mark.parametrize("can_sell", [True, False])

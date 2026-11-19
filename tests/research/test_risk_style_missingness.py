@@ -16,6 +16,33 @@ from quant_research_platform.research.risk import (
 )
 
 
+def test_held_exit_projects_only_missing_size_from_same_life_account_mark():
+    cross = pd.DataFrame(
+        {
+            "asset_id": ["held", "new-life", "unheld", "observed"],
+            "eligible": [False] * 4,
+            "listing_date": pd.to_datetime(["2020-01-01"] * 4),
+            "log_total_market_cap": [np.nan, np.nan, np.nan, 8.0],
+            "momentum": [0.7] * 4,
+        }
+    )
+    marks = cross[["asset_id", "listing_date"]].assign(close=2.0, total_shares=500.0)
+    marks.loc[1, "listing_date"] = pd.Timestamp("2010-01-01")
+    projected, used = daily._exit_size_projection(
+        cross,
+        None,
+        marks,
+        marks.drop(columns="total_shares"),
+        pd.Index(["held", "new-life", "observed"]),
+    )
+    assert used == {"held"}
+    np.testing.assert_allclose(
+        projected.log_total_market_cap, [np.log(1000), np.nan, np.nan, 8.0]
+    )
+    assert projected.momentum.tolist() == [0.7] * 4
+    assert pd.isna(cross.log_total_market_cap.iloc[0])
+
+
 @pytest.mark.parametrize(
     "values, expected",
     [

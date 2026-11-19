@@ -104,6 +104,8 @@ class OptimizationResult:
     holding_variance: float | None = None
     risk_penalty: float | None = None
     objective_value: float | None = None
+    cash_on_nonpositive_return: bool = False
+    unscored_target_weight: float = 0.0
     solver_iterations: int | None = None
     solver_variables: int | None = None
     solver_optimality: float | None = None
@@ -326,7 +328,7 @@ def optimize_portfolio(
         data["adv"] = data["adv"].where(valid_adv, np.inf)
         adv = data["adv"].to_numpy(dtype="float64")
         capacity = assumptions.adv_participation * adv / nav
-    for column in ("can_enter", "can_exit"):
+    for column in ("can_enter", "can_exit", "pool_exit"):
         if column in data:
             if not pd.api.types.is_bool_dtype(data[column]):
                 raise ValueError("optimizer_boolean_column_invalid")
@@ -346,18 +348,21 @@ def optimize_portfolio(
         signal_column,
     )
     if absolute:
-        # An enforced zero target has no signal or risk contribution. Only a
-        # holding that can actually be sold in full may use that observation.
+        pool_exit = (
+            data["pool_exit"].to_numpy(dtype=bool)
+            if ratio and "pool_exit" in data
+            else np.zeros(len(data), dtype=bool)
+        )
         zero_target = np.zeros(len(data), dtype=bool)
         if ratio:
-            zero_target |= incomplete
+            zero_target |= incomplete | pool_exit
             if "maximum_weight" in data:
                 zero_target |= data.maximum_weight.eq(0.0)
         can_liquidate = (sellable >= current) & (capacity >= current)
         if "can_exit" in data:
             can_liquidate &= data.can_exit.fillna(False).to_numpy(dtype=bool)
         required = (current > 0.0) & ~(zero_target & can_liquidate)
-        if (ranks or net_return) and (alpha_missing & required).any():
+        if (ranks or net_return) and (alpha_missing & required & ~pool_exit).any():
             raise RiskInputsUnavailable("robust_held_prediction_unavailable")
         if (incomplete & required).any():
             raise RiskInputsUnavailable("optimizer_held_risk_unavailable")
@@ -436,6 +441,12 @@ def optimize_portfolio(
         if any(lower > upper + tolerance for lower, upper in bounds):
             raise ValueError("optimizer_inventory_bounds_infeasible")
     lower, upper = np.asarray(bounds, dtype="float64").T
+    if absolute and pool_exit.any():
+        # On a mandatory exit the only target is what cannot yet be sold.
+        upper[pool_exit] = np.minimum(
+            upper[pool_exit], np.maximum(lower, current - capacity)[pool_exit]
+        )
+        bounds = tuple(zip(lower, upper, strict=True))
     net_lower, net_upper = np.asarray(net_bounds, dtype="float64").T
     frozen_stock = (lower == upper) & ~cash
     fee_lower, fee_upper = 0.0, maximum_cost / nav
@@ -1085,6 +1096,8 @@ def optimize_portfolio(
         affine_solution is not None and feasible(initial)
     )
     funding_iterations = 0
+    funding_constraint = None
+    exact_cash = False
     if absolute and config.fully_invested and not analytic_solution:
         # Maximize invested principal; fees paid are never a way to buy exposure.
         # Once fully funded, different allocations can reserve their own true fee.
@@ -1163,7 +1176,7 @@ def optimize_portfolio(
         )
         if cash_fee_floor is not None:
             constraints.remove(cash_fee_floor)
-        add_linear(
+        funding_constraint = add_linear(
             cash_direction[None, :],
             0.0 if exact_cash or maximum_cost else -np.inf,
             0.0 if exact_cash else idle_cash + config.solver_gtol,
@@ -1176,8 +1189,6 @@ def optimize_portfolio(
     analytic_solution |= (
         certified and np.array_equal(unpack(initial)[0], current) and feasible(initial)
     )
-    if net_return and no_positive_return:
-        raise RiskInputsUnavailable(no_positive_score)
     if not analytic_solution and not ratio and (ranks or maximum_cost == 0.0):
         # The budget-and-box linear relaxation bounds every remaining target.
         # A feasible maximizer with zero penalties attains that global bound.
@@ -1204,112 +1215,145 @@ def optimize_portfolio(
             )
             if zero_penalties and feasible(box_point):
                 initial, analytic_solution = box_point, True
-    if analytic_solution:
-        result = OptimizeResult(success=True, x=initial, nit=0)
-    else:
-        if ratio:
-            # A funded rank target can place many names on their post-fee caps.
-            capped_rank = ranks and config.name_weight_limit not in (None, 1.0)
-            barrier = (
-                0.1
-                if config.fully_invested and (risk_limit is not None or capped_rank)
-                else config.solver_gtol
+
+    def solve_ratio(initial):
+        nonlocal funding_iterations
+        # A funded rank target can place many names on their post-fee caps.
+        capped_rank = ranks and config.name_weight_limit not in (None, 1.0)
+        barrier = (
+            0.1
+            if config.fully_invested and (risk_limit is not None or capped_rank)
+            else config.solver_gtol
+        )
+        # A long-only budget already bounds each weight by the whole account.
+        upper_bounds[:weight_count][reachable_upper[free_weights] >= budget] = np.inf
+        keep_positive = not (config.fully_invested and exact_cash)
+        if priced_ratio:
+            score_domain = NonlinearConstraint(
+                lambda p: negative_score(p)[0],
+                -np.inf,
+                0.0,
+                jac=lambda p: sparse.csr_matrix(negative_score(p)[1][None, :]),
+                hess="2-point",
+                keep_feasible=keep_positive,
             )
-            # A long-only budget already bounds each weight by the whole account.
-            upper_bounds[:weight_count][reachable_upper[free_weights] >= budget] = (
-                np.inf
+
+            def positive_score(point):
+                weights, _, _ = unpack(point)
+                return score_domain.fun(point) < 0.0 and positive_income(
+                    weights, actual_cost(weights)[0]
+                )
+        else:
+            score_domain = LinearConstraint(
+                sparse.csr_matrix(signal_gradient[None, :]),
+                -(expected_alpha @ fixed_part) / score_scale,
+                np.inf,
+                keep_feasible=keep_positive,
             )
-            keep_positive = not (config.fully_invested and exact_cash)
-            if priced_ratio:
-                score_domain = NonlinearConstraint(
-                    lambda p: negative_score(p)[0],
-                    -np.inf,
-                    0.0,
-                    jac=lambda p: sparse.csr_matrix(negative_score(p)[1][None, :]),
-                    hess="2-point",
-                    keep_feasible=keep_positive,
-                )
 
-                def positive_score(point):
-                    weights, _, _ = unpack(point)
-                    return score_domain.fun(point) < 0.0 and positive_income(
-                        weights, actual_cost(weights)[0]
-                    )
-            else:
-                score_domain = LinearConstraint(
-                    sparse.csr_matrix(signal_gradient[None, :]),
-                    -(expected_alpha @ fixed_part) / score_scale,
-                    np.inf,
-                    keep_feasible=keep_positive,
-                )
+            def positive_score(point):
+                return (score_domain.A @ point)[0] > score_domain.lb[0]
 
-                def positive_score(point):
-                    return (score_domain.A @ point)[0] > score_domain.lb[0]
-
-            if net_return and exact_cash and not positive_score(initial):
-                if _funded_income_is_negative(
-                    expected_alpha, cash, budget, reachable_lower, reachable_upper
-                ):
-                    raise RiskInputsUnavailable(no_positive_score)
-
-                def income_starts():
-                    # Spreading purchases across positive forecasts limits nonlinear impact.
-                    positive = expected_alpha > 0.0
-                    yield funded_weights(positive, np.where(positive, current, 0.0))
-                    # Keeping a share saves a sale fee; adding one incurs a purchase fee.
-                    _, buy_rate, sell_rate = expected_transaction_cost(
-                        np.zeros(count), np.zeros(count)
-                    )
-                    order = np.argsort(
-                        -np.r_[expected_alpha + sell_rate, expected_alpha - buy_rate],
-                        kind="stable",
-                    )
-                    yield funded_weights(~cash, reachable_lower, income_order=order)
-
-                for weights, _ in income_starts():
-                    candidate = pack(weights)
-                    if feasible(candidate, config.solver_gtol) and positive_score(
-                        candidate
-                    ):
-                        initial = candidate
-                        break
-            if not feasible(initial, config.solver_gtol) or not positive_score(initial):
-                # Any feasible positive numerator starts the ratio problem.
-                # Only proving its absence requires optimizing the seed objective.
-                seed = solve(
-                    negative_score,
-                    "2-point" if priced_ratio else zero_hessian,
-                    initial,
-                    barrier=barrier,
-                    witness=positive_score,
-                )
-                initial = seed.x
-                funding_iterations += seed.nit
-            if not positive_score(initial):
-                raise RiskInputsUnavailable(no_positive_score)
-            # With no idle cash, strictly positive stock scores already imply
-            # the rank domain. An all-cash start would leave the ratio undefined.
-            if (
-                not config.fully_invested
-                or not exact_cash
-                or priced_ratio
-                or np.any((expected_alpha <= 0.0) & (reachable_upper > 0.0) & ~cash)
+        if net_return and exact_cash and not positive_score(initial):
+            if _funded_income_is_negative(
+                expected_alpha, cash, budget, reachable_lower, reachable_upper
             ):
-                constraints.append(score_domain)
-            result = solve(
-                signal_ratio,
-                "2-point" if priced_ratio else ratio_hessian,
+                return None
+
+            def income_starts():
+                # Spreading purchases across positive forecasts limits nonlinear impact.
+                positive = expected_alpha > 0.0
+                yield funded_weights(positive, np.where(positive, current, 0.0))
+                # Keeping a share saves a sale fee; adding one incurs a purchase fee.
+                _, buy_rate, sell_rate = expected_transaction_cost(
+                    np.zeros(count), np.zeros(count)
+                )
+                order = np.argsort(
+                    -np.r_[expected_alpha + sell_rate, expected_alpha - buy_rate],
+                    kind="stable",
+                )
+                yield funded_weights(~cash, reachable_lower, income_order=order)
+
+            for weights, _ in income_starts():
+                candidate = pack(weights)
+                if feasible(candidate, config.solver_gtol) and positive_score(
+                    candidate
+                ):
+                    initial = candidate
+                    break
+        if not feasible(initial, config.solver_gtol) or not positive_score(initial):
+            # Any feasible positive numerator starts the ratio problem.
+            # Only proving its absence requires optimizing the seed objective.
+            seed = solve(
+                negative_score,
+                "2-point" if priced_ratio else zero_hessian,
                 initial,
                 barrier=barrier,
+                witness=positive_score,
+            )
+            initial = seed.x
+            funding_iterations += seed.nit
+        if not positive_score(initial):
+            return None
+        # With no idle cash, strictly positive stock scores already imply
+        # the rank domain. An all-cash start would leave the ratio undefined.
+        if (
+            not config.fully_invested
+            or not exact_cash
+            or priced_ratio
+            or np.any((expected_alpha <= 0.0) & (reachable_upper > 0.0) & ~cash)
+        ):
+            constraints.append(score_domain)
+        return solve(
+            signal_ratio,
+            "2-point" if priced_ratio else ratio_hessian,
+            initial,
+            barrier=barrier,
+        )
+
+    cash_on_loss = False
+    if net_return and no_positive_return:
+        result = None
+    elif analytic_solution:
+        result = OptimizeResult(success=True, x=initial, nit=0)
+        weights, _, fee = unpack(initial)
+        if ratio and not positive_income(weights, fee):
+            result = None
+    elif ratio:
+        result = solve_ratio(initial)
+    else:
+        result = solve(
+            negative_score if ranks else objective,
+            zero_hessian if ranks else objective_hessian,
+            initial,
+            barrier=config.solver_gtol if absolute and config.fully_invested else 0.1,
+        )
+    if result is None:
+        if not net_return:
+            raise RiskInputsUnavailable(no_positive_score)
+        cash_on_loss = True
+        if funding_constraint is not None:
+            constraints.remove(funding_constraint)
+        if cash_fee_floor is not None and cash_fee_floor not in constraints:
+            constraints.append(cash_fee_floor)
+        lower_bounds[:weight_count][cash[free_weights]] = reachable_lower[free_weights][
+            cash[free_weights]
+        ]
+        # Starting in cash with no profitable entry attains the best net income.
+        stay = pack(current)
+        analytic_solution = (
+            not current[~cash].any() and no_positive_return and feasible(stay)
+        ) or not weight_count
+        if analytic_solution:
+            result = OptimizeResult(
+                success=True, x=stay if not current[~cash].any() else initial, nit=0
             )
         else:
             result = solve(
-                negative_score if ranks else objective,
-                zero_hessian if ranks else objective_hessian,
+                negative_score,
+                "2-point" if priced_ratio else zero_hessian,
                 initial,
-                barrier=config.solver_gtol
-                if absolute and config.fully_invested
-                else 0.1,
+                barrier=config.solver_gtol,
             )
     point = result.x.copy()
     moving = np.arange(weight_count)
@@ -1422,7 +1466,11 @@ def optimize_portfolio(
         covariance=covariance,
         specific=specific,
     )
-    if ratio:
+    if cash_on_loss:
+        objective_facts["objective_value"] = (
+            objective_facts["expected_return"] - cost_ratio
+        )
+    elif ratio:
         score = (
             expected_alpha @ weights - (cost_ratio if net_return else 0.0)
         ) / score_scale
@@ -1490,6 +1538,8 @@ def optimize_portfolio(
         else float((np.abs(weights - current) * nav / adv).max(initial=0.0)),
         predicted_total_volatility=volatility if absolute else None,
         risk_mode="absolute" if absolute else "benchmark_relative",
+        cash_on_nonpositive_return=cash_on_loss,
+        unscored_target_weight=float(weights[alpha_missing].sum()) if ratio else 0.0,
         **objective_facts,
         solver_iterations=int(result.nit + funding_iterations),
         solver_variables=variable_count,
