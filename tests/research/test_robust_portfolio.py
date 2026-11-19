@@ -45,78 +45,9 @@ def _solve(assets, loading, *, rate=0.0, **kwargs):
     )
 
 
-@pytest.mark.parametrize(
-    ("objective", "fully_invested", "target"),
-    [
-        ("rank", True, [1.0, 0.0]),
-        ("rank_to_risk", True, [3 / 7, 4 / 7]),
-        ("rank_to_risk", False, [3 / 7, 4 / 7]),
-    ],
-)
-@pytest.mark.parametrize("rate", [0.0, 0.005])
-def test_unscaled_rank_targets_with_actual_fees(
-    objective, fully_invested, target, rate
-):
-    assets = _assets((0.3, 0.1, 0.0), (0.0, 0.0, 1.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["specific_variance"] = [0.04, 0.01, 0.0]
-    rates = np.where(assets.is_cash, 0.0, rate)
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind=objective,
-        factor_covariance=pd.DataFrame(dtype=float),
-        expected_transaction_cost=lambda buy, sell: (
-            float((buy + sell) @ rates),
-            rates,
-            rates,
-        ),
-        nav=100.0,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(fully_invested=fully_invested),
-    )
-    # The positive tangency direction is inverse variance times score.
-    stock = result.weights.iloc[:2].to_numpy()
-    if fully_invested:
-        assert stock.sum() == pytest.approx(1 / (1 + rate), abs=2e-6)
-    assert stock / stock.sum() == pytest.approx(target, abs=2e-6)
-    assert result.expected_return is None
-    expected = 0.3 / (1 + rate) if objective == "rank" else np.sqrt(3.25)
-    assert result.objective_value == pytest.approx(expected, abs=1e-7)
-
-
-@pytest.mark.parametrize(
-    ("ranks", "variance", "reason"),
-    [
-        ((-0.2, -0.1, 0.0), (0.04, 0.01, 0.0), "optimizer_no_positive_feasible_rank"),
-        ((0.2, 0.3, 0.0), (0.0, 0.04, 0.0), "optimizer_rank_ratio_zero_volatility"),
-    ],
-)
-def test_rank_ratio_requires_a_finite_positive_opportunity(ranks, variance, reason):
-    assets = _assets(ranks, (0.0, 0.0, 1.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["specific_variance"] = variance
-    with pytest.raises(ValueError, match=reason):
-        optimizer.optimize_portfolio(
-            assets,
-            objective_kind="rank_to_risk",
-            factor_covariance=pd.DataFrame(dtype=float),
-            expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(3), np.zeros(3)),
-            nav=100.0,
-            cash_column="is_cash",
-            config=optimizer.AbsoluteRiskConfig(fully_invested=True),
-        )
-
-
-@pytest.mark.parametrize("objective", ["rank_to_risk", "net_return_to_risk"])
 @pytest.mark.parametrize("missing", ["risk", "exit_signal"])
-def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
-    objective, missing
-):
-    from quant_research_platform.contracts.portfolios import PortfolioObjective
-
-    signal = PortfolioObjective(objective).signal_column
+def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(missing):
+    signal = "expected_alpha"
     assets = _assets((0.05, 0.1, 0.0), (0.2, 0.8, 0.0)).rename(
         columns={"expected_alpha": signal}
     )
@@ -128,7 +59,7 @@ def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
         assets["pool_exit"] = [True, False, False]
     rates = np.array([0.001, 0.001, 0.0])
     kwargs = dict(
-        objective_kind=objective,
+        objective_kind="net_return_to_risk",
         holding_sessions=5,
         factor_covariance=pd.DataFrame(dtype=float),
         expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
@@ -152,189 +83,6 @@ def test_ratio_can_liquidate_unknown_position_but_cannot_ignore_a_residual(
         assert result.unscored_target_weight == pytest.approx(0.1)
         assert result.weights.iloc[1] > 0.89
         assert result.specific_variance > 0.0
-
-
-def test_rank_ratio_finds_the_tangency_portfolio_from_a_negative_rank_holding():
-    assets = _assets((0.10, 0.15, -0.20, 0.0), (0.0, 0.0, 1.0, 0.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["specific_variance"] = [0.01, 0.09, 0.01, 0.0]
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        factor_covariance=pd.DataFrame(dtype=float),
-        expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(4), np.zeros(4)),
-        nav=100.0,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(
-            fully_invested=True, total_volatility_limit=0.3
-        ),
-    )
-    # Long-only tangency weights are proportional to positive rank / variance.
-    assert result.weights.tolist() == pytest.approx([6 / 7, 1 / 7, 0.0, 0.0], abs=2e-7)
-    assert result.objective_value == pytest.approx(np.sqrt(1.25), abs=1e-7)
-
-
-def test_rank_ratio_respects_frozen_exposure_to_risk():
-    assets = _assets((0.2, 0.3, 0.0), (0.5, 0.5, 0.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["specific_variance"] = [0.0, 0.04, 0.0]
-    assets["trade_capacity_weight"] = 0.0
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        factor_covariance=pd.DataFrame(dtype=float),
-        expected_transaction_cost=lambda buy, sell: (0.0, np.zeros(3), np.zeros(3)),
-        nav=100.0,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(fully_invested=True),
-    )
-    assert result.objective_value == pytest.approx(2.5)
-
-
-def test_optional_cash_preserves_the_positive_risk_ratio_direction():
-    assets = _assets((-0.25, 0.25, 0.0), (0.0, 0.0, 1.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["specific_variance"] = [0.0, 0.04, 0.0]
-    fees = np.where(assets.is_cash, 0.0, 0.0005)
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        factor_covariance=pd.DataFrame(dtype=float),
-        expected_transaction_cost=lambda b, s: (float((b + s) @ fees), fees, fees),
-        nav=1e8,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(total_volatility_limit=0.3),
-    )
-    assert result.objective_value == pytest.approx(0.25 / np.sqrt(0.04), abs=1e-7)
-
-
-def _funded_frontier_weights(score, style, specific, limit):
-    # On the budget plane move from minimum variance in the zero-budget
-    # return direction until volatility reaches its limit.
-    covariance = np.diag(specific) + 0.04 * np.outer(style, style)
-    minimum = np.linalg.solve(covariance, np.ones(len(score)))
-    minimum /= minimum.sum()
-    direction = np.linalg.solve(covariance, score - minimum @ score)
-    scale = np.sqrt(
-        (limit**2 - minimum @ covariance @ minimum)
-        / (direction @ covariance @ direction)
-    )
-    return minimum + scale * direction
-
-
-def test_funded_rank_ratio_on_a_binding_risk_frontier():
-    score = np.array([-1 / 3, 0.0, 1 / 3])
-    style = np.array([0.7, 1.0, 1.3])
-    specific = np.array([0.01, 0.08, 0.15])
-    assets = _assets((*score, 0.0), (0.0, 0.0, 0.0, 1.0)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["style"] = np.r_[style, 0.0]
-    assets["specific_variance"] = np.r_[specific, 0.0]
-    rates = np.where(assets.is_cash, 0.0, 0.0005)
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        style_columns=("style",),
-        factor_covariance=pd.DataFrame([[0.04]], index=["style"], columns=["style"]),
-        expected_transaction_cost=lambda buy, sell: (
-            float((buy + sell) @ rates),
-            rates,
-            rates,
-        ),
-        nav=100.0,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(
-            fully_invested=True, total_volatility_limit=0.3
-        ),
-    )
-    expected = _funded_frontier_weights(score, style, specific, 0.3)
-    assert result.weights.iloc[:3].to_numpy() * 1.0005 == pytest.approx(
-        expected, abs=2e-6
-    )
-    assert result.objective_value == pytest.approx(score @ expected / 0.3, abs=1e-7)
-
-
-def test_funded_rank_ratio_with_binding_name_limits_and_no_volatility_cap():
-    scores = np.linspace(-0.05, 0.10, 4)
-    assets = _assets((*scores, 0.0), (0, 0, 0, 0, 1)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["style"] = [1, 1, 1, 1, 0]
-    assets["specific_variance"] = [0.04] * 4 + [0.0]
-    rates = np.r_[np.linspace(0.0005, 0.001, 4), 0.0]
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        style_columns=("style",),
-        factor_covariance=pd.DataFrame([[0.16]], index=["style"], columns=["style"]),
-        expected_transaction_cost=lambda b, s: (float((b + s) @ rates), rates, rates),
-        nav=100.0,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(
-            fully_invested=True, name_weight_limit=1 / 3
-        ),
-    )
-    # The common factor dominates risk. Each of the top three fills its post-fee cap.
-    rate = rates[1:4].mean()
-    expected = np.array([0.0, 1 / 3, 1 / 3, 1 / 3, rate]) / (1 + rate)
-    assert result.weights.to_numpy() == pytest.approx(expected, abs=2e-7)
-    assert result.objective_value == pytest.approx(
-        scores[1:].mean() / np.sqrt(0.16 + 0.04 / 3), abs=1e-7
-    )
-
-
-@pytest.mark.parametrize("binding", ["turnover", "volatility"])
-def test_funded_rank_rebalance_with_asymmetric_fees(binding):
-    mix = np.arange(1, 4)
-    stock = 0.92 * (mix[::-1] if binding == "turnover" else mix) / mix.sum()
-    stock[-1] += 0.025
-    cash = 1 - stock.sum()
-    assets = _assets((*np.linspace(-0.45, 0.45, 3), 0), (*stock, cash)).rename(
-        columns={"expected_alpha": "prediction_rank_score"}
-    )
-    assets["style"] = np.r_[np.linspace(0.7, 1.3, 3), 0]
-    assets["specific_variance"] = np.r_[np.linspace(0.01, 0.15, 3), 0]
-    buy = np.where(assets.is_cash, 0.0, 0.0005)
-    sell = 2 * buy
-    result = optimizer.optimize_portfolio(
-        assets,
-        objective_kind="rank_to_risk",
-        style_columns=("style",),
-        factor_covariance=pd.DataFrame([[0.04]], index=["style"], columns=["style"]),
-        expected_transaction_cost=lambda b, s: (float(b @ buy + s @ sell), buy, sell),
-        nav=1e8,
-        cash_column="is_cash",
-        config=optimizer.AbsoluteRiskConfig(
-            fully_invested=True,
-            total_volatility_limit=0.3,
-            target_turnover_limit=0.2,
-            name_weight_limit=2 / 3,
-        ),
-    )
-    if binding == "turnover":
-        # Spend the buy budget on the best stock, funded by cash and the worst stock.
-        fee = (0.0005 * 0.2 + 0.001 * (0.2 - cash)) / (1 - 0.001)
-        expected = np.r_[stock + [cash - 0.2 - fee, 0, 0.2], fee]
-        assert result.weights.to_numpy() == pytest.approx(expected, abs=2e-7)
-        assert result.target_turnover == pytest.approx(0.2, abs=2e-7)
-    else:
-        assert result.predicted_total_volatility == pytest.approx(0.3, abs=2e-8)
-        # Initial inventory lies close enough to reach the fully invested
-        # efficient frontier, whose optimum is independent of trading costs.
-        stocks = assets.iloc[:3]
-        frontier = _funded_frontier_weights(
-            stocks.prediction_rank_score, stocks["style"], stocks.specific_variance, 0.3
-        )
-        assert result.objective_value == pytest.approx(
-            stocks.prediction_rank_score @ frontier / 0.3, abs=2e-7
-        )
-        assert result.weights.iloc[-1] == pytest.approx(
-            result.expected_transaction_cost / 1e8, abs=2e-9
-        )
 
 
 def test_calibration_window_uses_market_sessions_or_fixed_start_and_maturity():
@@ -644,59 +392,6 @@ def test_small_trade_funds_the_actual_fee_without_forcing_both_capacity_bounds()
     assert result.objective_value >= best_objective - ECONOMIC_UTILITY_ATOL
 
 
-@pytest.mark.parametrize("blocked_sale", [False, True])
-def test_defined_nonpositive_slope_exits_to_cash_without_consuming_covariance(
-    blocked_sale,
-):
-    import quant_research_platform.research.portfolios.daily as daily
-    from tests.helpers.portfolio_inputs import decision_inputs
-
-    inputs = decision_inputs()
-    decision = inputs["enhanced_decision"]
-    inputs.update(
-        candidate=replace(
-            inputs["candidate"], construction="robust_long_only", benchmark_id=None
-        ),
-        enhanced_decision=replace(
-            decision,
-            benchmark_weights=pd.Series(dtype="float64"),
-            expected_alpha=decision.expected_alpha * 0.0,
-            risk=None,
-            calibration=replace(
-                decision.calibration,
-                slope=0.0,
-                slope_t_statistic=0.0,
-                slope_pvalue=1.0,
-            ),
-        ),
-        optimizer_config=optimizer.AbsoluteRiskConfig(total_volatility_limit=0.3),
-        robust_config=RobustPortfolioConfig(),
-        decision_reason="robust_optimizer",
-    )
-    if blocked_sale:
-        inputs["execution"].loc[inputs["execution"].asset_id.eq("a"), "can_exit"] = (
-            False
-        )
-    account, _, solved, _, ledger = daily._build_session(**inputs)
-    assert solved is None
-    assert ledger.attrs["decision_availability"]["decision_status"] == "AVAILABLE"
-    assert ledger.attrs["decision_availability"]["decision_skip_reason"] is None
-    if blocked_sale:
-        assert ledger.set_index("asset_id").loc["a", "post_trade_notional"] == 50.0
-        assert (
-            ledger.attrs["realized_constraints"]["realized_total_volatility_status"]
-            == "UNDEFINED"
-        )
-        return
-    assert account.post_trade_cash == 100.0
-    assert ledger.executed_delta_notional.tolist() == [-50.0, -50.0]
-    assert (
-        ledger.attrs["realized_constraints"]["realized_total_volatility_status"]
-        == "DEFINED"
-    )
-    assert ledger.attrs["realized_constraints"]["realized_total_volatility"] == 0.0
-
-
 def _calibration_rows():
     sessions = pd.bdate_range("2022-01-03", periods=35)
     intervals = calibration.alpha_calibration_intervals(sessions, "daily")
@@ -755,7 +450,6 @@ def test_date_cluster_slope_uncertainty_is_parameter_error_and_excludes_immature
 
 
 def test_calibrated_objective_defaults_and_risk_preferences():
-    assert RobustPortfolioConfig().objective == "calibrated_return"
     for values in ({"confidence": 1.0}, {"risk_aversion": -1.0}):
         with pytest.raises(ValueError, match="robust_portfolio_config_invalid"):
             RobustPortfolioConfig(**values)
@@ -960,7 +654,7 @@ def native_case(tmp_path_factory):
         "candidate": {
             "candidate_id": "robust",
             "selection_group": "research",
-            "construction": "robust_long_only",
+            "construction": "maximum_sharpe",
             "prediction_selector": "linear",
             "rebalance_schedule": "weekly-last-trading-day",
             "top_quantile": None,
@@ -999,37 +693,6 @@ def native_case(tmp_path_factory):
     return root, config, str(sources["benchmark_weights"]), pd.DataFrame(observations)
 
 
-@pytest.mark.parametrize("objective", ["rank", "rank_to_risk"])
-def test_native_rank_objective_trades_without_a_calibration_history(
-    native_case, objective
-):
-    from copy import deepcopy
-
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.research.portfolios.production import backtest
-
-    root, config, _, _ = native_case
-    config = deepcopy(config)
-    del config["calibration"]
-    config["robust_config"] = {"objective": objective}
-    config["optimizer_config"] = {"fully_invested": True}
-    config["output"] = str(root / objective)
-    config["prediction_window"]["start"] = config["output_window"]["start"]
-    config["predictions"][0]["window"]["start"] = config["output_window"]["start"]
-    artifact = read_portfolio_ledger_artifact(backtest(config))
-    assert artifact.final_alpha_calibration is None
-    traded = next(artifact.iter_chunks())
-    assert any(trade.quantity > 0 for trade in traded.trades)
-    assert any(row.name == "objective_value" for row in traded.diagnostics)
-    assert not any(
-        row.name in {"expected_alpha", "expected_return", "alpha_slope"}
-        and row.number is not None
-        for row in traded.diagnostics
-    )
-
-
 @pytest.mark.parametrize(
     "asset_means,variances,current,fee",
     [
@@ -1058,12 +721,12 @@ def test_funded_net_ratio_handles_existing_positions_and_cost_break_even(
     )
     result = optimizer.optimize_portfolio(assets, **args)
     if max(asset_means) < 0:
-        # Selling either position costs more than the expected loss on that stock.
-        assert result.cash_on_nonpositive_return
-        assert result.weights.tolist() == pytest.approx(current, abs=3e-7)
-        assert result.objective_value == pytest.approx(-0.00016, abs=2e-9)
+        # Nonpositive forecasts trigger a sale of both tradable holdings.
+        assert result.maximizing_net_income
+        assert result.weights.tolist() == pytest.approx([0, 0, 1], abs=3e-7)
+        assert result.objective_value == pytest.approx(-0.0008, abs=2e-9)
         return
-    assert not result.cash_on_nonpositive_return
+    assert not result.maximizing_net_income
     if current[0]:
         # Selling A or increasing A lowers the ratio. Keep A and fund B from cash.
         b = 0.4 + 0.2 / 1.0005
@@ -1115,7 +778,7 @@ def test_net_ratio_funds_positive_return_from_the_sellable_part_of_a_losing_hold
     )
 
 
-def test_only_losing_funded_combinations_release_cash():
+def test_only_positive_name_is_bought_up_to_its_cap():
     assets = _assets((0.01, -0.02, -0.02, 0.0), (0.4, 0.3, 0.3, 0.0))
     zero = np.zeros(4)
     # At most 40% earns 1%, and the remaining 60% loses at least 2%.
@@ -1130,9 +793,9 @@ def test_only_losing_funded_combinations_release_cash():
         cash_column="is_cash",
         config=optimizer.AbsoluteRiskConfig(fully_invested=True, name_weight_limit=0.4),
     )
-    assert result.cash_on_nonpositive_return
+    assert not result.maximizing_net_income
     assert result.weights.tolist() == pytest.approx([0.4, 0.0, 0.0, 0.6], abs=2e-7)
-    assert result.objective_value == pytest.approx(0.004, abs=1e-9)
+    assert result.expected_return == pytest.approx(0.004, abs=1e-9)
 
 
 def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income():
@@ -1158,9 +821,9 @@ def test_net_ratio_keeps_cash_when_risk_caps_stock_and_checks_net_entry_income()
     )
     assets.loc[0, "expected_alpha"] = 0.00099
     result = optimizer.optimize_portfolio(assets, **args)
-    assert result.cash_on_nonpositive_return
-    assert result.weights.tolist() == pytest.approx([0.0, 0.9])
-    assert result.objective_value == 0.0
+    assert result.maximizing_net_income
+    assert result.weights.tolist() == pytest.approx([stock, 0.9 - stock], abs=2e-8)
+    assert result.objective_value == pytest.approx((0.00099 - 0.001) * stock)
 
 
 def test_net_ratio_with_binding_turnover_invests_available_cash_in_the_best_mix():
@@ -1187,8 +850,11 @@ def test_net_ratio_with_binding_turnover_invests_available_cash_in_the_best_mix(
     assert result.objective_value == pytest.approx(expected, abs=1e-8)
 
 
-def test_native_raw_score_account_records_the_net_holding_ratio(
-    native_case, tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "construction", ["maximum_sharpe", "quantile_equal_weight", "quantile_float_cap"]
+)
+def test_native_weekly_stock_accounts_share_positive_forecasts(
+    native_case, tmp_path, monkeypatch, construction
 ):
     import json
     from copy import deepcopy
@@ -1206,12 +872,20 @@ def test_native_raw_score_account_records_the_net_holding_ratio(
     _, original, _, _ = native_case
     config = deepcopy(original)
     del config["calibration"]
-    config["robust_config"] = {"objective": "net_return_to_risk"}
-    config["optimizer_config"] = {"fully_invested": True}
+    config.pop("robust_config", None)
+    config.pop("optimizer_config", None)
     config["output"] = str(tmp_path / "account")
     source = Path(config["inputs"]["dataset"])
     spec = json.loads((source / "spec.json").read_text(encoding="utf-8"))
     frame = pd.read_parquet(source / "data")
+    if construction != "maximum_sharpe":
+        config["candidate"].update(
+            construction=construction, top_quantile=0.2, risk_style_columns=[]
+        )
+        config["inputs"].pop("risk_context")
+        config.pop("risk_model", None)
+        frame["float_market_cap"] = 1e8
+        spec["column_roles"]["float_market_cap"] = "context"
     label = "forward_return_5d"
     clock = label + "_available_at"
     frame[label] = np.where(frame.asset_id.isin(list("acegik")), 0.02, 0.04)
@@ -1246,7 +920,7 @@ def test_native_raw_score_account_records_the_net_holding_ratio(
         "target_transform": "date_zscore",
     }
     scores["prediction_score"] = np.where(
-        scores.asset_id.isin(list("acegik")), 0.5, 2.0
+        scores.asset_id.isin(list("acegik")), -4.0, 2.0
     )
     pred["path"] = str(
         write_prediction_outputs(
@@ -1260,13 +934,23 @@ def test_native_raw_score_account_records_the_net_holding_ratio(
     first = next(result.iter_chunks())
     assert any(t.quantity > 0 for t in first.trades)
     diagnostics = {r.name: r.number for r in first.diagnostics if r.number is not None}
+    assert all(t.asset_id in "bdfhjl" for t in first.trades)
+    # Six tradable names can take at most 12% of the account.
+    assert (
+        0
+        < sum(t.notional for t in first.trades)
+        <= 0.12 * config["assumptions"]["initial_nav"]
+    )
+    if construction != "maximum_sharpe":
+        assert "objective_value" not in diagnostics
+        return
     period = diagnostics["holding_sessions"]
     expected = {
         round(r.number, 8)
         for r in first.diagnostics
         if r.name == "expected_alpha" and r.number is not None
     }
-    assert expected == {round(x * period / 5, 8) for x in (0.035, 0.05)}
+    assert expected == {round(x * period / 5, 8) for x in (-0.01, 0.05)}
     assert diagnostics["objective_value"] == pytest.approx(
         (
             diagnostics["expected_return"]
@@ -1277,10 +961,7 @@ def test_native_raw_score_account_records_the_net_holding_ratio(
     )
 
 
-@pytest.mark.parametrize("construction", ["robust_long_only", "benchmark_enhanced"])
-def test_native_prediction_calibration_robust_account_and_frozen_reuse(
-    native_case, construction
-):
+def test_native_prediction_calibration_robust_account_and_frozen_reuse(native_case):
     import json
     from copy import deepcopy
     from pathlib import Path
@@ -1294,19 +975,19 @@ def test_native_prediction_calibration_robust_account_and_frozen_reuse(
 
     root, config, benchmark_path, observations = native_case
     config = deepcopy(config)
+    construction = "benchmark_enhanced"
     config["candidate"]["construction"] = construction
     config["output"] = str(root / construction)
     config["robust_config"] = {"confidence": 0.95, "risk_aversion": 1.0}
-    if construction == "benchmark_enhanced":
-        config["candidate"]["benchmark_id"] = "csi500"
-        config["inputs"]["benchmark"] = benchmark_path
-        config["optimizer_config"] = {
-            "active_name_limit": 0.1,
-            "tracking_error_limit": 1.0,
-            "target_turnover_limit": 0.2,
-            "industry_active_limit": 1.0,
-            "style_active_limit": 0.5,
-        }
+    config["candidate"]["benchmark_id"] = "csi500"
+    config["inputs"]["benchmark"] = benchmark_path
+    config["optimizer_config"] = {
+        "active_name_limit": 0.1,
+        "tracking_error_limit": 1.0,
+        "target_turnover_limit": 0.2,
+        "industry_active_limit": 1.0,
+        "style_active_limit": 0.5,
+    }
     calibration_path = Path(native_filesystem_path(config["calibration"]))
     before = calibration_path.read_bytes()
     payload = json.loads(before)
@@ -1401,73 +1082,7 @@ def test_robust_index_membership_maintenance_is_independent_of_calibration_sched
     assert not any(row.name == "solver_iterations" for row in maintenance.diagnostics)
 
 
-@pytest.mark.parametrize("risk_aversion", [0.0, 1.0])
-def test_native_robust_risk_window_only_blocks_a_consumed_covariance(
-    native_case, risk_aversion
-):
-    from copy import deepcopy
-
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-    )
-    from quant_research_platform.research.portfolios.production import backtest
-
-    root, config, _, _ = native_case
-    config = deepcopy(config)
-    config["risk_model"]["config"].update(factor_window=80, minimum_factor_dates=60)
-    config["robust_config"] = {"confidence": 0.95, "risk_aversion": risk_aversion}
-    config["output"] = str(root / f"risk_unavailable_{risk_aversion}")
-    artifact = read_portfolio_ledger_artifact(backtest(config))
-    batches = list(artifact.iter_chunks())
-    if risk_aversion == 0.0:
-        assert any(batch.trades for batch in batches)
-        optimized = next(
-            batch
-            for batch in batches
-            if any(row.name == "solver_iterations" for row in batch.diagnostics)
-        )
-        assert any(
-            row.name == "risk_penalty" and row.number == 0.0
-            for row in optimized.diagnostics
-        )
-        assert any(
-            row.name == "realized_total_volatility_status" and row.text == "UNDEFINED"
-            for row in optimized.diagnostics
-        )
-        assert not any(
-            row.name == "predicted_total_volatility" and row.number is not None
-            for row in optimized.diagnostics
-        )
-        assert all(
-            row.text != "factor_risk_factor_history_insufficient"
-            for batch in batches
-            for row in batch.diagnostics
-            if row.name == "decision_skip_reason"
-        )
-        return
-    assert all(not batch.trades for batch in batches)
-    skipped = []
-    for batch in batches:
-        facts = {
-            row.name: row.text
-            for row in batch.diagnostics
-            if row.asset_id == "__cash__" and row.text is not None
-        }
-        assert not any(row.name == "solver_iterations" for row in batch.diagnostics)
-        if (
-            facts.get("decision_skip_reason")
-            == "factor_risk_factor_history_insufficient"
-        ):
-            assert facts["decision_status"] == "SKIPPED"
-            assert facts["alpha_status"] == "DEFINED"
-            skipped.append(batch.sequence)
-    assert skipped
-
-
-@pytest.mark.parametrize("mode", ["active", "cash", "funded", "benchmark"])
-def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
-    native_case, mode
-):
+def test_native_unknown_unheld_industry_only_blocks_the_required_reference(native_case):
     from copy import deepcopy
 
     from quant_research_platform.artifacts.portfolio_ledger import (
@@ -1475,7 +1090,6 @@ def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
     )
     from quant_research_platform.research.portfolios.production import (
         backtest,
-        calibrate,
     )
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from tests.helpers.portfolio_inputs import _processed_specs
@@ -1484,99 +1098,23 @@ def test_native_unknown_unheld_industry_only_blocks_the_required_reference(
     config = deepcopy(config)
     panel = read_dataset(config["inputs"]["panel"])
     panel.loc[panel.asset_id.eq("b"), "industry_level1_code"] = pd.NA
-    path = root / f"unknown_industry_{mode}"
+    path = root / "unknown_industry"
     config["inputs"]["panel"] = str(
         write_dataset(path, panel, spec=_processed_specs().get("market_panel_1d")).root
     )
     config["robust_config"] = {"confidence": 0.95, "risk_aversion": 1.0}
-    config["output"] = str(root / f"account_unknown_industry_{mode}")
-    if mode == "benchmark":
-        config["candidate"].update(
-            construction="benchmark_enhanced", benchmark_id="csi500"
-        )
-        config["inputs"]["benchmark"] = benchmark_path
-    elif mode in {"cash", "funded"}:
-        observation_path = root / f"observations_{mode}.parquet"
-        observations.assign(
-            holding_return=-0.1 * observations.prediction_rank_score
-        ).to_parquet(observation_path, index=False)
-        config["calibration"] = str(
-            calibrate(
-                {
-                    "observations": str(observation_path),
-                    "scheduled_intervals": str(root / "intervals.parquet"),
-                    "calendar": config["inputs"]["calendar"],
-                    "cutoff": "2022-12-30",
-                    "rebalance_schedule": "weekly-last-trading-day",
-                    "selection_group": "research",
-                    "output": str(root / f"calibration_{mode}.json"),
-                }
-            )
-        )
-        if mode == "cash":
-            config["risk_model"]["config"].update(
-                factor_window=80, minimum_factor_dates=60
-            )
-        else:
-            config["optimizer_config"] = {
-                "fully_invested": True,
-                "target_turnover_limit": 0.2,
-            }
+    config["output"] = str(root / "account_unknown_industry")
+    config["candidate"].update(construction="benchmark_enhanced", benchmark_id="csi500")
+    config["inputs"]["benchmark"] = benchmark_path
     batches = list(read_portfolio_ledger_artifact(backtest(config)).iter_chunks())
     assert batches
     facts = [
         {row.name: row.text for row in batch.diagnostics if row.asset_id == "__cash__"}
         for batch in batches
     ]
-    if mode == "benchmark":
-        assert all(not batch.trades for batch in batches)
-        assert any(
-            row.get("decision_status") == "SKIPPED"
-            and row.get("decision_skip_reason") == "portfolio_industry_context_missing"
-            for row in facts
-        )
-        return
-    assert all(
-        row.get("decision_skip_reason") != "portfolio_industry_context_missing"
+    assert all(not batch.trades for batch in batches)
+    assert any(
+        row.get("decision_status") == "SKIPPED"
+        and row.get("decision_skip_reason") == "portfolio_industry_context_missing"
         for row in facts
-    )
-    assert any(row.get("decision_status") == "AVAILABLE" for row in facts)
-    if mode == "cash":
-        assert all(not batch.trades for batch in batches)
-        assert not any(
-            row.name == "solver_iterations"
-            for batch in batches
-            for row in batch.diagnostics
-        )
-        assert any(
-            row.name == "alpha_slope" and row.number < 0.0
-            for batch in batches
-            for row in batch.diagnostics
-        )
-        return
-    optimized = [
-        batch
-        for batch in batches
-        if any(row.name == "solver_iterations" for row in batch.diagnostics)
-    ]
-    assert optimized and any(batch.trades for batch in optimized)
-    if mode == "funded":
-        first = next(batch for batch in optimized if batch.trades)
-        assert (
-            sum(trade.notional for trade in first.trades)
-            > 0.95 * config["assumptions"]["initial_nav"]
-        )
-        diagnostics = {
-            row.name: row.number
-            for row in first.diagnostics
-            if row.asset_id == "__cash__"
-        }
-        assert diagnostics["alpha_slope"] < 0
-        assert diagnostics["expected_return"] == diagnostics["robust_penalty"] == 0.0
-    assert all(trade.asset_id != "b" for batch in batches for trade in batch.trades)
-    assert all(
-        row.quantity == 0.0
-        for batch in batches
-        for row in batch.valuations
-        if row.asset_id == "b"
     )

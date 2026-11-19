@@ -211,14 +211,12 @@ def test_frozen_nonzero_missing_risk_skips_target_and_keeps_real_account(missing
     )
 
 
-@pytest.mark.parametrize("objective", ["rank_to_risk", "net_return_to_risk"])
-def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objective):
+def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution():
     inputs = _decision_inputs(holdings=(0.2, 0.8))
     inputs["candidate"] = replace(
-        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+        inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
     )
     inputs["optimizer_config"] = daily.AbsoluteRiskConfig(fully_invested=True)
-    inputs["robust_config"] = daily.RobustPortfolioConfig(objective=objective)
     inputs["dataset"].loc[0, "eligible"] = False
     inputs["alpha"] = pd.Series({"a": np.nan, "b": 0.1})
     inputs["enhanced_decision"] = replace(
@@ -249,15 +247,12 @@ def test_pool_exit_without_forecast_keeps_weekly_target_and_real_execution(objec
     assert book.attrs["decision_availability"]["decision_skip_reason"] is None
 
 
-def test_cash_week_keeps_stock_when_actual_minimum_commission_exceeds_expected_loss():
+def test_negative_forecasts_exit_even_when_minimum_commission_exceeds_expected_loss():
     inputs = _decision_inputs(holdings=(0.5, 0.5), fee_rate=0.0001)
     inputs["candidate"] = replace(
-        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+        inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
     )
     inputs["optimizer_config"] = daily.AbsoluteRiskConfig(fully_invested=True)
-    inputs["robust_config"] = daily.RobustPortfolioConfig(
-        objective="net_return_to_risk"
-    )
     inputs["assumptions"] = replace(inputs["assumptions"], minimum_commission=5.0)
     alpha = pd.Series({"a": -0.02, "b": -0.02})
     inputs["alpha"] = alpha
@@ -268,9 +263,9 @@ def test_cash_week_keeps_stock_when_actual_minimum_commission_exceeds_expected_l
         holding_sessions=5,
     )
     _, _, target, _, book = daily._build_session(**inputs)
-    assert target.cash_on_nonpositive_return
+    assert target.maximizing_net_income
     assert target.weights.loc[["a", "b"]].sum() == pytest.approx(0, abs=2e-7)
-    assert book.executed_delta_notional.eq(0).all()
+    assert book.executed_delta_notional.lt(0).all()
 
 
 @pytest.mark.parametrize("can_sell", [True, False])
@@ -280,17 +275,19 @@ def test_single_name_repair_only_trades_the_requested_book(can_sell, monkeypatch
     )
     inputs["cash"] = 25.0
     inputs["candidate"] = replace(
-        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+        inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
     )
     inputs["optimizer_config"] = daily.AbsoluteRiskConfig(
         fully_invested=True, name_weight_limit=0.55
     )
-    inputs["robust_config"] = daily.RobustPortfolioConfig(objective="rank_to_risk")
     inputs["alpha"] = pd.Series([0.9, 0.25, 0.4], index=list("abc"))
     enhanced = inputs["enhanced_decision"]
     enhanced.risk.specific_variance["c"] = np.nan
     inputs["enhanced_decision"] = replace(
-        enhanced, benchmark_weights=pd.Series(dtype=float), holding_sessions=5
+        enhanced,
+        benchmark_weights=pd.Series(dtype=float),
+        holding_sessions=5,
+        expected_alpha=inputs["alpha"],
     )
     inputs["next_panel"].loc[0, "open"] = 0.023
     inputs["execution"].loc[0, "can_exit"] = can_sell
@@ -303,7 +300,7 @@ def test_single_name_repair_only_trades_the_requested_book(can_sell, monkeypatch
 
     monkeypatch.setattr(daily, "execute_stock_target", execute_requested_book)
     account, _, target, _, book = daily._build_session(**inputs)
-    assert target.weights["c"] == 0.0
+    assert target.weights.get("c", 0.0) == 0.0
     # A is worth 103.5 of 158.5. Selling 700 shares leaves 87.4, above 55%;
     # selling 800 brings it to 85.1. If A is frozen the 25 cash can still buy B.
     assert book.set_index("asset_id").at["a", "executed_quantity"] == (
@@ -325,17 +322,17 @@ def test_adjacent_lot_improves_other_positions_with_a_frozen_overweight(sellable
     inputs = _decision_inputs(benchmark=(0.5, 0.2, 0.3), holdings=(0.45, 0.15, 0.0))
     inputs["cash"] = 40.0
     inputs["candidate"] = replace(
-        inputs["candidate"], construction="robust_long_only", benchmark_id=None
+        inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
     )
     inputs["optimizer_config"] = daily.AbsoluteRiskConfig(
         fully_invested=True, name_weight_limit=0.55
     )
-    inputs["robust_config"] = daily.RobustPortfolioConfig(objective="rank_to_risk")
     inputs["alpha"] = 0.1 * (1.0 + pd.Series([0.54, 0.1615, 0.2985], index=list("abc")))
     inputs["enhanced_decision"] = replace(
         inputs["enhanced_decision"],
         benchmark_weights=pd.Series(dtype=float),
         holding_sessions=5,
+        expected_alpha=inputs["alpha"],
     )
     inputs["next_panel"].loc[0, "open"] = 0.03
     inputs["execution"].loc[0, "can_exit"] = bool(sellable_lots)
@@ -343,7 +340,7 @@ def test_adjacent_lot_improves_other_positions_with_a_frozen_overweight(sellable
         inputs["amount_history"]["a", pd.Timestamp("2000-01-01")] = [15.0] * 20
     inputs["execution"].loc[2, "can_enter"] = False
     _, _, target, _, book = daily._build_session(**inputs)
-    assert target.weights["b"] == pytest.approx(0.1615, abs=1e-6)
+    assert target.weights["b"] == pytest.approx(0.1615, abs=2e-6)
     # B's target is 3068.5 shares at the open. Buying 1600, from 1500,
     # invests the adjacent lot. Each 100-share lot sold reduces A by 3.
     assert book.executed_quantity.tolist() == [-100 * sellable_lots, 1600, 0]
@@ -482,3 +479,92 @@ def test_one_cent_future_price_move_requires_missing_active_risk(missing):
     assert facts["realized_constraints_reason"] == "active_risk_unavailable"
     assert facts["realized_tracking_error_status"] == "UNDEFINED"
     assert "realized_tracking_error" not in facts
+
+
+@pytest.mark.parametrize(
+    "construction", ["quantile_equal_weight", "quantile_float_cap", "maximum_sharpe"]
+)
+def test_nonpositive_full_book_exits_to_cash_and_missing_holding_freezes(construction):
+    inputs = _decision_inputs(benchmark=(0.3, 0.3, 0.4), holdings=(0.03, 0, 0.01))
+    inputs["cash"] = 96.0
+    alpha = pd.Series([np.nan, 0.1, -0.08], index=["a", "b", "c"])
+    inputs.update(alpha=alpha, holding_returns=alpha)
+    sharpe = construction == "maximum_sharpe"
+    inputs["candidate"] = replace(
+        inputs["candidate"],
+        construction=construction,
+        top_quantile=None if sharpe else 1.0,
+        benchmark_id=None,
+    )
+    inputs["enhanced_decision"] = (
+        replace(
+            inputs["enhanced_decision"],
+            expected_alpha=alpha,
+            holding_sessions=5,
+            benchmark_weights=pd.Series(dtype=float),
+        )
+        if sharpe
+        else None
+    )
+    inputs["optimizer_config"] = daily.WEEKLY_STOCK_RISK if sharpe else None
+    _, _, _, _, book = daily._build_session(**inputs)
+    fills = book.set_index("asset_id").executed_delta_notional
+    assert fills["a"] == 0 and fills["b"] > 0 and fills["c"] < 0
+    if sharpe:
+        inputs["enhanced_decision"] = replace(inputs["enhanced_decision"], risk=None)
+        _, _, _, _, book = daily._build_session(**inputs)
+        assert book.set_index("asset_id").at["c", "executed_delta_notional"] < 0
+
+
+@pytest.mark.parametrize(
+    ("construction", "exit_return"),
+    [
+        ("maximum_sharpe", -0.10),
+        ("quantile_equal_weight", -0.10),
+        ("quantile_float_cap", 0.02),
+    ],
+)
+def test_limited_sale_does_not_reverse_direction_after_opening_gap(
+    construction, exit_return
+):
+    inputs = _decision_inputs(holdings=(0.02, 0))
+    inputs["cash"] = 98.0
+    names = ["a", "b"]
+    alpha = pd.Series([exit_return, 0.1], index=names)
+    sharpe = construction == "maximum_sharpe"
+    inputs.update(
+        alpha=alpha,
+        holding_returns=alpha,
+        optimizer_config=daily.WEEKLY_STOCK_RISK if sharpe else None,
+    )
+    inputs["candidate"] = replace(
+        inputs["candidate"],
+        construction=construction,
+        top_quantile=None if sharpe else 0.5,
+        benchmark_id=None,
+    )
+    inputs["enhanced_decision"] = (
+        replace(
+            inputs["enhanced_decision"],
+            expected_alpha=alpha,
+            holding_sessions=5,
+            benchmark_weights=pd.Series(dtype=float),
+        )
+        if sharpe
+        else None
+    )
+    inputs["dataset"]["float_market_cap"] = 1.0
+    # At yesterday's price only 100 of A's 2000 shares can be sold.
+    for frame in (inputs["panel"], inputs["next_panel"]):
+        frame[["open", "close"]] = 0.001
+    inputs["next_panel"].loc[inputs["next_panel"].asset_id.eq("a"), "open"] = 0.0009
+    inputs["held_units"] = inputs["holdings"] / 0.001
+    for (asset, _), amounts in inputs["amount_history"].items():
+        if asset == "a":
+            amounts.clear()
+            amounts.extend([0.1] * 20)
+    _, _, _, delta, book = daily._build_session(**inputs)
+    assert delta["a"] == pytest.approx(-0.001)
+    assert book.set_index("asset_id").at[
+        "a", "executed_delta_notional"
+    ] == pytest.approx(-0.09)

@@ -50,9 +50,7 @@ def _publish(tmp_path, batches, *, capital, candidate, window):
         return daily.copy()
 
 
-@pytest.mark.parametrize(
-    "construction", ("quantile_equal_weight", "quantile_equal_weight_half_step")
-)
+@pytest.mark.parametrize("construction", ("quantile_equal_weight",))
 def test_many_fills_conserve_cash_and_publish_native_returns(
     tmp_path, monkeypatch, construction
 ):
@@ -152,7 +150,7 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
     assert economics_calls == [batch.sequence for batch in batches]
     assert daily.return_status.eq("DEFINED").all()
     # One purchase of a constant-price asset pool costs 0.04% of bought notional.
-    shares_per_stock = 50_000 if construction.endswith("half_step") else 99_900
+    shares_per_stock = 99_900
     expected = -shares_per_stock * count * 0.0004 / 10_000_001.0
     assert daily.net_return.iloc[0] == pytest.approx(expected, rel=2e-13)
 

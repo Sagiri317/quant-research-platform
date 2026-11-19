@@ -568,11 +568,15 @@ def test_decision_panel_carries_consumed_label_definition_and_feature_lineage(tm
 
 
 @pytest.mark.parametrize("case", ["complete", "late_predictions", "closed_only"])
-def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, case):
+def test_preopen_dataset_runs_shared_daily_account_on_next_session(
+    tmp_path, case, monkeypatch
+):
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
     from quant_research_platform.contracts.portfolios import (
         ExecutionAssumptions,
         PortfolioCandidateSpec,
-        RobustPortfolioConfig,
     )
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.a_share.calendar import (
@@ -636,13 +640,13 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
             1_000_000, 0, 0, 1, (1,), minimum_commission=0
         ),
     )
-    batches = list(backtest_a_share(**settings))
+    batches = list(backtest_a_share(**settings, return_horizon=1))
     assert len(batches) == 4
     assert min(seen) == pd.Timestamp("2023-01-02T01:00")
     trades = [trade for batch in batches for trade in batch.trades]
-    assert (
-        trades
-        and pd.Timestamp(trades[0].timestamp_ns).date().isoformat() == "2023-01-02"
+    first_execution = "2023-01-04" if case == "late_predictions" else "2023-01-02"
+    assert trades and pd.Timestamp(trades[0].timestamp_ns) == pd.Timestamp(
+        first_execution
     )
     assert unified_trading_sessions(calendar)[-1] == pd.Timestamp("2023-01-06")
     from quant_research_platform.contracts.policies import PolicyDecision
@@ -771,13 +775,13 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(tmp_path, cas
                         **settings,
                         "candidate": replace(
                             settings["candidate"],
-                            construction="robust_long_only",
+                            construction="maximum_sharpe",
                             benchmark_id=None,
                             top_quantile=None,
                             rebalance_schedule=schedule,
                             risk_style_columns=("signal",),
                         ),
-                        "robust_config": RobustPortfolioConfig(),
+                        "return_horizon": 1,
                         "inputs": {
                             **settings["inputs"],
                             "risk_context": [inputs["dataset"]],

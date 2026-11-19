@@ -8,6 +8,7 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
+from scipy.optimize import brentq
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _mad_winsorize,
@@ -37,6 +38,7 @@ def build_simple_target_weights(
     portfolio_mode: PortfolioMode = "long_only",
     top_quantile: float = DEFAULT_TOP_QUANTILE,
     bottom_quantile: float = DEFAULT_TOP_QUANTILE,
+    holding_returns: pd.Series | None = None,
     float_market_cap: pd.Series | None = None,
     neutrality: Literal["none", "industry", "size", "industry_size"] = "none",
     industry: pd.Series | None = None,
@@ -98,6 +100,10 @@ def build_simple_target_weights(
     top = valid_values.index[
         _select_quantile_boundary(valid_values, top_quantile, ascending=False)
     ]
+    if holding_returns is not None:
+        top = top[holding_returns.reindex(top).gt(0.0)]
+        if top.empty:
+            return pd.Series(0.0, index=assets, dtype="float64", name="target_weight")
     bottom = (
         valid_values.index[
             _select_quantile_boundary(valid_values, bottom_quantile, ascending=True)
@@ -147,6 +153,24 @@ def build_simple_target_weights(
         if context is not None
         else result
     )
+
+
+def fund_stock_weights(weights, current, capacity, locked, stock_budget, name_limit):
+    """Redistribute the stock budget proportionally within reachable holdings."""
+    lower = np.maximum(locked, current - capacity).clip(lower=0.0)
+    upper = np.maximum(lower, np.minimum(current + capacity, name_limit))
+    upper = upper.where(weights.gt(0.0), lower)
+    if upper.sum() <= stock_budget:
+        return upper
+    if lower.sum() >= stock_budget:
+        return lower
+    active = weights.gt(0.0)
+    scale = brentq(
+        lambda k: weights.mul(k).clip(lower, upper).sum() - stock_budget,
+        0.0,
+        (upper[active] / weights[active]).max(),
+    )
+    return weights.mul(scale).clip(lower, upper)
 
 
 def _canonical_assets(signal: pd.Series, eligible: pd.Series) -> pd.Index:

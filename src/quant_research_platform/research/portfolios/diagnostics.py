@@ -374,7 +374,7 @@ def _portfolio_risk_models(ledgers, candidates, config):
     )
     result = {}
     for candidate in candidates:
-        if candidate.construction in {"benchmark_enhanced", "robust_long_only"}:
+        if candidate.construction in {"benchmark_enhanced", "maximum_sharpe"}:
             model = FactorRiskModel.from_mapping(
                 ledgers[candidate.candidate_id].metadata["risk_model"]
             )
@@ -872,17 +872,28 @@ def _portfolio_statistics_tables(
                 missing_orders = {
                     item.asset_id
                     for item in batch.diagnostics
-                    if item.name == "block_reason" and item.text == "adv_unavailable"
+                    if (item.name == "block_reason" and item.text == "adv_unavailable")
+                    or item.name == "adv_unavailable_demand_notional"
+                    and item.number
                 }
                 adv_gaps[candidate_id]["adv_unavailable_intervals"] += bool(
                     missing_orders
                 )
                 for value in batch.valuations:
                     if value.phase == "after" and value.asset_id in missing_orders:
-                        desired = (
-                            facts[value.asset_id, "target_notional"].number
-                            - value.share_value
+                        demand = facts.get(
+                            (value.asset_id, "adv_unavailable_demand_notional")
                         )
+                        desired = (
+                            demand.number
+                            if demand is not None
+                            else (
+                                facts[value.asset_id, "target_notional"].number
+                                - value.share_value
+                            )
+                        )
+                        if desired == 0:
+                            continue
                         side = "buy" if desired > 0 else "sell"
                         adv_gaps[candidate_id][f"adv_unavailable_{side}_orders"] += 1
                         adv_gaps[candidate_id][
@@ -896,9 +907,12 @@ def _portfolio_statistics_tables(
                         and item.asset_id != PORTFOLIO_CASH_ASSET_ID
                         and (item.number != 0.0)
                     }
-                    if deltas:
+                    if deltas or missing_orders:
                         decision_date = pd.Timestamp(
-                            facts[next(iter(deltas)), "decision_timestamp"].text
+                            facts[
+                                next(iter(deltas or missing_orders)),
+                                "decision_timestamp",
+                            ].text
                         )
                         available = {
                             asset: facts[asset, "adv20"].number
@@ -906,7 +920,9 @@ def _portfolio_statistics_tables(
                             else None
                             for asset in deltas
                         }
-                        adv_missing = any(value is None for value in available.values())
+                        adv_missing = bool(missing_orders) or any(
+                            value is None for value in available.values()
+                        )
                         for participation in config["execution_assumptions"][
                             "adv_sensitivities"
                         ]:

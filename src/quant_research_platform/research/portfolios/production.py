@@ -15,7 +15,6 @@ from quant_research_platform.contracts.json_codec import qrp_json_mapping_snapsh
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
-    PortfolioObjective,
     RobustPortfolioConfig,
 )
 from quant_research_platform.contracts.risk import FactorRiskModel
@@ -40,7 +39,7 @@ from quant_research_platform.research.portfolios.daily import (
     backtest_a_share,
 )
 from quant_research_platform.research.portfolios.optimizer import (
-    AbsoluteRiskConfig,
+    WEEKLY_STOCK_RISK,
     OptimizerConfig,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -151,26 +150,17 @@ def backtest(config: Mapping) -> Path:
     for key, value in inputs.items():
         for source in value if key == "risk_context" else (value,):
             _dataset_input_options(source)
-    absolute = candidate.construction == "robust_long_only"
-    enhanced = candidate.construction in {"benchmark_enhanced", "robust_long_only"}
+    absolute = candidate.construction == "maximum_sharpe"
+    enhanced = candidate.construction in {"benchmark_enhanced", "maximum_sharpe"}
     robust_config = (
         RobustPortfolioConfig(**config["robust_config"])
         if "robust_config" in config
         else None
     )
-    if absolute and robust_config is None:
-        robust_config = RobustPortfolioConfig()
-    calibrated = enhanced and (
-        robust_config is None
-        or robust_config.objective == PortfolioObjective.CALIBRATED
-    )
-    monetary_ratio = (
-        robust_config is not None
-        and robust_config.objective == PortfolioObjective.NET_RETURN_TO_RISK
-    )
-    prediction_column = (
-        "prediction_score" if monetary_ratio else "prediction_rank_score"
-    )
+    calibrated = candidate.construction == "benchmark_enhanced"
+    if robust_config is not None and not calibrated:
+        raise ValueError("portfolio_unused_configuration")
+    prediction_column = "prediction_rank_score" if calibrated else "prediction_score"
     return_horizon = None
     if not calibrated and ("calibration" in config or "calibration_window" in config):
         raise ValueError("portfolio_unused_calibration")
@@ -218,7 +208,7 @@ def backtest(config: Mapping) -> Path:
         path = Path(item["path"])
         metadata = read_output_manifest(path)["metadata"]
         facts = metadata["model_facts"]
-        if monetary_ratio:
+        if not calibrated:
             horizon = zscore_return_horizon(facts)
             if return_horizon is not None and horizon != return_horizon:
                 raise ValueError("portfolio_raw_score_return_horizon_conflict")
@@ -329,10 +319,12 @@ def backtest(config: Mapping) -> Path:
         )
     final = []
     risk_config = risk_model.config if enhanced else None
+    if absolute and "optimizer_config" in config:
+        raise ValueError("portfolio_unused_configuration")
     optimizer_config = (
-        (AbsoluteRiskConfig if absolute else OptimizerConfig)(
-            **config.get("optimizer_config", {})
-        )
+        WEEKLY_STOCK_RISK
+        if absolute
+        else OptimizerConfig(**config.get("optimizer_config", {}))
         if enhanced
         else None
     )
@@ -370,11 +362,7 @@ def backtest(config: Mapping) -> Path:
                 "risk_model": risk_model.to_dict(),
                 "optimizer_config": asdict(optimizer_config),
                 **(
-                    {
-                        "robust_config": asdict(robust_config)
-                        if calibrated
-                        else {"objective": robust_config.objective}
-                    }
+                    {"robust_config": asdict(robust_config)}
                     if robust_config is not None
                     else {}
                 ),
@@ -385,7 +373,13 @@ def backtest(config: Mapping) -> Path:
         "window": dict(config["output_window"]),
         "corporate_action_policy": portfolio_sessions.CORPORATE_ACTION_POLICY,
         "initial_holding_convention": "cash",
-        "initial_turnover_policy": "first_actual_buy_exempt_fees_and_capacity_apply",
+        **(
+            {
+                "initial_turnover_policy": "first_actual_buy_exempt_fees_and_capacity_apply"
+            }
+            if calibrated
+            else {}
+        ),
         **(
             {"neutrality_reference_domain": _NEUTRALITY_REFERENCE_DOMAIN}
             if candidate.neutrality != "none" and candidate.benchmark_id is None

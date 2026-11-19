@@ -231,6 +231,7 @@ CONTINUOUS_EXECUTION_COLUMNS = (
     "block_reason",
     "adv20",
     "prediction_rank_score",
+    "prediction_score",
     "decision_delta_weight",
     "expected_alpha",
     "benchmark_weight",

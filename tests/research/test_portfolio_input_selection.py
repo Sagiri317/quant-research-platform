@@ -409,7 +409,12 @@ def test_market_axis_reprojections_keep_filter_support_during_migration(tmp_path
 
 @pytest.mark.parametrize("source_name", ("panel", "execution"))
 @pytest.mark.parametrize("selected", (False, True))
-def test_bounded_backtest_preserves_selected_history(tmp_path, source_name, selected):
+def test_bounded_backtest_preserves_selected_history(
+    tmp_path, source_name, selected, monkeypatch
+):
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
     from quant_research_platform.contracts.portfolios import (
         ExecutionAssumptions,
         PortfolioCandidateSpec,
@@ -445,6 +450,7 @@ def test_bounded_backtest_preserves_selected_history(tmp_path, source_name, sele
     def backtest(end):
         return list(
             daily.backtest_a_share(
+                return_horizon=1,
                 candidate=PortfolioCandidateSpec(
                     selection_group="global",
                     prediction_selector="champion",
@@ -708,8 +714,11 @@ def test_public_portfolio_respects_explicit_input_market(tmp_path, name, market)
 
 @pytest.mark.parametrize("missing_input", [None, "panel", "execution"])
 def test_public_portfolio_consumes_selected_keys_from_larger_inputs(
-    tmp_path, missing_input
+    tmp_path, missing_input, monkeypatch
 ):
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
     )
@@ -721,7 +730,7 @@ def test_public_portfolio_consumes_selected_keys_from_larger_inputs(
     config = _public_prediction_config(tmp_path)
     config["inputs"]["dataset"] = {
         "path": config["inputs"]["dataset"],
-        "row_filters": [["asset_id", "in", ["a5"]]],
+        "row_filters": [["asset_id", "in", ["a4", "a5"]]],
     }
     if missing_input is not None:
         config["inputs"][missing_input] = {

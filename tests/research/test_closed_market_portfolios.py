@@ -38,6 +38,13 @@ from tests.helpers.portfolio_inputs import closed_market_inputs as _native_input
 from tests.helpers.portfolio_ledger import session_frame
 
 
+@pytest.fixture(autouse=True)
+def one_mature_return_for_fixture(monkeypatch):
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
+
+
 def _ledger(layout, roots):
     candidate = PortfolioCandidateSpec(
         selection_group="global",
@@ -59,6 +66,7 @@ def _ledger(layout, roots):
             return 0, 0
 
     return daily.backtest_a_share(
+        return_horizon=1,
         candidate=candidate,
         inputs=layout,
         output_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -123,9 +131,7 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
         for batch in chunks
         for trade in batch.trades
     )
-    assert any(
-        trade.asset_id == "a0" and trade.quantity < 0 for trade in chunks[3].trades
-    )
+    assert all(not trade.asset_id.startswith("a") for trade in chunks[3].trades)
     for before, after in zip(frames[:-1], frames[1:], strict=True):
         assert before.end_notional.sum() == pytest.approx(
             after.pre_trade_notional.sum()
@@ -258,10 +264,7 @@ def test_union_session_keeps_closed_holdings_without_any_raw_asset_rows(tmp_path
     assert len(chunks) == 4
     for batch in chunks[1:3]:
         assert not batch.trades and not batch.cashflows
-    assert any(
-        trade.asset_id.startswith("a") and trade.quantity < 0
-        for trade in chunks[3].trades
-    )
+    assert all(not trade.asset_id.startswith("a") for trade in chunks[3].trades)
     stream = iter_holding_factor_inputs(
         iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         inputs=layout,
@@ -608,7 +611,7 @@ def test_native_daily_fees_follow_actual_order_side_and_session(tmp_path):
     )
     expected = list(_ledger(layout, roots))
     assert [len(batch.trades) for batch in expected] == [3, 3, 0, 0]
-    assert all(trade.quantity == 1600 for batch in expected for trade in batch.trades)
+    assert all(trade.quantity == 100 for batch in expected for trade in batch.trades)
     # The account buys on January 2/3, then holds. Neither a sell fee nor a
     # January 4/5 fee is an input to these completed share transitions.
     fees = read_dataset(layout["fees"])

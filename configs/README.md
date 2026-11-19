@@ -54,7 +54,7 @@ PPO 使用 2025 年前三季度训练、第四季度验证；训练插补及观�
 
 | 文件 | 用途 |
 | --- | --- |
-| `backtest-robust.json` | 低频稳健组合的接口示例，保留显式历史校准输入；不是当前 2022–2026 年任务。该任务从首日运行需要此前真实样本外预测做收益校准，不能只改日期或用后续收益补齐 |
+| `backtest-stock-weekly.json` | A 股周频费后夏普，使用 2022–2026 年季度滚动预测。 |
 | `backtest-hft.json`、`high-frequency/backtest-hft-passive.json`、`backtest-policy-ac.json` | 信号阈值、被动排队与 AC 执行进度，研究假设不同 |
 | `research-learning/train-policy-execution.json`、`backtest-policy-execution.json` | 固定母单执行，目标由调用者给定 |
 | `research-learning/train-policy-inventory.json`、`backtest-policy-etf-inventory.json` | 学习库存目标及透明库存策略的原生接口；不同于当前 PPO 执行时机任务 |

@@ -22,7 +22,6 @@ from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
     ]
     + [
         ("quantile_float_cap", True, True),
-        ("quantile_equal_weight_half_step", True, True),
     ],
 )
 def test_off_schedule_research_exit_is_independent_of_unrelated_forecast(

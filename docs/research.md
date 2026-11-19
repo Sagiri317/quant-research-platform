@@ -77,22 +77,7 @@ A股低频新研究默认使用 `forward_return_5d`，在唯一目标变换入�
 
 ETF高频默认共同决策间隔3秒，对应原始 `future_mid_return_30s`；30秒决策对应 `future_mid_return_60s`，均为 `raw`、`decimal_return`。默认映射由高频协议唯一维护，采样声明及下游组装从实际决策时钟派生，不按数据集名称判断。ModelSpec仍显式指定单个 `target_column`，可取采样产物声明的默认源标签；显式选择其它已声明期限仍有效，不被默认覆盖。标签从决策时点的可见中价出发，成熟钟仍为实际未来报价时刻加可见延迟，不跨连续交易段补标签。
 
-风险约束组合比较使用既有 `robust_long_only` 和同一风险约束配置，[backtest-robust.json](../configs/backtest-robust.json) 以日频为例。调用方读一次配置后分别调用原生 `backtest`，仅更换调仓日历和输出；风险参数不复制成两份配置：
-
-```python
-from copy import deepcopy
-from pathlib import Path
-
-from quant_research_platform.research.portfolios.production import backtest
-from quant_research_platform.storage.manifests import read_qrp_json_file
-
-base = read_qrp_json_file(Path("configs/backtest-robust.json"))[1]
-for name, schedule in (("daily", "daily"), ("weekly", "weekly-last-trading-day")):
-    config = deepcopy(base)
-    config["candidate"].update(candidate_id=f"stock_robust_{name}", rebalance_schedule=schedule)
-    config["output"] = str(Path(base["output"]) / name)
-    backtest(config)
-```
+A 股正式周频组合共用[同一份滚动预测配置](../configs/backtest-stock-weekly.json)，选股、现金和回测方法见[周频组合](robust-portfolio.md)。
 
 调用前由研究caller替换真实输入、预测窗及新输出。观察日T的日频输入已带T+1盘前决策时钟，账户按保留的 `signal_session` 对齐调度，在T+1开盘执行，不再移到T+2；周频按真实相邻交易会话跨周选择信号，在其下一交易日开盘执行，节假日不压缩会话轴。预测5会话收益的价格端点为T+1与T+6，退出日复权开盘依赖当日收盘事实，因此成熟不能提前到退出日开盘；尾部未知保留NaT。
 

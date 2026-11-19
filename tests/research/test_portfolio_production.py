@@ -194,6 +194,18 @@ def _build_producer(
             benchmark_id=None,
         )
     frames = dict(frames)
+    if not enhanced:
+        from quant_research_platform.research.portfolios import calibration
+
+        # Exercise order/ledger boundary cases at the intended notionals in this
+        # two-name market. Formal strategy tests use the real 2% concentration.
+        monkeypatch.setattr(daily, "STOCK_NAME_WEIGHT_LIMIT", 1.0)
+        # This short accounting fixture needs one mature prior cross-section.
+        monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
+        frames["dataset"] = frames["dataset"].assign(
+            forward_return_1d=0.01,
+            forward_return_1d_available_at=lambda f: f.timestamp + pd.offsets.BDay(2),
+        )
     frames.setdefault(
         "corporate_actions",
         pd.DataFrame(columns=market_sessions._CORPORATE_SOURCE_COLUMNS),
@@ -290,7 +302,13 @@ def _build_producer(
             root=root,
             time_window=time_window,
             arrow_schema=SimpleNamespace(names=tuple(source_frame.columns)),
-            spec={"column_roles": dict.fromkeys(source_frame.columns, "context")},
+            spec={
+                "column_roles": dict.fromkeys(source_frame.columns, "context"),
+                "column_units": {"forward_return_1d": "decimal_return"},
+                "label_availability_columns": {
+                    "forward_return_1d": "forward_return_1d_available_at"
+                },
+            },
             read_paths=(root / "synthetic.parquet",),
             logical_columns=tuple(columns)
             if columns is not None
@@ -397,6 +415,7 @@ def _build_producer(
 
     def output():
         chunks = daily.backtest_a_share(
+            return_horizon=None if enhanced else 1,
             candidate=candidate,
             inputs={
                 "dataset": roots["dataset"],
@@ -2124,10 +2143,16 @@ def test_simple_producer_keeps_short_adv_history_unknown(
     batches = list(output)
     assert batches
     for batch in batches:
+        if not batch.asset_id.eq("b").any():
+            assert (
+                batch.loc[batch.asset_id.eq("__cash__"), "post_trade_notional"].item()
+                == 100
+            )
+            continue
         requested = batch.loc[batch.asset_id.eq("b")].iloc[0]
         assert requested.block_reason == "adv_unavailable"
         assert pd.isna(requested.adv20)
-        assert requested.target_notional == 100.0
+        assert requested.target_notional == 0.0
         assert requested.executed_delta_notional == 0.0
         assert (
             batch.loc[batch.asset_id.eq("__cash__"), "post_trade_notional"].item()
@@ -2521,7 +2546,7 @@ def test_feature_missing_held_asset_keeps_saved_prediction(
     held = output.loc[output.asset_id.eq("b")]
     assert held.iloc[0].end_notional > 0.0
     later = held.loc[held.decision_timestamp.ge(second)]
-    assert later.prediction_rank_score.eq(1.0).all()
+    assert later.prediction_score.eq(1.0).all()
     assert any(asset == "b" for date, asset in lookup.matched if date >= second)
     assert later.post_trade_notional.gt(0.0).all()
     assert later.executed_delta_notional.eq(0.0).all()
@@ -2993,66 +3018,12 @@ def test_simple_producer_retains_order_and_unknown_adv_window(
         requested = batch.loc[batch.asset_id.eq("b")].iloc[0]
         assert requested.block_reason == "adv_unavailable"
         assert pd.isna(requested.adv20)
-        assert requested.target_notional == 100.0
+        assert requested.target_notional == 0.0
         assert requested.executed_delta_notional == 0.0
         assert (
             batch.loc[batch.asset_id.eq("__cash__"), "post_trade_notional"].item()
             == 100.0
         )
-
-
-def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
-    tmp_path, monkeypatch
-):
-    frames, fee_frame, output_window = _inputs()
-    output, _ = _build_producer(
-        tmp_path,
-        monkeypatch,
-        frames=frames,
-        fee_frame=fee_frame,
-        output_window=output_window,
-        construction="quantile_equal_weight_half_step",
-        typed_batches=True,
-    )
-    batches = list(output)
-    first = session_frame(batches[0]).set_index("asset_id")
-    assert first.loc[
-        first.index != "__cash__", "decision_delta_weight"
-    ].sum() == pytest.approx(0.5)
-    assert first.loc["__cash__", "decision_delta_weight"] == pytest.approx(-0.5)
-    second = session_frame(batches[1]).set_index("asset_id")
-    assert (
-        0 < second.loc[second.index != "__cash__", "decision_delta_weight"].sum() < 0.5
-    )
-    envelope = {
-        "capital": PortfolioCapital(
-            **{
-                "candidate_id": "half_step",
-                "initial_capital": 100.0,
-                "valuation_currency": "CNY",
-                "valuation_method": "cash_equity",
-            }
-        ),
-        "metadata": {
-            "window": {
-                "start": "2023-01-03",
-                "end": "2023-01-06",
-                "access": "development",
-            }
-        },
-    }
-
-    def produce(emit):
-        for batch in batches:
-            emit(batch)
-
-    root = write_portfolio_ledger_artifact(
-        tmp_path / "half-step",
-        capital=envelope["capital"],
-        metadata=envelope["metadata"],
-        produce=produce,
-    )
-    assert list(read_portfolio_ledger_artifact(root).iter_chunks()) == batches
 
 
 @pytest.mark.parametrize(
@@ -3069,7 +3040,6 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
         ("quantile_equal_weight", "missing_prediction", "closed"),
         ("quantile_equal_weight", "missing_prediction", "unknown"),
         ("quantile_float_cap", "ineligible", "sellable"),
-        ("quantile_equal_weight_half_step", "ineligible", "sellable"),
     ),
 )
 def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
@@ -3202,9 +3172,7 @@ def test_nonempty_selection_still_requires_valid_predictions(problem):
         daily._prediction_alpha(frame, Lookup())
 
 
-@pytest.mark.parametrize(
-    "construction", ("quantile_equal_weight", "quantile_equal_weight_half_step")
-)
+@pytest.mark.parametrize("construction", ("quantile_equal_weight",))
 @pytest.mark.parametrize("fees", (False, True))
 @pytest.mark.parametrize("blocked", (False, True))
 def test_cash_exposure_is_post_execution_ledger_cash(
@@ -3237,9 +3205,7 @@ def test_cash_exposure_is_post_execution_ledger_cash(
     if blocked:
         assert row["cash_weight_post"] == 1.0
     elif not fees:
-        assert row["cash_weight_post"] == pytest.approx(
-            0.5032 if construction.endswith("half_step") else 0.0064
-        )
+        assert row["cash_weight_post"] == pytest.approx(0.0064)
 
 
 @pytest.mark.parametrize("styles", (RISK_STYLE_COLUMNS[:-1], RISK_STYLE_COLUMNS))

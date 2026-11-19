@@ -271,7 +271,12 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
     assert not list(tmp_path.iterdir())
 
 
-def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
+def test_native_adv_gap_preserves_portfolio_statistics(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,
         summarize_portfolio_ledger,
@@ -301,7 +306,28 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
         for catalog in (_interim_specs(), _processed_specs())
         for spec in catalog.list()
     }
-    schemas["pv_all"] = _dataset_spec()
+    dataset = frames["pv_all"]
+    dataset["forward_return_1d"] = dataset.label
+    dataset["model_target"] = 2.0 * dataset.x - 1.0
+    spec = _dataset_spec()
+    schemas["pv_all"] = replace(
+        spec,
+        target_label_column="forward_return_1d",
+        label_columns=(*spec.label_columns, "model_target", "forward_return_1d"),
+        column_roles={
+            **spec.column_roles,
+            "model_target": "label",
+            "forward_return_1d": "label",
+        },
+        column_units={
+            "model_target": "dimensionless",
+            "forward_return_1d": "decimal_return",
+        },
+        label_availability_columns={
+            "forward_return_1d": "label_available_at",
+            "model_target": "label_available_at",
+        },
+    )
     roots = {}
     for name, frame in frames.items():
         roots[name] = tmp_path / "inputs" / name
@@ -315,12 +341,12 @@ def test_native_adv_gap_preserves_portfolio_statistics(tmp_path):
                 "model_id": "linear",
                 "model_algorithm": "linear_regression",
                 "input_factor_columns": ["x"],
-                "target_column": "label",
+                "target_column": "model_target",
                 "random_seed": 42,
             },
             "fit_windows": [{"start": "2018-12-01", "end": "2018-12-28"}],
             "fit_cutoff": "2018-12-28",
-            "label_unit": "decimal_return",
+            "label_unit": "dimensionless",
         }
     )
     window = {"start": "2019-01-02", "end": "2019-02-15"}

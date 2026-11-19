@@ -315,55 +315,6 @@ def test_backtest_risk_reads_only_configured_capitalization(
     assert observed[0][weight_column].tolist() == [100.0, 900.0]
 
 
-@pytest.mark.parametrize("column", ["total_market_cap", "float_market_cap"])
-def test_simple_production_reads_selected_size_and_keeps_reference(
-    tmp_path, monkeypatch, column
-):
-    import quant_research_platform.research.portfolios.daily as daily
-    from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
-    from tests.research.test_portfolio_production import _build_producer
-
-    frames, fees, window = _inputs()
-    frames["dataset"]["total_market_cap"] = frames["dataset"].asset_id.map(
-        {"a": 2000.0, "b": 9000.0}
-    )
-    expected = [2000.0, 9000.0] if column == "total_market_cap" else [1000.0, 2000.0]
-    if column == "float_market_cap":
-        frames["dataset"] = frames["dataset"].drop(columns="total_market_cap")
-    observed = []
-    original = daily._neutrality_context
-
-    def context(*args, **kwargs):
-        result = original(*args, **kwargs)
-        observed.append((kwargs["size_market_cap"].tolist(), result))
-        return result
-
-    monkeypatch.setattr(daily, "_neutrality_context", context)
-    candidate = PortfolioCandidateSpec(
-        "size",
-        "global",
-        "quantile_equal_weight",
-        "champion",
-        "daily",
-        0.5,
-        None,
-        neutrality="size",
-        size_cap_column=column,
-    )
-    batches, _ = _build_producer(
-        tmp_path,
-        monkeypatch,
-        frames=frames,
-        fee_frame=fees,
-        output_window=window,
-        candidate=candidate,
-    )
-    assert list(batches)
-    assert observed
-    assert observed[0][0] == expected
-    np.testing.assert_allclose(observed[0][1].benchmark_weight, [1 / 3, 2 / 3])
-
-
 def test_missing_size_nonrebalance_marks_undefined_and_preserves_account():
     from quant_research_platform.research.portfolios.daily import _build_session
     from tests.helpers.portfolio_inputs import decision_inputs as _decision_inputs
@@ -448,7 +399,6 @@ def test_panel_selection_cannot_reintroduce_excluded_risk_capitalization(
     [
         ("total_market_cap", "default", "benchmark_enhanced"),
         ("float_market_cap", "model", "benchmark_enhanced"),
-        ("float_market_cap", "model", "robust_long_only"),
     ],
 )
 def test_native_backtest_persists_resolved_risk_and_size_defaults(

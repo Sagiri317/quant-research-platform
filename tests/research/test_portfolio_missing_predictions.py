@@ -20,6 +20,13 @@ from tests.helpers.portfolio_inputs import portfolio_inputs as _inputs
 from tests.research.test_portfolio_production import _build_producer
 
 
+@pytest.fixture(autouse=True)
+def short_return_history(monkeypatch):
+    from quant_research_platform.research.portfolios import calibration
+
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
+
+
 class _Forecasts:
     def __init__(self, missing):
         self.missing = missing
@@ -316,6 +323,12 @@ def _public_prediction_config(tmp_path, *, empty=False, prediction_start="2023-0
     metadata.update(
         prediction_window=window, prediction_rows=None, effective_prediction_end=None
     )
+    metadata["model_facts"]["model"]["target_column"] = "model_target"
+    metadata["model_facts"]["target_definition"] = {
+        "source_label": "forward_return_1d",
+        "target_transform": "date_zscore",
+        "target_clip": "none",
+    }
     predicted = write_prediction_outputs(
         output_path=tmp_path / "prediction",
         output_chunks=[rows.iloc[:0] if empty else rows],
@@ -367,7 +380,10 @@ def _replace_public_input(tmp_path, config, name, transform, *, market=None):
             "column_roles",
             "primary_key",
             "partition_columns",
+            "column_units",
+            "label_availability_columns",
         )
+        if key in declaration
     }
     fields["primary_key"] = tuple(fields["primary_key"])
     fields["partition_columns"] = tuple(fields["partition_columns"])
@@ -621,7 +637,7 @@ def test_public_prediction_selection_keeps_end_day_intraday_values(
             mark_matched=False,
         )
         assert all(present)
-        np.testing.assert_allclose(values, rows.prediction_rank_score)
+        np.testing.assert_allclose(values, rows.prediction_score)
         seen.append(len(values))
         yield from original(**kwargs)
 

@@ -40,6 +40,7 @@ REBALANCE_SCHEDULES = {
     "weekly-last-trading-day",
     "monthly-last-trading-day",
 }
+STOCK_NAME_WEIGHT_LIMIT = 0.02
 PORTFOLIO_CASH_ASSET_ID = "__cash__"
 RESEARCH_VALUATION_POLICY = "evidenced_rights_or_confirmed_delisting_zero"
 PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
@@ -63,21 +64,7 @@ class PortfolioTargetBlocked(Exception):
 
 class PortfolioObjective(StrEnum):
     CALIBRATED = "calibrated_return"
-    RANK = "rank"
-    RANK_TO_RISK = "rank_to_risk"
     NET_RETURN_TO_RISK = "net_return_to_risk"
-
-    @property
-    def uses_rank(self) -> bool:
-        return self in (self.RANK, self.RANK_TO_RISK)
-
-    @property
-    def is_ratio(self) -> bool:
-        return self in (self.RANK_TO_RISK, self.NET_RETURN_TO_RISK)
-
-    @property
-    def signal_column(self) -> str:
-        return "prediction_rank_score" if self.uses_rank else "expected_alpha"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +73,8 @@ class RobustPortfolioConfig:
 
     confidence: float = 0.95
     risk_aversion: float = 1.0
-    objective: PortfolioObjective = PortfolioObjective.CALIBRATED
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "objective", PortfolioObjective(self.objective))
         for name in ("confidence", "risk_aversion"):
             value = strict_finite_float(
                 getattr(self, name), error="robust_portfolio_config_invalid"
@@ -235,10 +220,9 @@ class PortfolioCandidateSpec:
     selection_group: str
     construction: Literal[
         "quantile_equal_weight",
-        "quantile_equal_weight_half_step",
         "quantile_float_cap",
         "benchmark_enhanced",
-        "robust_long_only",
+        "maximum_sharpe",
     ]
     prediction_selector: str
     rebalance_schedule: str
@@ -263,10 +247,9 @@ class PortfolioCandidateSpec:
                 raise ValueError("portfolio_candidate_dependency_invalid")
         if type(self.construction) is not str or self.construction not in {
             "quantile_equal_weight",
-            "quantile_equal_weight_half_step",
             "quantile_float_cap",
             "benchmark_enhanced",
-            "robust_long_only",
+            "maximum_sharpe",
         }:
             raise ValueError("portfolio_candidate_construction_invalid")
         if (
@@ -307,7 +290,7 @@ class PortfolioCandidateSpec:
             if value < 0:
                 raise ValueError("portfolio_candidate_neutrality_limit_invalid")
             object.__setattr__(self, name, value)
-        if self.construction in {"benchmark_enhanced", "robust_long_only"}:
+        if self.construction in {"benchmark_enhanced", "maximum_sharpe"}:
             if self.neutrality != "none":
                 raise ValueError("portfolio_candidate_neutrality_invalid")
             if self.top_quantile is not None or (

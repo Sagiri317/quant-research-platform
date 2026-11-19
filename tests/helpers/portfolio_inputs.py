@@ -477,6 +477,7 @@ def portfolio_inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindo
                 / 10000,
                 "amount": 1000.0,
                 "total_market_cap": 1000.0 if asset == "a" else 2000.0,
+                "float_market_cap": 1000.0 if asset == "a" else 2000.0,
                 "market_type": 1,
                 "is_a_share_scope": True,
                 "is_trading": True,
@@ -791,6 +792,8 @@ def closed_market_inputs(tmp_path, *, fault=None, open_assets=6):
     data = panel[["market_id", "asset_id", "timestamp", "float_market_cap"]].assign(
         eligible=True, signal=1.0, label=0.0
     )
+    data["forward_return_1d"] = 0.01
+    data["forward_return_1d_available_at"] = data.timestamp + pd.offsets.BDay(2)
     # This fixture uses identical raw and research price paths, with no actions.
     panel["open"] = panel.adj_open
     panel["close"] = panel.adj_close
@@ -799,9 +802,18 @@ def closed_market_inputs(tmp_path, *, fault=None, open_assets=6):
     dataset_spec = make_demo_research_dataset_spec(
         data_id="fixture",
         factor_columns=("signal",),
-        label_columns=("label",),
+        label_columns=("label", "forward_return_1d"),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap",),
+        context_columns=("float_market_cap", "forward_return_1d_available_at"),
+    )
+    from dataclasses import replace
+
+    dataset_spec = replace(
+        dataset_spec,
+        column_units={"forward_return_1d": "decimal_return"},
+        label_availability_columns={
+            "forward_return_1d": "forward_return_1d_available_at"
+        },
     )
     for target, frame, spec in (
         ("market_panel_1d", panel, specs.get("market_panel_1d")),
@@ -849,6 +861,7 @@ def decision_inputs(*, benchmark=(0.5, 0.5), holdings=None, fee_rate=0.0):
             "market_type": 1,
             "is_trading": True,
             "is_nonfinancial_industry": True,
+            "float_market_cap": 1000.0,
             "research_open_mark_at": pd.NaT,
         }
     )

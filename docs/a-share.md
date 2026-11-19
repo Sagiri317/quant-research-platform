@@ -1328,7 +1328,7 @@ N_train
 |---|---|
 | `candidate_id` | 本次实际组合候选标识 |
 | `selection_group` | 与实际选择记录一致的研究标识；当前 A 股训练使用 `quarterly` |
-| `construction` | `quantile_equal_weight`、`quantile_equal_weight_half_step`、`quantile_float_cap` 或 `benchmark_enhanced` |
+| `construction` | `quantile_equal_weight`、`quantile_float_cap`、`maximum_sharpe` 或 `benchmark_enhanced` |
 | `prediction_selector` | 已持久化模型的 `family_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
@@ -1661,9 +1661,7 @@ A 股日频组合估计行业风险时，将 CSRC2012 和 CAPCO 的 A 至 S 共 
 首次实际买入的换手豁免仍作为单独政策记录。
 仅基准、简单组合及中性投影的可执行目标共用这条预算：股票目标总权重至多为
 `1 - unpaid_receivable / NAV`，比例缩放不改变已选股票腿构成。
-新目标先扣应收与缺预测冻结旧仓的预算，半步构造再与合法旧仓平均；
-不能在半步之后重新归一化补满现金。`raw_target_weight` 是预算/半步后的投影前研究目标，
-`target_weight`/`target_notional` 是股票腿中性投影后的实际请求；投影保留股票总量。
+简单组合先留出应收和缺预测冻结旧仓，再按入选股票及其交易容量分配可投资金。目标与实际成交分别记录。
 仅基准分支的实际成交若因费用、现金或执行约束偏离基准，不能因分支名称认证风险满足；
 风险历史不足时实际 TE 与全约束明确未定义。
 决策时已知费用后的可行性复用同一执行会计核，
@@ -1779,14 +1777,7 @@ PSTAT 从原生账本派生 `industry_neutrality_domains`，并在 `portfolio_ex
 不足时保留归因未定义原因，不把子组合比例用于冒充完整收益归因。
 执行、现金、ADV 与成本共用实际经济账本。
 
-固定预测的持仓对照可选择 `quantile_equal_weight_half_step`：换仓日先由原简单组合负责模块
-生成等权目标，先分配扣除应收和缺预测冻结旧仓后的可投资预算，
-再与合法旧仓权重各取一半；缺预测旧仓在两侧保持原权重。首次从现金开始只建半仓；
-剩余现金不重归一化；这是 `neutrality=none` 时的最终目标。启用中性化时，该半仓权重
-是原始目标，随后归一股票腿做中性投影，再还原原始股票总权重，保留半步现金。失去资格的旧仓按独立退出规则处理；
-仅预测缺失的旧仓保留且不加仓，实际卖出仍遵守原交易限制。
-该构造在本次组合参数中记录，可显式选用原模型和预测；报告同时比较毛/净收益、风险、现金和换手，
-不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。
+周频纯多头组合的正收益股票池、资金分配与费用见[周频组合](robust-portfolio.md)。
 
 ### 5.22 组合时序与核算
 

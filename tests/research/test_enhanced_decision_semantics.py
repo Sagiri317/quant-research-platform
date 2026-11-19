@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import asdict, replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -38,12 +39,18 @@ from tests.research.direct_model_test_support import fit_frame
 
 
 def _data_spec():
-    return make_demo_research_dataset_spec(
-        data_id="fixture",
-        factor_columns=("signal",),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=("float_market_cap",),
+    return replace(
+        make_demo_research_dataset_spec(
+            data_id="fixture",
+            factor_columns=("signal",),
+            label_columns=("label", "forward_return_1d"),
+            filter_columns=("eligible",),
+            context_columns=("float_market_cap", "forward_return_1d_available_at"),
+        ),
+        column_units={"forward_return_1d": "decimal_return"},
+        label_availability_columns={
+            "forward_return_1d": "forward_return_1d_available_at"
+        },
     )
 
 
@@ -699,7 +706,6 @@ def test_missing_new_target_context_does_not_cancel_independent_exit(kind, reaso
         ("benchmark_enhanced", "none"),
         ("quantile_equal_weight", "none"),
         ("quantile_float_cap", "none"),
-        ("quantile_equal_weight_half_step", "none"),
         ("quantile_equal_weight", "size"),
     ],
 )
@@ -722,6 +728,12 @@ def test_every_construction_reserves_receivable_in_executable_target(
         args["enhanced_decision"] = None
     account, _, optimized, _, ledger = daily._build_session(**args)
     assert optimized is None
+    if construction != "benchmark_enhanced" and neutrality == "none":
+        assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
+            [0.02, 0.02]
+        )
+        assert account.post_trade_cash == pytest.approx(86.0)
+        return
     assert (ledger.target_notional / account.nav_before).sum() == pytest.approx(0.9)
     assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
         [0.45, 0.45]
@@ -754,76 +766,17 @@ def test_partial_missing_target_keeps_held_weight_and_reserves_receivable():
     args["alpha"].loc["a"] = np.nan
     account, _, _, _, ledger = daily._build_session(**args)
     assert (ledger.target_notional / account.nav_before).tolist() == pytest.approx(
-        [0.45, 0.45]
+        [0.45, 0.02]
     )
     assert ledger.executed_delta_notional.tolist() == pytest.approx(
-        [0.0, 0.0], abs=1e-8
+        [0.0, -43.0], abs=1e-8
     )
-    assert account.post_trade_cash == pytest.approx(0.0)
-
-
-@pytest.mark.parametrize("receivable", [0.0, 10.0])
-@pytest.mark.parametrize("partial", [False, True])
-def test_half_step_budgets_new_leg_before_mixing_and_keeps_missing_holdings(
-    receivable, partial
-):
-    args = _decision_inputs(holdings=(0.4, 0.4))
-    args.update(
-        cash=20.0 - receivable,
-        decision_receivable=receivable,
-        receivable=receivable,
-        enhanced_decision=None,
-    )
-    args["candidate"] = replace(
-        args["candidate"],
-        construction="quantile_equal_weight_half_step",
-        top_quantile=1.0,
-        benchmark_id=None,
-        risk_style_columns=(),
-    )
-    if partial:
-        args["alpha"].loc["a"] = np.nan
-    account, _, _, _, ledger = daily._build_session(**args)
-    expected_buy = (20.0 - receivable) / 2.0
-    assert ledger.target_notional.sum() == pytest.approx(80.0 + expected_buy)
-    actual_buy = 4.0 if receivable == 10.0 and not partial else expected_buy
-    assert ledger.executed_delta_notional.sum() == pytest.approx(actual_buy)
-    assert account.post_trade_cash == pytest.approx(20.0 - receivable - actual_buy)
-    assert account.nav_after == pytest.approx(100.0)
-    if partial:
-        assert ledger.set_index("asset_id").loc[
-            "a", "target_notional"
-        ] == pytest.approx(40.0)
-        assert ledger.set_index("asset_id").loc["a", "executed_delta_notional"] == 0.0
-
-
-def test_half_step_neutrality_preserves_budgeted_stock_gross():
-    args = _decision_inputs(holdings=(0.4, 0.4))
-    args.update(
-        cash=10.0, decision_receivable=10.0, receivable=10.0, enhanced_decision=None
-    )
-    args["candidate"] = replace(
-        args["candidate"],
-        construction="quantile_equal_weight_half_step",
-        top_quantile=1.0,
-        benchmark_id=None,
-        risk_style_columns=(),
-        neutrality="size",
-    )
-    account, _, _, _, ledger = daily._build_session(**args)
-    assert ledger.raw_target_weight.sum() == pytest.approx(0.85)
-    assert ledger.target_weight.sum() == pytest.approx(0.85)
-    assert ledger.target_notional.sum() == pytest.approx(85.0)
-    assert ledger.executed_delta_notional.sum() == pytest.approx(4.0)
-    assert account.post_trade_cash == pytest.approx(6.0)
-    assert ledger.attrs["neutrality_exposures"]["target_exposure_status"] == "DEFINED"
+    assert account.post_trade_cash == pytest.approx(43.0)
 
 
 @pytest.mark.parametrize(
     "holdings,neutrality,construction",
     [
-        ((0.0, 0.0), "industry", "quantile_equal_weight_half_step"),
-        ((0.5, 0.5), "industry_size", "quantile_equal_weight_half_step"),
         ((0.0, 0.0), "size", "quantile_float_cap"),
         ((0.5, 0.5), "industry", "quantile_float_cap"),
     ],
@@ -896,52 +849,38 @@ def _simple_native_config(enhanced_config, tmp_path, construction):
     return config
 
 
-@pytest.mark.parametrize("payment_date", ["2023-01-04", "2023-01-06"])
-def test_native_half_step_cash_and_receivable_payment_control(
-    enhanced_config, tmp_path, payment_date
+def test_native_missing_selected_float_cap_preserves_account(
+    enhanced_config, tmp_path, monkeypatch
 ):
-    config = _simple_native_config(
-        enhanced_config, tmp_path, "quantile_equal_weight_half_step"
+    from quant_research_platform.artifacts.outputs.prediction import (
+        read_predictions,
+        write_prediction_outputs,
     )
-    ca = read_dataset(config["inputs"]["corporate_actions"])
-    ca["settlement_date"] = pd.Timestamp(payment_date)
-    write_dataset(tmp_path / "ca", ca, spec=_interim_specs().get("corporate_actions"))
-    config["inputs"]["corporate_actions"] = str(tmp_path / "ca")
-    batches = list(
-        read_portfolio_ledger_artifact(
-            portfolio_production.backtest(config)
-        ).iter_chunks()
-    )
-    last = batches[-1]
-    after = [row for row in last.valuations if row.phase == "after"]
-    pending = sum(row.receivable for row in after)
-    assert pending == pytest.approx(60000.0 if payment_date == "2023-01-06" else 0.0)
-    # 5000 shares per stock at 100, then 2500 at 99. The final half-step
-    # rounds to 8700 shares with unpaid rights, or 8800 after payment.
-    quantity = 8700 if payment_date == "2023-01-06" else 8800
-    stock_value = 12 * quantity * 99.0
-    assert all(row.quantity == quantity for row in after if row.asset_id != "__cash__")
-    assert sum(
-        row.value - row.receivable for row in after if row.asset_id != "__cash__"
-    ) == pytest.approx(stock_value)
-    assert sum(row.value for row in after) == pytest.approx(12000000.0)
-    assert sum(
-        row.value for row in after if row.asset_id == "__cash__"
-    ) == pytest.approx(12000000.0 - pending - stock_value)
-    assert sum(trade.notional for trade in last.trades) == pytest.approx(
-        12 * (quantity - 7500) * 99.0
-    )
-    assert _facts(last)["decision_status"] == "AVAILABLE"
+    from quant_research_platform.research.portfolios import calibration
 
-
-def test_native_missing_selected_float_cap_preserves_account(enhanced_config, tmp_path):
+    monkeypatch.setattr(calibration, "RETURN_MOMENT_WINDOW", 1)
     config = _simple_native_config(enhanced_config, tmp_path, "quantile_float_cap")
-    data = read_dataset(config["inputs"]["dataset"])
-    data.loc[
-        data.timestamp.eq("2023-01-04") & data.asset_id.eq("a0"), "float_market_cap"
+    pred = config["predictions"][0]
+    scores, meta = read_predictions(Path(pred["path"]))
+    meta["model_facts"]["model"]["target_column"] = "model_target"
+    meta["model_facts"]["target_definition"] = {
+        "source_label": "forward_return_1d",
+        "target_transform": "date_zscore",
+        "target_clip": "none",
+    }
+    pred["path"] = str(
+        write_prediction_outputs(
+            output_path=tmp_path / "scores", output_chunks=[scores], metadata=meta
+        )
+    )
+    panel = read_dataset(config["inputs"]["panel"])
+    panel.loc[
+        panel.timestamp.eq("2023-01-04") & panel.asset_id.eq("a0"), "float_market_cap"
     ] = np.nan
-    write_dataset(tmp_path / "data", data, spec=_data_spec())
-    config["inputs"]["dataset"] = str(tmp_path / "data")
+    write_dataset(
+        tmp_path / "panel", panel, spec=_processed_specs().get("market_panel_1d")
+    )
+    config["inputs"]["panel"] = str(tmp_path / "panel")
     batches = list(
         read_portfolio_ledger_artifact(
             portfolio_production.backtest(config)

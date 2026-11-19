@@ -9,7 +9,6 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_LEDGER_COST_COLUMNS,
-    RobustPortfolioConfig,
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
@@ -26,7 +25,7 @@ def _inputs(*, nav, price=1.0, rate=0.0004, config=None, market_type=1):
     fees["rate"] = np.where(fees.fee_code.eq("BROKER_COMMISSION"), rate, 0.0)
     inputs.update(
         candidate=replace(
-            inputs["candidate"], construction="robust_long_only", benchmark_id=None
+            inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
         ),
         cash=float(nav),
         nav=float(nav),
@@ -37,14 +36,15 @@ def _inputs(*, nav, price=1.0, rate=0.0004, config=None, market_type=1):
             decision,
             benchmark_weights=pd.Series(dtype=float),
             expected_alpha=pd.Series([0.02], index=["a"]),
-            risk=None,
+            risk=decision.risk,
             holding_sessions=21,
             calibration=replace(
                 decision.calibration, slope=0.08, slope_standard_error=0.0
             ),
         ),
-        optimizer_config=config or optimizer.AbsoluteRiskConfig(),
-        robust_config=RobustPortfolioConfig(risk_aversion=0.0),
+        optimizer_config=replace(
+            config or optimizer.AbsoluteRiskConfig(), fully_invested=True
+        ),
         decision_reason="robust_optimizer",
     )
     for key in ("panel", "next_panel", "endpoint_panel"):
@@ -125,26 +125,6 @@ def test_actual_minimum_commission_and_capacity_do_not_become_continuous_costs()
     assert account.post_trade_cash == 200.04
 
 
-def test_actual_utility_rejects_a_nearest_buy_with_a_loss_from_minimum_commission():
-    inputs = _inputs(nav=1500.0)
-    inputs["assumptions"] = replace(inputs["assumptions"], minimum_commission=5.0)
-    decision = inputs["enhanced_decision"]
-    risk = decision_inputs()["enhanced_decision"].risk
-    risk = replace(
-        risk,
-        factor_covariance=risk.factor_covariance * 0.0,
-        specific_variance=pd.Series([0.25], index=["a"]),
-    )
-    inputs["enhanced_decision"] = replace(decision, risk=risk, holding_sessions=252)
-    inputs["robust_config"] = RobustPortfolioConfig(risk_aversion=2.0)
-    account, _, solved, _, ledger = daily._build_session(**inputs)
-    assert 50.0 < solved.weights.iloc[0] * 1500.0 < 100.0
-    # U(100) = .02*(100/1500)-.25*(100/1500)^2-5/1500 < U(0).
-    assert 0.02 / 15 - 0.25 / 225 - 5 / 1500 < 0.0
-    assert ledger.executed_quantity.tolist() == [0]
-    assert account.post_trade_cash == 1500.0
-
-
 def test_fully_invested_buys_the_affordable_lot_despite_negative_net_utility():
     inputs = _inputs(
         nav=100.04, config=optimizer.AbsoluteRiskConfig(fully_invested=True)
@@ -153,7 +133,7 @@ def test_fully_invested_buys_the_affordable_lot_despite_negative_net_utility():
     inputs["enhanced_decision"] = replace(
         decision,
         calibration=replace(decision.calibration, slope=0.0),
-        expected_alpha=decision.expected_alpha * 0.0,
+        expected_alpha=decision.expected_alpha * 0.001,
     )
     account, _, solved, _, ledger = daily._build_session(**inputs)
     assert solved.objective_value < 0.0
@@ -249,6 +229,7 @@ def test_native_zero_exposure_counts_cancellation_roundoff_in_product_units(
     inputs["enhanced_decision"] = replace(
         inputs["enhanced_decision"],
         expected_alpha=pd.Series([0.02, 0.02], index=["a", "b"]),
+        risk=two["enhanced_decision"].risk,
         exposures=pd.DataFrame(
             {"asset_id": ["a", "b"], "style": [-0.1, 0.3 + exposure_error]}
         ),
@@ -312,7 +293,7 @@ def test_full_investment_rebalances_despite_lot_cash_and_respects_missing_open(
         inputs["next_panel"] = inputs["next_panel"].loc[lambda f: f.asset_id.eq("a")]
     inputs.update(
         candidate=replace(
-            inputs["candidate"], construction="robust_long_only", benchmark_id=None
+            inputs["candidate"], construction="maximum_sharpe", benchmark_id=None
         ),
         holdings=pd.Series({"a": 10000.0}),
         held_units=pd.Series({"a": 10000.0}),
@@ -323,12 +304,12 @@ def test_full_investment_rebalances_despite_lot_cash_and_respects_missing_open(
             inputs["enhanced_decision"],
             benchmark_weights=pd.Series(dtype=float),
             calibration=None,
-            expected_alpha=None,
+            expected_alpha=pd.Series({"a": 0.0, "b": 0.25}),
+            holding_sessions=5,
         ),
         optimizer_config=optimizer.AbsoluteRiskConfig(
-            fully_invested=True, target_turnover_limit=0.2
+            fully_invested=True, name_weight_limit=0.2
         ),
-        robust_config=RobustPortfolioConfig(objective="rank"),
         decision_reason="robust_optimizer",
     )
     account, _, solved, _, ledger = daily._build_session(**inputs)
@@ -337,4 +318,4 @@ def test_full_investment_rebalances_despite_lot_cash_and_respects_missing_open(
         1900 if next_quote else 0
     )
     if next_quote:
-        assert account.post_trade_cash == pytest.approx(81.0)
+        assert account.post_trade_cash == pytest.approx(8081.0)
