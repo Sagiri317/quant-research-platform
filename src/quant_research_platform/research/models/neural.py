@@ -14,9 +14,6 @@ from quant_research_platform.contracts.models import (
     sequence_parameters,
 )
 from quant_research_platform.research.models.deeplob import complete_book_rows
-from quant_research_platform.research.models.scaler import (
-    equal_timestamp_sample_weights,
-)
 
 
 def _network(algorithm, width, parameters, *, columns=()):
@@ -73,6 +70,10 @@ def _network(algorithm, width, parameters, *, columns=()):
                         )
             self.dropout = nn.Dropout(parameters.get("head_dropout", 0.0))
             self.output = nn.Linear((hidden if dynamic else 0) + len(static), 1)
+            if parameters.get("initialize_at_target_mean", False):
+                # Zero in the training-normalized target is its fitted mean.
+                nn.init.zeros_(self.output.weight)
+                nn.init.zeros_(self.output.bias)
             if (
                 dynamic
                 and algorithm == "lstm_regressor"
@@ -409,9 +410,7 @@ def fit_sequence(prepared, spec, validation=None, *, fit_inputs=None):
             else ((v_target - mean) / scale).astype("float32")
         )
         validation_arrays = (v_matrix, v_endpoints, v_starts, v_actual)
-        validation_weights = equal_timestamp_sample_weights(
-            validation.training.timestamp
-        )
+        validation_weights = validation.validation_weights
         validation_mass = torch.as_tensor(
             validation_weights, dtype=torch.float64, device=device
         )

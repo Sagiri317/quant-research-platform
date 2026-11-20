@@ -56,6 +56,8 @@ def stopping_config(tmp_path, algorithm):
         roles.update({column: "feature" for column in DEEPLOB_INPUT_COLUMNS})
         roles.update(session_date="context", segment_id="context")
         config["model"]["input_feature_columns"] = list(DEEPLOB_INPUT_COLUMNS)
+    elif algorithm in {"lstm_regressor", "transformer_regressor"}:
+        parameters["initialize_at_target_mean"] = True
     frame.to_parquet(inputs, index=False)
     config["model"].update(
         model_algorithm=algorithm,
@@ -105,6 +107,7 @@ def test_best_state_native_roundtrip_and_validation_maturity(
     )
     if algorithm == "xgboost_regressor":
         estimator = result.prediction_model.estimator
+        assert estimator.get_params()["device"] == "cpu"
         assert stopped["iterations"] < 8
         assert estimator.get_booster().num_boosted_rounds() == best + 1
         losses = estimator.evals_result()["validation_0"]["rmse"]
@@ -342,3 +345,7 @@ def test_boosting_validation_rmse_gives_each_timestamp_equal_mass(tmp_path):
     observed = fitted.metadata["early_stopping"]["validation_metrics"]["rmse"][0]
     assert observed == pytest.approx(expected, rel=1e-6)
     assert not np.isclose(observed, np.sqrt(squared.mean()), rtol=1e-3)
+    # Training dates 1, 2, 3 have means .01, .02, .03. Validation dates weigh equally.
+    assert fitted.metadata["early_stopping"][
+        "validation_mean_baseline_mse"
+    ] == pytest.approx(((2 - 0.02) ** 2 + 2 * (-0.1 - 0.02) ** 2) / 3)

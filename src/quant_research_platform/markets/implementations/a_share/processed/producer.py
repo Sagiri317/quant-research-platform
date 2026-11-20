@@ -96,6 +96,17 @@ _FULL_HISTORY_SOURCE_IDS = {
 }
 
 
+def _output_definitions(spec):
+    if spec.kind is ProcessedDataKind.FACTOR:
+        catalog = a_share.factor_catalog()
+    elif spec.kind is ProcessedDataKind.LABEL:
+        catalog = a_share.label_catalog()
+    else:
+        return ()
+    columns = set(spec.required_columns)
+    return tuple(item for item in catalog.list() if item.output_column in columns)
+
+
 @contextmanager
 def produce_a_share_processed_data(
     spec: ProcessedDataSpec,
@@ -151,15 +162,9 @@ def produce_a_share_processed_data(
             )
     dependencies = {}
     panel_axis = None
-    factor_definitions = (
-        tuple(
-            definition
-            for definition in a_share.factor_catalog().list()
-            if definition.output_column in spec.required_columns
-        )
-        if spec.kind is ProcessedDataKind.FACTOR
-        else ()
-    )
+    definitions = _output_definitions(spec)
+    factor_definitions = definitions if spec.kind is ProcessedDataKind.FACTOR else ()
+    lookback = factor_engine.factor_lookback_bars(factor_definitions)
     for data_id in spec.processed_input_data_ids:
         dependency = processed.get(data_id)
         root = inputs[data_id]
@@ -167,7 +172,7 @@ def produce_a_share_processed_data(
             None
             if spec.kind is ProcessedDataKind.LABEL or spec.data_id == "execution_mask"
             else _preceding_input_window(time_window)
-            if factor_engine.factor_lookback_bars(factor_definitions)
+            if lookback
             or any(definition.full_history for definition in factor_definitions)
             else time_window
         )
@@ -216,13 +221,7 @@ def produce_a_share_processed_data(
             )
         elif spec.kind is ProcessedDataKind.LABEL:
             requested = {
-                *label_engine.label_panel_input_columns(
-                    tuple(
-                        definition
-                        for definition in a_share.label_catalog().list()
-                        if definition.output_column in spec.required_columns
-                    )
-                ),
+                *label_engine.label_panel_input_columns(definitions),
                 "listing_date",
             }
             columns = tuple(
@@ -260,7 +259,7 @@ def produce_a_share_processed_data(
         uses_panel_clock = (
             spec.kind is ProcessedDataKind.LABEL
             or spec.data_id == "execution_mask"
-            or bool(factor_engine.factor_lookback_bars(factor_definitions))
+            or bool(lookback)
         )
         if uses_panel_clock and data_id == "market_panel_1d":
             # Bare member selections have no independent full-session inventory.
@@ -298,6 +297,7 @@ def produce_a_share_processed_data(
 
     data = _processed_frames(
         spec,
+        definitions=definitions,
         time_window=time_window,
         source=source,
         source_sessions=source_sessions,
@@ -324,8 +324,7 @@ def produce_a_share_processed_data(
                         "timezone": "Asia/Shanghai",
                         "stored_timezone": "UTC",
                     }
-                    for definition in a_share.label_catalog().list()
-                    if definition.output_column in spec.required_columns
+                    for definition in definitions
                 }
             }
         if spec.data_id == "session_return_labels":
@@ -348,8 +347,7 @@ def produce_a_share_processed_data(
                         "timezone": "Asia/Shanghai",
                         "stored_timezone": "UTC",
                     }
-                    for definition in a_share.label_catalog().list()
-                    if definition.output_column in spec.required_columns
+                    for definition in definitions
                 }
             }
         if spec.data_id == "on_id_decomposition":
@@ -465,7 +463,14 @@ def _market_model_frames(
 
 
 def _processed_frames(
-    spec, *, time_window, source, source_sessions, dependencies, panel_axis=None
+    spec,
+    *,
+    definitions,
+    time_window,
+    source,
+    source_sessions,
+    dependencies,
+    panel_axis=None,
 ):
     if spec.data_id == "benchmark_weights":
         yield from _benchmark_frames(source, source_sessions["index_weights"])
@@ -500,32 +505,16 @@ def _processed_frames(
             or spec.kind is ProcessedDataKind.FACTOR
         ),
     )
-    definitions = (
-        tuple(
-            definition
-            for definition in a_share.factor_catalog().list()
-            if definition.output_column in spec.required_columns
-        )
-        if spec.kind is ProcessedDataKind.FACTOR
-        else ()
-    )
-    lookback = factor_engine.factor_lookback_bars(definitions)
-    full_history = any(definition.full_history for definition in definitions)
-    market_model = any(
-        definition.family == "market_model" for definition in definitions
-    )
+    factors = definitions if spec.kind is ProcessedDataKind.FACTOR else ()
+    lookback = factor_engine.factor_lookback_bars(factors)
+    full_history = any(definition.full_history for definition in factors)
+    market_model = any(definition.family == "market_model" for definition in factors)
     full_cross_section = market_model or any(
         definition.family in {"market_structure", "style_structure", "risk_residual"}
-        for definition in definitions
+        for definition in factors
     )
     lookahead = (
-        label_engine.label_lookahead_bars(
-            tuple(
-                definition
-                for definition in a_share.label_catalog().list()
-                if definition.output_column in spec.required_columns
-            )
-        )
+        label_engine.label_lookahead_bars(definitions)
         if spec.kind is ProcessedDataKind.LABEL
         else 0
     )
@@ -578,7 +567,7 @@ def _processed_frames(
             lookback=factor_engine.factor_lookback_bars(
                 tuple(
                     definition
-                    for definition in definitions
+                    for definition in factors
                     if definition.output_column != "market_breadth_change_5d"
                 )
             ),
@@ -586,7 +575,7 @@ def _processed_frames(
             market_lookback=factor_engine.factor_lookback_bars(
                 tuple(
                     definition
-                    for definition in definitions
+                    for definition in factors
                     if definition.output_column == "market_breadth_change_5d"
                     or definition.output_column.startswith("breadth_")
                     or definition.output_column
@@ -600,7 +589,7 @@ def _processed_frames(
             peer_lookback=factor_engine.factor_lookback_bars(
                 tuple(
                     definition
-                    for definition in definitions
+                    for definition in factors
                     if definition.output_column == "industry_comovement_20d"
                     or definition.output_column
                     in {
@@ -782,6 +771,7 @@ def _processed_frames(
             financial_pit = financial_calculate(observations)
         output = _compute_processed_frame(
             spec,
+            definitions=definitions,
             source=current_source,
             dependencies=frames,
             trading_sessions=sessions,
@@ -1385,6 +1375,7 @@ def _prepare_panel_source(source, stocks):
 def _compute_processed_frame(
     spec,
     *,
+    definitions,
     source,
     dependencies,
     trading_sessions,
@@ -1423,11 +1414,6 @@ def _compute_processed_frame(
             pit=financial_pit,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
-        definitions = tuple(
-            definition
-            for definition in a_share.factor_catalog().list()
-            if definition.output_column in spec.required_columns
-        )
         if "expectations" in {definition.family for definition in definitions}:
             panel = dependencies["market_panel_1d"]
             features = expectations(panel)
@@ -1514,11 +1500,6 @@ def _compute_processed_frame(
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     if spec.kind is ProcessedDataKind.LABEL:
         panel = dependencies["market_panel_1d"]
-        definitions = tuple(
-            definition
-            for definition in a_share.label_catalog().list()
-            if definition.output_column in spec.required_columns
-        )
         pieces = []
         history_keys = ("listing_date",) + (
             ("_calendar_segment",) if "_calendar_segment" in panel else ()

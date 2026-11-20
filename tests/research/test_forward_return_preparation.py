@@ -299,6 +299,7 @@ def test_producer_batches_lifecycles_on_each_clipped_market_axis(
     monkeypatch.setattr(producer.label_engine, "calculate_labels_for_panel", record)
     actual = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={},
         dependencies={"market_panel_1d": panel},
         trading_sessions=axis,

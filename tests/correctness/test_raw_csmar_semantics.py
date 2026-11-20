@@ -231,6 +231,7 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     processed_spec = processed_catalog().get("expectations_factors")
     actual = producer._compute_processed_frame(
         processed_spec,
+        definitions=producer._output_definitions(processed_spec),
         source={"analyst_forecast": saved},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
@@ -314,6 +315,7 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     facts = _synthetic_interim_frames(sessions)
     panel = producer._compute_processed_frame(
         panel_spec,
+        definitions=producer._output_definitions(panel_spec),
         source={
             **producer._prepare_panel_source(
                 facts, producer.panels._canonical_stock_master(facts["stock_master"])

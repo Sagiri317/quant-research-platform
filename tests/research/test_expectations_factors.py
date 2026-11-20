@@ -209,6 +209,7 @@ def test_expectations_processed_producer_persists_latest_declaration(
     )
     actual = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
@@ -348,6 +349,7 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
     spec = scientific_catalogs().processed.get("expectations_factors")
     actual = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
@@ -416,6 +418,7 @@ def test_eps_medians_and_mad_persist(tmp_path, scale, symmetric):
     spec = scientific_catalogs().processed.get("expectations_factors")
     actual = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=dates,
@@ -480,6 +483,7 @@ def test_forecast_centers_survive_both_medians(tmp_path, same_institution, close
     spec = scientific_catalogs().processed.get("expectations_factors")
     output = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=dates,

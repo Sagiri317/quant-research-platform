@@ -215,6 +215,7 @@ def test_snapshot_branch_reads_last_real_row_not_padding_or_older_values(algorit
             norm_first=True,
             dropout=0.0,
             snapshot_columns=["slow"],
+            initialize_at_target_mean=True,
         ),
         columns=("fast", "slow"),
     ).eval()
@@ -223,6 +224,9 @@ def test_snapshot_branch_reads_last_real_row_not_padding_or_older_values(algorit
     changed[0, 0, 1] = 10000.0
     changed[0, 2, :] = -10000.0
     with torch.no_grad():
+        assert net(sample, torch.tensor([2])).item() == 0.0
+        assert net.output.weight.count_nonzero().item() == 0
+        net.output.weight.fill_(1.0)
         assert torch.equal(
             net(sample, torch.tensor([2])), net(changed, torch.tensor([2]))
         )

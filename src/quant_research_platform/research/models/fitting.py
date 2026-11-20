@@ -81,6 +81,10 @@ class PreparedTraining:
         self.feature_file.close()
 
     @cached_property
+    def validation_weights(self):
+        return equal_timestamp_sample_weights(self.training.timestamp)
+
+    @cached_property
     def preprocessing(self):
         weights = equal_timestamp_sample_weights(
             self.training["timestamp"],
@@ -213,6 +217,18 @@ def _fit_model_result(
     result.metadata["training_target_mean"] = float(
         np.average(target, weights=prepared_training.preprocessing[0])
     )
+    if (
+        "early_stopping" in result.metadata
+        and spec.model_algorithm != "deeplob_classifier"
+    ):
+        observed = validation.training
+        errors = (
+            observed[spec.target_column].to_numpy(dtype="float64")
+            - result.metadata["training_target_mean"]
+        )
+        result.metadata["early_stopping"]["validation_mean_baseline_mse"] = float(
+            np.average(errors**2, weights=validation.validation_weights)
+        )
     return result
 
 
@@ -784,11 +800,7 @@ def _booster_matrix(
 ):
     from xgboost import DataIter
 
-    weights = (
-        prepared.preprocessing[0]
-        if ref is None
-        else equal_timestamp_sample_weights(prepared.training["timestamp"])
-    )
+    weights = prepared.preprocessing[0] if ref is None else prepared.validation_weights
     if external:
         import cupy
         from xgboost import ExtMemQuantileDMatrix

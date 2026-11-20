@@ -23,7 +23,6 @@ from quant_research_platform.markets.implementations.a_share.stock_pool import (
     a_share_eligibility,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.protocols.a_share import factor_catalog
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     open_dataset_session,
@@ -315,6 +314,7 @@ def test_processed_blocks_preserve_full_history_math(
         eager[data_id] = (
             producer._compute_processed_frame(
                 spec,
+                definitions=producer._output_definitions(spec),
                 source={
                     **producer._prepare_panel_source(
                         source,
@@ -607,6 +607,7 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     caps_before = prepared["market_cap"].copy(deep=True)
     expected = compute(
         spec,
+        definitions=(),
         source={
             **prepared,
             "market_bars_1d": decoded["market_bars_1d"],
@@ -717,6 +718,7 @@ def narrow_panel_history(tmp_path_factory):
     panel_spec = processed_catalog().get("market_panel_1d")
     panel = producer._compute_processed_frame(
         panel_spec,
+        definitions=producer._output_definitions(panel_spec),
         source={
             **producer._prepare_panel_source(
                 source, producer.panels._canonical_stock_master(source["stock_master"])
@@ -755,6 +757,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
 ):
     dates, source, panel, input_layout = narrow_panel_history
     spec = processed_catalog().get(target)
+    definitions = producer._output_definitions(spec)
     expected = (
         pd.concat(
             producer._market_model_frames(
@@ -767,6 +770,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
         if target == "market_model_factors"
         else producer._compute_processed_frame(
             spec,
+            definitions=definitions,
             source={"trading_calendar": source["trading_calendar"]},
             dependencies={"market_panel_1d": panel},
             trading_sessions=tuple(dates),
@@ -833,17 +837,8 @@ def test_processed_narrow_output_uses_existing_panel_history(
     )
     assert actual.timestamp.min() == core[0]
     assert actual.timestamp.max() == core[-1]
-    columns = [
-        definition.output_column
-        for definition in factor_catalog().list()
-        if definition.output_column in spec.required_columns
-    ]
+    columns = [definition.output_column for definition in definitions]
     assert actual.loc[actual.timestamp.eq(core[0]), columns].notna().any().any()
-    definitions = tuple(
-        definition
-        for definition in factor_catalog().list()
-        if definition.output_column in spec.required_columns
-    )
     lookback = producer.factor_engine.factor_lookback_bars(definitions)
     if target == "price_volume_facts" and any(d.full_history for d in definitions):
         assert input_sessions == [len(dates)]
@@ -1106,6 +1101,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     spec = processed_catalog().get("market_panel_1d")
     panel = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={
             **producer._prepare_panel_source(
                 source, producer.panels._canonical_stock_master(source["stock_master"])
@@ -1124,6 +1120,7 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     spec = processed_catalog().get("forward_returns")
     output = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(dates),
@@ -1301,6 +1298,7 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     spec = processed_catalog().get("price_volume_facts")
     panel = producer._compute_processed_frame(
         panel_spec,
+        definitions=producer._output_definitions(panel_spec),
         source={
             **producer._prepare_panel_source(
                 source, producer.panels._canonical_stock_master(source["stock_master"])
@@ -1318,6 +1316,7 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
         assert pd.isna(own_panel.loc[dates[245], "amount"])
     expected = producer._compute_processed_frame(
         spec,
+        definitions=producer._output_definitions(spec),
         source={},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(dates),

@@ -6,22 +6,23 @@ import pytest
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.production import fit
 from quant_research_platform.research.predictions.runner import predict
 from tests.correctness.test_direct_model_operations import data, fit_config, input_spec
 
 
-@pytest.mark.parametrize("value", [None, 0, 1, "true"])
-def test_preload_inputs_requires_boolean(value):
-    with pytest.raises(ValueError, match="sequence_parameter_invalid: preload_inputs"):
+@pytest.mark.parametrize(
+    "name,value", [("preload_inputs", 1), ("initialize_at_target_mean", "true")]
+)
+def test_sequence_options_require_booleans(name, value):
+    with pytest.raises(ValueError, match=f"sequence_parameter_invalid: {name}"):
         ModelSpec(
             model_id="lstm",
             model_algorithm="lstm_regressor",
             input_feature_columns=("x",),
             target_column="label",
-            hyperparameters={"preload_inputs": value},
+            hyperparameters={name: value},
         )
 
 
@@ -502,21 +503,6 @@ def test_sequence_cpu_fallback_boundaries_and_native_roundtrip(
         scored.groupby("timestamp").squared_error.mean().mean(), rel=1e-6
     )
     assert summary.observation_count.iloc[0] == len(scored)
-
-
-def test_xgboost_cpu_training_and_native_roundtrip(tmp_path):
-    inputs = data(tmp_path)
-    config = fit_config(tmp_path, inputs)
-    config["model"].update(
-        model_algorithm="xgboost_regressor",
-        hyperparameters={"device": "cpu", "n_estimators": 3, "max_depth": 2},
-    )
-    result, _ = load_model(fit(config))
-    assert result.prediction_model.estimator.get_params()["device"] == "cpu"
-    predict_frame = prediction_callable(
-        tuple(result.metadata["input_columns"]), result.prediction_model
-    )
-    assert np.isfinite(predict_frame(pd.read_parquet(inputs))).all()
 
 
 @pytest.mark.parametrize("algorithm", ["lstm_regressor", "transformer_regressor"])

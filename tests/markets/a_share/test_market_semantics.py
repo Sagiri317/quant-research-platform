@@ -1428,6 +1428,7 @@ def test_industry_mapping_gap_preserves_panel_with_local_unknowns(tmp_path, dama
     def compute():
         return producer._compute_processed_frame(
             spec,
+            definitions=producer._output_definitions(spec),
             source={
                 **producer._prepare_panel_source(
                     source,

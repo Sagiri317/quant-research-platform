@@ -63,7 +63,8 @@
           "session_date",
           "segment_id"
         ],
-        "head_dropout": 0.1
+        "head_dropout": 0.1,
+        "initialize_at_target_mean": true
       },
       "random_seed": 42,
       "training_scaling": true,
@@ -90,7 +91,8 @@
           "session_date",
           "segment_id"
         ],
-        "norm_first": true
+        "norm_first": true,
+        "initialize_at_target_mean": true
       },
       "random_seed": 42,
       "training_scaling": true,
@@ -148,7 +150,7 @@
     "lstm": [
       {},
       {
-        "sequence_length": 60
+        "learning_rate": 0.0001
       }
     ],
     "transformer": [

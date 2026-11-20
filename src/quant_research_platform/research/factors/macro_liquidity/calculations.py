@@ -386,7 +386,10 @@ def calculate_macro_factors(
         for name in sorted(required_factors(columns, config))
         if RECIPES[name][0] == "beta"
     ]
-    variables = {RECIPES[name][1] for name in beta_columns}
+    by_variable = {}
+    for name in beta_columns:
+        _, variable, kind = RECIPES[name]
+        by_variable.setdefault(variable, []).append((name, kind))
     clocks = None
     if (
         beta_columns
@@ -408,7 +411,7 @@ def calculate_macro_factors(
         historical = macro_states(
             observations,
             clocks.dropna(),
-            columns=[f"ml_{name}_level" for name in variables],
+            columns=[f"ml_{name}_level" for name in by_variable],
             config=config,
         )
     output = work.loc[:, ["market_id", "asset_id", "timestamp"]].merge(
@@ -512,7 +515,7 @@ def calculate_macro_factors(
                 if "market_return" in group
                 else None
             )
-            for variable in variables:
+            for variable, betas in by_variable.items():
                 level = pd.Series(
                     historical[f"ml_{variable}_level"]
                     .reindex(clocks.loc[group.index])
@@ -520,10 +523,7 @@ def calculate_macro_factors(
                     index=signals,
                 ).reindex(axis)
                 shocks = level.diff().mask(boundary)
-                for kind in ("beta", "partial_beta"):
-                    name = f"ml_{variable}_{kind}"
-                    if name not in beta_columns:
-                        continue
+                for name, kind in betas:
                     if kind == "partial_beta" and market_returns is None:
                         continue
                     result = liquidity_beta(

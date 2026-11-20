@@ -140,6 +140,7 @@ def sequence_parameters(algorithm, parameters):
     if algorithm in {"transformer_regressor", "lstm_regressor"}:
         defaults["snapshot_columns"] = []
         defaults["head_dropout"] = 0.0
+        defaults["initialize_at_target_mean"] = False
     if algorithm == "transformer_regressor":
         defaults["n_heads"] = 4
         defaults["independent_layer_initialization"] = False
@@ -192,13 +193,15 @@ def sequence_parameters(algorithm, parameters):
     ):
         if type(defaults[name]) is not int or defaults[name] < 1:
             raise ValueError(f"sequence_parameter_invalid: {name}")
-    if type(defaults["preload_inputs"]) is not bool:
-        raise ValueError("sequence_parameter_invalid: preload_inputs")
-    if (
-        algorithm == "lstm_regressor"
-        and type(defaults["input_gate_xavier_initialization"]) is not bool
+    for name in (
+        "preload_inputs",
+        "initialize_at_target_mean",
+        "input_gate_xavier_initialization",
+        "independent_layer_initialization",
+        "norm_first",
     ):
-        raise ValueError("sequence_parameter_invalid: input_gate_xavier_initialization")
+        if name in defaults and type(defaults[name]) is not bool:
+            raise ValueError(f"sequence_parameter_invalid: {name}")
     epochs = defaults["epochs"]
     if epochs is None:
         if defaults.get("early_stopping_rounds") is None:
@@ -223,9 +226,6 @@ def sequence_parameters(algorithm, parameters):
     ):
         raise ValueError("model_device_invalid")
     if algorithm == "transformer_regressor":
-        for name in ("independent_layer_initialization", "norm_first"):
-            if type(defaults[name]) is not bool:
-                raise ValueError(f"sequence_parameter_invalid: {name}")
         heads = defaults["n_heads"]
         if type(heads) is not int or heads < 1 or defaults["hidden_size"] % heads:
             raise ValueError("transformer_heads_invalid")

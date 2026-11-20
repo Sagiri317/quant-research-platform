@@ -28,91 +28,71 @@ def calculate_factors_for_panel(
     min_fresh_fraction: float = 0.75,
 ) -> pd.DataFrame:
     requested = tuple(definitions)
-    _require_factor_input_columns(panel_frame, requested)
+    missing = [
+        name
+        for name in factor_panel_input_columns(requested)
+        if name not in panel_frame
+    ]
+    if missing:
+        raise ValueError("missing_factor_input_columns: " + ", ".join(missing))
     families = tuple(dict.fromkeys(definition.family for definition in requested))
-    output_source = panel_frame
+    keys = panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]]
     if output_window is not None:
         start, end, closed = time_window_timestamp_interval(output_window)
         timestamps = pd.to_datetime(panel_frame["timestamp"])
-        output_source = panel_frame.loc[
+        keys = keys.loc[
             timestamps.ge(start)
             & (timestamps.le(end) if closed else timestamps.lt(end))
         ]
     if not requested:
-        return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+        return keys.copy()
+    columns = tuple(definition.output_column for definition in requested)
     if families == ("style_structure",):
         from .style_structure import calculate
 
-        return _with_keys(
-            output_source,
-            calculate(
-                panel_frame,
-                factor_columns=tuple(d.output_column for d in requested),
-                history_keys=history_keys,
-            ),
-            output_columns=tuple(d.output_column for d in requested),
+        calculated = calculate(
+            panel_frame, factor_columns=columns, history_keys=history_keys
         )
-    if families == ("market_structure",):
+    elif families == ("market_structure",):
         from .market_structure import calculate
 
-        return _with_keys(
-            output_source,
-            calculate(
-                panel_frame,
-                factor_columns=tuple(d.output_column for d in requested),
-                history_keys=history_keys,
-            ),
-            output_columns=tuple(d.output_column for d in requested),
+        calculated = calculate(
+            panel_frame, factor_columns=columns, history_keys=history_keys
         )
-    if families == ("risk_residual",):
+    elif families == ("risk_residual",):
         from quant_research_platform.contracts.risk import RISK_STYLE_COLUMNS
 
         from .residual import calculate_residual_factors
 
-        return _with_keys(
-            output_source,
-            calculate_residual_factors(
-                panel_frame,
-                style_columns=RISK_STYLE_COLUMNS,
-                factor_columns=tuple(item.output_column for item in requested),
-                history_keys=history_keys,
-                min_fresh_fraction=min_fresh_fraction,
-            ),
-            output_columns=tuple(item.output_column for item in requested),
+        calculated = calculate_residual_factors(
+            panel_frame,
+            style_columns=RISK_STYLE_COLUMNS,
+            factor_columns=columns,
+            history_keys=history_keys,
+            min_fresh_fraction=min_fresh_fraction,
         )
-    if families == ("fundamental",):
-        return _with_keys(
-            output_source,
-            calculate_fundamental_factors(
-                panel_frame,
-                factor_columns=tuple(
-                    definition.output_column for definition in requested
-                ),
-            ),
-            output_columns=tuple(definition.output_column for definition in requested),
+    elif families == ("fundamental",):
+        calculated = calculate_fundamental_factors(panel_frame, factor_columns=columns)
+    elif families == (PRICE_VOLUME_FACTOR_FAMILY,):
+        calculated = calculate_price_volume_factors(
+            panel_frame,
+            factor_columns=columns,
+            output_window=output_window,
+            history_keys=history_keys,
+            min_fresh_fraction=min_fresh_fraction,
         )
-    if families != (PRICE_VOLUME_FACTOR_FAMILY,):
+    else:
         raise ValueError("mixed_or_unknown_factor_families")
-    calculated = calculate_price_volume_factors(
-        panel_frame,
-        factor_columns=tuple(definition.output_column for definition in requested),
-        output_window=output_window,
-        history_keys=history_keys,
-        min_fresh_fraction=min_fresh_fraction,
-    )
-    return _with_keys(
-        output_source,
-        calculated,
-        output_columns=tuple(definition.output_column for definition in requested),
+    return keys.merge(
+        calculated.loc[:, ["asset_id", "timestamp", *columns]],
+        on=["asset_id", "timestamp"],
+        how="left",
     )
 
 
 def factor_panel_input_columns(
     definitions: Sequence[FactorDefinition],
 ) -> tuple[str, ...]:
-    requested = tuple(definitions)
-    if not requested:
-        return ("market_id", "asset_id", "timestamp")
     return tuple(
         dict.fromkeys(
             (
@@ -121,7 +101,7 @@ def factor_panel_input_columns(
                 "timestamp",
                 *(
                     column
-                    for definition in requested
+                    for definition in definitions
                     for column in definition.input_columns
                 ),
             )
@@ -157,31 +137,3 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
             current -= 1
         lookback = max(lookback, current)
     return lookback
-
-
-def _require_factor_input_columns(
-    panel_frame: pd.DataFrame,
-    definitions: Sequence[FactorDefinition],
-) -> None:
-    missing = [
-        column
-        for column in factor_panel_input_columns(definitions)
-        if column not in panel_frame.columns
-    ]
-    if missing:
-        raise ValueError("missing_factor_input_columns: " + ", ".join(missing))
-
-
-def _with_keys(
-    source: pd.DataFrame,
-    calculated: pd.DataFrame,
-    *,
-    output_columns: tuple[str, ...],
-) -> pd.DataFrame:
-    keys = source.loc[:, ["market_id", "asset_id", "timestamp"]]
-    values = calculated.loc[:, ["asset_id", "timestamp", *output_columns]]
-    return keys.merge(
-        values,
-        on=["asset_id", "timestamp"],
-        how="left",
-    )

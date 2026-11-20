@@ -343,7 +343,6 @@ _MACRO_NAMES = {
     "us_ioer": "美联储超额准备金利率IOER",
     "us_effr": "美国有效联邦基金利率EFFR",
     "us_fed_funds": "美国联邦基金利率DFF",
-    "us_target_lower": "联邦基金目标利率下限",
     "us_target_upper": "联邦基金目标利率上限",
     "us_treasury_3m": "美国3个月国债收益率",
     "us_treasury_2y": "美国2年期国债收益率",

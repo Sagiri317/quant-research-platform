@@ -315,11 +315,7 @@ def _calculate_values(
         fresh = np.ones(len(values[names[0]]), dtype=bool)
     minimum = ceil(min_fresh_fraction * windows[0]) if windows else 0
     size = windows[0] if windows else 0
-    source_name = (
-        "turnover"
-        if "turnover" in factor and not factor.startswith("return_")
-        else names[0]
-    )
+    source_name = names[0]
     source = values[source_name]
     output = np.full(stop - start, np.nan)
     if factor.startswith(("reversal_", "momentum_")) or factor.endswith("_change_20d"):
@@ -345,7 +341,7 @@ def _calculate_values(
         return output
 
     if factor.endswith("_corr_20d"):
-        other = values[factor.removeprefix("return_").removesuffix("_corr_20d")]
+        other = values[names[1]]
         begin = first - size + 1
         left = sliding_window_view(source[begin:stop], size)
         right = sliding_window_view(other[begin:stop], size)

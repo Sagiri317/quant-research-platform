@@ -52,7 +52,7 @@
         "epochs": null,
         "early_stopping_rounds": 5,
         "sequence_length": 60,
-        "hidden_size": 64,
+        "hidden_size": 32,
         "num_layers": 1,
         "input_gate_xavier_initialization": true,
         "batch_size": 4096,
@@ -82,7 +82,8 @@
           "cn_fund_holder_concentration",
           "feature_pre_neutral_cn_disclosed_ownership_change",
           "cn_disclosed_ownership_change"
-        ]
+        ],
+        "initialize_at_target_mean": true
       },
       "random_seed": 42,
       "training_scaling": true,
@@ -96,7 +97,7 @@
         "epochs": null,
         "early_stopping_rounds": 5,
         "sequence_length": 60,
-        "hidden_size": 64,
+        "hidden_size": 32,
         "num_layers": 1,
         "n_heads": 4,
         "norm_first": true,
@@ -126,7 +127,8 @@
           "cn_fund_holder_concentration",
           "feature_pre_neutral_cn_disclosed_ownership_change",
           "cn_disclosed_ownership_change"
-        ]
+        ],
+        "initialize_at_target_mean": true
       },
       "random_seed": 42,
       "training_scaling": true,
@@ -191,7 +193,7 @@
     "transformer": [
       {},
       {
-        "learning_rate": 3.3333333333333335e-05
+        "learning_rate": 3e-05
       }
     ]
   },

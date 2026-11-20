@@ -360,9 +360,9 @@ def calculate(panel, *, factor_columns=None, history_keys=("asset_id",)):
         frame["_c"] = frame.adj_close.where(frame.adj_close.gt(0))
         frame["_mom"] = (frame._c / history._c.shift(20) - 1).where(fresh)
         for width in (1, 5):
-            if any(
+            if (width == 1 and "industry_return_relative_1d" in requested) or any(
                 f"industry_{kind}_{width}d" in requested
-                for kind in ("return_relative", "catchup", "catchdown")
+                for kind in ("catchup", "catchdown")
             ):
                 frame[f"_mom{width}"] = (frame._c / history._c.shift(width) - 1).where(
                     fresh
@@ -658,16 +658,15 @@ def _industry_context(frame, out, requested, history_start):
         )
         else None
     )
-    if "industry_return_relative_1d" in requested:
-        out["industry_return_relative_1d"] = frame._mom1 - leave_one_out_mean(
-            frame._mom1, peer_ids
-        )
     for width in (1, 5, 20):
         names = {kind: f"industry_{kind}_{width}d" for kind in ("catchup", "catchdown")}
-        if not set(names.values()).intersection(requested):
+        relative = width == 1 and "industry_return_relative_1d" in requested
+        if not relative and not set(names.values()).intersection(requested):
             continue
         values = frame["_mom" if width == 20 else f"_mom{width}"]
         peers = leave_one_out_mean(values, peer_ids)
+        if relative:
+            out["industry_return_relative_1d"] = values - peers
         valid = values.notna() & peers.notna()
         if names["catchup"] in requested:
             out[names["catchup"]] = (
