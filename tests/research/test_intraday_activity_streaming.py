@@ -161,3 +161,23 @@ def test_activity_missing_flows_are_local_and_unknown_calendar_retains_no_state(
         )
         assert unknown[list(ACTIVITY)].isna().all(axis=None)
         assert history == ({}, None)
+
+
+def test_unknown_final_quote_in_late_slot_invalidates_its_twenty_day_reference():
+    days, frame = _observations()
+    frame = frame.loc[frame.asset_id.eq("b")].copy()
+    # On B's first session, the second quote in the same late three-second
+    # slot has unknown recorded volume. The next slot is unknown too.
+    first_late = days[3] + pd.Timedelta(hours=6, minutes=45, seconds=3)
+    missing = frame.loc[frame.timestamp.eq(first_late)].assign(
+        timestamp=first_late + pd.Timedelta(seconds=1), observed_trade_volume=np.nan
+    )
+    name = "late_session_relative_activity"
+    result, _ = calculate_activity(
+        pd.concat([frame, missing]), columns=(name,), session_days=days
+    )
+    latest = result.loc[
+        result.timestamp.gt(days[-1] + pd.Timedelta(hours=6, minutes=45))
+    ]
+    assert len(latest) == 2
+    assert latest[name].isna().all()

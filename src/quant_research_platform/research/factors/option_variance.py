@@ -24,22 +24,25 @@ def implied_variances(decisions, risk, contracts):
     ).max(axis=1, skipna=False)
     meta = meta.rename(columns={"expiry_date": "expiry", "exercise_price": "strike"})
     fields = ("expiry", "strike", "underlying_id")
-    cutoffs = decisions.groupby("signal_session", sort=False).timestamp.min()
+    cutoffs = (
+        decisions[["signal_session", "timestamp"]]
+        .drop_duplicates()
+        .set_axis(["timestamp", "_decision"], axis=1)
+    )
     risk = observation_versions(
         risk,
         keys=("asset_id", "contract_id", "timestamp"),
         columns=("underlying_id", "option_type", "implied_volatility"),
     )
-    visible = risk.loc[risk.timestamp.isin(cutoffs.index)].copy()
+    visible = risk.merge(cutoffs, on="timestamp", how="inner")
     visible["available_at"] = pd.to_datetime(
         visible.available_at, utc=True
     ).dt.tz_localize(None)
-    visible["_decision"] = visible.timestamp.map(cutoffs)
     visible = visible.loc[
         visible.available_at.notna() & visible.available_at.le(visible._decision)
     ]
     visible = visible.sort_values("available_at", kind="stable").drop_duplicates(
-        ["asset_id", "contract_id", "timestamp"], keep="last"
+        ["asset_id", "contract_id", "timestamp", "_decision"], keep="last"
     )
     visible = visible.loc[visible.underlying_id.isin(decisions.asset_id.unique())]
     if visible.empty:
@@ -47,8 +50,8 @@ def implied_variances(decisions, risk, contracts):
     visible["asset_id"] = visible.asset_id + ":" + visible.contract_id
     query = visible[["asset_id"]].assign(timestamp=visible._decision)
     known = latest_observations(meta, query, columns=fields)
-    for field in fields:
-        visible[field] = known[field].to_numpy()
+    visible[["expiry", "strike"]] = known[["expiry", "strike"]]
+    visible = visible.loc[visible.underlying_id.eq(known.underlying_id)].copy()
     visible["expiry"] = pd.to_datetime(visible.expiry)
     visible = visible.loc[
         visible.implied_volatility.gt(0)
@@ -60,6 +63,7 @@ def implied_variances(decisions, risk, contracts):
         .groupby(
             [
                 visible.timestamp,
+                visible._decision,
                 visible.underlying_id,
                 visible.expiry,
                 visible.strike,
@@ -74,31 +78,23 @@ def implied_variances(decisions, risk, contracts):
         .rename("variance")
         .reset_index()
     )
-    observed = {date: block for date, block in surface.groupby("timestamp", sort=False)}
-    for date, at in decisions.groupby("signal_session", sort=False).groups.items():
-        if date not in observed:
+    surfaces = surface.groupby(["timestamp", "_decision", "underlying_id"], sort=False)
+    for i, row in decisions.iterrows():
+        key = (row.signal_session, row.timestamp, row.asset_id)
+        if key not in surfaces.indices or not row.close > 0:
             continue
-        r = observed[date]
-        for i in at:
-            row = decisions.loc[i]
-            own = r.loc[r.underlying_id.eq(row.asset_id)]
-            curve = []
-            for expiry, block in own.groupby("expiry", sort=False):
-                if not row.close > 0:
-                    continue
-                strike = np.abs(
-                    np.log(block.strike.to_numpy(float) / row.close)
-                ).argmin()
-                variance = block.variance.iloc[strike]
-                curve.append(((expiry - date).days / 365, variance))
-            if not curve:
-                continue
-            curve.sort()
-            tenor, variance = np.asarray(curve).T
-            for width, name in zip((20, 60), names, strict=True):
-                horizon = width / 252
-                if tenor[0] <= horizon <= tenor[-1]:
-                    result.loc[i, name] = (
-                        np.interp(horizon, tenor, tenor * variance) / horizon
-                    )
+        own = surfaces.get_group(key)
+        curve = []
+        for expiry, block in own.groupby("expiry", sort=False):
+            strike = np.abs(np.log(block.strike.to_numpy(float) / row.close)).argmin()
+            variance = block.variance.iloc[strike]
+            curve.append(((expiry - row.signal_session).days / 365, variance))
+        curve.sort()
+        tenor, variance = np.asarray(curve).T
+        for width, name in zip((20, 60), names, strict=True):
+            horizon = width / 252
+            if tenor[0] <= horizon <= tenor[-1]:
+                result.loc[i, name] = (
+                    np.interp(horizon, tenor, tenor * variance) / horizon
+                )
     return result

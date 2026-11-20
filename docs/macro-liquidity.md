@@ -40,6 +40,8 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 `release_csv` 按观察日选择记录，再验证所选数值、单位与发布时钟。下载数据同样先解析原格式中的观察日并选域，再解释所选记录的下载时刻、历史版本日期、数值、单位和业务时序；窗外版本日期异常不阻塞已选观察。同一已选观察日的修订全部保留，发布时间推定口径沿用原规则。
 
+`macro_public_baseline` 的 ALFRED `VIXCLS` 来源中，有 26 个观测日的 `realtime_start_date` 早于 `period_start_date`。例如，2018-10-08 的观测记录给出的版本日期是 2018-10-05。选中这些记录时，`prepare-source` 会报 `macro_release_clock_precedes_observation`。修正这段历史需要能核实对应版本可用日的来源证据。
+
 宏观响应按业务来源合并：中债、CBOE、BIS 与 SF Fed 图表数据读取 Parquet，来源条目中的原始列名和行组限定每次响应的实际范围；其他接口响应使用 JSONL gzip 的独立 member，范围同样记录在来源条目中。原请求、获取时刻、缺失和修订仍各自保留。BIS 的系列属性保留原 `UNIT_MULT`；SF Fed 的 MPS/MPS_ORTH 多工作表研究文件单独作为参考工作簿保存，不按图表 `Surprise` 的基点定义解释。
 
 ## 日频决策时钟

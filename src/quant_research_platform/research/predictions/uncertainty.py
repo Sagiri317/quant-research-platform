@@ -9,11 +9,13 @@ import pandas as pd
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.experiments import label_maturity_mask
+from quant_research_platform.contracts.ids import validate_input_market
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.models import (
+    _comparable_target_definition,
     _prediction_loss_reason,
     _target_definition,
 )
@@ -43,7 +45,7 @@ def conformal_radius(residuals, alpha):
     return float(np.partition(values, rank - 1)[rank - 1])
 
 
-def _mature_pairs(config, observations):
+def _mature_pairs(config, observations, market_id):
     label = config["label"]
     frame, session, clock = research_frame(
         config["dataset"],
@@ -52,6 +54,7 @@ def _mature_pairs(config, observations):
         label=label,
         observation_keys=observations,
     )
+    validate_input_market(session.spec, market_id)
     mature = label_maturity_mask(
         frame,
         target_column=label,
@@ -91,7 +94,9 @@ def calibrate_uncertainty(config):
         columns=("timestamp", "asset_id", "prediction_score"),
         time_window=TimeWindow(**config["window"]),
     )
-    paired, session = _mature_pairs(config, predictions)
+    paired, session = _mature_pairs(
+        config, predictions, metadata["model_facts"]["market_id"]
+    )
     spec = session.spec
     if spec.get("column_units", {}).get(config["label"]) != config["unit"]:
         raise ValueError("uncertainty_label_unit_mismatch")
@@ -215,14 +220,17 @@ def evaluate_uncertainty(config):
         time_window=TimeWindow(**config["window"]),
     )
     intervals = materialize_dataset_session(session)
-    paired, label_session = _mature_pairs(config, intervals)
+    parameters = session.manifest["parameters"]
+    paired, label_session = _mature_pairs(config, intervals, parameters["market_id"])
     label_spec = label_session.spec
     if (
         session.spec["column_units"].get("prediction_lower")
         != label_spec.get("column_units", {}).get(config["label"])
-        or session.manifest["parameters"]["label"] != config["label"]
-        or session.manifest["parameters"]["target_definition"]
-        != _target_definition(label_spec, config["label"], label_session.manifest)
+        or parameters["label"] != config["label"]
+        or _comparable_target_definition(parameters["target_definition"])
+        != _comparable_target_definition(
+            _target_definition(label_spec, config["label"], label_session.manifest)
+        )
     ):
         raise ValueError("uncertainty_evaluation_target_mismatch")
     coverage = (

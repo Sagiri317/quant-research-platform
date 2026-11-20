@@ -50,7 +50,9 @@ FACTORS = (
 )
 UNITS = dict.fromkeys(FACTORS, "dimensionless")
 for _name in FACTORS:
-    if "return" in _name and "fraction" not in _name:
+    if _name.startswith(
+        ("industry_return_", "industry_catchup_", "industry_catchdown_", "lagged_")
+    ):
         UNITS[_name] = "decimal_return"
 DAILY_FIELDS = (
     "close",
@@ -272,39 +274,28 @@ def calculate_activity(panel, *, columns, session_days, history=None):
                 }
             ).loc[selected]
         )
-    if windows:
-        for asset, at in work.groupby("asset_id", sort=False).indices.items():
-            observed = pd.DatetimeIndex(day.iloc[at].unique())
-            earliest = min(
-                (date for owner, date, _ in activities if owner == asset),
-                default=observed.min(),
+    if windows and activities and not work.empty:
+        dates = session_days[
+            max(
+                0, session_days.searchsorted(day.min()) - 20
+            ) : session_days.searchsorted(day.max(), side="right")
+        ]
+        totals = pd.Series(activities, dtype=float).unstack([0, 2]).reindex(dates)
+        baseline = totals.shift().rolling(20).mean()
+        # Join frozen asset-day ratios to the quotes at and after each cutoff.
+        ratios = (totals / baseline.where(baseline > 0)).stack(0)
+        query = pd.MultiIndex.from_arrays([day, work.asset_id])
+        aligned = ratios.reindex(index=query, columns=windows).to_numpy()
+        for i, window in enumerate(windows):
+            visible = work.timestamp.ge(day + pd.Timedelta(minutes=90 + window))
+            result[f"opening_relative_activity_{window}m"] = np.where(
+                visible, aligned[:, i], np.nan
             )
-            dates = session_days[
-                (session_days >= min(earliest, observed.min()))
-                & (session_days <= observed.max())
-            ]
-            for window in windows:
-                amounts = pd.Series(
-                    [activities.get((asset, date, window), np.nan) for date in dates],
-                    index=dates,
-                )
-                baseline = amounts.shift().rolling(20, min_periods=20).mean()
-                for date in observed:
-                    if date not in baseline.index or not baseline.loc[date] > 0:
-                        continue
-                    positions = np.asarray(at)[day.iloc[at].eq(date)]
-                    result.loc[positions, f"opening_relative_activity_{window}m"] = (
-                        np.where(
-                            work.timestamp.iloc[positions].ge(
-                                date + pd.Timedelta(hours=1, minutes=30 + window)
-                            ),
-                            amounts.loc[date] / baseline.loc[date],
-                            np.nan,
-                        )
-                    )
     if samples:
         samples = pd.concat(samples, ignore_index=True)
-        current = samples.groupby(["asset_id", "slot", "day"], sort=False).volume.last()
+        current = samples.groupby(["asset_id", "slot", "day"], sort=False).volume.last(
+            skipna=False
+        )
         late_history = (
             current if late_history is None else pd.concat([late_history, current])
         )

@@ -297,6 +297,14 @@ def test_unproved_rights_quote_cannot_create_a_valuation_anchor():
     result = marks.project(view)
     assert result.open.isna().all()
     assert result.close.isna().all()
+    # Only the next actual price re-establishes this life's share-value anchor.
+    recovered = marks.project(mark_view("2023-01-03", np.nan, 12.0))
+    assert recovered.open.isna().all()
+    assert recovered.close.iloc[0] == 12.0
+    assert recovered.research_close_mark_at.isna().all()
+    suspended = marks.project(mark_view("2023-01-04", np.nan, np.nan, trading=False))
+    assert suspended.open.iloc[0] == 12.0
+    assert suspended.research_open_mark_at.iloc[0] == pd.Timestamp("2023-01-03")
 
 
 @pytest.mark.parametrize("selected_inputs", [False, True])

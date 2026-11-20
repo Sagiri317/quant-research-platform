@@ -140,7 +140,7 @@
     "start": "2022-01-01",
     "end": "2026-10-30"
   },
-  "trading_calendar": "data/interim/csmar-20261110/trading_calendar",
+  "trading_calendar": "data/interim/csmar/trading_calendar",
   "validation_sessions": 120,
   "selection_metric": "daily_rank_ic",
   "evaluation_cutoff": "2026-10-31T00:00:00",

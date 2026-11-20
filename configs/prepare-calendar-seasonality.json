@@ -3,7 +3,7 @@
   "data_id": "price_volume_facts",
   "inputs": {
     "market_panel_1d": "data/interim/portfolio-suspension-inputs/market_panel",
-    "trading_calendar": "data/interim/csmar-20261110/trading_calendar"
+    "trading_calendar": "data/interim/csmar/trading_calendar"
   },
   "factor_columns": [
     "calendar_month_return_5y"

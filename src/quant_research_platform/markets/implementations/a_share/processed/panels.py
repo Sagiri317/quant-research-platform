@@ -1204,9 +1204,9 @@ def _apply_special_treatment(
         known_at="timestamp",
         columns=columns,
     )
-    right = right.loc[:, ["asset_id", "timestamp", *columns]].sort_values(
-        ["timestamp", "asset_id"], kind="mergesort"
-    )
+    right = right.loc[
+        :, ["asset_id", "timestamp", "effective_date", *columns]
+    ].sort_values(["timestamp", "asset_id"], kind="mergesort")
     merged = pd.merge_asof(
         result.sort_values(["timestamp", "asset_id"], kind="mergesort"),
         right,
@@ -1216,8 +1216,12 @@ def _apply_special_treatment(
         allow_exact_matches=True,
         suffixes=("", "_event"),
     )
+    # An old listing's event can be announced after the code is listed again.
+    prior_life = merged.pop("effective_date").lt(merged.get("listing_date", pd.NaT))
     for column in columns:
-        merged[column] = merged.pop(column + "_event").combine_first(merged[column])
+        merged[column] = (
+            merged.pop(column + "_event").mask(prior_life).combine_first(merged[column])
+        )
     return merged
 
 

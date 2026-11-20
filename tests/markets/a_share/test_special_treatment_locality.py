@@ -125,3 +125,49 @@ def test_unclassified_event_uses_only_independent_current_daily_fact(
     actual = _panel(history, daily_known=daily_known)
     baseline = _panel(None, daily_known=daily_known)
     pd.testing.assert_frame_equal(actual, baseline)
+
+
+def test_relisting_does_not_inherit_the_old_listings_treatment(tmp_path):
+    from quant_research_platform.sources.csmar.interim import normalize_raw_frame
+    from tests.helpers.a_share_sources import _prepare, _write_inputs
+
+    days = pd.bdate_range("2024-01-02", periods=6).as_unit("ns")
+    inputs = _synthetic_interim_frames(days)
+    stocks = inputs["stock_master"]
+    old = stocks.source_asset_id.eq("000001")
+    stocks.loc[old, "delisting_date"] = days[1]
+    inputs["stock_master"] = pd.concat(
+        [
+            stocks,
+            stocks.loc[old].assign(
+                listing_date=days[3], timestamp=days[3], delisting_date=pd.NaT
+            ),
+        ],
+        ignore_index=True,
+    )
+    bars = inputs["market_bars_1d"]
+    inputs["market_bars_1d"] = bars.loc[
+        ~(bars.source_asset_id.eq("000001") & bars.timestamp.eq(days[2]))
+    ]
+    # An old-life ST change is published after the new listing. Its release date
+    # is current but its effective date still belongs to the previous listing.
+    inputs["special_treatment_changes"] = normalize_raw_frame(
+        pd.DataFrame(
+            dict(
+                Symbol="000001",
+                Chgtype=["AT", "AB", "AC"],
+                Annoudt=[days[0], days[4], days[5]],
+                Execudt=[days[0], days[1], days[5]],
+            )
+        ),
+        "special_treatment_changes",
+    )
+    paths = _write_inputs(tmp_path / "inputs", inputs)
+    panel = read_dataset(
+        _prepare(tmp_path, "market_panel_1d", paths, days[0], days[-1])
+    )
+    own = panel.loc[panel.asset_id.eq("000001")].set_index("timestamp")
+    assert own.loc[days[:2], "is_delisting"].all()
+    assert own.loc[days[3:5], "is_delisting"].isna().all()
+    assert not own.loc[days[3:5], "is_st"].any()  # Current daily status is normal.
+    assert own.loc[days[5], "is_pt"] and not own.loc[days[5], "is_delisting"]

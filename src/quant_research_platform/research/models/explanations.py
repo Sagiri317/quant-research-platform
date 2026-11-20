@@ -46,6 +46,7 @@ from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.persisted import load_model
 from quant_research_platform.research.models.scaler import LinearScaledPredictor
 from quant_research_platform.research.predictions.outputs import (
+    centered_target_scores,
     prediction_input_mask,
     prediction_rows,
 )
@@ -158,8 +159,8 @@ def _prediction_frames(session, result, window, *, extra=()):
                 window,
                 include_context=metadata["model_algorithm"] in SEQUENCE_ALGORITHMS,
             )
-            for _, block in usable.groupby("timestamp", sort=True):
-                yield block
+            if not usable.empty:
+                yield usable
 
 
 def _context(session, result, window, selection, *, extra=()):
@@ -172,14 +173,20 @@ def _context(session, result, window, selection, *, extra=()):
     with closing_iterator(
         _prediction_frames(session, result, window, extra=extra)
     ) as source:
-        for block in source:
-            seen += 1
-            if limit is None or len(retained) < limit:
-                retained.append(block.copy())
-            else:
-                index = int(rng.integers(seen))
-                if index < limit:
-                    retained[index] = block.copy()
+        for frame in source:
+            if limit is None:
+                # Native chronological chunks never split a timestamp.
+                retained.append(frame)
+                seen += frame.timestamp.nunique()
+                continue
+            for _, block in frame.groupby("timestamp", sort=False):
+                seen += 1
+                if len(retained) < limit:
+                    retained.append(block.copy())
+                else:
+                    index = int(rng.integers(seen))
+                    if index < limit:
+                        retained[index] = block.copy()
     if not retained:
         raise ValueError("explanation_sample_empty")
     context = (
@@ -330,7 +337,16 @@ def _output(result, frame, output_space, *, intervention=False):
     return raw, np.asarray(explained, dtype="float64")
 
 
-def _attributions(result, context, indices, method, background, output_space):
+def _attributions(
+    result,
+    context,
+    indices,
+    method,
+    background,
+    output_space,
+    *,
+    target_definition=None,
+):
     predictor = result.prediction_model
     algorithm = result.metadata["model_algorithm"]
     if (
@@ -345,7 +361,17 @@ def _attributions(result, context, indices, method, background, output_space):
         raise ValueError("explanation_tree_model_required")
     columns = result.metadata["input_columns"]
     selected = context.iloc[indices]
-    raw, explained = _output(result, selected, output_space)
+    if (target_definition or {}).get("target_transform") == "date_zscore":
+        # The published score uses every scorable asset, before display sampling.
+        scope = context.loc[context.timestamp.isin(selected.timestamp)]
+        raw, explained = _output(result, scope, output_space)
+        positions = scope.index.get_indexer(selected.index)
+        scores = centered_target_scores(
+            pd.Series(raw, index=scope.index), scope.timestamp, target_definition
+        ).to_numpy()[positions]
+        explained = explained[positions]
+    else:
+        scores, explained = _output(result, selected, output_space)
     method_facts = {
         "method": method,
         "implementation": "qrp",
@@ -451,7 +477,7 @@ def _attributions(result, context, indices, method, background, output_space):
     predictions = selected[["timestamp", "asset_id"]].copy()
     predictions["base_value"] = base
     predictions["explained_output"] = explained
-    predictions["prediction_score"] = raw
+    predictions["prediction_score"] = scores
     predictions["additivity_residual"] = residual
     predictions["additivity_tolerance"] = tolerance
     predictions["status"] = ["UNDEFINED" if reason else "DEFINED" for reason in reasons]
@@ -634,27 +660,12 @@ def _permutation_segments(frame, config):
     episode = config["episode_column"]
     if frame[episode].isna().any() or frame.asset_id.nunique() != 1:
         raise ValueError("explanation_temporal_requires_one_asset_and_episodes")
-    segments = []
-    previous = None
-    seen = set()
-    current = []
-    for index, row in frame.iterrows():
-        key = row[episode]
-        if (
-            previous is None
-            or key != previous[0]
-            or row.timestamp.value - previous[1].value != step_ns
-        ):
-            if current:
-                segments.append(np.asarray(current))
-            if previous is not None and key != previous[0] and key in seen:
-                raise ValueError("explanation_episode_not_contiguous")
-            current = []
-            seen.add(key)
-        current.append(index)
-        previous = key, row.timestamp
-    if current:
-        segments.append(np.asarray(current))
+    keys = frame[episode]
+    changed = keys.ne(keys.shift()).fillna(True)
+    if keys.loc[changed].duplicated().any():
+        raise ValueError("explanation_episode_not_contiguous")
+    boundary = changed | frame.timestamp.diff().ne(pd.Timedelta(step_ns, unit="ns"))
+    segments = np.split(frame.index.to_numpy(), np.flatnonzero(boundary)[1:])
     if any(len(index) <= config["block_size"] for index in segments):
         raise ValueError("explanation_temporal_episode_too_short")
     return segments
@@ -1005,7 +1016,13 @@ def explain(config: Mapping) -> Path:
                 else None
             )
             predictions, contributions, method_facts = _attributions(
-                result, context, indices, method, background, config["output_space"]
+                result,
+                context,
+                indices,
+                method,
+                background,
+                config["output_space"],
+                target_definition=facts.get("target_definition"),
             )
             tables.update(
                 predictions=predictions,

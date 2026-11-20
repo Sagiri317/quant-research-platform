@@ -47,7 +47,7 @@ def write_fund_records(path, rows):
     }
 
 
-def write_source_manifest(root, manifest, *, name="manifest.json"):
+def write_source_manifest(root, manifest, *, name="manifest.json", default=False):
     path = root / "manifest.json"
     source = (
         json.loads(path.read_text(encoding="utf-8"))
@@ -55,6 +55,8 @@ def write_source_manifest(root, manifest, *, name="manifest.json"):
         else {"source_root": ".", "collections": {}}
     )
     source["collections"][name] = manifest
+    if default:
+        source["default_collection"] = name
     path.write_text(json.dumps(source, ensure_ascii=False), encoding="utf-8")
 
 

@@ -884,3 +884,48 @@ def test_permutation_releases_predictions_before_next_intervention(
     assert len(references) == 5
     assert not any(reference() is not None for reference in references)
     assert tables["permutation_repeats"].status.eq("DEFINED").all()
+
+
+def test_date_standardized_explanation_separates_model_output_from_published_score(
+    tmp_path,
+):
+    from quant_research_platform.artifacts.outputs.prediction import read_predictions
+    from quant_research_platform.research.predictions.runner import predict
+    from tests.research.test_published_model_metric_semantics import (
+        _defined_target_case,
+    )
+
+    _, _, _, model, _, source = _defined_target_case(tmp_path, transform="date_zscore")
+    window = {"start": "2020-01-03", "end": "2020-01-03"}
+    common = {"inputs": str(source), "model": str(model)}
+    pred, _ = read_predictions(
+        predict(
+            {
+                **common,
+                "output": str(tmp_path / "pred"),
+                "prediction_window": window,
+                "asset_ids": ["0"],
+            }
+        )
+    )
+    _, tables = read_explanation(
+        explain(
+            {
+                **common,
+                "output": str(tmp_path / "explain"),
+                "window": window,
+                "sample_role": "test",
+                "methods": ["affine"],
+                "output_space": "model_output",
+                "selection": {"max_rows": 1, "max_dates": None, "asset_ids": ["0"]},
+            }
+        )
+    )
+    row = tables["predictions"].iloc[0]
+    # Four uncentered outputs: .025, .075, .125, .175; only asset 0 is displayed.
+    assert row.explained_output == pytest.approx(0.025)
+    assert row.base_value + tables["contributions"].contribution.sum() == pytest.approx(
+        0.025
+    )
+    assert pred.prediction_score.item() == pytest.approx(-0.075)
+    assert row.prediction_score == pytest.approx(pred.prediction_score.item())

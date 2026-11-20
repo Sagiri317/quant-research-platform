@@ -448,6 +448,14 @@ def materialize_dataset_session(
     )
 
 
+def read_native_dataset_metadata(root: Path) -> tuple[dict, dict]:
+    """Read the published spec and manifest without discovering data members."""
+    return (
+        read_qrp_json_file(root / "spec.json")[1],
+        read_qrp_json_file(root / "_manifest" / "manifest.json")[1],
+    )
+
+
 def open_dataset_session(
     dataset_root: Path,
     *,
@@ -477,14 +485,38 @@ def open_dataset_session(
         )
     if spec is not None:
         raise ValueError("dataset_spec_already_declared")
-    root = Path(dataset_root)
-    spec_path, data_root, manifest_path = (
-        root / "spec.json",
-        root / "data",
-        root / "_manifest" / "manifest.json",
+    return _native_dataset_session(
+        path,
+        *read_native_dataset_metadata(path),
+        columns=columns,
+        time_window=time_window,
+        row_filters=row_filters,
+        years=years,
+        files=files,
     )
-    _, spec_payload = read_qrp_json_file(spec_path)
-    _, manifest = read_qrp_json_file(manifest_path)
+
+
+def _partition_years_for_selection(years, time_window):
+    selected = None if years is None else set(years)
+    if time_window is not None:
+        start, end = time_window_date_bounds(time_window)
+        window_years = set(range(int(start.year), (end or date.max).year + 1))
+        selected = window_years if selected is None else selected & window_years
+    return selected
+
+
+def _native_dataset_session(
+    root: Path,
+    spec_payload: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    columns=None,
+    time_window=None,
+    row_filters=(),
+    years=None,
+    files=None,
+) -> DatasetSession:
+    data_root = root / "data"
     inventory = DatasetSessionInventory(data_root=data_root)
     if files is None:
         partition_years = _partition_years_for_selection(
@@ -500,41 +532,6 @@ def open_dataset_session(
                 inventory.add(path)
             except ValueError as exc:
                 raise ValueError("invalid_dataset_part_files") from exc
-    session = _build_dataset_session(
-        root=root,
-        data_root=data_root,
-        spec_payload=spec_payload,
-        manifest=manifest,
-        inventory=inventory,
-        columns=columns,
-        time_window=time_window,
-        row_filters=row_filters,
-        years=years,
-    )
-    return session
-
-
-def _partition_years_for_selection(years, time_window):
-    selected = None if years is None else set(years)
-    if time_window is not None:
-        start, end = time_window_date_bounds(time_window)
-        window_years = set(range(int(start.year), (end or date.max).year + 1))
-        selected = window_years if selected is None else selected & window_years
-    return selected
-
-
-def _build_dataset_session(
-    *,
-    root: Path,
-    data_root: Path,
-    spec_payload: dict[str, Any],
-    manifest: dict[str, Any],
-    inventory: DatasetSessionInventory,
-    columns: tuple[str, ...] | list[str] | None,
-    time_window: TimeWindow | None,
-    row_filters: tuple[tuple[str, str, Any], ...],
-    years: tuple[int, ...] | None,
-) -> DatasetSession:
     all_paths = inventory.paths
     schema = manifest["physical_schema"]
     arrow_schema = arrow_schema_from_payload(schema)

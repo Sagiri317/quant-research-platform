@@ -79,6 +79,16 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
         )
         frame = frame.drop(columns="timestamp")
     write_dataset(root, frame, spec=spec)
+    from quant_research_platform.storage.datasets import inventory
+
+    opened = []
+    scandir = inventory.filesystem_scandir
+
+    def observe_dir(path):
+        opened.append(path)
+        return scandir(path)
+
+    monkeypatch.setattr(inventory, "filesystem_scandir", observe_dir)
     projections = []
     original = schema_inventory.iter_dataset_chunks
 
@@ -103,7 +113,8 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     if context:
         expected_nulls["note"] = 2
     assert item["selected_important_column_null_counts"] == expected_nulls
-    assert projections == [("note",)] if context else projections == []
+    assert projections == ([("note",)] if context else [])
+    assert bool(opened) is context
 
 
 def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path, monkeypatch):

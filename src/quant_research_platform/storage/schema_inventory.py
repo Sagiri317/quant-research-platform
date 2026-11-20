@@ -18,10 +18,13 @@ from quant_research_platform.storage.atomic import (
     atomic_write_chunks,
     is_atomic_directory_staging_name,
 )
+from quant_research_platform.storage.datasets.paths import (
+    timestamp_column_from_spec_payload,
+)
 from quant_research_platform.storage.datasets.reading import (
-    DatasetSession,
+    _native_dataset_session,
     iter_dataset_chunks,
-    open_dataset_session,
+    read_native_dataset_metadata,
 )
 from quant_research_platform.storage.datasets.schema import physical_schema_columns
 from quant_research_platform.storage.identity import (
@@ -126,24 +129,8 @@ def _inventory_item(
     *,
     important_null_count_columns: frozenset[str],
 ) -> dict[str, Any]:
-    session = open_dataset_session(artifact_root, columns=None, time_window=None)
-    return _inventory_item_from_session(
-        project_root,
-        artifact_root,
-        session=session,
-        important_null_count_columns=important_null_count_columns,
-    )
-
-
-def _inventory_item_from_session(
-    project_root: Path,
-    artifact_root: Path,
-    *,
-    session: DatasetSession,
-    important_null_count_columns: frozenset[str],
-) -> dict[str, Any]:
-    columns = physical_schema_columns(session.schema)
-    spec_payload = session.spec
+    spec_payload, manifest = read_native_dataset_metadata(artifact_root)
+    columns = physical_schema_columns(manifest["physical_schema"])
     primary_key = tuple(spec_payload["primary_key"])
     partition_columns = tuple(spec_payload["partition_columns"])
     important_columns = tuple(
@@ -155,13 +142,16 @@ def _inventory_item_from_session(
         if column not in primary_key
         and spec_payload["column_roles"][column] not in {"factor", "label"}
     }
-    manifest = session.manifest
     row_count_by_year = {
         partition.removeprefix("year="): count
         for partition, count in manifest["partition_row_counts"].items()
         if partition.startswith("year=") and count
     }
-    time_column = session.timestamp_column if not partition_columns else None
+    time_column = (
+        timestamp_column_from_spec_payload(spec_payload)
+        if not partition_columns
+        else None
+    )
     scan_columns = tuple(
         dict.fromkeys(
             (
@@ -171,9 +161,10 @@ def _inventory_item_from_session(
         )
     )
     if scan_columns:
-        with closing_iterator(
-            iter_dataset_chunks(session.projected_view(scan_columns))
-        ) as frames:
+        session = _native_dataset_session(
+            artifact_root, spec_payload, manifest, columns=scan_columns
+        )
+        with closing_iterator(iter_dataset_chunks(session)) as frames:
             for frame in frames:
                 if time_column is not None:
                     for year, count in (
@@ -198,7 +189,7 @@ def _inventory_item_from_session(
         descriptor["name"]: (
             "category" if descriptor["kind"] == "categorical" else descriptor["dtype"]
         )
-        for descriptor in session.logical_dtypes["columns"]
+        for descriptor in manifest["logical_dtypes"]["columns"]
     }
     dtypes = {column: dtypes[column] for column in columns}
     logical_root = artifact_root.relative_to(project_root).as_posix()

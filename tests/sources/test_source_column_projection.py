@@ -42,7 +42,8 @@ def _publish(tmp_path, provider, columns, values, *, name):
                 }
             }
         },
-        name="download.json",
+        name=provider,
+        default=True,
     )
     output = tmp_path / name / "interim"
     materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})

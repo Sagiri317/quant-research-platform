@@ -3,7 +3,7 @@
   "data_id": "decision_panel",
   "inputs": {
     "daily_dataset": "data/processed/a_share/stock/daily/close-signals",
-    "trading_calendar": "data/interim/csmar-20261110/trading_calendar"
+    "trading_calendar": "data/interim/csmar/trading_calendar"
   },
   "parameters": {
     "mode": "preopen",

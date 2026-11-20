@@ -151,7 +151,10 @@ def test_alpha_window_uses_complete_252_session_clock_and_mature_labels():
     )
     # A missing observation does not compress the complete market clock.
     absent = sessions[-100]
-    frame = frame.loc[frame.timestamp.ne(absent)]
+    # Preserve the repeated positional labels of the per-date fragments.
+    # Missing responses at one date cannot drop or duplicate rows at other dates.
+    frame.loc[frame.timestamp.eq(absent), "holding_return"] = np.nan
+    frame = pd.concat((frame, frame.iloc[[-1]].assign(holding_return=np.nan)))
     result = calibration.calibrate_expected_alpha(
         frame,
         as_of=sessions[-1],

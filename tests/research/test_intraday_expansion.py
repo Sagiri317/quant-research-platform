@@ -459,6 +459,14 @@ def test_industry_catchup_excludes_self_and_unknown_calendar_does_not_gate_peers
         np.exp(0.0001 * 30) - 1
     )
     assert row.industry_catchup_30s == pytest.approx(expected)
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        intraday,
+    )
+
+    units = intraday.processed_spec().column_units
+    for width in (30, 60, 300):
+        assert units[f"industry_catchup_{width}s"] == "decimal_return"
+        assert units[f"industry_catchdown_{width}s"] == "decimal_return"
     assert row.intraday_positive_return_fraction == 1
     assert result.opening_relative_activity_5m.isna().all()
     future = context.assign(timestamp=pd.Timestamp("2024-01-02 02:00"))

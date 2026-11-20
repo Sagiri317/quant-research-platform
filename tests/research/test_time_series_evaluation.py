@@ -1119,3 +1119,20 @@ def test_evaluation_assets_are_intersected_before_materialization(
         pd.testing.assert_frame_equal(
             read_dataset(actual / name), read_dataset(expected / name)
         )
+
+
+def test_future_label_cannot_be_used_as_a_forecast_factor(tmp_path):
+    frame = pd.read_parquet(data(tmp_path))
+    frame = frame.loc[frame.timestamp.dt.day.isin([4, 8])]
+    config = _factor_evaluation_config(
+        tmp_path,
+        frame.assign(
+            peer=frame.label, label_available_at=frame.timestamp + pd.Timedelta(days=1)
+        ),
+    )
+    # A second future outcome cannot serve as an observation-time signal.
+    spec = config["inputs"]["spec"]
+    spec["column_roles"]["peer"] = "label"
+    spec["label_availability_columns"]["peer"] = "label_available_at"
+    with pytest.raises(ValueError, match="evaluation_signal_role_mismatch"):
+        evaluate_time_series(config)

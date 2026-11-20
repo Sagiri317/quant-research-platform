@@ -193,24 +193,9 @@ class ResearchValuationMarks:
             previous.listing_date
         )
         same_life &= ~assets.isin(view.unproved_lifecycle_assets)
-        for asset, row in observed.iterrows():
-            if (
-                pd.notna(row.is_trading)
-                and bool(row.is_trading)
-                and pd.notna(row.open)
-                and asset not in view.unproved_lifecycle_assets
-            ):
-                self.unproved_rights.discard((str(asset), row.listing_date))
-        unproved_rights = pd.Series(
-            [
-                (str(asset), listing) in self.unproved_rights
-                for asset, listing in current.listing_date.items()
-            ],
-            index=assets,
-            dtype=bool,
-        )
-        same_life &= ~unproved_rights
-        current.loc[unproved_rights, ["open", "close"]] = np.nan
+        identities = pd.MultiIndex.from_arrays((assets, current.listing_date))
+        delisted = identities.isin(view.confirmed_delisted_lifecycles)
+        cancelled = identities.isin(self.cancelled_lifecycles)
         previous = previous.loc[same_life].copy()
         self.last = previous.copy()
         observed = observed.loc[
@@ -253,25 +238,16 @@ class ResearchValuationMarks:
             current[f"research_{phase}_evidence_identity"] = pd.Series(
                 pd.NA, index=assets, dtype="string"
             )
-            delisted = pd.Series(
-                [
-                    (str(asset), listing) in view.confirmed_delisted_lifecycles
-                    for asset, listing in current.listing_date.items()
-                ],
-                index=assets,
-                dtype=bool,
-            )
-            cancelled = pd.Series(
-                [
-                    (str(asset), listing) in self.cancelled_lifecycles
-                    for asset, listing in current.listing_date.items()
-                ],
-                index=assets,
-                dtype=bool,
-            )
-            zero = (
-                (delisted & ~assets.isin(known.index)) | cancelled
-            ) & ~unproved_rights
+            zero = (delisted & ~assets.isin(known.index)) | cancelled
+            if self.unproved_rights:
+                # Only an observed price in this phase re-establishes the anchor.
+                self.unproved_rights.difference_update(
+                    zip(known.index, known.listing_date, strict=True)
+                )
+                unresolved = identities.isin(self.unproved_rights)
+                self.last = self.last.drop(assets[unresolved], errors="ignore")
+                missing &= ~unresolved
+                zero &= ~unresolved
             if missing.any():
                 for asset in assets[missing & ~zero]:
                     identity = (str(asset), current.loc[asset, "listing_date"])
@@ -293,7 +269,7 @@ class ResearchValuationMarks:
                         self.unproved_rights.add(identity)
                         self.last = self.last.drop(asset, errors="ignore")
                         missing.loc[asset] = False
-                        current.loc[asset, ["open", "close"]] = np.nan
+                        current.loc[asset, column] = np.nan
                         continue
                     if evidence:
                         previous.loc[asset, "mark_price"] = adjusted
@@ -325,7 +301,7 @@ class ResearchValuationMarks:
                 current.loc[zero, f"research_{phase}_mark_kind"] = (
                     "confirmed_delisting_zero"
                 )
-                current.loc[cancelled, f"research_{phase}_mark_kind"] = (
+                current.loc[zero & cancelled, f"research_{phase}_mark_kind"] = (
                     "extinguished_rights"
                 )
             if self.rights_quotes:
@@ -353,7 +329,7 @@ class ResearchValuationMarks:
                             )
                         except PortfolioTargetBlocked:
                             self.unproved_rights.add((str(asset), event.listing_date))
-                            current.loc[asset, ["open", "close"]] = np.nan
+                            current.loc[asset, column] = np.nan
                             continue
                         # Rebuild from the original economic quote each time:
                         # a later disclosure may prove an earlier share action.
@@ -369,10 +345,13 @@ class ResearchValuationMarks:
                         )
             known = known.loc[~known.index.isin(assets[cancelled])]
             if not known.empty:
-                for asset, listing in known.listing_date.items():
-                    identity = (str(asset), listing)
-                    quote = self.rights_quotes.get(identity)
-                    if quote is not None and quote.timestamp <= view.timestamp:
+                for identity, quote in tuple(self.rights_quotes.items()):
+                    asset, listing = identity
+                    if (
+                        asset in known.index
+                        and known.at[asset, "listing_date"] == listing
+                        and quote.timestamp <= view.timestamp
+                    ):
                         self.rights_quotes.pop(identity)
                 marks = known.loc[:, ["listing_date", "market_type"]].assign(
                     mark_at=view.timestamp,

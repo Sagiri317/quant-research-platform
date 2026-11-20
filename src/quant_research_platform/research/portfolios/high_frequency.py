@@ -1039,7 +1039,7 @@ def inventory_batches(
                 sellable -= pd.Series(
                     {asset: passive.frozen_shares(asset) for asset in assets}
                 )
-            free_cash = cash - (passive.frozen_cash() if passive is not None else 0)
+            reserved_cash = passive.frozen_cash() if passive is not None else 0.0
             nav = account_nav(visible_marks)
             limits = maximum_quantities(visible_marks, nav)
             target = yield PolicyDecision(
@@ -1048,14 +1048,14 @@ def inventory_batches(
                 units.reindex(assets).copy(),
                 sellable,
                 visible_marks,
-                free_cash,
+                cash - reserved_cash,
                 nav,
                 reference_inventory.reindex(assets).copy(),
                 pending,
                 pending_targets,
                 estimated_costs,
                 estimate_trade_cost,
-                reserved_cash=passive.frozen_cash() if passive is not None else 0.0,
+                reserved_cash=reserved_cash,
                 receivable_value=fsum(entitlements.receivables.values()),
                 estimate_trade_cost_gradient=estimate_trade_cost_gradient,
                 order_state=passive.state(at, assets) if dynamic_execution else None,

@@ -54,6 +54,10 @@ def test_atm_total_variance_interpolation_and_unknown_release():
     assert result.implied_variance_20d.iloc[0] == pytest.approx(expected)
     assert pd.isna(result.implied_variance_60d.iloc[0])
     assert result.iloc[1].isna().all()
+    # Both ETFs are requested; disagreement between the risk and contract
+    # underlyings cannot turn one ETF's prices into the other's surface.
+    wrong = contracts.assign(underlying_id="510500")
+    assert implied_variances(decisions, risk, wrong).isna().all().all()
     contracts["available_at"] = pd.NaT
     assert implied_variances(decisions, risk, contracts).isna().all().all()
 
@@ -161,24 +165,20 @@ def test_option_risk_versions_are_selected_before_surface_aggregation(
                             "source_sha256": "conflicting-revision",
                         }
                     )
-    for hour in (16, 18):
-        decision = pd.DataFrame(
-            dict(
-                asset_id=["510300"],
-                signal_session=date,
-                timestamp=date + pd.Timedelta(hours=hour, minutes=30),
-                close=100.0,
-            )
+    decision = pd.DataFrame(
+        dict(
+            asset_id="510300",
+            signal_session=date,
+            timestamp=[date + pd.Timedelta(hours=h, minutes=30) for h in (16, 18)],
+            close=100.0,
         )
-        result = implied_variances(
-            decision, pd.DataFrame(risk), pd.DataFrame(contracts)
-        )
-        if hour == 16:
-            assert result.implied_variance_20d.iloc[0] == pytest.approx(0.04)
-        elif revision == "known":
-            assert result.implied_variance_20d.iloc[0] == pytest.approx(0.16)
-        else:
-            assert pd.isna(result.implied_variance_20d.iloc[0])
+    )
+    result = implied_variances(decision, pd.DataFrame(risk), pd.DataFrame(contracts))
+    assert result.implied_variance_20d.iloc[0] == pytest.approx(0.04)
+    if revision == "known":
+        assert result.implied_variance_20d.iloc[1] == pytest.approx(0.16)
+    else:
+        assert pd.isna(result.implied_variance_20d.iloc[1])
 
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.markets.prepare import prepare

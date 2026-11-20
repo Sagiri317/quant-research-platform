@@ -877,3 +877,38 @@ def test_benchmark_selector_does_not_require_the_whole_input_to_be_one_index(tmp
         )
     )
     assert read_dataset(output).asset_id.unique().tolist() == ["index:000300"]
+
+
+def test_split_scale_survives_a_missing_ex_date_quote():
+    days = pd.bdate_range("2024-01-02", periods=5)
+    calendar = pd.DataFrame(
+        dict(calendar_date=pd.date_range(days[0], days[-1]), source_market_type=1)
+    )
+    calendar["is_trading_day"] = calendar.calendar_date.isin(days)
+    prices = pd.DataFrame(
+        dict(
+            asset_id="510300",
+            timestamp=days[[0, 2, 3, 4]],
+            open=10.0,
+            close=[10.0, 5.0, 6.0, 6.0],
+        )
+    )
+    action = pd.DataFrame(
+        dict(
+            asset_id=["510300:splits"],
+            timestamp=[days[1]],
+            available_at=[days[0]],
+            event_type=["splits"],
+            amount=[float("nan")],
+            numerator=[2.0],
+            denominator=[1.0],
+        )
+    )
+    panel = daily_quotes.daily_decisions(prices, calendar, actions=action).set_index(
+        "signal_session"
+    )
+    # The split changes the share count by two independent of its missing close.
+    assert pd.isna(panel.loc[days[1], "adj_close"])
+    assert panel.loc[days[2:4], "adj_close"].tolist() == pytest.approx([10.0, 12.0])
+    assert panel.loc[days[1:3], "period_return"].isna().all()
+    assert panel.loc[days[3], "period_return"] == pytest.approx(0.2)

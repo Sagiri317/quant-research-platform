@@ -140,12 +140,18 @@ def test_sandbox_full_table_is_context_while_native_search_filters_maturity(tmp_
 
 
 @pytest.mark.parametrize("empty", [False, True])
-def test_sandbox_metadata_does_not_require_label_maturity_declaration(tmp_path, empty):
+def test_sandbox_metadata_does_not_require_label_maturity_declaration(
+    tmp_path, empty, monkeypatch
+):
     frame, spec = learning_panel(tmp_path / "earlier")
     if empty:
         frame = frame.iloc[:0]
     root = tmp_path / "input"
     write_dataset(root, frame, spec=replace(spec, label_availability_columns={}))
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.filesystem_scandir",
+        lambda path: pytest.fail("metadata request enumerated data shards"),
+    )
     metadata = dataset_context({"panel": root})["panel"]
     assert metadata["rows"] == len(frame)
     assert metadata["date_max"] == (None if empty else "2020-01-12")

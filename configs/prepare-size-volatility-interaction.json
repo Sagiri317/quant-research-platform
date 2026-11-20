@@ -3,7 +3,7 @@
   "data_id": "style_structure_factors",
   "inputs": {
     "market_panel_1d": "data/interim/portfolio-suspension-inputs/market_panel",
-    "trading_calendar": "data/interim/csmar-20261110/trading_calendar",
+    "trading_calendar": "data/interim/csmar/trading_calendar",
     "price_volume_facts": {
       "path": "data/research/a_share/stock/daily/close-factors",
       "columns": [

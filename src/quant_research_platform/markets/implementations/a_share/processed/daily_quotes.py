@@ -293,9 +293,10 @@ def daily_decisions(prices, calendar, *, actions=None):
                     if len(dividends)
                     else 0.0
                 )
-                multiplier.loc[date] = (
-                    q + cash / data.close.loc[date] if complete else np.nan
-                )
+                # A split changes the share count even when no ex-date quote exists.
+                if pd.notna(cash) and cash != 0:
+                    cash /= data.close.loc[date]
+                multiplier.loc[date] = q + cash if complete else np.nan
                 if complete:
                     # Both closes are known by the current session's close.
                     # A later action version must not inherit that earlier clock.
@@ -332,10 +333,20 @@ def daily_decisions(prices, calendar, *, actions=None):
                     .droplevel(0)
                 )
         blocks.append(out.loc[out.timestamp.notna()].reset_index(drop=True))
-    return (
-        pd.concat(blocks, ignore_index=True)
-        if blocks
-        else pd.DataFrame(columns=[*KEY, *CONTEXT, LABEL])
+    if blocks:
+        return pd.concat(blocks, ignore_index=True)
+    # A selector may match no asset. Keep the same native price, clock and
+    # numerical columns rather than publishing untyped empty observations.
+    empty = prices.iloc[:0]
+    empty_spec = processed_specs()[0 if "volume" in prices else 1]
+    return empty.assign(
+        market_id="a_share",
+        eligible=empty.close.gt(0),
+        **dict.fromkeys(
+            (name for name in CONTEXT if name.endswith(("_session", "_at"))),
+            empty.timestamp,
+        ),
+        **dict.fromkeys(empty_spec.column_units.keys() - set(empty), np.nan),
     )
 
 
@@ -460,7 +471,16 @@ def produce(spec, *, inputs, time_window):
             actions.available_at, utc=True
         ).dt.tz_localize(None)
     frame = daily_decisions(prices, calendar, actions=actions)
-    if spec.data_id == "etf_daily_panel" and "index_market" in inputs:
+    start, end, closed = time_window_timestamp_interval(time_window)
+    frame = frame.loc[
+        frame.timestamp.ge(start)
+        & (frame.timestamp.le(end) if closed else frame.timestamp.lt(end))
+    ].copy()
+    if (
+        not frame.empty
+        and spec.data_id == "etf_daily_panel"
+        and "index_market" in inputs
+    ):
         benchmark = materialize_dataset_session(
             open_dataset_session(
                 **_dataset_input_options(inputs["index_market"])
@@ -473,7 +493,9 @@ def produce(spec, *, inputs, time_window):
         )
         returns = benchmark.set_index("signal_session").period_return
         frame["market_return"] = frame.signal_session.map(returns)
-    if {"public_option_risk", "public_option_contracts"} <= set(inputs):
+    if not frame.empty and {"public_option_risk", "public_option_contracts"} <= set(
+        inputs
+    ):
         from quant_research_platform.research.factors.option_variance import (
             implied_variances,
         )
@@ -486,10 +508,18 @@ def produce(spec, *, inputs, time_window):
         )
         implied = implied_variances(frame, risk, contracts)
         frame[list(implied)] = implied
-    if "hft_panel" in inputs:
+    if "hft_panel" in inputs and not frame.empty:
+        # A preopen decision consumes the entire preceding signal session.
+        span = TimeWindow(
+            frame.signal_session.min().date(), frame.signal_session.max().date()
+        )
         panel = materialize_dataset_session(
             open_dataset_session(
-                **_dataset_input_options(inputs["hft_panel"])
+                **_dataset_input_options(
+                    inputs["hft_panel"],
+                    time_window=span,
+                    row_filters=(("asset_id", "in", tuple(frame.asset_id.unique())),),
+                )
             ).projected_view(
                 (
                     "asset_id",
@@ -500,8 +530,21 @@ def produce(spec, *, inputs, time_window):
             )
         )
         panel["signal_session"] = panel.timestamp.dt.normalize()
-        groups = panel.groupby(["asset_id", "signal_session"], sort=False)
         fields = ["observed_trade_volume", "observed_signed_trade_volume"]
+        # AM and PM each start without a preceding continuous-trading interval.
+        # A later gap inside that half-day still invalidates the daily sum.
+        half = (
+            panel.timestamp.dt.tz_localize("UTC")
+            .dt.tz_convert("Asia/Shanghai")
+            .dt.floor("12h")
+        )
+        first = panel.groupby([panel.asset_id, half], sort=False).timestamp.transform(
+            "min"
+        )
+        panel = panel.loc[
+            ~(panel.timestamp.eq(first) & panel[fields].isna().all(axis=1))
+        ]
+        groups = panel.groupby(["asset_id", "signal_session"], sort=False)
         sums = (
             groups[fields].sum().where(groups[fields].count().eq(groups.size(), axis=0))
         )
@@ -514,12 +557,7 @@ def produce(spec, *, inputs, time_window):
         )
     if source == "index_market":
         frame["asset_id"] = "index:" + frame.asset_id
-    start, end, closed = time_window_timestamp_interval(time_window)
-    selected = frame.loc[
-        frame.timestamp.ge(start)
-        & (frame.timestamp.le(end) if closed else frame.timestamp.lt(end)),
-        list(spec.column_roles),
-    ]
+    selected = frame.loc[:, list(spec.column_roles)]
     metadata = {
         "producer_diagnostics": {
             "decision_clock": "09:00_Asia_Shanghai_preopen",

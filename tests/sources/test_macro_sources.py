@@ -117,7 +117,8 @@ def test_archive_unit_change_uses_vintage_and_persists_canonical_millions(
                 }
             }
         },
-        name="download.json",
+        name="archive_units",
+        default=True,
     )
     materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
     result = read_dataset(output).sort_values(["observation_date", "vintage_date"])
@@ -335,9 +336,13 @@ def test_overlapping_archive_blocks_are_resolved_before_backdating(tmp_path):
                 }
             }
         },
-        name="download.json",
+        name="fed_assets",
     )
-    materialize_interim_data(raw_root=raw, output_roots={"macro_observations": output})
+    materialize_interim_data(
+        raw_root=raw,
+        output_roots={"macro_observations": output},
+        manifests=["fed_assets"],
+    )
     frame = read_dataset(output).sort_values(["observation_date", "timestamp"])
     assert len(frame) == 3
     assert frame.value.iloc[:2].tolist() == [101, 110]
@@ -645,7 +650,8 @@ def test_downloaded_macro_window_ignores_other_observations_invalid_facts(
                 }
             }
         },
-        name="download.json",
+        name="observations",
+        default=True,
     )
     output = tmp_path / "selected"
     materialize_interim_data(

@@ -20,11 +20,11 @@
     "dataset": "data/research/a_share/stock/daily/exposure-model-inputs",
     "panel": "data/interim/portfolio-suspension-inputs/market_panel",
     "execution": "data/processed/a_share/stock/daily/execution",
-    "calendar": "data/interim/csmar-20261110/trading_calendar",
-    "fees": "data/interim/reference-20261105/a_share_fee_schedule",
-    "market_bars": "data/interim/csmar-20261110-r3/market_bars_1d",
-    "stock_master": "data/interim/csmar-20261110/stock_master",
-    "corporate_actions": "data/interim/csmar-20261110/corporate_actions",
+    "calendar": "data/interim/csmar/trading_calendar",
+    "fees": "data/interim/reference/a_share_fee_schedule",
+    "market_bars": "data/interim/csmar/market_bars_1d",
+    "stock_master": "data/interim/csmar/stock_master",
+    "corporate_actions": "data/interim/csmar/corporate_actions",
     "risk_context": [
       "data/research/a_share/stock/daily/close-factors"
     ]

@@ -333,3 +333,75 @@ def test_native_formula_application_retains_listing_context(tmp_path):
         values.loc[values.timestamp.ne("2020-01-10"), "discovered_factor"],
         [1.0, 2.0, 3.0] * 3,
     )
+
+
+def test_uncertainty_pairs_the_same_market_and_residual_label(tmp_path):
+    from quant_research_platform.research.predictions.runner import predict
+    from tests.research.test_published_model_metric_semantics import (
+        _defined_target_case,
+    )
+
+    frame, spec, metadata, model, _, source = _defined_target_case(
+        tmp_path, transform="risk_residual"
+    )
+    window = {"start": "2020-01-03", "end": "2020-01-05"}
+    predictions = predict(
+        dict(
+            inputs=str(source),
+            model=str(model),
+            prediction_window=window,
+            output=str(tmp_path / "predictions"),
+        )
+    )
+    labels = tmp_path / "labels"
+    # Covariance half-life is not used by the cross-sectional residual regression.
+    config = replace(spec.risk_model.config, factor_half_life=63.0)
+    equivalent = replace(spec, risk_model=replace(spec.risk_model, config=config))
+    write_dataset(labels, frame, spec=equivalent, metadata=metadata)
+    other = tmp_path / "other-market"
+    write_dataset(
+        other,
+        frame,
+        spec=replace(equivalent, market_id="another_market"),
+        metadata=metadata,
+    )
+    settings = dict(
+        dataset=str(labels),
+        predictions=str(predictions),
+        label="model_target",
+        window={"start": "2020-01-03", "end": "2020-01-03"},
+        cutoff="2020-01-03",
+        alpha=0.5,
+        unit=spec.column_units["model_target"],
+        block="row",
+        output=str(tmp_path / "calibration.json"),
+    )
+    calibration = calibrate_uncertainty(settings)
+    future = {"start": "2020-01-04", "end": "2020-01-05"}
+    intervals = apply_uncertainty(
+        dict(
+            calibration=str(calibration),
+            predictions=str(predictions),
+            window=future,
+            cost=0,
+            output=str(tmp_path / "intervals"),
+        )
+    )
+    evaluation = dict(
+        dataset=str(labels),
+        intervals=str(intervals),
+        label="model_target",
+        window=future,
+        cutoff="2020-01-05",
+        output=str(tmp_path / "evaluation.json"),
+    )
+    report = parse_qrp_json_object(evaluate_uncertainty(evaluation).read_bytes())
+    assert report["rows"] == 8
+    for operation, request in (
+        (calibrate_uncertainty, settings),
+        (evaluate_uncertainty, evaluation),
+    ):
+        with pytest.raises(ValueError, match="input_market_mismatch"):
+            operation(
+                {**request, "dataset": str(other), "output": str(tmp_path / "wrong")}
+            )

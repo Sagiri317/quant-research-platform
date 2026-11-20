@@ -648,6 +648,11 @@ def evaluate_time_series(config):
             row_filters=(("asset_id", "in", asset_ids),),
         )
     )
+    if any(
+        session.spec["column_roles"].get(name) not in {"factor", "feature"}
+        for name in factors
+    ):
+        raise ValueError("evaluation_signal_role_mismatch")
     label = config["label"]
     availability = session.spec["label_availability_columns"][label]
     columns = ["timestamp", "asset_id", "eligible", label, availability, *factors]

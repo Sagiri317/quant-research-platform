@@ -586,7 +586,6 @@ class PassiveOrders:
         diagnostics = self.advance(at)
         at_ns = int(at.value)
         for asset, row in current.iterrows():
-            free = cash - self.frozen_cash()
             crossed = (
                 pd.notna(row.bid_px1)
                 and pd.notna(row.ask_px1)
@@ -608,7 +607,6 @@ class PassiveOrders:
             self.segments[asset] = row.segment_id
             if order is not None and (crossed or row.segment_id != order.segment):
                 diagnostics.extend(self._remove(asset, "observation_gap"))
-                free = cash - self.frozen_cash()
                 order = None
             if order is not None:
                 morning_end, afternoon_end = self.session_ends[asset]
@@ -732,8 +730,8 @@ class PassiveOrders:
                     cost, side, price, count, face_value_per_share=face
                 )
 
-            pending_cash = self._cash_reservations().get(asset, 0.0)
-            budget = free + pending_cash
+            reservations = self._cash_reservations()
+            budget = cash - fsum(reservations.values()) + reservations.get(asset, 0.0)
 
             if (
                 side == 1

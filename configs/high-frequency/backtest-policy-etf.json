@@ -52,7 +52,7 @@
       "fee_schedule": "data/interim/etf-execution/fees",
       "daily_inputs": {
         "panel": "data/interim/etf-execution/panel",
-        "calendar": "data/interim/csmar-20261110/trading_calendar",
+        "calendar": "data/interim/csmar/trading_calendar",
         "market_bars": "data/interim/etf-execution/market-bars",
         "stock_master": "data/interim/etf-execution/instruments",
         "corporate_actions": "data/interim/etf-execution/corporate-actions",

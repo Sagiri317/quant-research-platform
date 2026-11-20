@@ -260,8 +260,8 @@ def calibrate_expected_alpha(
         frame[return_column], error="alpha_calibration_numeric_invalid"
     )
     valid = alpha.notna() & returns.notna() & np.isfinite(alpha) & np.isfinite(returns)
-    valid_dates = dates.loc[valid].isin(scheduled)
-    date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
+    selected = valid & dates.isin(scheduled)
+    date_count = int(dates.loc[selected].nunique())
     coverage = date_count / max(1, len(scheduled))
     enough_coverage = date_count >= minimum_valid_dates and coverage >= minimum_coverage
 
@@ -283,7 +283,6 @@ def calibrate_expected_alpha(
 
     if not enough_coverage:
         return undefined("alpha_calibration_insufficient_coverage")
-    selected = valid & valid_dates
     left = alpha.loc[selected].to_numpy(dtype="float64")
     right = returns.loc[selected].to_numpy(dtype="float64")
     _, cluster_codes = np.unique(dates.loc[selected].to_numpy(), return_inverse=True)

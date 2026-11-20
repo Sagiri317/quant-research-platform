@@ -3,7 +3,7 @@
   "data_id": "cash_distribution_factors",
   "inputs": {
     "decision_panel": "data/research/a_share/stock/daily/factors",
-    "corporate_actions": "data/interim/csmar-20261110/corporate_actions",
+    "corporate_actions": "data/interim/csmar/corporate_actions",
     "market_panel_1d": "data/interim/portfolio-suspension-inputs/market_panel"
   },
   "factor_columns": [

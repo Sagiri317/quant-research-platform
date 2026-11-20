@@ -518,8 +518,8 @@ XGBoost 的 CPU 模型保留原位预测，GPU 模型对 Pandas 输入直接使�
 `selection` 明确 `max_rows`、`max_dates`，可选 `asset_ids`；`root_seed` 省略时为 42，显式值覆盖默认。
 `max_dates=null` 表示全窗口。
 先保留选中时间的完整截面，再抽展示/评分行。序列模型保留截至评分时点的全部可观察历史，资格只控制评分，不提前裁去历史。
-线性与树模型的逐行贡献只预测抽中的展示行；置换分析仍使用完整干预上下文。
-解释输入不支持 `row_filters`，资产展示筛选通过 `selection.asset_ids`，保留明确的预测上下文。
+逐行贡献只解释展示行。若目标是按日标准化的 `date_zscore`，发布分数还要用展示时点所有可评分证券的截面均值。置换分析使用完整干预上下文。
+只想展示部分资产时，用 `selection.asset_ids` 保留完整预测上下文；输入中的 `row_filters` 会改变实际计算域。
 
 `output_space` 为 `model_output` 或 `raw_margin`，按真实模型能力使用。
 非恒等目标变换的原生树贡献只解释 raw margin，不把它标成收益。
@@ -529,8 +529,7 @@ background 的 `root_seed` 省略时为 42，显式值覆盖默认。
 抽样使用有界 reservoir；其余方法不接收未使用的背景选项。
 
 贡献表保存 timestamp、asset_id、feature、input_value、contribution；input_value 是逐源列保真的可空数值文本，缺失保存为 null，不参与贡献计算。
-预测表保存基值、真实输出、预测分数、
-加和残差与容差及逐行状态。加和检验同时考虑运算误差与输出精度；普通舍入保留解释，
+预测表中，贡献加上基值对应被解释的模型输出 `explained_output`；`prediction_score` 与同一输入域的 PRED 一致。目标为 `date_zscore` 时，后者扣除当时的截面均值，前者和贡献保留原模型尺度。置换衡量所选输出空间的变化。表中还保存加和残差、容差和逐行状态。加和检验同时考虑运算误差与输出精度；普通舍入保留解释，
 贡献不可表示或严重抵消导致精度丢失时标 UNDEFINED 与原因，有效预测仍保留。
 summary 给出有符号/绝对均值、绝对占比、排序与覆盖，另可按 month/quarter 汇总。
 贡献汇总先逐日取截面均值，再对日期等权，不按展示行数跨日期加权。

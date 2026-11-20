@@ -485,7 +485,7 @@ def materialize_interim_data(
     start_date=None,
     end_date=None,
     release_csv=None,
-    manifests=("download.json",),
+    manifests=None,
 ):
     """Prepare source observations only; no factors, fitting, or research are run."""
     if tuple(data_ids) != (DATA_ID,) or set(output_roots) != {DATA_ID}:
@@ -498,6 +498,8 @@ def materialize_interim_data(
     else:
         catalog = read_qrp_json_file(raw_root / "manifest.json")[1]
         source_root = (raw_root / catalog["source_root"]).resolve()
+        if manifests is None:
+            manifests = (catalog["default_collection"],)
         for name in manifests:
             for key, metadata in catalog["collections"][name]["sources"].items():
                 chunks = []

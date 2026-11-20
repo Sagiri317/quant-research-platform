@@ -103,7 +103,7 @@
     "start": "2023-09-07",
     "end": "2026-10-30"
   },
-  "trading_calendar": "data/interim/csmar-20261110/trading_calendar",
+  "trading_calendar": "data/interim/csmar/trading_calendar",
   "label_unit": "decimal_return",
   "validation_sessions": 20,
   "min_train_sessions": 60,

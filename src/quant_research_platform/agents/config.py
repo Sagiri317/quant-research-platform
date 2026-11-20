@@ -10,7 +10,9 @@ from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
     sanitize_shared_text,
 )
-from quant_research_platform.storage.datasets.reading import open_dataset_session
+from quant_research_platform.storage.datasets.reading import (
+    read_native_dataset_metadata,
+)
 
 OPERATIONS = {
     "prepare",
@@ -84,8 +86,7 @@ def dataset_context(inputs):
     """Expose native metadata without treating the whole table as a sample window."""
     result = {}
     for alias, root in inputs.items():
-        session = open_dataset_session(Path(root))
-        spec, manifest = session.spec, session.manifest
+        spec, manifest = read_native_dataset_metadata(Path(root))
         result[alias] = {
             "columns": spec["column_roles"],
             "units": spec.get("column_units", {}),

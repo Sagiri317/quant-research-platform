@@ -1,7 +1,7 @@
 {
   "source_id": "macro",
   "raw_root": "data/raw/macro_liquidity",
-  "manifests": ["public-20261105/download.json"],
+  "manifests": ["macro_public_baseline"],
   "outputs": {
     "macro_observations": "data/interim/macro_liquidity/observations"
   },
