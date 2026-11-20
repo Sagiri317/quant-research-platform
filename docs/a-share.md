@@ -1244,7 +1244,7 @@ A 股股票训练默认使用 `model.sample_filter_mode=eligible`；ETF 可明�
 训练、验证与后续预测按各自声明的同一资格口径取样，不由市场标识强制覆盖配置。
 其他合法名称按普通标识符解释。
 
-精确并列时，按 `score.candidate_ids` 的显式顺序选择，家族内和家族间使用同一顺序。
+指标并列时，使用 `select.tie_break_order`；未指定则用 `score.candidate_ids`。先在各家族内选出最佳候选，再按同一规则比较各家族的胜者。
 每次 `fit` 的 `candidate_parameters` 记录实际候选参数；仓库不另维护固定网格或自动排序。
 历史报告中的 Lasso/XGBoost 网格和保守顺序仅属于当次实验，当前候选由调用者明确选择。
 
@@ -1328,7 +1328,7 @@ N_train
 |---|---|
 | `candidate_id` | 本次实际组合候选标识 |
 | `selection_group` | 与实际选择记录一致的研究标识；当前 A 股训练使用 `quarterly` |
-| `construction` | `quantile_equal_weight`、`quantile_float_cap`、`maximum_sharpe` 或 `benchmark_enhanced` |
+| `construction` | `quantile_equal_weight`、`quantile_float_cap`、`mean_variance`、`maximum_sharpe` 或 `benchmark_enhanced` |
 | `prediction_selector` | 已持久化模型的 `family_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
@@ -1640,7 +1640,6 @@ A 股日频组合估计行业风险时，将 CSRC2012 和 CAPCO 的 A 至 S 共 
 基线和 RO 共用 SciPy `trust-constr` 稀疏求解。固定权重及确定为单向的交易直接消去，
 其余绝对交易量使用精确线性辅助约束；实际净交易容量由股票权重边界负责。
 换手仍为股票和现金权重变化绝对值之和的一半，行业、风格使用双边仿射约束。
-数值停止、残差诊断、真实仿射等式与费用闭合及参数见 [统一优化器的数值实现](robust-portfolio.md#数值求解与保存事实)。
 固定应收不参与换手；成本目标将 `u` 与权重变化转换为独立买/卖金额，使用同一
 `PreparedTradeCost.totals_and_gradients` 的真实费用与解析边际费率。线性费率和平方根冲击
 保留原经济含义；求解器试探负侧金额时只作切线连续延伸，实际成交仍要求非负金额。
@@ -1918,7 +1917,7 @@ ADV 约束有两项职责，但只有一份参数真值：
 
 逐资产账本对受 ADV 缺项阻止的订单披露窗口观察数与缺项数，统计分别披露买/卖未成交订单数、
 执行开盘原目标与实际持仓差额对应的未成交目标金额和受影响区间数；这些是执行覆盖诊断，不是收益损失或因果影响估计。
-必要来源整体不存在、身份或结构非法仍由原生准入拒绝，与局部空行情分开处理。
+回测所需的来源、证券身份或表结构有问题时，读取对应输入会报错。单个交易日的空行情按上述规则处理。
 已有原件中的缺项不能仅凭空值就断言为供应商缺源。
 
 增强优化器对 ADV 未知或为零的资产固定当前真实持仓，未持有资产不新增；

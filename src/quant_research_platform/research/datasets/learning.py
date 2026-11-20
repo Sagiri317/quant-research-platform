@@ -32,6 +32,7 @@ def research_frame(
     """Read a bounded panel and return its source session and maturity column.
 
     Labels and their availability clocks are read only when explicitly requested.
+    Supplied observation keys already define the cohort; they need no eligibility mask.
     """
     columns = tuple(columns)
     _validate_column_tuple(columns, "research_features", required=False)
@@ -51,7 +52,7 @@ def research_frame(
         "timestamp",
         "asset_id",
         *spec["primary_key"],
-        "eligible",
+        *(("eligible",) if observation_keys is None else ()),
         *columns,
         *context_columns,
     ]

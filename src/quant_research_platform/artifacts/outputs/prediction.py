@@ -243,11 +243,9 @@ class _PredictionLookup:
         *,
         index: ExactPrimaryKeyIndex,
         primary_key: tuple[str, ...],
-        prediction_column: str,
     ) -> None:
         self._index = index
         self.primary_key = primary_key
-        self.prediction_column = prediction_column
 
     def close(self) -> None:
         self._index = None
@@ -267,6 +265,6 @@ class _PredictionLookup:
         )
         return (values, found)
 
-    def coverage_counts(self) -> tuple[int, int]:
+    def unmatched_count(self) -> int:
         # Matching moves each key out of the outstanding partition.
-        return (self._index.float_value_count(namespace="prediction"), 0)
+        return self._index.float_value_count(namespace="prediction")

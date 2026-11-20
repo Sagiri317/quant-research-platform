@@ -62,7 +62,7 @@ LSTM、Transformer 和成本感知网络复用同一库的设备选择；XGBoost
 原 `implementation_shortfall_bps` 继续只计已成交部分；终局另存未完成量、末次已观察中价、
 `opportunity_cost_bps` 和两者之和 `total_implementation_shortfall_bps`。未知终局观察保留未定义，
 不使用日频收盘价替代，不虚构成交。配置和同母单 maker/taker 对照见[高频执行说明](a-share-hft.md#被动委托信号与执行基准)。
-`unfinished_penalty_bps` 乘未完成比例后计入终局奖励，其他任务必须设为零。
+母单风险惩罚按每次实际成交更新剩余比例，以各段时长占整个执行窗口的比例加权；全部成交后不再计罚。`unfinished_penalty_bps` 乘未完成比例后计入终局奖励，其他任务必须设为零。
 母单限额在账户执行处约束：有延迟、部分成交或等待动作时也不能反向买回或超额执行。
 该母单不改变其他股票的目标。
 
@@ -428,6 +428,7 @@ Python 仍可用 `backtest_policy(config, portfolio_context=provider)` 注入已
 标准化分数的成本不能直接按收益率解释。
 输出为 factor/feature 体系可读取的原生数据集，应用不读取未来标签。
 `evaluate-uncertainty` 另行读取成熟标签，报告配对行数、覆盖率和平均宽度。
+校准和评价以已发布的预测或区间为样本；标签表只提供目标值和成熟时点，不按其中的 `eligible` 再筛一次。
 
 理论覆盖依赖校准块与未来块的交换性；金融序列中的时间依赖和分布变化可能破坏该条件。
 按 timestamp 分块保留截面关联，但不自动解决跨期依赖。实际覆盖需在随后窗口单独检验。

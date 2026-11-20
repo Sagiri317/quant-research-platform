@@ -454,10 +454,16 @@ def calculate(
         opening = date + pd.Timedelta(hours=1, minutes=30)
         complete = 0 <= (times[0] - opening).total_seconds() <= 6
         for minutes in opening_windows:
-            ends = np.flatnonzero(times >= opening + pd.Timedelta(minutes=minutes))
-            if not len(ends):
+            boundary = opening + pd.Timedelta(minutes=minutes)
+            end = times.searchsorted(boundary)
+            if end == len(times):
                 continue
-            end = ends[0]
+            # An exact endpoint needs no intervening prices. A later observation
+            # may stand for the boundary only inside a continuous quote segment.
+            if times[end] != boundary and (
+                end == 0 or block.segment_id.iloc[end] != block.segment_id.iloc[end - 1]
+            ):
+                continue
             visible = np.arange(len(block)) >= end
             name = f"opening_gap_repair_fraction_{minutes}m"
             if name in columns and complete:

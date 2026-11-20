@@ -192,6 +192,7 @@ def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monke
                 ],
                 "label_columns": ["label"],
                 "evaluation_axis": "cross_sectional",
+                "top_quantile": 0.7,
             },
         }
     )
@@ -202,6 +203,7 @@ def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monke
         dates=pd.date_range("2020-01-04", periods=6).strftime("%Y-%m-%d").tolist(),
         assets=["a", "b", "c"],
         axis="cross_sectional",
+        top_quantile=1.0,
     )
     import quant_research_platform.research.models.fitting as fitting
 
@@ -212,6 +214,7 @@ def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monke
         {
             "inputs": source,
             "evaluation_axis": "cross_sectional",
+            "top_quantile": 0.2,
             "sessions": pd.date_range("2020-01-01", periods=9)
             .strftime("%Y-%m-%d")
             .tolist(),
@@ -235,6 +238,14 @@ def test_native_phase_errors_match_hand_calculation_and_saved_cv(tmp_path, monke
     first = metrics.loc[metrics.period_id.eq(results[0]["fold_id"])].set_index(
         ["stage", "metric"]
     )
+    assert metadata["models"][0]["top_quantile_by_stage"] == {
+        "training": 0.2,
+        "validation": 0.7,
+        "prediction": 1.0,
+    }
+    # The three fractions retain 1, 2 and 3 of the three signals per day.
+    for stage, count in (("training", 3), ("validation", 2), ("prediction", 9)):
+        assert first.loc[(stage, "long_mean_label"), "observation_count"] == count
     # y=2*x+day: fit days1..3 has intercept2. Candidate fit days1..2 has1.5.
     for metric, expected in {
         "mse": 2 / 3,
@@ -777,6 +788,7 @@ def test_utc_aware_fit_and_prediction_windows_cross_months(tmp_path, algorithm):
         assets=["a", "b", "c"],
         axis="cross_sectional",
     )
+    predictions.rename(tmp_path / "moved_predictions")
     clock = dates if algorithm == "lstm_regressor" else dates.difference(dates[2:4])
     config = {
         "inputs": source,

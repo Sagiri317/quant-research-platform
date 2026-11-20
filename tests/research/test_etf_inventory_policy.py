@@ -103,6 +103,24 @@ def run_stream(panel, signals, params, *, events=None, policy=None):
     return decisions, batches
 
 
+def test_unlisted_unheld_member_does_not_block_etf_decision_or_fill():
+    panel = quotes("2024-01-02", assets=("a",)).assign(instrument_type="gold_etf")
+    signals = pd.DataFrame(
+        {
+            "timestamp": [START + pd.Timedelta(milliseconds=1)],
+            "asset_id": ["a"],
+            "prediction_score": [0.1],
+        }
+    )
+    params = parameters(("a", "unlisted"))
+    params["initial_inventory"] = {"a": 100}
+    decisions, batches = run_stream(panel, signals, params)
+    assert decisions[0].features.prediction_score.isna().loc["unlisted"]
+    assert [
+        (fill.asset_id, fill.quantity) for batch in batches for fill in batch.trades
+    ] == [("a", 200)]
+
+
 @pytest.mark.parametrize("price", [5.0, 10.0])
 def test_inventory_cap_tracks_current_nav_instead_of_fixed_shares(price):
     panel = quotes(

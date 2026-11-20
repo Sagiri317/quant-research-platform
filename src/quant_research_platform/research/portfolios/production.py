@@ -311,7 +311,6 @@ def backtest(config: Mapping) -> Path:
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),
-        prediction_column=prediction_column,
     )
     frozen = None
     if "calibration" in config:

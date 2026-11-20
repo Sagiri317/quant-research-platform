@@ -26,7 +26,10 @@ from quant_research_platform.storage.atomic import atomic_write_text
 
 def lookup(arguments, state):
     arguments = _strict_config(
-        arguments, {"scope", "query"}, {"key", "offset", "page_size"}
+        arguments,
+        {"scope", "query"},
+        {"key", "offset", "page_size"}
+        | ({"profile"} if arguments.get("scope") == "catalog" else set()),
     )
     scope, query = arguments["scope"], arguments["query"]
     offset = arguments.get("offset", 0)
@@ -120,7 +123,7 @@ def lookup(arguments, state):
                     )
                 documents[name] = sanitize_shared_text(text)
     elif scope == "catalog":
-        profile = research_profile(A_SHARE_PROFILE_ID)
+        profile = research_profile(arguments.get("profile", A_SHARE_PROFILE_ID))
         catalogs = {"factors": profile.factors, "labels": profile.labels}
         if "key" in arguments:
             catalogs = {arguments["key"]: catalogs[arguments["key"]]}

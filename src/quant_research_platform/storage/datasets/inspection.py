@@ -30,7 +30,15 @@ def inspect_dataset(
 
 def inspect_dataset_session(context: DatasetSession) -> DatasetInspection:
     """Inspect an existing frozen session through the shared summary observer."""
-    runtime = _inspection_runtime_metadata(context, batch_rows=DEFAULT_BATCH_ROWS)
+    manifest = context.manifest
+    runtime = (
+        manifest
+        if context.native
+        and context.time_window is None
+        and not context.parquet_filters
+        and len(context.read_paths) == manifest["file_count"]
+        else _inspection_runtime_metadata(context)
+    )
     return DatasetInspection(
         root=context.root,
         data_root=context.data_root,
@@ -38,11 +46,11 @@ def inspect_dataset_session(context: DatasetSession) -> DatasetInspection:
         columns=physical_schema_columns(context.schema),
         file_count=int(runtime["file_count"]),
         row_count=int(runtime["row_count"]),
-        partitions=runtime["partitions"],
+        partitions=tuple(runtime["partitions"]),
         partition_row_counts=runtime["partition_row_counts"],
         date_min=runtime["date_min"],
         date_max=runtime["date_max"],
-        manifest=context.manifest,
+        manifest=manifest,
     )
 
 
@@ -51,21 +59,6 @@ def _inspection_runtime_metadata(
     *,
     batch_rows: int = DEFAULT_BATCH_ROWS,
 ) -> dict[str, Any]:
-    if context.native and context.time_window is None:
-        manifest = context.manifest
-        summary = {
-            name: manifest[name]
-            for name in (
-                "file_count",
-                "row_count",
-                "partitions",
-                "partition_row_counts",
-                "date_min",
-                "date_max",
-            )
-        }
-        summary["partitions"] = tuple(summary["partitions"])
-        return summary
     timestamp = context.timestamp_column
     columns = tuple(
         dict.fromkeys(

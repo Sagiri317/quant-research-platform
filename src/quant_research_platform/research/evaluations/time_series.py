@@ -571,7 +571,7 @@ def daily_inference(daily, *, groups, statistics, sessions):
     return result.astype(dtypes)
 
 
-def _write_table(root, name, frame, key, config):
+def _write_table(root, name, frame, key, metadata):
     roles = dict.fromkeys(frame.columns, "context")
     roles.update(
         {column: "timestamp" if column == "timestamp" else "key" for column in key}
@@ -587,7 +587,7 @@ def _write_table(root, name, frame, key, config):
             primary_key=key,
             partition_columns=(),
         ),
-        metadata={"parameters": config},
+        metadata=metadata,
     )
 
 
@@ -663,6 +663,7 @@ def evaluate_time_series(config):
     frame.loc[~(mature & frame.eligible.fillna(False)), label] = np.nan
     base = frame.set_index(["timestamp", "asset_id"])
     scores, probability, thresholds, loss_reasons = {}, {}, {}, {}
+    prediction_facts = {candidate: [] for candidate in candidates}
     for candidate, paths in candidates.items():
         if type(paths) is not list or not paths:
             raise ValueError("evaluation_predictions_required")
@@ -672,6 +673,16 @@ def evaluate_time_series(config):
             part, metadata = read_predictions(
                 Path(path), time_window=window, asset_ids=asset_ids
             )
+            if metadata["prediction_rows"]:
+                prediction_facts[candidate].append(
+                    {
+                        "model_facts": metadata["model_facts"],
+                        "prediction_window": metadata["prediction_window"],
+                        "effective_prediction_end": metadata[
+                            "effective_prediction_end"
+                        ],
+                    }
+                )
             model = metadata["model_facts"]["model"]
             if model["target_column"] != label:
                 raise ValueError("evaluation_prediction_target_mismatch")
@@ -899,14 +910,14 @@ def evaluate_time_series(config):
             "daily",
             daily,
             ("timestamp", "asset_id", "candidate_id", "sample_scope", "metric"),
-            config,
+            {"parameters": config, "prediction_facts": prediction_facts},
         )
         _write_table(
             root,
             "inference",
             inference,
             ("asset_id", "candidate_id", "sample_scope", "metric", "family"),
-            config,
+            {"parameters": config},
         )
 
         _write_table(
@@ -914,7 +925,7 @@ def evaluate_time_series(config):
             "summary",
             summary,
             ("asset_id", "candidate_id", "sample_scope", "metric"),
-            config,
+            {"parameters": config},
         )
 
     atomic_write_directory(output, publish)

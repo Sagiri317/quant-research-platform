@@ -128,7 +128,16 @@ def test_interactive_quote_account_observes_then_executes_and_keeps_t1():
     assert event.quantities["a"] == 200
     assert event.sellable["a"] == 100
     event = stream.send(pd.Series({"a": 0.0}))
-    remaining = [event, *stream]
+    remaining = []
+    try:
+        while True:
+            if isinstance(event, PolicyDecision):
+                event = stream.send(event.quantities)
+            else:
+                remaining.append(event)
+                event = next(stream)
+    except StopIteration:
+        pass
     assert sum(trade.quantity for batch in remaining for trade in batch.trades) == -100
     assert [
         row.quantity
@@ -182,6 +191,27 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
         values = performance.set_index("metric_id").value
         assert values["net_pnl"] == pytest.approx(-1)
         assert values["terminal_nav"] == pytest.approx(4999)
+
+
+def test_mother_order_penalty_stops_at_actual_partial_and_final_fills(tmp_path):
+    episode = hft_episode(tmp_path / "inputs")
+    episode["order"]["quantity"] = -200
+    episode["account"]["parameters"].update(
+        initial_inventory={"a": 200}, participation_rate=0.2
+    )
+    episode.update(risk_aversion=1.0, unfinished_penalty_bps=0.0)
+    episode["window"]["end"] = "2024-01-02T01:30:09"
+    env = TradingEnv([episode])
+    try:
+        env.reset(seed=0)
+        done = False
+        while not done:
+            _, _, done, _, info = env.step(np.array([1.0]))
+        assert info["filled_quantity"] == 200
+        # Sell 100 shares each at +3s and +6s. The final 3 seconds carry no risk.
+        assert info["reward_penalty"] == pytest.approx((3 + 3 * 0.5**2) / 9)
+    finally:
+        env.close()
 
 
 def test_execution_strategies_keep_distinct_native_candidates(tmp_path):
@@ -454,7 +484,9 @@ def test_delayed_mother_order_cannot_reverse_or_overfill_after_partial_fills():
         event = next(stream)
         while True:
             if isinstance(event, PolicyDecision):
-                event = stream.send(pd.Series({"a": next(targets)}))
+                event = stream.send(
+                    pd.Series({"a": next(targets, event.quantities["a"])})
+                )
             else:
                 trades.extend(event.trades)
                 event = next(stream)

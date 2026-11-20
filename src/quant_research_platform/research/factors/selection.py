@@ -17,23 +17,25 @@ def cluster_exposures(days, columns, *, axis, threshold, preferred=()):
             continue
         day = day.sort_values(["asset_id", "timestamp"], kind="stable")
         values = day[columns]
-        minimum, maximum = values.min().to_numpy(float), values.max().to_numpy(float)
+        minimum = values.min().to_numpy(float)
         first = np.where(np.isnan(first), minimum, first)
-        varying |= np.isfinite(maximum) & (
-            (minimum != maximum)
-            if axis == "cross_sectional"
-            else ((minimum != first) | (maximum != first))
-        )
         coverages.append(values.notna().mean().to_numpy())
-        ranks = values.groupby(
+        groups = values.groupby(
             day.timestamp if axis == "cross_sectional" else day.asset_id, sort=False
-        ).rank(pct=True)
+        )
+        ranks = groups.rank(pct=True)
         if axis == "cross_sectional":
-            ranks.index = pd.Index(day.asset_id)
+            varying |= groups.max().gt(groups.min()).any().to_numpy()
+            ranks.index = pd.MultiIndex.from_arrays(
+                [day.asset_id, day.timestamp - day.timestamp.dt.normalize()]
+            )
             if previous is not None:
-                movements.append((ranks - previous).abs().mean().to_numpy())
+                current, prior = ranks.align(previous, join="inner", axis=0)
+                movements.append((current - prior).abs().mean().to_numpy())
             previous = ranks
         else:
+            maximum = values.max().to_numpy(float)
+            varying |= np.isfinite(maximum) & ((minimum != first) | (maximum != first))
             movement = ranks.groupby(day.asset_id, sort=False).diff()
             if "segment_id" in day:
                 movement = movement.where(

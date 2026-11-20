@@ -137,6 +137,7 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
         input_factor_columns=("x",),
         target_column="label",
         random_seed=1,
+        sample_filter_mode="unfiltered",
     )
     case = fit_frame(
         tmp_path / "fitted",
@@ -146,6 +147,8 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
     )
     validation = frame.loc[frame.timestamp.between("2020-01-05", "2020-01-08")].copy()
     validation["label"] += np.repeat([0.01, 0.02, 0.03, 0.04], 3)
+    validation["eligible"] = validation.asset_id.ne("b")
+    validation.loc[~validation.eligible, "label"] += 0.03
     write_dataset(tmp_path / "labels", validation, spec=spec)
     window = {"start": "2020-01-05", "end": "2020-01-08"}
     _, predictions, _ = predict_frame(
@@ -165,10 +168,13 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
         }
     )
     facts = parse_qrp_json_object(calibration.read_bytes())
-    assert facts["radius"] == pytest.approx(0.04)
+    assert facts["radius"] == pytest.approx(0.07)
+    assert facts["calibration_rows"] == 12
     assert facts["calibration_blocks"] == 4
     future = frame.loc[frame.timestamp.ge("2020-01-10")].copy()
     future["label"] += 0.02
+    future["eligible"] = future.asset_id.ne("b")
+    future.loc[~future.eligible, "label"] += 0.10
     window = {"start": "2020-01-10", "end": "2020-01-12"}
     _, predictions, _ = predict_frame(
         tmp_path / "future-pred", future, case, window=window
@@ -204,8 +210,15 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
             }
         )
     values = read_dataset(intervals)
-    assert values.conservative_score.tolist() == pytest.approx([0.05, 0.15, 0.25] * 3)
-    write_dataset(tmp_path / "future-labels", future, spec=spec)
+    assert values.conservative_score.tolist() == pytest.approx([0.02, 0.12, 0.22] * 3)
+    label_columns = ["timestamp", "asset_id", "label", "label_available_at"]
+    write_dataset(
+        tmp_path / "future-labels",
+        future[label_columns],
+        spec=replace(
+            spec, column_roles={c: spec.column_roles[c] for c in label_columns}
+        ),
+    )
     report = evaluate_uncertainty(
         {
             "intervals": str(intervals),
@@ -216,7 +229,9 @@ def test_conformal_radius_and_real_prediction_calibration_roundtrip(tmp_path):
             "output": str(tmp_path / "coverage.json"),
         }
     )
-    assert parse_qrp_json_object(report.read_bytes())["coverage"] == 1
+    coverage = parse_qrp_json_object(report.read_bytes())
+    assert coverage["rows"] == 9
+    assert coverage["coverage"] == pytest.approx(2 / 3)
     changed = tmp_path / "changed-label-definition"
     write_dataset(
         changed,

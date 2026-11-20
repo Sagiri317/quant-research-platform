@@ -63,9 +63,6 @@ def _ledger(layout, roots, *, positive_returns_only=False):
                 10.0 if str(asset).startswith("a") else 1.0 for asset in frame.asset_id
             ], [True] * len(frame)
 
-        def coverage_counts(self):
-            return 0, 0
-
     return daily.backtest_a_share(
         candidate=candidate,
         return_horizon=1 if positive_returns_only else None,
@@ -536,9 +533,6 @@ def test_alpha_uses_native_normal_carry_endpoints(
             return [float(asset.startswith("a")) for asset in frame.asset_id], [
                 True
             ] * len(frame)
-
-        def coverage_counts(self):
-            return 0, 0
 
     completed = {}
     original = daily._completed_calibration_rows

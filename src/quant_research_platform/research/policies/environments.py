@@ -171,6 +171,7 @@ class TradingEnv(gym.Env):
                             or trade.quantity * sign <= 0
                         ):
                             raise ValueError("policy_execution_off_mandate")
+                        self._integrate_unfilled(trade.timestamp_ns)
                         self.filled += abs(trade.quantity)
                         self.shortfall += (
                             trade.notional - trade.quantity * self.arrival_price
@@ -201,6 +202,11 @@ class TradingEnv(gym.Env):
                 )
             self.done = True
             self.close()
+
+    def _integrate_unfilled(self, end_ns):
+        remaining = 1 - self.filled / abs(self.episode["order"]["quantity"])
+        self._unfilled_integral += remaining**2 * (end_ns - self._unfilled_at)
+        self._unfilled_at = end_ns
 
     def _integrate_exposure(self, rows, end):
         start = max(pd.Timestamp(rows[0].timestamp_ns), self.decision.timestamp)
@@ -448,8 +454,8 @@ class TradingEnv(gym.Env):
         before_nav, before_shortfall, before_fees = self.nav, self.shortfall, self.fees
         self._inventory_integral = self._deviation_integral = 0.0
         if self.task == "execution":
-            order = self.episode["order"]
-            remaining = max(0, abs(order["quantity"]) - self.filled)
+            self._unfilled_at = decision.timestamp.value
+            self._unfilled_integral = 0.0
         if self.task != "dynamic_execution":
             target = target.reindex(decision.features.index, fill_value=0)
         self._advance(target)
@@ -464,13 +470,11 @@ class TradingEnv(gym.Env):
                 TimeWindow(**self.episode["window"])
             )
             end = pd.Timestamp(upper) if self.done else self.decision.timestamp
-            elapsed = (end - decision.timestamp) / (
-                pd.Timestamp(upper) - pd.Timestamp(lower)
-            )
+            self._integrate_unfilled(end.value)
             reward -= (
                 self.episode["risk_aversion"]
-                * (remaining / abs(order["quantity"])) ** 2
-                * elapsed
+                * self._unfilled_integral
+                / (pd.Timestamp(upper) - pd.Timestamp(lower)).value
             )
             if self.done:
                 reward -= (

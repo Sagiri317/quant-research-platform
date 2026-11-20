@@ -444,9 +444,6 @@ def test_bounded_backtest_preserves_selected_history(
                 10.0 if str(asset).startswith("a") else 1.0 for asset in frame.asset_id
             ], [True] * len(frame)
 
-        def coverage_counts(self):
-            return 0, 0
-
     def backtest(end):
         return list(
             daily.backtest_a_share(

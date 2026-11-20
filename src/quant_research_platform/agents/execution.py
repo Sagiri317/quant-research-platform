@@ -385,6 +385,7 @@ def _metrics(output, definitions):
         )
         if not source.is_relative_to(output.resolve()):
             raise ValueError("agent_metric_path_escape")
+        filters = definition.get("filters", ())
         if source.suffix == ".parquet":
             if not source.is_file():
                 raise ValueError("agent_metric_file_required")
@@ -394,6 +395,8 @@ def _metrics(output, definitions):
                 filters=definition.get("filters"),
             )[definition["column"]]
         elif source.suffix == ".json":
+            if filters:
+                raise ValueError("agent_metric_filters_require_rows")
             value = parse_qrp_json_object(source.read_bytes())
             for key in definition["column"].split("."):
                 value = value[key]
@@ -403,13 +406,22 @@ def _metrics(output, definitions):
         elif source.is_dir():
             if (source / "spec.json").is_file():
                 from quant_research_platform.storage.datasets import read_dataset
+                from quant_research_platform.storage.datasets.reading import (
+                    _dataset_input_options,
+                )
 
                 values = read_dataset(
-                    source,
-                    columns=[definition["column"]],
-                    row_filters=definition.get("filters", ()),
+                    **_dataset_input_options(
+                        {
+                            "path": source,
+                            "columns": [definition["column"]],
+                            "row_filters": filters,
+                        }
+                    )
                 )[definition["column"]]
             else:
+                if filters:
+                    raise ValueError("agent_metric_filters_require_rows")
                 values = _ledger_metric(source, definition["column"], ledger_summaries)
         else:
             raise ValueError("agent_metric_format_invalid")

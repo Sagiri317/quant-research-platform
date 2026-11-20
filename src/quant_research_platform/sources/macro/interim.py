@@ -305,6 +305,32 @@ def validate_observations(frame):
         )
     ).all():
         raise ValueError("macro_availability_basis_invalid")
+    # Policy terms and scheduled maturities may be announced before taking effect.
+    measured = frame.loc[
+        ~frame.series_id.isin(
+            (
+                "us_target_lower",
+                "us_target_upper",
+                "us_iorb",
+                "us_ioer",
+                "eu_deposit_rate",
+                "hk_base_rate",
+                "cn_repo_7d_rate",
+                "cn_repo_maturity",
+            )
+        )
+    ]
+    for zone, rows in measured.groupby("source_timezone", dropna=False):
+        local_day = (
+            rows.timestamp.dt.tz_convert(zone).dt.tz_localize(None).dt.normalize()
+        )
+        # A date-only release uses next midnight for availability, not for publication.
+        release_day = local_day.where(
+            ~rows.availability_basis.isin(("release_date_end", "archive_date_end")),
+            rows.vintage_date,
+        )
+        if release_day.lt(rows.observation_date.dt.normalize()).any():
+            raise ValueError("macro_release_clock_precedes_observation")
     for name, group in frame.groupby("series_id", sort=False):
         series = SERIES[name]
         if (
@@ -422,11 +448,7 @@ def read_release_csv(path, *, start_date=None, end_date=None):
 
 
 def resolve_source_conflicts(frame):
-    """Prefer official current API/release values over secondary snapshots.
-
-    Keep revisions within the selected source. Same-key upstream corrections use
-    the latest retrieval; source and retrieval facts remain on the retained row.
-    """
+    """Prefer the most authoritative source available at each version's clock."""
     priority = frame.source_id.map(
         {
             "eastmoney": 0,
@@ -435,14 +457,15 @@ def resolve_source_conflicts(frame):
             "pbc_government_reprint": 2,
         }
     ).fillna(2)
-    frame = frame.loc[
-        priority.eq(
-            priority.groupby([frame.series_id, frame.observation_date]).transform("max")
-        )
-    ]
-    return (
-        frame.sort_values("retrieved_at", kind="stable")
+    versions = (
+        frame.assign(_priority=priority)
+        .sort_values(["timestamp", "_priority", "retrieved_at"], kind="stable")
         .drop_duplicates(list(KEY), keep="last")
+    )
+    best = versions.groupby(["series_id", "observation_date"])["_priority"].cummax()
+    return (
+        versions.loc[versions._priority.eq(best)]
+        .drop(columns="_priority")
         .sort_values(["timestamp", "series_id", "observation_date"], kind="stable")
         .reset_index(drop=True)
     )

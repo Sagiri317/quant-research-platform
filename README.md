@@ -129,7 +129,7 @@ HTTP `create_app(project_root=...)` 提供因子与标签目录、
 - [架构、API 与读写边界](docs/architecture.md)
 - [来源与数据资格](docs/data.md)
 - [A 股计算方法与交易规则](docs/a-share.md)
-- [椭球不确定集的鲁棒组合优化](docs/robust-portfolio.md)
+- [周频组合与指数增强](docs/robust-portfolio.md)
 - [A 股 Level-2、日级评价与库存账户](docs/a-share-hft.md)
 - [研究选择与比较方法](docs/research.md)
 - [策略学习、公式搜索与不确定性](docs/research-learning.md)

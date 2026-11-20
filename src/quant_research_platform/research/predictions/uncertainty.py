@@ -8,6 +8,7 @@ import pandas as pd
 
 from quant_research_platform.artifacts.outputs.prediction import read_predictions
 from quant_research_platform.contracts.data import DataSpec
+from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.json_codec import (
     _strict_config,
     parse_qrp_json_object,
@@ -21,10 +22,7 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
-from quant_research_platform.research.datasets.learning import (
-    mature_rows,
-    research_frame,
-)
+from quant_research_platform.research.datasets.learning import research_frame
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.manifests import write_qrp_json_file
 
@@ -43,6 +41,27 @@ def conformal_radius(residuals, alpha):
     if rank > len(values):
         raise ValueError("conformal_calibration_too_small")
     return float(np.partition(values, rank - 1)[rank - 1])
+
+
+def _mature_pairs(config, observations):
+    label = config["label"]
+    frame, session, clock = research_frame(
+        config["dataset"],
+        config["window"],
+        (),
+        label=label,
+        observation_keys=observations,
+    )
+    mature = label_maturity_mask(
+        frame,
+        target_column=label,
+        availability_column=clock,
+        fitting_cutoff=config["cutoff"],
+    )
+    keys = ["timestamp", "asset_id"]
+    return observations.merge(
+        frame.loc[mature, [*keys, label]], on=keys, validate="one_to_one"
+    ), session
 
 
 def calibrate_uncertainty(config):
@@ -72,13 +91,7 @@ def calibrate_uncertainty(config):
         columns=("timestamp", "asset_id", "prediction_score"),
         time_window=TimeWindow(**config["window"]),
     )
-    frame, session, availability = research_frame(
-        config["dataset"],
-        config["window"],
-        (),
-        label=config["label"],
-        observation_keys=predictions,
-    )
+    paired, session = _mature_pairs(config, predictions)
     spec = session.spec
     if spec.get("column_units", {}).get(config["label"]) != config["unit"]:
         raise ValueError("uncertainty_label_unit_mismatch")
@@ -86,14 +99,6 @@ def calibrate_uncertainty(config):
         metadata["model_facts"], config["label"], spec, session.manifest
     ):
         raise ValueError("uncertainty_prediction_target_mismatch")
-    frame = mature_rows(
-        frame, label=config["label"], availability=availability, cutoff=config["cutoff"]
-    )
-    paired = frame.merge(
-        predictions[["timestamp", "asset_id", "prediction_score"]],
-        on=["timestamp", "asset_id"],
-        validate="one_to_one",
-    )
     paired["residual"] = (paired[config["label"]] - paired.prediction_score).abs()
     if config["block"] == "timestamp":
         residuals = paired.groupby("timestamp").residual.max().to_numpy()
@@ -210,20 +215,8 @@ def evaluate_uncertainty(config):
         time_window=TimeWindow(**config["window"]),
     )
     intervals = materialize_dataset_session(session)
-    labels, label_session, availability = research_frame(
-        config["dataset"],
-        config["window"],
-        (),
-        label=config["label"],
-        observation_keys=intervals,
-    )
+    paired, label_session = _mature_pairs(config, intervals)
     label_spec = label_session.spec
-    labels = mature_rows(
-        labels,
-        label=config["label"],
-        availability=availability,
-        cutoff=config["cutoff"],
-    )
     if (
         session.spec["column_units"].get("prediction_lower")
         != label_spec.get("column_units", {}).get(config["label"])
@@ -232,11 +225,6 @@ def evaluate_uncertainty(config):
         != _target_definition(label_spec, config["label"], label_session.manifest)
     ):
         raise ValueError("uncertainty_evaluation_target_mismatch")
-    paired = labels.merge(
-        intervals[["timestamp", "asset_id", "prediction_lower", "prediction_upper"]],
-        on=["timestamp", "asset_id"],
-        validate="one_to_one",
-    )
     coverage = (
         None
         if paired.empty

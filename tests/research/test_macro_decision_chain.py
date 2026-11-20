@@ -618,9 +618,6 @@ def test_preopen_dataset_runs_shared_daily_account_on_next_session(
                 len(rows), dtype=bool
             )
 
-        def coverage_counts(self):
-            return 0, 0
-
     settings = dict(
         candidate=PortfolioCandidateSpec(
             selection_group="global",

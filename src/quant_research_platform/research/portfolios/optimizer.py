@@ -1087,6 +1087,7 @@ def optimize_portfolio(
     )
     funding_iterations = 0
     exact_cash = False
+    cash_cap = np.inf
     if absolute and config.fully_invested and not analytic_solution:
         # Maximize invested principal; fees paid are never a way to buy exposure.
         # Once fully funded, different allocations can reserve their own true fee.
@@ -1163,10 +1164,11 @@ def optimize_portfolio(
         )
         if cash_fee_floor is not None:
             constraints.remove(cash_fee_floor)
+        cash_cap = 0.0 if exact_cash else idle_cash + config.solver_gtol
         add_linear(
             cash_direction[None, :],
             0.0 if exact_cash or maximum_cost else -np.inf,
-            0.0 if exact_cash else idle_cash + config.solver_gtol,
+            cash_cap,
             fee=-1.0,
         )
         if exact_cash:
@@ -1180,12 +1182,13 @@ def optimize_portfolio(
         # The budget-and-box linear relaxation bounds every remaining target.
         # A feasible maximizer with zero penalties attains that global bound.
         box_weights = reachable_lower.copy()
+        room = reachable_upper - box_weights
+        # With zero fees the funding constraint is itself a cash-weight bound.
+        room[cash] = np.minimum(room[cash], cash_cap - box_weights[cash])
         remaining = budget - box_weights.sum()
         if remaining >= 0.0:
             for position in np.argsort(-expected_alpha, kind="stable"):
-                change = min(
-                    remaining, reachable_upper[position] - box_weights[position]
-                )
+                change = min(remaining, room[position])
                 box_weights[position] += change
                 remaining -= change
                 if remaining <= 0.0:

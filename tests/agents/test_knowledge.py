@@ -13,13 +13,22 @@ from tests.agents.support import ScriptedClient, agent_config
 
 
 @pytest.mark.parametrize("name", ["factors", "labels"])
-def test_catalog_lookup_preserves_native_facts_across_pages(name):
-    profile = research_profile()
+@pytest.mark.parametrize("profile_id", [None, "a_share_level2"])
+def test_catalog_lookup_preserves_native_facts_across_pages(name, profile_id):
+    selector = {"profile": profile_id} if profile_id else {}
+    profile = research_profile(profile_id) if profile_id else research_profile()
     expected = [item.to_manifest() for item in getattr(profile, name).list()]
     pieces, offset = [], 0
     while True:
         result = lookup(
-            {"scope": "catalog", "query": "", "key": name, "offset": offset}, {}
+            {
+                "scope": "catalog",
+                "query": "",
+                "key": name,
+                "offset": offset,
+                **selector,
+            },
+            {},
         )
         pieces.append(result["text"])
         if result["next_offset"] is None:

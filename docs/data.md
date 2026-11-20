@@ -147,7 +147,7 @@ CSS 类型及境内证券代码限定使用域，不执行汇率换算；境外�
 
 ### Venvoo A 股 Level-2
 
-活动入口为 `venvoo/hft_quotes/data.parquet`、`hft_orders/data.parquet` 和 `hft_trades/data.parquet`，ETF 使用 `venvoo-etf` 域下相同业务流。这些是原生 Parquet 汇总元数据文件；外部整理方用 `pyarrow.parquet.write_metadata` 写入实际数据文件的行组元数据，成员路径相对于入口。股票数据页沿用已收集成员，不为改名重编码大表；ETF 数据文件按业务流、交易所和证券存放，例如 `venvoo-etf/hft_quotes/SSE/510300.parquet`。不保存获取日期、查询失败、校验配置或空文件状态。
+活动入口为 `venvoo/hft_quotes/data.parquet`、`hft_orders/data.parquet` 和 `hft_trades/data.parquet`，ETF 使用 `venvoo-etf` 域下相同业务流。这些是原生 Parquet 汇总元数据文件；外部整理方用 `pyarrow.parquet.write_metadata` 写入实际数据文件的行组元数据，成员路径相对于入口。股票数据页沿用已收集成员，不为改名重编码大表；股票报价索引的一组直接指向 `samples.parquet`，包含 2021-07-23 的 9,717 行；读索引时已包含整组，再拼接该文件会重复计数。ETF 数据文件按业务流、交易所和证券存放，例如 `venvoo-etf/hft_quotes/SSE/510300.parquet`。不保存获取日期、查询失败、校验配置或空文件状态。
 
 `prepare-source` 用 `pyarrow.dataset.parquet_dataset` 打开该入口，以原始 `date` 列和证券身份下推筛选；目录名不参与选窗或日期校验。供应商部分 ETF 的 `wind_code` 后缀与真实交易所不符，ETF 按六位证券码选择并使用明确的交易所映射，原字段不改写；股票继续匹配完整代码。来源行号按每会话的选中事件顺序生成，没有观测的窗口返回空数据，不补成零成交或休市。交易会话由市场日历负责，不由文件或请求清单推断。来源 revision、实际入口与证券映射用于解释实际输入，不在读取时核验原件是否改变。单位、事件时钟与缺失边界见 [A 股高频](a-share-hft.md)。
 
@@ -525,8 +525,8 @@ CSV、XLSX和Parquet先按实际消费字段投影；这些字段的原始表头
 | `public_finra_short_volume` | 场所内卖空成交、豁免成交与对应总成交；不是空头持仓或全市场净卖出；合法代码`NA`不是缺失值 |
 | `public_option_put_call` | Cboe不同范围的Put／Call比率分别保留，不混成一种投资者情绪 |
 | `public_option_prices` | 深交所逐合约日线OHLC为CNY/基金份额，成交量为期权合约数、成交额为CNY；`asset_id`是数值合约编码，`contract_id`是交易代码，另保留标的代码 |
-| `public_etf_prices`／`public_etf_actions` | 市场OHLCV、调整收盘和企业行动分别保存；Yahoo的拆股调整收盘与含分配调整收盘不同，当前复权版本不等于历史冻结版本 |
-| `public_etf_nav` | SSGA官方NAV、份额和净资产，不能用NAV代替市场收盘价 |
+| `public_etf_prices`／`public_etf_actions` | 市场OHLCV、调整收盘和企业行动分别保存；Yahoo的拆股调整收盘与含分配调整收盘不同，当前复权版本不等于历史冻结版本。Nasdaq 证券代码取自响应的 `data.symbol` |
+| `public_etf_nav` | SSGA 官方 NAV、份额和净资产。NAV 按基金净值口径使用，市场收盘价来自行情表。证券代码取自 `navhist` 表头的 `Ticker Symbol:` |
 
 SEC raw按`sec/13f`和`sec/nport`下的监管业务表名保存Parquet，保留原TSV全部字段与字符串缺失标记；原申报包的schema事实另存`sec/source_schemas.json`。每个来源记录用`tables`保留其原始列和对应row groups，入口只读该来源及该业务表的消费字段。原包SHA／URL、accession、修订、报告期和申报期各自保留；不把目标证券提取表当作整个来源包，也不把不同来源包的同名持仓编号混接。N-PORT持仓的报告日期从`SUBMISSION.REPORT_DATE`按申报编号关联，持仓原表没有这个日期列。ZIP解包和HTML说明的采集侧归档在仓库外完成。
 
@@ -548,7 +548,7 @@ N-PORT仅接收公开的`NPORT-P/NPORT-P/A`：当前批次所适用的季度末�
 时刻必须带UTC偏移或Z，源清单和结构化来源自带的发布时间同样校验；先按观察日选取请求窗口，再检查所选记录的发布／可用日
 不得早于来源当地观察日，FINRA月度融资统计不得早于观察月末。发布日与带时区时钟也在观察日筛选后解析；release CSV 只检查实际配对来源和观察日的键唯一性、业务时钟及依据。窗口外或未配对来源的业务时钟异常不阻塞当前导入，来源路径、格式和观察日结构仍须合法。
 公募报告的发布日期与声明送出日、SEC 申报日及公开表格类型、指数权重范围和 Yahoo 币种，
-同样在报告期修正与观察窗口选择后解释；13F 金额按选中报告的真实申报日适用单位换算。
+同样在报告期修正与观察窗口选择后解释；13F 原表金额按选中报告的真实申报日换算；没有申报日期时不能区分历史千美元与美元，金额留空，股数等独立事实照常保留。
 窗口内不满足约定的事实仍明确失败，不将其补为有效值。所用 release CSV 的来源身份以
 `release_clock_sha256` 保存。原有实际发布时间优先，已有产物的重建写新输出路径。
 

@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.manifest import read_output_manifest
 from quant_research_platform.artifacts.statistics import (
     STATISTICS_TABLE_COLUMNS,
     write_statistics_artifact,
@@ -235,17 +234,10 @@ def _prediction_source(path, model_id, config):
     actual, requested = set(parameters["asset_ids"]), set(config["asset_ids"])
     if not requested <= actual or (not single and actual != requested):
         raise ValueError("model_period_prediction_assets_mismatch")
-    return (
-        session,
-        parameters,
-        [
-            read_output_manifest(Path(path))["metadata"]
-            for path in parameters["predictions"][model_id]
-        ],
-    )
+    return session, parameters, session.manifest["prediction_facts"][model_id]
 
 
-def _prediction_daily(source, model_id, facts, window, dates):
+def _prediction_daily(source, facts, window, dates):
     session, parameters, predictions = source
     if parameters["label"] != facts["model"]["target_column"]:
         raise ValueError("model_period_prediction_target_mismatch")
@@ -254,8 +246,6 @@ def _prediction_daily(source, model_id, facts, window, dates):
         raise ValueError("model_period_prediction_sessions_mismatch")
     start, end = time_window_inclusive_bounds(window)
     for metadata in predictions:
-        if metadata["prediction_rows"] == 0:
-            continue
         extent = PredictionWindow(**metadata["prediction_window"])
         lower = pd.Timestamp(extent.start)
         upper = (
@@ -272,7 +262,7 @@ def _prediction_daily(source, model_id, facts, window, dates):
         ):
             raise ValueError("model_period_prediction_fit_mismatch")
     daily = materialize_dataset_session(session.filtered_view(window))
-    return daily, parameters["cutoff"]
+    return daily, parameters
 
 
 def _summary_rows(daily, common):
@@ -571,9 +561,8 @@ def evaluate_model_periods(config: Mapping) -> Path:
                 sources[model_id] = _prediction_source(
                     config["prediction_daily"][model_id], model_id, config
                 )
-            prediction_daily, cutoff = _prediction_daily(
+            prediction_daily, prediction_parameters = _prediction_daily(
                 sources[model_id],
-                model_id,
                 facts,
                 window,
                 _window_days(dates, (window,)),
@@ -637,7 +626,7 @@ def evaluate_model_periods(config: Mapping) -> Path:
                         "source": "saved_prediction_daily",
                         "window_start": time_window_inclusive_bounds(window)[0],
                         "window_end": time_window_inclusive_bounds(window)[1],
-                        "cutoff": cutoff,
+                        "cutoff": prediction_parameters["cutoff"],
                     },
                 )
             )
@@ -673,6 +662,11 @@ def evaluate_model_periods(config: Mapping) -> Path:
                     "label_available_max": metadata["label_available_max"],
                     "target_definition": facts["target_definition"],
                     "training_selection": selection_lineage,
+                    "top_quantile_by_stage": {
+                        "training": config.get("top_quantile"),
+                        "validation": (selection or {}).get("top_quantile"),
+                        "prediction": prediction_parameters.get("top_quantile"),
+                    },
                     "final_fit_curve": "saved" if final_curves else "not_saved",
                     "historical_cv_curves": "saved"
                     if validation_curves

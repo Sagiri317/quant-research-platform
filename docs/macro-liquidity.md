@@ -22,7 +22,7 @@ ALFRED raw 按供应商 Series ID 合并为 `alfred/<Series ID>.parquet`，保�
 - ALFRED 的 `archive_date_end` 同样使用版本日期的 America/Chicago 下一午夜。后续修订按归档顺序保留；最早版本早于归档收录的历史采用下述显式推断。
 - 无历史版本证据的当前快照及延迟归档的首个版本使用 `inferred_snapshot_release`：按观测期与略保守的发布规则推断历史可用时刻，`published_at` 仍留空。获取日期仅为来源事实，不再作为这类历史研究的门槛。
 
-[ALFRED 实时区间下载](https://alfred.stlouisfed.org/help/downloaddata)保留初值及修订。一个查询跨多个下载批次时，相同版本只保留一份；同键上游更正取最近获取版本；跨来源逐序列、逐观测期选择较可信来源。HKMA 当前官方结构化 API 优先旧页面，央行政府转载原公告优先东方财富快照，其他归档修订全部保留。历史缺失值不补零，修订也不会改写已过去决策的输入。
+[ALFRED 实时区间下载](https://alfred.stlouisfed.org/help/downloaddata)保留初值及修订。一个查询跨多个下载批次时，相同版本只保留一份；同键上游更正取最近获取版本；同一序列、同一观测期内，每次只比较当时已经可见的来源。官方数据公布前保留先前可用的次级来源；公布后采用官方版本及其后续修订，不再用次级来源覆盖。HKMA 官方结构化 API 优先旧页面，央行政府转载原公告优先东方财富快照。历史缺失值不补零，修订也不会改写已过去决策的输入。
 
 HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山联储政策冲击的当前下载均不提供本接口已核实的历史版本链，因此按 `inferred_snapshot_release` 导入。BIS 信贷单位为百万美元，BOJ 为亿日元；美国 ON RRP 为十亿美元，Fed 资产与 TGA 为百万美元。
 
@@ -36,7 +36,7 @@ HKMA、BOJ 当座账户、BIS 全球美元信贷、东方财富 M2 和旧金山�
 
 官方接口的覆盖并不统一。SOFR、IORB 有各自起始日；IOER 已终止。新旧美元指数保持独立；信用利差受发布方当前历史下载范围限制。Shibor 使用 CFETS 官方历史接口，国债与 AAA 中短期票据使用中债官方日终曲线，均按来源的一年查询上限分年请求；社融增量使用商务部转载的央行数据。公开市场操作、社融存量等仍可通过明确的发布文件接入，不能用其他利率代理或补零冒充缺失指标。下载及规范表元数据记录实际覆盖，独立年度请求的成功响应可保留为不完整来源。
 
-结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`。三种时钟列可以共存，每行依次使用实际 `published_at`、`release_date`、`estimated_available_at` 中第一个已有的值。消费字段及存在的时钟列表头必须唯一，未消费说明列不参与检查。实际与推定时刻必须显式含 UTC 偏移。仅有发布日期时，沿用来源当地下一午夜的可用规则；推定时刻仍记为 `inferred_snapshot_release`，未知的实际发布时间和历史版本日期保持空。原始时钟证据保留在 raw，每次修订独立保留。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
+结构化发布或快照文件使用 `prepare-source` 的 `source_id=macro` 与 `release_csv`。CSV 必须包含 `series_id,observation_date,value,unit,frequency,source_id,source_series,source_timezone,source_url,retrieved_at`。三种时钟列可以共存，每行依次使用实际 `published_at`、`release_date`、`estimated_available_at` 中第一个已有的值。消费字段及存在的时钟列表头必须唯一，未消费说明列不参与检查。实际与推定时刻必须显式含 UTC 偏移。已实现的利率、价格、统计量等，其发布日不能早于来源当地观察日；只有发布日期时比较原日期，可用上界仍取下一午夜。可提前公告的政策利率、已知回购到期量保留其真实公告和生效日的区别。推定时刻仍记为 `inferred_snapshot_release`，未知的实际发布时间和历史版本日期保持空。原始时钟证据保留在 raw，每次修订独立保留。此入口也可接入有真实事前预期依据的政策惊喜，普通历史创新不能改称政策惊喜。
 
 `release_csv` 按观察日选择记录，再验证所选数值、单位与发布时钟。下载数据同样先解析原格式中的观察日并选域，再解释所选记录的下载时刻、历史版本日期、数值、单位和业务时序；窗外版本日期异常不阻塞已选观察。同一已选观察日的修订全部保留，发布时间推定口径沿用原规则。
 

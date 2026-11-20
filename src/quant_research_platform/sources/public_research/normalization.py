@@ -19,6 +19,7 @@ from quant_research_platform.sources.tabular import (
 from quant_research_platform.sources.tabular import (
     read_parquet as _read_parquet,
 )
+from quant_research_platform.sources.tabular import select_source_columns
 
 DATASETS = {
     "public_index_weights": {
@@ -1268,9 +1269,9 @@ def normalize(data_id, path, record):
                 result["asset_id"] = result.asset_id + ":" + result.market
                 yield result
     elif source == "nasdaq_etf_ohlcv":
-        payload = json.loads(path.read_bytes())
+        data = json.loads(path.read_bytes())["data"]
         result = _rename(
-            pd.DataFrame(payload["data"]["tradesTable"]["rows"]),
+            pd.DataFrame(data["tradesTable"]["rows"]),
             {
                 "date": "timestamp",
                 "open": "open",
@@ -1283,7 +1284,7 @@ def normalize(data_id, path, record):
         for name in ("open", "high", "low", "close", "volume"):
             result[name] = result[name].str.replace(r"[$,]", "", regex=True)
         result["adjusted_close"] = float("nan")
-        result["asset_id"] = path.stem.split("-")[0]
+        result["asset_id"] = data["symbol"]
         result["adjustment_basis"] = "vendor_unspecified_not_total_return"
         yield result
     elif source in {
@@ -1328,15 +1329,20 @@ def normalize(data_id, path, record):
             "Shares Outstanding": "shares_outstanding",
             "Total Net Assets": "total_net_assets",
         }
-        frame = _read_excel(path, columns=mapping, header=3)
-        result = _rename(
-            frame,
-            mapping,
+        sheet = pd.read_excel(path, sheet_name="navhist", header=None)
+        details = sheet.iloc[:3]
+        ticker = details.loc[details[0].eq("Ticker Symbol:"), 1].item()
+        header = sheet.iloc[3].tolist()
+        columns = select_source_columns(header, mapping)
+        result = (
+            sheet.iloc[4:]
+            .set_axis(header, axis="columns")[columns]
+            .rename(columns=mapping)
         )
         result = result.loc[
             pd.to_datetime(result.timestamp, errors="coerce").notna()
         ].copy()
-        result["asset_id"] = path.stem.split("-")[0]
+        result["asset_id"] = ticker
         yield result
 
 
@@ -1371,9 +1377,9 @@ def normalize_selected_facts(frame, *, source):
         frame[fields] *= 10000
     elif source == "sec_13f":
         _numbers(frame, ("value_usd",))
-        frame["value_usd"] *= frame.publication_date.lt("2023-01-03").map(
-            {True: 1000, False: 1}
-        )
+        filing = frame.publication_date
+        scale = filing.lt("2023-01-03").map({True: 1000, False: 1})
+        frame["value_usd"] *= scale.where(filing.notna())
     elif source == "sec_nport":
         if not frame.filing_type.isin(("NPORT-P", "NPORT-P/A")).all():
             raise ValueError("nport_public_filing_type_required")

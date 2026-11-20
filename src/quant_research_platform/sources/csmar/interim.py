@@ -1198,12 +1198,15 @@ def _iter_normalized_interim_frames(
     if pending:
         combined = pd.concat(pending, ignore_index=True)
         pending.clear()
-        exact_duplicate = combined.duplicated()
-        exact_duplicates = int(exact_duplicate.sum())
-        if exact_duplicates:
-            combined = combined.loc[~exact_duplicate].copy()
-        del exact_duplicate
         duplicate = combined.duplicated(list(primary_key), keep=False)
+        exact_duplicates = 0
+        if duplicate.any():
+            # Rows with distinct keys cannot have identical payloads.
+            repeated = combined.loc[duplicate].duplicated()
+            exact_duplicates = int(repeated.sum())
+            if exact_duplicates:
+                combined = combined.drop(index=repeated.index[repeated])
+                duplicate = combined.duplicated(list(primary_key), keep=False)
         if duplicate.any():
             if data_id == "stock_master":
                 combined["delisting_date_unresolved"] = combined.groupby(

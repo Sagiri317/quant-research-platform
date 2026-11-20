@@ -191,7 +191,6 @@ def test_shared_prediction_lookup_preserves_exact_key_and_consumer_coverage():
         return _PredictionLookup(
             index=index,
             primary_key=("timestamp", "asset_id"),
-            prediction_column="prediction_score",
         )
 
     first, second = lookup(), lookup()
@@ -201,8 +200,8 @@ def test_shared_prediction_lookup_preserves_exact_key_and_consumer_coverage():
     values, found = first.values_for_frame(request, mark_matched=True)
     assert list(found) == [1, 0]
     assert values[0] == -0.25 and np.isnan(values[1])
-    assert first.coverage_counts() == (1, 0)
-    assert second.coverage_counts() == (2, 0)
+    assert first.unmatched_count() == 1
+    assert second.unmatched_count() == 2
 
 
 @pytest.mark.parametrize("axis", ["cross_sectional", "single_asset_time_series"])

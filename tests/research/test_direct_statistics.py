@@ -338,8 +338,8 @@ def test_unselected_family_keeps_planned_inference_members_without_fake_predicti
                 len(keys), dtype=bool
             )
 
-        def coverage_counts(self):
-            return (0, 0)
+        def unmatched_count(self):
+            return 0
 
     tables = build_a_share_statistics_tables(
         dataset_session=open_dataset_session(tmp_path / "input", time_window=window),
@@ -582,8 +582,8 @@ def test_selected_statistics_consumes_saved_predictions_without_historical_x(tmp
                 len(keys), dtype=bool
             )
 
-        def coverage_counts(self):
-            return (0, 0)
+        def unmatched_count(self):
+            return 0
 
     tables = build_a_share_statistics_tables(
         dataset_session=session,

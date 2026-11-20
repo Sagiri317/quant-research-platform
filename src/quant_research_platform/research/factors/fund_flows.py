@@ -283,6 +283,34 @@ def complete_mainland_stock_reports(headers):
     ]
 
 
+def _mainland_stock_snapshots(holdings, headers):
+    """Resolve complete reports at the same release, per stock, before aggregation."""
+    coordinate = ["economic_portfolio_id", "timestamp", "available_at"]
+    version = "report_version_identity"
+    reports = complete_mainland_stock_reports(headers)[[*coordinate, version]]
+    reports = reports.dropna(subset=["available_at"]).drop_duplicates().copy()
+    reports["_snapshot"] = reports.groupby(coordinate, sort=False).ngroup()
+    positions = holdings.loc[
+        holdings.stock_market.eq("CN_MAINLAND"), [version, "stock_code", "shares_held"]
+    ].merge(reports[[version, "_snapshot"]], on=version)
+    # Multiple lines inside one version are additive; distinct versions are not.
+    lines = positions.groupby(
+        ["_snapshot", version, "stock_code"], sort=False
+    ).shares_held
+    amounts = lines.sum(min_count=1).where(lines.count().eq(lines.size()))
+    by_stock = amounts.groupby(level=["_snapshot", "stock_code"], sort=False)
+    amount = by_stock.first()
+    versions = reports.groupby("_snapshot", sort=False).size()
+    present_in_all = by_stock.size().eq(
+        amount.index.get_level_values("_snapshot").map(versions)
+    )
+    # An omitted holding in a complete release is zero. It agrees only with zero.
+    agreed = by_stock.nunique(dropna=False).eq(1) & (present_in_all | amount.eq(0))
+    facts = amount.where(agreed).rename("shares_held").reset_index()
+    snapshots = reports.drop(columns=version).drop_duplicates()
+    return snapshots, facts.merge(snapshots[["_snapshot", "economic_portfolio_id"]])
+
+
 def financial_states(cells):
     work = cells.loc[cells.value_observation_date.eq(cells.report_period_end)].copy()
     work["value"] = work.value.to_numpy(dtype=float, na_value=np.nan)
@@ -448,13 +476,21 @@ def us_ownership_states(holdings, filings, *, assets):
             kind = str(event["amendment_type"]).upper().strip()
             values = positions.get(event["accession"], np.zeros((n, 2)))
             if kind == "NEW HOLDINGS":
-                state["extras"][event["accession"]] = (number, values)
+                state["extras"][event["accession"]] = (number, values, clock)
             elif event["filing_type"] == "13F-HR" or kind == "RESTATEMENT":
                 if not np.isfinite(number):
                     state["base"] = None
                 elif number >= state["number"]:
                     state["base"] = values
                     state["number"] = number
+                    if kind == "RESTATEMENT":
+                        # SEC Form 13F FAQs 58b-c: a complete restatement replaces
+                        # earlier disclosures, but does not order same-clock filings.
+                        state["extras"] = {
+                            accession: extra
+                            for accession, extra in state["extras"].items()
+                            if np.isfinite(extra[0]) or extra[2] >= clock
+                        }
             else:
                 state["base"] = None
             changed.add(manager)
@@ -467,11 +503,11 @@ def us_ownership_states(holdings, filings, *, assets):
                     return None
                 additions = [
                     v
-                    for number, v in state["extras"].values()
+                    for number, v, _ in state["extras"].values()
                     if np.isfinite(number) and number > state["number"]
                 ]
                 if any(
-                    not np.isfinite(number) for number, _ in state["extras"].values()
+                    not np.isfinite(number) for number, _, _ in state["extras"].values()
                 ):
                     return None
                 return state["base"] + sum(additions, start=np.zeros((n, 2)))
@@ -481,9 +517,8 @@ def us_ownership_states(holdings, filings, *, assets):
                 full(quarters[periods[-2]]) if len(periods) > 1 else None
             )
         complete = [value for value in current.values() if value is not None]
-        if not complete:
-            continue
-        values = np.stack(complete)
+        # Publish an empty cohort as unknown at this release, superseding old facts.
+        values = np.stack(complete) if complete else np.empty((0, n, 2))
         shares = values[:, :, 0].sum(axis=0)
         money = values[:, :, 1].sum(axis=0)
         concentration = np.divide(
@@ -909,13 +944,9 @@ def calculate(decisions, sources, *, columns, parameters=None):
     holdings = sources.get("public_fund_holdings")
     ownership = set((*FUNDS[:4], FUNDS[8], FUNDS[9], FUNDS[15]))
     if holdings is not None and usable & ownership:
-        headers = complete_mainland_stock_reports(
-            sources["public_fund_holdings_reports"]
+        headers, h = _mainland_stock_snapshots(
+            holdings, sources["public_fund_holdings_reports"]
         )
-        h = holdings.loc[
-            holdings.stock_market.eq("CN_MAINLAND")
-            & holdings.report_version_identity.isin(headers.report_version_identity)
-        ]
         reports = iter_latest_report_keys(
             headers,
             work.timestamp.drop_duplicates().tolist(),
@@ -935,19 +966,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     right_on=["economic_portfolio_id", "timestamp", "available_at"],
                     how="inner",
                 )
-                known = h.loc[
-                    h.report_version_identity.isin(
-                        latest_headers.report_version_identity
-                    )
-                ]
-                quantities = known.groupby(
-                    ["economic_portfolio_id", "stock_code"], sort=False
-                ).shares_held
-                known = (
-                    quantities.sum(min_count=1)
-                    .where(quantities.count().eq(quantities.size()))
-                    .reset_index()
-                )
+                known = h.loc[h._snapshot.isin(latest_headers._snapshot)]
                 quantities = known.groupby("stock_code", sort=False).shares_held
                 total = quantities.sum(min_count=1).where(
                     quantities.count().eq(quantities.size())
@@ -1008,9 +1027,7 @@ def calculate(decisions, sources, *, columns, parameters=None):
                     common = known.loc[
                         known.economic_portfolio_id.isin(earlier.economic_portfolio_id)
                     ]
-                    earlier = h.loc[
-                        h.report_version_identity.isin(earlier.report_version_identity)
-                    ]
+                    earlier = h.loc[h._snapshot.isin(earlier._snapshot)]
                     endpoints = []
                     for endpoint in (common, earlier):
                         grouped = endpoint.groupby("stock_code").shares_held
@@ -1096,8 +1113,8 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 if prior.empty:
                     continue
                 prior = h.merge(
-                    prior[["report_version_identity", "_redemption_rate"]],
-                    on="report_version_identity",
+                    prior[["_snapshot", "_redemption_rate"]],
+                    on="_snapshot",
                     how="inner",
                 )
                 grouped = (prior.shares_held * prior._redemption_rate).groupby(

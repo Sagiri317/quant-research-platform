@@ -193,13 +193,12 @@ def test_partial_saved_prediction_matches_context_without_requiring_extra_scores
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id"),
-        prediction_column="prediction_rank_score",
     )
     result = daily._prediction_alpha(context, lookup)
     assert pd.isna(result.loc["a"])
     assert result.loc["b"] == 0.5
     assert pd.isna(result.loc["excluded"])
-    assert lookup.coverage_counts() == (0, 0)
+    assert lookup.unmatched_count() == 0
 
 
 @pytest.mark.parametrize("asset", ["a", "b"])

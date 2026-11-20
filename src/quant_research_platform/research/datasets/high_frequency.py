@@ -33,80 +33,68 @@ from quant_research_platform.storage.parquet import DEFAULT_BATCH_ROWS
 
 
 def _sample_block(
-    frame, domains, grid, roles, max_age, *, book_status, visibility_delay
+    frame, grid, roles, max_age, *, interval, book_status, visibility_delay
 ):
-    """Align the shared grid in one grouped as-of, retaining each asset's domain."""
-    observations, grids = [], {}
-    for asset, segments in domains.items():
-        ordered = sorted(segments.values(), key=lambda item: item[0])
-        exchange, instrument = ordered[0][2:]
-        key = (exchange, instrument)
-        if key not in grids:
-            grids[key] = (
+    """Sample the latest visible quote without using the end of its segment."""
+    grid_times = grid.to_numpy(dtype="datetime64[ns]")
+    latest = grid_times - visibility_delay.to_timedelta64()
+    oldest = grid_times - pd.Timedelta(seconds=max_age).to_timedelta64()
+    # Retain the first expired grid row so a missing observation breaks sequences.
+    step = np.timedelta64(interval, "s")
+    quote_times = frame.timestamp.to_numpy(dtype="datetime64[ns]")
+    exchanges = frame.exchange.to_numpy()
+    instruments = frame.instrument_type.to_numpy()
+    rows, clocks, sessions = [], [], {}
+    for positions in frame.groupby(
+        "asset_id", sort=True, observed=True
+    ).indices.values():
+        key = exchanges[positions[0]], instruments[positions[0]]
+        if key not in sessions:
+            sessions[key] = (
                 continuous_session(
                     pd.Series(grid),
-                    pd.Series(exchange, index=range(len(grid))),
-                    pd.Series(instrument, index=range(len(grid))),
+                    pd.Series(key[0], index=range(len(grid))),
+                    pd.Series(key[1], index=range(len(grid))),
                 )
                 .ne("")
                 .to_numpy()
             )
-        observed = np.zeros(len(grid), dtype=bool)
-        for i, (start, end, _, _) in enumerate(ordered):
-            end += (
-                pd.Timedelta(seconds=max_age)
-                if i == len(ordered) - 1
-                else visibility_delay
-            )
-            observed |= (grid >= start + visibility_delay) & (grid <= end)
-        times = grid[observed & grids[key]]
-        if len(times):
-            observations.append((asset, times))
-    if not observations:
+        times = quote_times[positions]
+        order = np.argsort(times, kind="stable")
+        times = times[order]
+        previous = times.searchsorted(latest, side="right") - 1
+        fresh = (previous >= 0) & (times[previous] >= oldest)
+        before_window = times.searchsorted(latest[0] - step, side="right") - 1
+        first_marker = before_window >= 0 and times[before_window] >= oldest[0] - step
+        in_range = sessions[key] & (fresh | np.r_[first_marker, fresh[:-1]])
+        if in_range.any():
+            rows.append(positions[order[previous[in_range]]])
+            clocks.append(grid_times[in_range])
+    if not rows:
         return pd.DataFrame()
-    quotes = frame.rename(columns={"timestamp": "quote_timestamp"}).copy()
-    quotes["quote_timestamp"] = quotes.quote_timestamp.astype("datetime64[ns]")
-    quotes["_quote_visible_at"] = quotes.quote_timestamp + visibility_delay
-    decisions = pd.DataFrame(
-        {
-            "timestamp": np.concatenate(
-                [times.to_numpy() for _, times in observations]
-            ),
-            "asset_id": pd.Series(
-                np.repeat(
-                    [asset for asset, _ in observations],
-                    [len(times) for _, times in observations],
-                ),
-                dtype=frame.asset_id.dtype,
-            ),
-        }
-    )
-    block = pd.merge_asof(
-        decisions.sort_values("timestamp", kind="stable"),
-        quotes.sort_values("_quote_visible_at", kind="stable"),
-        left_on="timestamp",
-        right_on="_quote_visible_at",
-        by="asset_id",
-        direction="backward",
-    ).drop(columns="_quote_visible_at")
+    sampled_times = np.concatenate(clocks)
+    chronological = np.argsort(sampled_times, kind="stable")
+    indices = np.concatenate(rows)[chronological]
+    block = frame.iloc[indices].rename(columns={"timestamp": "quote_timestamp"})
+    block["quote_timestamp"] = quote_times[indices]
+    block["timestamp"] = sampled_times[chronological]
     block["quote_age_seconds"] = (
         block.timestamp - block.quote_timestamp
     ).dt.total_seconds()
-    fresh = block.quote_age_seconds.le(max_age) & block.segment_id.notna()
     payload = [
         name
         for name, role in roles.items()
         if role in {"factor", "feature"} or name == "mid"
     ]
-    block.loc[~fresh, payload] = np.nan
+    block.loc[
+        block.quote_age_seconds.gt(max_age) | block.segment_id.isna(), payload
+    ] = np.nan
     if book_status:
         block["eligible"] = True
     for name, role in roles.items():
         if role in {"universe", "mask"}:
             block[name] = block[name].astype("boolean")
-    return block.sort_values(["timestamp", "asset_id"], kind="stable").reset_index(
-        drop=True
-    )
+    return block.reset_index(drop=True)
 
 
 def _with_stock_pool(frame, membership):
@@ -282,24 +270,7 @@ def sample_hft(config):
                         quotes.timestamp, quotes.exchange, quotes.instrument_type
                     ).ne("")
                 ]
-                domains = {}
-                bounds = quotes.groupby(["asset_id", "segment_id"], sort=False).agg(
-                    first=("timestamp", "min"),
-                    last=("timestamp", "max"),
-                    exchange=("exchange", "first"),
-                    instrument_type=("instrument_type", "first"),
-                )
-                for (
-                    asset,
-                    segment,
-                ), first, last, exchange, instrument in bounds.itertuples(name=None):
-                    domains.setdefault(asset, {})[segment] = (
-                        first,
-                        last,
-                        exchange,
-                        instrument,
-                    )
-                if not domains and pool is None:
+                if quotes.empty and pool is None:
                     continue
                 lookup = QuoteReturnLookup(
                     (quotes.loc[:, ["asset_id", "segment_id", "timestamp", "mid"]],),
@@ -315,10 +286,10 @@ def sample_hft(config):
                     continue
                 frame = _sample_block(
                     quotes,
-                    domains,
                     grid,
                     roles,
                     max_age,
+                    interval=interval,
                     book_status=book_status,
                     visibility_delay=visibility_delay,
                 )
@@ -370,12 +341,12 @@ def sample_hft(config):
                     "availability_assumption": (
                         "quote_event_time_plus_configured_visibility_delay_at_or_before_decision"
                     ),
-                    "alignment": "backward_same_asset_continuous_session_and_segment",
+                    "alignment": "backward_same_asset_continuous_session",
                     "unobserved_or_stale_inputs": "missing",
                     "observation_domain": (
                         "qualified_pool_and_raw_observations"
                         if pool is not None
-                        else "observed_segments_and_final_quote_age_within_session"
+                        else "visible_quotes_and_first_expiry_within_session"
                     ),
                     "asset_universe": "point_in_time_stock_pool_with_raw_observations"
                     if pool is not None

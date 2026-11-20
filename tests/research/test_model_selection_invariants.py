@@ -191,6 +191,46 @@ def test_model_selection_uses_validation_only_and_explicit_ties() -> None:
         )
 
 
+def test_select_breaks_family_ties_by_the_winning_candidates_order(tmp_path):
+    import json
+
+    from quant_research_platform.research.models.trial_selection import (
+        read_selection,
+        select,
+    )
+
+    ids = ["slow", "a", "b", "b2"]
+    scores = {
+        "candidate_ids": ids,
+        "candidates": [
+            {"model_id": name, "family_id": family}
+            for name, family in zip(ids, ["A", "A", "B", "B"], strict=True)
+        ],
+        "metrics": [
+            {"model_id": name, "validation_mse": value}
+            for name, value in zip(ids, [2.0, 1.0, 1.0, 1.0], strict=True)
+        ],
+        "cutoff": "2020-01-04",
+    }
+    path = tmp_path / "scores.json"
+    path.write_text(json.dumps(scores))
+    result = read_selection(
+        select(
+            dict(
+                scores=str(path),
+                output=str(tmp_path / "selection.json"),
+                selection_metric="validation_mse",
+                selection_direction="minimize",
+                tie_break_order=["slow", "b2", "a", "b"],
+                refit_windows=[{"start": "2020-01-01", "end": "2020-01-04"}],
+                refit_cutoff="2020-01-04",
+            )
+        )
+    )
+    assert (result["selected_family_id"], result["selected_model_id"]) == ("B", "b2")
+    assert result["family_tie_break_order"] == ["B", "A"]
+
+
 def test_model_selection_metrics_are_cross_sectional_and_chunk_parity_stable() -> None:
     frame = pd.DataFrame(
         {

@@ -669,6 +669,7 @@ def _select(config, fold, session, candidates, calendar, preferred=()):
         "validation_rule": "latest_mature_signal_sessions",
         "metric": metric,
         "evaluation_axis": axis,
+        "top_quantile": evaluation.get("top_quantile"),
         "common_rows": int(common.sum()),
         "common_sessions": int(dates.nunique()),
         "label_available_max": pd.Timestamp(

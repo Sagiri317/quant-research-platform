@@ -555,7 +555,11 @@ def test_native_source_to_assembled_hft_dataset(tmp_path, monkeypatch, instrumen
             )
         )
     pd.testing.assert_frame_equal(sampled[0], sampled[1], check_exact=True)
-    assert len(sampled[0]) == 5 and sampled[0].eligible.all()
+    common = sampled[0]
+    assert common.eligible.all()
+    assert common.quote_age_seconds.tolist() == [3, 3, 3, 3, 6, 9]
+    assert common.mid.notna().tolist() == [True] * 5 + [False]
+    assert pd.isna(common.future_mid_return_3s.iloc[-1])
 
     from quant_research_platform.artifacts.portfolio_ledger import (
         read_portfolio_ledger_artifact,

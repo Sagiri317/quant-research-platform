@@ -98,6 +98,14 @@ class PortfolioLedgerArtifact:
             return None
         return read_qrp_json_file(self.root / self._final_alpha_calibration_member)[1]
 
+    def iter_nav_rows(self) -> Iterator[dict[str, object]]:
+        """Read only the native valuation fields required for a displayed curve."""
+        return _table_records(
+            self.root,
+            "valuations",
+            columns=("sequence", "phase", "timestamp_ns", "value"),
+        )
+
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
         yield from _iter_batches(self.root)
 
@@ -230,8 +238,10 @@ def summarize_portfolio_ledger(
     return result
 
 
-def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
-    chunks = iter_dataset_part_batches(root / f"{name}.parquet")
+def _table_records(
+    root: Path, name: str, *, columns=None
+) -> Iterator[dict[str, object]]:
+    chunks = iter_dataset_part_batches(root / f"{name}.parquet", columns=columns)
     with closing_iterator(chunks):
         for chunk in chunks:
             records = chunk.to_pylist()

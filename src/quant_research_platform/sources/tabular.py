@@ -8,6 +8,16 @@ from pandas._libs.parsers import STR_NA_VALUES
 from quant_research_platform.policy.lifecycle import closing_iterator
 
 
+def select_source_columns(
+    header, required, optional=(), *, error="source_columns_invalid"
+):
+    """Require exactly one field for every consumed name in the original header."""
+    selected = set(required) | (set(optional) & set(header))
+    if any(header.count(column) != 1 for column in selected):
+        raise ValueError(error)
+    return [column for column in header if column in selected]
+
+
 def _read_table(reader, source, columns, optional_columns, error, options):
     strip_headers = options.pop("strip_headers", False)
     position = source.tell() if hasattr(source, "tell") else None
@@ -32,12 +42,11 @@ def _read_table(reader, source, columns, optional_columns, error, options):
     raw_header = header
     if strip_headers:
         header = [name.strip() for name in header]
-    selected = set(columns) | (set(optional_columns) & set(header))
-    if any(header.count(column) != 1 for column in selected):
-        raise ValueError(error)
-    actual = [
-        raw for raw, name in zip(raw_header, header, strict=True) if name in selected
-    ]
+    selected = select_source_columns(header, columns, optional_columns, error=error)
+    actual = selected
+    if strip_headers:
+        by_name = dict(zip(header, raw_header, strict=True))
+        actual = [by_name[column] for column in selected]
     result = reader(source, usecols=actual, **options)
     return result.rename(columns=str.strip) if strip_headers else result
 
@@ -73,11 +82,7 @@ def read_excel(
 def read_parquet(
     path, metadata, *, columns, optional_columns=(), chunksize=None, na_values=()
 ):
-    fields = metadata["columns"]
-    selected = set(columns) | (set(optional_columns) & set(fields))
-    if any(fields.count(column) != 1 for column in selected):
-        raise ValueError("source_columns_invalid")
-    selected = [field for field in fields if field in selected]
+    selected = select_source_columns(metadata["columns"], columns, optional_columns)
 
     def frame(table):
         # Preserve CSV/TSV missing markers on consumed string columns.

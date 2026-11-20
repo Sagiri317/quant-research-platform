@@ -212,6 +212,114 @@ def test_us_complete_reports_supplements_restatements_and_empty_positions(unknow
     assert spy.loc["2024-05-02", field] == 1
 
 
+@pytest.mark.parametrize(
+    ("unknown_kind", "unknown_day", "expected"),
+    [
+        ("RESTATEMENT", 1, [1, np.nan, 1, 1]),
+        ("NEW HOLDINGS", 1, [1, np.nan, 1, 1]),
+        ("NEW HOLDINGS", 2, [1, 1, np.nan, np.nan]),
+        ("NEW HOLDINGS", 3, [1, 1, 1, np.nan]),
+    ],
+    ids=["restatement", "earlier_addition", "simultaneous_addition", "later_addition"],
+)
+def test_last_13f_manager_withdrawal_and_recovery(unknown_kind, unknown_day, expected):
+    dates = pd.to_datetime(["2024-02-01", "2024-02-02", "2024-02-05", "2024-02-06"])
+    filings = pd.DataFrame(
+        dict(
+            accession=["original", "unknown", "corrected"],
+            manager_cik="M",
+            timestamp=pd.Timestamp("2023-12-31"),
+            available_at=dates[[0, unknown_day, 2]],
+            filing_type=["13F-HR", "13F-HR/A", "13F-HR/A"],
+            amendment_type=["", unknown_kind, "RESTATEMENT"],
+            amendment_number=[0, np.nan, 2],
+        )
+    )
+    holdings = pd.DataFrame(
+        dict(
+            accession=["original", "corrected"],
+            cusip="x",
+            share_type="SH",
+            put_call="",
+            shares_or_principal=[10, 20],
+            value_usd=[100, 200],
+        )
+    )
+    concentration = "us_institution_ownership_concentration"
+    result = calculate(
+        pd.DataFrame(dict(asset_id="X", market_id="a_share", timestamp=dates)),
+        {"public_13f_filings": filings, "public_13f_holdings": holdings},
+        columns=[concentration],
+        parameters={"us_assets": {"X": "x"}},
+    )
+    np.testing.assert_allclose(result[concentration], expected)
+
+
+def test_complete_fund_reports_at_one_clock_are_alternatives_per_stock():
+    headers = pd.DataFrame(
+        dict(
+            report_version_identity=["left", "right", "next"],
+            economic_portfolio_id="f",
+            timestamp=pd.to_datetime(["2023-06-30", "2023-06-30", "2024-06-30"]),
+            available_at=pd.to_datetime(["2023-08-01", "2023-08-01", "2024-08-20"]),
+            stock_disclosure_status="full_stock_table_reconciled",
+            disclosure_scope="full_stock_holdings",
+            explicit_no_stock="false",
+            stock_rows=[3, 2, 3],
+        )
+    )
+    holdings = pd.DataFrame(
+        [
+            ("left", "same", 7),
+            ("left", "same", 3),
+            ("left", "missing", 4),
+            ("right", "same", 10),
+            ("right", "explicit_zero", 0),
+            ("next", "same", 15),
+            ("next", "missing", 1),
+            ("next", "explicit_zero", 1),
+        ],
+        columns=["report_version_identity", "stock_code", "shares_held"],
+    ).assign(stock_market="CN_MAINLAND", economic_portfolio_id="f")
+    decision = (
+        pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2023-08-02", "2024-08-21"]),
+                ["same", "missing", "explicit_zero"],
+            ],
+            names=["timestamp", "asset_id"],
+        )
+        .to_frame(index=False)
+        .assign(market_id="a_share", a_float_shares=100.0, avg_volume_20d=10.0)
+    )
+    ownership = "cn_fund_ownership_float_share"
+    change = "cn_disclosed_ownership_change"
+    pressure = "cn_redemption_stock_pressure"
+    result = calculate(
+        decision,
+        {
+            "public_fund_holdings": holdings,
+            "public_fund_holdings_reports": headers,
+            "public_fund_financial_cells": cells(),
+        },
+        columns=[ownership, change, pressure],
+    ).set_index(["timestamp", "asset_id"])
+    # Per-version line sums 7+3 and 10 agree. A missing row means a known zero,
+    # so 4 versus absence conflicts, whereas explicit 0 versus absence agrees.
+    np.testing.assert_allclose(
+        result.loc["2023-08-02", ownership].reindex(
+            ["same", "missing", "explicit_zero"]
+        ),
+        [0.10, np.nan, 0],
+    )
+    np.testing.assert_allclose(
+        result.loc["2024-08-21", [ownership, change, pressure]]
+        .reindex(["same", "missing", "explicit_zero"])
+        .to_numpy(dtype=float, na_value=np.nan),
+        [[0.15, 0.05, 0.10], [0.01, np.nan, np.nan], [0.01, 0.01, 0]],
+    )
+
+
 @pytest.mark.parametrize("unknown", [False, True])
 def test_nport_flows_use_prior_net_assets_and_empty_reports_replace_positions(unknown):
     funds = pd.DataFrame(

@@ -1,5 +1,7 @@
 """Published trading status acts independently of forecasts and actual fill capacity."""
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,7 +27,9 @@ from tests.helpers.high_frequency import (
 START = pd.Timestamp("2024-01-02T01:30:00")
 
 
-def status_source(root, panel, *, flag="is_st", value=True, known_second=1.5):
+def status_source(
+    root, panel, *, flag="is_st", initial=False, value=True, known_second=1.5
+):
     daily = write_daily_inputs(root / "daily", panel)
     frame = pd.DataFrame(
         {
@@ -40,6 +44,7 @@ def status_source(root, panel, *, flag="is_st", value=True, known_second=1.5):
         }
     )
     frame[flag] = frame[flag].astype("boolean")
+    frame.loc[0, flag] = initial
     frame.loc[1, flag] = value
     roles = dict.fromkeys(frame, "context")
     roles.update(timestamp="timestamp", asset_id="key", published_at="key")
@@ -64,7 +69,7 @@ def status_source(root, panel, *, flag="is_st", value=True, known_second=1.5):
     }
 
 
-def replay(panel, signals, params, source, *, events=None):
+def replay(panel, signals, params, source, *, events=None, fee_schedule=None):
     sessions = [
         (
             daily_view(frame, listing=panel.session_date.min()),
@@ -76,7 +81,7 @@ def replay(panel, signals, params, source, *, events=None):
     return list(
         inventory_batches(
             sessions,
-            schedule(),
+            schedule() if fee_schedule is None else fee_schedule,
             params,
             TimeWindow(
                 panel.session_date.min().date(), panel.session_date.max().date()
@@ -227,3 +232,48 @@ def test_unknown_status_blocks_new_buy_without_inventing_exit(tmp_path):
         for batch in batches
         for row in batch.diagnostics
     )
+
+
+def test_reopened_entry_accepts_only_newly_issued_buys(tmp_path):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:01", "01:30:02", "01:30:03", "01:30:05"),
+    )
+    source = status_source(tmp_path, panel, flag="is_pt", initial=True, value=False)
+    signals = panel.iloc[[0, 3]][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    params = parameters(("a",))
+    params.update(initial_inventory={}, latency_ms=1900)
+    batches = replay(panel, signals, params, source)
+    # Entry reopens at +1.5s. The +0s forecast cannot trade at +2s;
+    # the new +3s forecast may buy 60% of 5000 at the +5s book.
+    assert [
+        (pd.Timestamp(trade.timestamp_ns), trade.quantity)
+        for batch in batches
+        for trade in batch.trades
+    ] == [(START + pd.Timedelta(seconds=5), 300)]
+
+
+def test_stock_status_source_does_not_change_etf_taker_requests(tmp_path):
+    source = status_source(tmp_path, quotes("2024-01-02", assets=("a",)))
+    panel = quotes("2024-01-02", assets=("fund",)).assign(instrument_type="gold_etf")
+    fees = schedule()
+    fees = replace(
+        fees, rules=tuple(replace(rule, market="etf") for rule in fees.rules)
+    )
+    for seconds in (0, 1.5):
+        signals = pd.DataFrame(
+            {
+                "timestamp": [START + pd.Timedelta(seconds=seconds)],
+                "asset_id": ["fund"],
+                "prediction_score": [1.0],
+            }
+        )
+        batches = replay(
+            panel, signals, parameters(("fund",)), source, fee_schedule=fees
+        )
+        assert [
+            (pd.Timestamp(trade.timestamp_ns), trade.asset_id, trade.quantity)
+            for batch in batches
+            for trade in batch.trades
+        ] == [(START + pd.Timedelta(seconds=3), "fund", 200)]

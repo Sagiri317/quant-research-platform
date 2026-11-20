@@ -73,6 +73,33 @@ def test_sign_flips_cluster_but_a_market_state_is_constant_within_each_date():
     assert set(time_series["retained"]) == {"original", "distinct", "common"}
 
 
+def test_intraday_turnover_pairs_the_same_clock_and_asset_across_sessions():
+    clock = np.repeat(np.arange(30), 2)
+    exposure = np.tile([0.0, 1.0], 30)
+    days = [
+        pd.DataFrame(
+            {
+                "timestamp": day + pd.to_timedelta(clock, unit="s"),
+                "asset_id": np.tile(["a", "b"], 30),
+                "stable": exposure,
+                "nearby": np.where(clock == i, 1 - exposure, exposure),
+                "market_clock": clock,
+            }
+        )
+        for i, day in enumerate(pd.date_range("2020-01-06", periods=5, freq="7D"))
+    ]
+    days[1] = days[1].iloc[:-1]
+    result = cluster_exposures(
+        days,
+        ["nearby", "stable", "market_clock"],
+        axis="cross_sectional",
+        threshold=0.8,
+    )
+    assert result["retained"] == ["stable"]
+    assert result["clusters"] == {"stable": ["nearby"]}
+    assert result["constant"] == ["market_clock"]
+
+
 def test_correlation_requires_pairs_in_three_different_weeks():
     x = np.arange(60, dtype=float)
     days = [

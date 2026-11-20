@@ -185,6 +185,42 @@ def test_explicit_original_release_timestamp_and_timezone_requirement(tmp_path):
         read_release_csv(path)
 
 
+@pytest.mark.parametrize(
+    ("column", "clock"),
+    [
+        ("published_at", "2024-01-02T18:00+08:00"),
+        ("estimated_available_at", "2024-01-02T18:00+08:00"),
+        ("release_date", "2024-01-02"),
+    ],
+)
+def test_realized_fixing_cannot_be_released_before_its_local_day(
+    tmp_path, column, clock
+):
+    path = tmp_path / "releases.csv"
+    row = dict(
+        series_id="cn_dr007",
+        observation_date="2024-01-03",
+        value=1.8,
+        unit="percent",
+        frequency="D",
+        source_id="cfets",
+        source_series="DR007",
+        source_timezone="Asia/Shanghai",
+        source_url="https://example.org/rates",
+        retrieved_at="2024-01-04T00:00Z",
+    )
+    pd.DataFrame([row | {column: clock}]).to_csv(path, index=False)
+    with pytest.raises(ValueError, match="macro_release_clock_precedes_observation"):
+        read_release_csv(path)
+    pd.DataFrame([row | {"published_at": "2024-01-02T16:30Z"}]).to_csv(
+        path, index=False
+    )
+    assert read_release_csv(path).value.tolist() == [1.8]
+    policy = row | {"series_id": "cn_repo_7d_rate", "source_series": "OMO7D"}
+    pd.DataFrame([policy | {column: clock}]).to_csv(path, index=False)
+    assert read_release_csv(path).value.tolist() == [1.8]
+
+
 def test_explicit_snapshot_clock_does_not_claim_publication_or_vintage(tmp_path):
     path = tmp_path / "snapshot.csv"
     row = dict(
@@ -383,6 +419,40 @@ def test_source_priority_is_per_observation_and_keeps_selected_revisions():
     )
     actual = resolve_source_conflicts(frame)
     assert sorted(actual.value.tolist()) == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_later_official_release_preserves_previously_visible_estimate(tmp_path):
+    first = dict(
+        series_id="cn_m2",
+        observation_date="2024-01-01",
+        value=100,
+        unit="CNY_100million",
+        frequency="M",
+        source_id="eastmoney",
+        source_series="M2",
+        source_timezone="Asia/Shanghai",
+        source_url="https://example.org/m2",
+        retrieved_at="2024-03-01T00:00Z",
+        published_at="2024-02-10T18:00+08:00",
+    )
+    official = first | dict(
+        source_id="pbc_government_reprint",
+        value=110,
+        published_at="2024-02-20T18:00+08:00",
+    )
+    later_secondary = first | dict(value=105, published_at="2024-02-25T18:00+08:00")
+    path = tmp_path / "release.csv"
+    output = tmp_path / "macro"
+    pd.DataFrame([later_secondary, official, first]).to_csv(path, index=False)
+    materialize_interim_data(
+        raw_root=tmp_path, release_csv=path, output_roots={"macro_observations": output}
+    )
+    facts = read_dataset(output).sort_values("timestamp")
+    assert facts.value.tolist() == [100, 110]
+    assert facts.timestamp.tolist() == [
+        pd.Timestamp("2024-02-10 10:00"),
+        pd.Timestamp("2024-02-20 10:00"),
+    ]
 
 
 def test_official_shibor_and_structured_chinabond_preserve_curve_and_nulls(tmp_path):

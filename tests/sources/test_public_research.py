@@ -1224,10 +1224,14 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
     path = tmp_path / "13f"
     tables = {}
     tables["SUBMISSION.tsv"] = (
-        "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\nold\t2022-12-30\t13F-HR\t1\t2022-09-30\nnew\t2023-01-03\t13F-HR/A\t1\t2022-09-30\n"
+        "ACCESSION_NUMBER\tFILING_DATE\tSUBMISSIONTYPE\tCIK\tPERIODOFREPORT\n"
+        "old\t2022-12-30\t13F-HR\t1\t2022-09-30\n"
+        "new\t2023-01-03\t13F-HR/A\t1\t2022-09-30\n"
+        "undated\t\t13F-HR\t1\t2022-09-30\n"
     )
     tables["COVERPAGE.tsv"] = (
         "ACCESSION_NUMBER\tISAMENDMENT\tAMENDMENTTYPE\nold\tN\t\nnew\tY\tRESTATEMENT\n"
+        "undated\tN\t\n"
     )
     header = (
         "ACCESSION_NUMBER\tINFOTABLE_SK\tCUSIP\tVALUE\tSSHPRNAMT\t"
@@ -1236,6 +1240,7 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
     tables["INFOTABLE.tsv"] = (
         header + "old\t1\t012345678\t7\t30\tSH\t\tSOLE\n"
         "new\t2\t012345678\t7000\t30\tSH\t\tSOLE\n"
+        "undated\t3\t012345678\t7\t30\tSH\t\tSOLE\n"
     )
     sec_record = write_source_tables(path, tables)
     write_source_manifest(
@@ -1260,8 +1265,10 @@ def test_13f_value_unit_depends_on_filing_date_and_keeps_amendments(tmp_path):
         }
     )
     frame = read_dataset(output)
-    assert frame.value_usd.tolist() == [7000, 7000]
-    assert frame.is_amendment.tolist() == ["N", "Y"]
+    assert frame.value_usd.iloc[:2].tolist() == [7000, 7000]
+    assert pd.isna(frame.value_usd.iloc[2])
+    assert frame.shares_or_principal.tolist() == [30, 30, 30]
+    assert frame.is_amendment.tolist() == ["N", "Y", "N"]
     assert frame.report_date.nunique() == 1
     assert frame.publication_date.nunique() == 2
     assert frame.asset_id.is_unique
@@ -1326,6 +1333,35 @@ def test_finra_symbol_na_is_an_identifier_not_missing(tmp_path):
     assert frame.short_exempt_volume.tolist() == ["0"]
     assert frame.total_volume.tolist() == ["10.6"]
     assert frame.source_sha256.tolist() == ["original-response"]
+
+
+def test_etf_sources_identify_the_security_from_the_contents(tmp_path):
+    price = tmp_path / "prices.json"
+    row = dict(
+        date="01/02/2024", open="$9", high="$11", low="$8", close="$10", volume="1,000"
+    )
+    price.write_text(
+        json.dumps({"data": {"symbol": "QQQ", "tradesTable": {"rows": [row]}}})
+    )
+    frame = next(normalize("public_etf_prices", price, {"source": "nasdaq_etf_ohlcv"}))
+    assert frame[["asset_id", "close", "volume"]].values.tolist() == [
+        ["QQQ", "10", "1000"]
+    ]
+
+    nav = tmp_path / "fund.xlsx"
+    pd.DataFrame(
+        [
+            ["Ticker Symbol:", "SPY"],
+            ["Fund", "SPDR"],
+            [],
+            ["Date", "NAV", "Shares Outstanding", "Total Net Assets"],
+            ["2024-01-02", 10.0, 100.0, 1000.0],
+        ]
+    ).to_excel(nav, sheet_name="navhist", header=False, index=False)
+    frame = next(normalize("public_etf_nav", nav, {"source": "ssga_nav_shares"}))
+    assert frame[["asset_id", "nav", "shares_outstanding"]].values.tolist() == [
+        ["SPY", 10.0, 100.0]
+    ]
 
 
 def test_supplement_manifest_yahoo_price_clock_and_adjustment(tmp_path):

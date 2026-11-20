@@ -223,14 +223,16 @@ def test_off_quote_signals_use_visible_context_without_crossing_session():
     assert process_prediction_signals(
         predictions.iloc[[1]], panel, stage
     ).prediction_score.tolist() == [2.0]
-    # Filtering leaves the off-quote clock for the existing execution mapper.
-    from quant_research_platform.research.portfolios.high_frequency import _decisions
-
-    mapped = _decisions(panel, result, 0)
-    assert (
-        mapped[(predictions.timestamp.iloc[0].value, "a")][0]
-        == panel.timestamp.iloc[1].value
+    batches = inventory_batches(
+        [(daily_view(panel), panel, result)],
+        schedule(),
+        parameters(("a",)),
+        TimeWindow("2024-01-02", "2024-01-02"),
     )
+    first = next(trade for batch in batches for trade in batch.trades)
+    batches.close()
+    assert first.timestamp_ns == panel.timestamp.iloc[1].value
+    assert int(first.order_id) == predictions.timestamp.iloc[0].value
 
 
 def test_incomplete_book_does_not_remask_saved_signals_or_reset_filter(tmp_path):

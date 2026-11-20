@@ -4,6 +4,7 @@
 不代表当前研究只覆盖这些证券，也不会自动扩展到其他证券。
 路径须对应实际已准备的数据；修改路径或窗口直接修改传入的配置，不复制证券专用版本。
 文件名以实际 CLI 操作为前缀；参数片段和因子处理表除外。
+相对路径从运行命令的目录解释。从仓库根运行股票或 ETF 因子组装时，把 `input_policy.policy` 改为 `configs/factor-analysis-policy.csv`；服务器从包含 `code/main/` 的数据目录运行时可直接用示例路径。
 
 ## 当前研究
 
@@ -57,7 +58,6 @@ ETF 底仓单独运行同一账户的 `hold` 策略，使用新的输出路径�
 
 | 文件 | 用途 |
 | --- | --- |
-| `backtest-stock-weekly.json` | A 股周频费后夏普，使用 2022–2026 年季度滚动预测。 |
 | `backtest-hft.json`、`high-frequency/backtest-hft-passive.json`、`backtest-policy-ac.json` | 信号阈值、被动排队与 AC 执行进度，研究假设不同 |
 | `research-learning/train-policy-execution.json`、`backtest-policy-execution.json` | 固定母单执行，目标由调用者给定 |
 | `research-learning/train-policy-inventory.json`、`backtest-policy-etf-inventory.json` | 学习库存目标及透明库存策略的原生接口；不同于当前 PPO 执行时机任务 |

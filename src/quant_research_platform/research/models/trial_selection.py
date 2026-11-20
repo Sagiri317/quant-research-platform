@@ -991,11 +991,11 @@ def select(config):
 
 
 def _selection_decisions(value):
-    _selection_choice(value)
+    selected = _selection_choice(value)
     family_order = list(
         dict.fromkeys(item["family_id"] for item in value["candidates"])
     )
-    families, winners = [], []
+    families, winner_families = [], {}
     for family in family_order:
         members = [
             item["model_id"]
@@ -1029,43 +1029,20 @@ def _selection_decisions(value):
                 },
             }
         )
-        if winner is None:
-            continue
-        winners.append(
-            {
-                **next(row for row in subset["metrics"] if row["model_id"] == winner),
-                "model_id": family,
-            }
-        )
-    if not winners:
-        return {
-            "family_tie_break_order": family_order,
-            "families": families,
-            "selected_family_id": None,
-            "selected_model_id": None,
-        }
-    selected_family = select_best_validation_trial(
-        pd.DataFrame(winners),
-        trial_id_column="model_id",
-        selection_metric=value["selection_metric"],
-        maximize=value["selection_direction"] == "maximize",
-        validation_metric_columns=(value["selection_metric"],),
-        test_metric_columns=(),
-        tie_break_order=tuple(
-            family
-            for family in family_order
-            if any(row["model_id"] == family for row in winners)
-        ),
-    )
+        if winner is not None:
+            winner_families[winner] = family
+    ordered_winners = [
+        winner_families[name]
+        for name in value["tie_break_order"]
+        if name in winner_families
+    ]
     return {
-        "family_tie_break_order": family_order,
-        "families": families,
-        "selected_family_id": selected_family,
-        "selected_model_id": next(
-            item["selected_config_id"]
-            for item in families
-            if item["family_id"] == selected_family
+        "family_tie_break_order": list(
+            dict.fromkeys([*ordered_winners, *family_order])
         ),
+        "families": families,
+        "selected_family_id": winner_families.get(selected),
+        "selected_model_id": selected,
     }
 
 

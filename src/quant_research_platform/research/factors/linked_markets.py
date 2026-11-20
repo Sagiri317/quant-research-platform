@@ -95,6 +95,8 @@ for _name in (
     "us_relative_sector_shock_x_own_beta",
 ):
     UNITS[_name] = "decimal_return"
+for _width in (20, 60):
+    UNITS[f"linked_pair_beta_adjusted_spread_{_width}d"] = "log_return"
 
 
 def definitions():
@@ -386,7 +388,7 @@ def _futures_states(futures, contracts, index_prices, *, product):
     return states
 
 
-def foreign_price_states(prices):
+def foreign_price_states(prices, *, fields=(US[3], US[4], US[7])):
     """Derive visible foreign returns before any historical beta alignment."""
     versions = []
     sessions = pd.DatetimeIndex(prices.timestamp.unique()).sort_values()
@@ -395,22 +397,23 @@ def foreign_price_states(prices):
     ):
         current = snapshots["prices"]
         if released is None:
-            states = _foreign_price_states(current, sessions=sessions)
+            states = _foreign_price_states(current, sessions=sessions, fields=fields)
         else:
             changed = updated["prices"]
             assets = (
                 current.asset_id.unique()
-                if changed.asset_id.eq("SPY").any()
+                if US[7] in fields and changed.asset_id.eq("SPY").any()
                 else changed.asset_id.unique()
             )
             first = sessions.searchsorted(changed.timestamp.min())
             last = sessions.searchsorted(changed.timestamp.max())
-            axis = sessions[max(0, first - 5) : last + 6]
+            width = 5 if US[4] in fields else 1
+            axis = sessions[max(0, first - width) : last + width + 1]
             selected = current.loc[
                 current.asset_id.isin((*assets, "SPY"))
                 & current.timestamp.between(axis[0], axis[-1])
             ]
-            states = _foreign_price_states(selected, sessions=axis)
+            states = _foreign_price_states(selected, sessions=axis, fields=fields)
             states = states.loc[
                 states.asset_id.isin(assets)
                 & states.timestamp.ge(changed.timestamp.min())
@@ -418,17 +421,16 @@ def foreign_price_states(prices):
         versions.append((released, states))
     if len(versions) == 1:
         return versions[0][1]
-    return combine_derived_versions(
-        versions, columns=(US[3], US[4], "us_relative_sector_shock")
-    )
+    return combine_derived_versions(versions, columns=fields)
 
 
-def _foreign_price_states(raw, *, sessions):
+def _foreign_price_states(raw, *, sessions, fields):
     states = _quote_session_rows(raw, sessions)
     prices = states.groupby("asset_id", sort=False).adjusted_close
-    states[US[3]] = states.adjusted_close / prices.shift() - 1
-    states[US[4]] = states.adjusted_close / prices.shift(5) - 1
     for name, width in ((US[3], 1), (US[4], 5)):
+        if name not in fields and not (name == US[3] and US[7] in fields):
+            continue
+        states[name] = states.adjusted_close / prices.shift(width) - 1
         states[f"{name}_available_at"] = pd.concat(
             [
                 states.available_at,
@@ -436,6 +438,8 @@ def _foreign_price_states(raw, *, sessions):
             ],
             axis=1,
         ).max(axis=1, skipna=False)
+    if US[7] not in fields:
+        return states
     spy = states.loc[
         states.asset_id.eq("SPY"), ["timestamp", US[3], f"{US[3]}_available_at"]
     ].rename(columns={US[3]: "_market", f"{US[3]}_available_at": "_market_available"})
@@ -760,8 +764,19 @@ def calculate(decisions, sources, *, columns, parameters=None):
         result[list(fields)] = _align(
             states, work, fields, ids=np.repeat(benchmark, len(work))
         )[list(fields)].to_numpy()
-    if usable & set(US[3:]):
-        states = foreign_price_states(sources["public_etf_prices"])
+    shocks = (US[3], US[4], US[7])
+    direct = [name for name in shocks if name in usable]
+    training_fields = []
+    current_fields = list(direct)
+    if {"period_return", "market_return", "signal_session"} <= set(work):
+        for shock, interaction in ((US[3], US[6]), (US[7], US[8])):
+            if interaction in usable or (shock == US[3] and US[5] in usable):
+                training_fields.append(shock)
+            if interaction in usable and shock not in current_fields:
+                current_fields.append(shock)
+    fields = tuple(dict.fromkeys((*current_fields, *training_fields)))
+    if fields:
+        states = foreign_price_states(sources["public_etf_prices"], fields=fields)
         mapping = parameters.get("industry_etfs", {})
         ids = (
             (
@@ -773,53 +788,36 @@ def calculate(decisions, sources, *, columns, parameters=None):
             else pd.Series(np.nan, index=work.index)
         )
         ids = work.asset_id.map(parameters.get("asset_us_tickers", {})).fillna(ids)
-        values = _align(
-            states, work, (US[3], US[4], "us_relative_sector_shock"), ids=ids
-        )
-        for name in (US[3], US[4], "us_relative_sector_shock"):
-            if name in usable:
-                result[name] = values[name].to_numpy()
-        if {"period_return", "market_return", "signal_session"} <= set(work):
+        values = _align(states, work, current_fields, ids=ids)
+        for name in direct:
+            result[name] = values[name].to_numpy()
+        if training_fields:
             from quant_research_platform.compute.dataframe.history import liquidity_beta
 
             signal_open = work.assign(
                 timestamp=pd.to_datetime(work.signal_session)
                 + pd.Timedelta(hours=1, minutes=30)
             )
-            training = _align(
-                states, signal_open, (US[3], "us_relative_sector_shock"), ids=ids
-            )
+            training = _align(states, signal_open, training_fields, ids=ids)
             for positions in work.groupby(
                 _history_ids(work), sort=False
             ).indices.values():
                 if not ids.iloc[positions].notna().any():
                     continue
                 block = work.iloc[positions]
-                x = values.iloc[positions][US[3]].to_numpy(float)
-                relative = values.iloc[positions]["us_relative_sector_shock"].to_numpy(
-                    float
-                )
-                beta = pd.Series(
-                    liquidity_beta(
+                for shock in training_fields:
+                    beta = liquidity_beta(
                         block.period_return,
-                        training.iloc[positions][US[3]],
+                        training.iloc[positions][shock],
                         market_returns=block.market_return,
                     )
-                ).to_numpy()
-                relative_beta = pd.Series(
-                    liquidity_beta(
-                        block.period_return,
-                        training.iloc[positions]["us_relative_sector_shock"],
-                        market_returns=block.market_return,
-                    )
-                ).to_numpy()
-                for name, v in (
-                    ("us_sector_own_beta", beta),
-                    ("us_sector_shock_x_own_beta", x * beta),
-                    ("us_relative_sector_shock_x_own_beta", relative * relative_beta),
-                ):
-                    if name in usable:
-                        result.loc[positions, name] = v
+                    if shock == US[3] and US[5] in usable:
+                        result.loc[positions, US[5]] = beta
+                    interaction = US[6] if shock == US[3] else US[8]
+                    if interaction in usable:
+                        result.loc[positions, interaction] = (
+                            values.iloc[positions][shock].to_numpy(float) * beta
+                        )
     result.attrs["missing_source_dependencies"] = {
         k: v for k, v in missing.items() if v
     }

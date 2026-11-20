@@ -146,9 +146,6 @@ class _PredictionLookup:
 
         return values, found
 
-    def coverage_counts(self) -> tuple[int, int]:
-        return (0, 0)
-
 
 def _build_producer(
     tmp_path: Path,

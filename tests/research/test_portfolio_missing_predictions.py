@@ -40,9 +40,6 @@ class _Forecasts:
             ),
         )
 
-    def coverage_counts(self):
-        return 0, 0
-
 
 def _persist(root, batches):
     saved = write_portfolio_ledger_artifact(

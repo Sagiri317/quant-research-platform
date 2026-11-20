@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import os
 from pathlib import Path
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pandas as pd
 import pytest
@@ -129,47 +129,18 @@ def test_dataset_write_read_long_path_preserves_existing_publication(
     )
 
 
-def _install_parquet_stubs(monkeypatch, handle, parquet):
-    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
+def _install_parquet_stubs(monkeypatch, *, handle_error=None, parquet_error=None):
+    handle, parquet = Mock(), Mock()
+    handle.close.side_effect = handle_error
+    parquet.close.side_effect = parquet_error
     monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: handle)
-    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle, **_kwargs: parquet)
 
 
 def test_opened_parquet_close_surfaces_failure_on_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
-    class Handle:
-        def __enter__(self) -> Handle:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            pass
-
-        def fileno(self) -> int:
-            return 1
-
-        def tell(self) -> int:
-            return getattr(self, "position", 0)
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            if whence == 2:
-                self.position = 8 + offset
-            elif whence == 0:
-                self.position = offset
-            else:
-                self.position += offset
-            return self.position
-
-        def read(self, _size: int = -1) -> bytes:
-            return b"\x00\x00\x00\x00PAR1"
-
-    class Parquet:
-        def close(self) -> None:
-            raise RuntimeError("close_failed")
-
-    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
+    _install_parquet_stubs(monkeypatch, parquet_error=RuntimeError("close_failed"))
     with pytest.raises(RuntimeError, match="close_failed"):
         with physical._opened_parquet(Path("part.parquet")):
             raise GeneratorExit()
@@ -217,39 +188,7 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
 ) -> None:
     primary = primary_type("body_primary")
 
-    class Handle:
-        def __enter__(self) -> Handle:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            self.close()
-
-        def fileno(self) -> int:
-            return 1
-
-        def tell(self) -> int:
-            return getattr(self, "position", 0)
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            if whence == 2:
-                self.position = 8 + offset
-            elif whence == 0:
-                self.position = offset
-            else:
-                self.position += offset
-            return self.position
-
-        def read(self, _size: int = -1) -> bytes:
-            return b"\x00\x00\x00\x00PAR1"
-
-        def close(self) -> None:
-            raise OSError("raw_close_secondary")
-
-    class Parquet:
-        def close(self) -> None:
-            pass
-
-    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
+    _install_parquet_stubs(monkeypatch, handle_error=OSError("raw_close_secondary"))
     with pytest.raises(primary_type) as raised:
         with physical._opened_parquet(Path("part.parquet")):
             raise primary
@@ -260,39 +199,7 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
-    class Handle:
-        def __enter__(self) -> Handle:
-            return self
-
-        def __exit__(self, *_args: object) -> None:
-            self.close()
-
-        def fileno(self) -> int:
-            return 1
-
-        def tell(self) -> int:
-            return getattr(self, "position", 0)
-
-        def seek(self, offset: int, whence: int = 0) -> int:
-            if whence == 2:
-                self.position = 8 + offset
-            elif whence == 0:
-                self.position = offset
-            else:
-                self.position += offset
-            return self.position
-
-        def read(self, _size: int = -1) -> bytes:
-            return b"\x00\x00\x00\x00PAR1"
-
-        def close(self) -> None:
-            raise OSError("raw_close_failed")
-
-    class Parquet:
-        def close(self) -> None:
-            pass
-
-    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
+    _install_parquet_stubs(monkeypatch, handle_error=OSError("raw_close_failed"))
     with pytest.raises(OSError, match="raw_close_failed"):
         with physical._opened_parquet(Path("part.parquet")):
             pass

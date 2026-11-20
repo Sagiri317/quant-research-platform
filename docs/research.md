@@ -91,7 +91,7 @@ A 股正式周频组合共用[同一份滚动预测配置](../configs/backtest-s
 
 会话扩窗默认 `min_train_sessions=60`、`validation_sessions=20`、`prediction_sessions=20`，三项由调用者配置为正整数，末块可以不足预测块长度；标签成熟仍按每折真实时点决定，不能以名义会话数代替成熟样本数。正式研究的模型、参数候选、目标单位和窗口属于本次运行配置，示例值不代表通用最优参数。该流程按时间反复选择和重拟合，研究结果应如实说明这种使用方式。
 
-`research.models.periods.evaluate_model_periods(config)` 及薄 CLI `qrp evaluate-model-periods --config ...` 独立汇总每个滚动期的训练、验证和预测指标，配置结构见 [evaluate-model-periods.json](../configs/evaluate-model-periods.json)。调用者替换结构示例的路径、证券及完整会话轴，`sessions` 须覆盖原拟合窗、序列真实前文和预测窗，应取原 rolling 配置的完整时钟；只含样本外日期的评价时钟不够，也不加入拟合起点之前的因子预热。不能用有记录的日期推断休市。`periods` 显式映射每期覆盖完整日的预测窗及各模型的冻结 MDL，日表不能恢复半日区间；`prediction_daily` 指向同一模型原生 `evaluate-time-series` 的 `daily`。已有全期评价可直接复用；尚无误差日表时，先用现有 `evaluate-time-series` 评价保存的 PRED，不重新生成未来预测。日表的证券域、会话、目标及轴须对应本次请求和冻结模型；操作不依赖数据集名称。
+`research.models.periods.evaluate_model_periods(config)` 及薄 CLI `qrp evaluate-model-periods --config ...` 独立汇总每个滚动期的训练、验证和预测指标，配置结构见 [evaluate-model-periods.json](../configs/evaluate-model-periods.json)。调用者替换结构示例的路径、证券及完整会话轴，`sessions` 须覆盖原拟合窗、序列真实前文和预测窗，应取原 rolling 配置的完整时钟；只含样本外日期的评价时钟不够，也不加入拟合起点之前的因子预热。不能用有记录的日期推断休市。`periods` 显式映射每期覆盖完整日的预测窗及各模型的冻结 MDL，日表不能恢复半日区间；`prediction_daily` 指向同一模型原生 `evaluate-time-series` 的 `daily`。已有全期评价可直接复用；尚无误差日表时，先用现有 `evaluate-time-series` 评价保存的 PRED，不重新生成未来预测。日表保存各预测窗口、实际预测终点和对应模型的拟合事实。移动日表或归档原预测目录后，分期统计仍可用日表核对模型、证券、会话、目标及评价轴。
 
 训练阶段只加载最终冻结模型，按原 `fit_windows`、`fit_cutoff`、筛选、输入观察和标签成熟规则前向，使用冻结插补及缩放；按自然月分块读取特征，块内按日聚合，并保持跨块的因果序列状态。它输出原拟合样本的日等权 MSE、RMSE、MAE、IC、RankIC 及相对同域零预测的 R²，不重新拟合，也不保存逐行训练 PRED。这是最终重拟合模型的回代误差，不是样本外表现或原优化器加权损失。
 
@@ -99,7 +99,7 @@ A 股正式周频组合共用[同一份滚动预测配置](../configs/backtest-s
 
 输出沿原生STAT保留三张表：`model_period_metrics.parquet`记录最终模型三阶段及全部候选验证汇总，含candidate_id、参数、是否选中、selection_metric与selection_score；`model_daily_metrics.parquet`保留同一计算的逐日值、缺失原因和样本计数；`model_epoch_curves.parquet`保存所有实际已有的候选NN训练／验证曲线、XGBoost逐树验证曲线和最终NN重训曲线。NN使用epoch，XGBoost使用boosting_round，二者不混作同一单位；曲线stage区分candidate_fit与final_fit。完整原拟合窗、目标定义和历史选型事实仍保存在模型元数据中，统计只消费实际已存CV，不重新构造历史验证模型。
 
-`valid_session_count`及`session_count`同时保留，未成熟会话不补零。在线优化损失与冻结模型训练误差分别报告，旧的行均验证损失不会被改写为新的时间戳等权损失。标准化`model_target`的误差不能解释为基点。`top_quantile`可选参数沿用因子的相关系数与分位边界owner，增加两端IC/RankIC及标签均值；股票取0.2，ETF未声明时不增加尾部指标。收益差保留标签单位，原始收益另由季度EVAL的`forward_return_5d`提供，不把重叠标签复利成账户净值。图表直接消费这些表，不改训练、选参或早停流程。
+`valid_session_count`及`session_count`同时保留，未成熟会话不补零。在线优化损失与冻结模型训练误差分别报告，旧的行均验证损失不会被改写为新的时间戳等权损失。标准化`model_target`的误差不能解释为基点。训练阶段的 `top_quantile` 指定按预测值取两端各多少比例的样本，计算各自的 IC、RankIC 和标签均值；验证和预测沿用各自日表的比例。每期每个模型的 `top_quantile_by_stage` 分别记录这三个比例。比较尾部指标先核对比例；如果旧验证日表有尾部值却没记录比例，保留原值，比例记为 null。收益差保留标签单位，原始收益另由季度EVAL的`forward_return_5d`提供，不把重叠标签复利成账户净值。图表直接消费这些表，不改训练、选参或早停流程。
 
 截面日表的资产域须与请求相同；单资产时间轴的日表可包含更多证券，操作仅投影请求证券，训练阶段仍保留原 MDL 的完整拟合证券域。同一冻结模型的分段或开放终点 PRED 可复用原生日表。若原评价没有保存零预测基准，R² 行保留为 `UNDEFINED/not_saved`，其余指标继续产出。
 

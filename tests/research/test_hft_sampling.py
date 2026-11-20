@@ -282,11 +282,9 @@ def test_common_clock_recomputes_labels_and_cli_roundtrip(tmp_path):
     younger = read_dataset(
         sample_hft(config(tmp_path, inputs, name="younger", max_quote_age_seconds=1.5))
     )
-    rejected = younger.loc[
-        younger.timestamp.eq(START + pd.Timedelta(seconds=3)) & younger.asset_id.eq("A")
-    ].iloc[0]
-    assert rejected.eligible and pd.isna(rejected.f) and pd.isna(rejected.mid)
-    assert rejected.quote_age_seconds == 2
+    assert younger.loc[
+        younger.timestamp.eq(START + pd.Timedelta(seconds=3)), "asset_id"
+    ].tolist() == ["B"]
 
 
 def test_invalid_quotes_gaps_lunch_and_next_day_do_not_fill(tmp_path):
@@ -310,8 +308,8 @@ def test_invalid_quotes_gaps_lunch_and_next_day_do_not_fill(tmp_path):
     settings = config(tmp_path, inputs, end=12606)
     sampled = read_dataset(sample_hft(settings)).set_index("timestamp")
     assert pd.isna(sampled.loc[START + pd.Timedelta(seconds=3), "f"])
-    for second in (12, 27):
-        assert START + pd.Timedelta(seconds=second) not in sampled.index
+    assert pd.isna(sampled.loc[START + pd.Timedelta(seconds=12), "mid"])
+    assert START + pd.Timedelta(seconds=27) not in sampled.index
     assert sampled.loc[START + pd.Timedelta(seconds=30), "f"] == 60
     assert pd.isna(sampled.loc[START, "future_mid_return_3s"])
     assert pd.isna(
@@ -449,10 +447,10 @@ def test_sampled_missing_context_real_fit_and_chunked_prediction(tmp_path, algor
             }
         )
     )
-    assert len(saved) == int(future.eligible.sum())
-    np.testing.assert_allclose(
-        saved.prediction_score, expected[future.eligible], atol=1e-6
-    )
+    scorable = future.eligible & future.f.notna()
+    assert saved.timestamp.tolist() == future.loc[scorable, "timestamp"].tolist()
+    assert np.isnan(expected[~scorable]).all()
+    np.testing.assert_allclose(saved.prediction_score, expected[scorable], atol=1e-6)
     from quant_research_platform.artifacts.outputs.evaluation import (
         read_evaluation_outputs,
     )
@@ -622,7 +620,7 @@ def test_quote_age_and_label_lateness_have_independent_candidate_defaults(tmp_pa
     pd.testing.assert_series_equal(extended.mid, frame.mid)
 
 
-def test_visibility_delay_never_revives_previous_segment_or_invalid_quote(tmp_path):
+def test_visibility_delay_uses_previous_quote_until_new_quote_arrives(tmp_path):
     frame = pd.concat(
         [quotes([0, 3], segment="old"), quotes([6, 9, 12], segment="new")]
     )
@@ -639,13 +637,55 @@ def test_visibility_delay_never_revives_previous_segment_or_invalid_quote(tmp_pa
             )
         )
     ).set_index("timestamp")
-    assert START + pd.Timedelta(seconds=6) not in result.index
+    assert result.loc[START + pd.Timedelta(seconds=6), "quote_timestamp"] == (
+        START + pd.Timedelta(seconds=3)
+    )
     assert pd.isna(result.loc[START + pd.Timedelta(seconds=3), "future_mid_return_3s"])
     assert result.loc[
         START + pd.Timedelta(seconds=9), "quote_timestamp"
     ] == START + pd.Timedelta(seconds=6)
     assert pd.isna(result.loc[START + pd.Timedelta(seconds=12), "mid"])
     assert result.loc[START + pd.Timedelta(seconds=12), "f"] == 18
+
+
+@pytest.mark.parametrize("later_segment", ["am", "after_gap"])
+def test_future_quotes_do_not_change_past_decisions(tmp_path, later_segment):
+    past = quotes([0, 3])
+    future = pd.concat([past, quotes([15], segment=later_segment)])
+    columns = [
+        "timestamp",
+        "asset_id",
+        "quote_timestamp",
+        "quote_age_seconds",
+        "f",
+        "mid",
+    ]
+    outputs = []
+    for name, frame in [("past", past), ("future", future)]:
+        source = save_quotes(tmp_path, frame, name=name)
+        output = sample_hft(
+            config(tmp_path, source, name=f"{name}_sampled", max_quote_age_seconds=6)
+        )
+        outputs.append(read_dataset(output, columns=columns))
+    assert outputs[0].timestamp.tolist() == list(
+        START + pd.to_timedelta([0, 3, 6, 9, 12], unit="s")
+    )
+    assert outputs[0].quote_age_seconds.tolist() == [0, 0, 3, 6, 9]
+    assert outputs[0].iloc[-1][["mid", "f"]].isna().all()
+    pd.testing.assert_frame_equal(*outputs)
+
+
+def test_expired_decision_breaks_sequence_within_same_quote_segment(tmp_path):
+    from quant_research_platform.research.models.neural import _sequence_starts
+
+    source = save_quotes(tmp_path, quotes([0, 6, 9], instrument="equity_etf"))
+    sampled = read_dataset(sample_hft(config(tmp_path, source, end=9)))
+    assert sampled.segment_id.nunique() == 1
+    assert sampled.f.isna().tolist() == [False, True, False, False]
+    starts = _sequence_starts(
+        sampled, sampled.f.notna().to_numpy(), ["segment_id"], False
+    )
+    assert starts[-2:].tolist() == [2, 2]
 
 
 @pytest.mark.parametrize("axis", ["cross_sectional", "single_asset_time_series"])
@@ -776,10 +816,11 @@ def test_sparse_clock_is_bounded_and_does_not_read_exclusive_next_day(
     settings["time_window"] = {"start": "2025-01-02", "end": "2025-01-02"}
     result = read_dataset(module.sample_hft(settings))
     assert result.timestamp.tolist() == list(
-        START + pd.to_timedelta([3, 6, 63, 66], unit="s")
+        START + pd.to_timedelta([3, 6, 9, 63, 66, 69], unit="s")
     )
-    assert result.asset_id.tolist() == ["A", "A", "B", "B"]
-    assert result.quote_age_seconds.tolist() == [2, 5, 2, 5]
+    assert result.asset_id.tolist() == ["A"] * 3 + ["B"] * 3
+    assert result.quote_age_seconds.tolist() == [2, 5, 8] * 2
+    assert result.mid.isna().tolist() == [False, False, True] * 2
     assert all(
         pd.Timestamp(window.end) < pd.Timestamp("2025-01-03") for window in observed
     )

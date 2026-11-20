@@ -4,9 +4,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.research.portfolios.high_frequency import _decisions
-from tests.helpers.high_frequency import parameters, quotes, trade_input
-from tests.research.test_etf_inventory_policy import run_stream
+from quant_research_platform.contracts.policies import PolicyDecision
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.portfolios.high_frequency import inventory_batches
+from tests.helpers.high_frequency import (
+    daily_view,
+    parameters,
+    quotes,
+    schedule,
+    trade_input,
+)
+from tests.research.test_etf_inventory_policy import etf_schedule, run_stream
 from tests.research.test_passive_execution import replay
 
 
@@ -97,68 +105,68 @@ def test_off_quote_policy_observes_released_cash_before_its_next_decision(tmp_pa
     assert [(t.asset_id, t.quantity) for b in batches for t in b.trades] == [("b", 200)]
 
 
-@pytest.mark.parametrize("latency_ns", [0, 1_000_000_000, 4_000_000_000])
-def test_decision_mapping_matches_direct_clock_and_segment_rules(latency_ns):
-    start = pd.Timestamp("2024-01-02T01:30:00")
-    panel = pd.DataFrame(
-        {
-            "timestamp": start + pd.to_timedelta([0, 3, 6, 9, 0, 4, 8], unit="s"),
-            "asset_id": ["a"] * 4 + ["b"] * 3,
-            "segment_id": [0, 0, 1, 1, 0, 0, 0],
-        }
+@pytest.mark.parametrize("task", ["inventory", "portfolio", "execution"])
+@pytest.mark.parametrize(
+    "future_second,segment,filled", [(6, 0, 100), (7, 1, 0), (None, None, 0)]
+)
+def test_pending_orders_are_visible_before_the_next_quote_is_known(
+    task, future_second, segment, filled
+):
+    clocks = ["01:30:00", "01:30:01", "01:30:02"]
+    if future_second is not None:
+        clocks.append(f"01:30:{future_second:02d}")
+    inventory = task == "inventory"
+    panel = quotes("2024-01-02", assets=("a",), clocks=clocks).assign(
+        instrument_type="gold_etf" if inventory else "stock"
     )
-    signals = pd.DataFrame(
-        [
-            (start + pd.Timedelta(seconds=second), asset, score)
-            for asset in ("a", "b", "absent")
-            for second, score in [
-                (9, 1.0),
-                (0, 2.0),
-                (-1, 3.0),
-                (2.5, 4.0),
-                (4, 5.0),
-                (6, np.nan),
-                (10, 6.0),
-            ]
-        ],
-        columns=["timestamp", "asset_id", "prediction_score"],
+    if future_second is not None:
+        panel.loc[panel.index[-1], "segment_id"] = segment
+    signals = panel.iloc[[1, 2]][["timestamp", "asset_id"]].assign(
+        prediction_score=[1.0, np.nan]
     )
-    expected = {}
-    for asset, book in panel.groupby("asset_id"):
-        rows = list(book.itertuples(index=False))
-        for signal in (
-            signals.loc[signals.asset_id.eq(asset)]
-            .sort_values("timestamp")
-            .itertuples(index=False)
-        ):
-            if pd.isna(signal.prediction_score):
-                continue
-            previous = [row for row in rows if row.timestamp <= signal.timestamp]
-            if not previous or signal.timestamp > rows[-1].timestamp:
-                continue
-            later = [
-                row
-                for row in rows
-                if row.timestamp > signal.timestamp
-                and row.timestamp.value >= signal.timestamp.value + latency_ns
-            ]
-            destination = (
-                later[0].timestamp.value
-                if later and later[0].segment_id == previous[-1].segment_id
-                else None
-            )
-            expected[signal.timestamp.value, asset] = (
-                destination,
-                signal.prediction_score,
-            )
-    assert _decisions(panel, signals, latency_ns) == expected
+    params = {**parameters(("a",)), "latency_ms": 4000.0}
+    fixed = task == "execution"
+    stream = inventory_batches(
+        [(daily_view(panel), panel, pd.DataFrame() if fixed else signals)],
+        etf_schedule() if inventory else schedule(),
+        params,
+        TimeWindow("2024-01-02T01:30:00", "2024-01-02T01:30:10"),
+        decision_columns=("mid",) if fixed else ("prediction_score",),
+        prediction_decisions=not fixed,
+        prediction_task=task,
+        quote_visibility_delay_ms=1,
+        execution_order={"asset_id": "a", "quantity": 100} if fixed else None,
+    )
+    observed, trades = [], []
+    try:
+        event = next(stream)
+        while True:
+            if isinstance(event, PolicyDecision):
+                second = event.timestamp.second
+                if second == 2:
+                    observed.append(event.quantities["a"])
+                    if not fixed:
+                        assert event.pending_quantities["a"] == 100
+                target = 200.0 if second in (1, 2) else event.quantities["a"]
+                event = stream.send(pd.Series({"a": target}))
+            else:
+                trades.extend(event.trades)
+                event = next(stream)
+    except StopIteration:
+        pass
+    finally:
+        stream.close()
+    assert observed == [100]
+    assert sum(trade.quantity for trade in trades) == filled
+    assert all(
+        pd.Timestamp(trade.timestamp_ns).second == future_second for trade in trades
+    )
 
 
 def test_selected_prediction_chunks_preserve_unsorted_days_and_relationships(tmp_path):
     from quant_research_platform.artifacts.outputs.prediction import (
         write_prediction_outputs,
     )
-    from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.portfolios.high_frequency import (
         inventory_inputs,
     )
@@ -233,7 +241,6 @@ def test_prediction_asset_filter_preserves_native_strings_and_empty_results(
         _iter_prediction_member,
         write_prediction_outputs,
     )
-    from quant_research_platform.contracts.time import TimeWindow
     from tests.helpers.output_frames import make_price_volume_prediction_output_frame
 
     frame = pd.concat(

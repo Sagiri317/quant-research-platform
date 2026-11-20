@@ -44,8 +44,8 @@ from tests.helpers.statistics_artifacts import (
 
 
 class _PredictionLookup:
-    def coverage_counts(self):
-        return (0, 0)
+    def unmatched_count(self):
+        return 0
 
     def values_for_frame(self, frame: pd.DataFrame, *, mark_matched: bool):
         assert mark_matched
@@ -110,11 +110,8 @@ def test_family_comparison_production_matches_oracles_on_persisted_common_date_l
                 np.ones(len(coordinates), dtype=bool),
             )
 
-        def coverage_counts(self):
-            return (
-                len(set(lookup_values) - self.matched),
-                len(self.matched - set(lookup_values)),
-            )
+        def unmatched_count(self):
+            return len(set(lookup_values) - self.matched)
 
     spec = make_demo_research_dataset_spec(
         data_id="pv_all",
@@ -1028,8 +1025,8 @@ def test_model_family_names_preserve_factor_statistics_and_native_names(
                 signs = np.where(keys.family_id.eq(self.family), -1.0, 1.0)
                 return (values.to_numpy() * signs, np.ones(len(keys), dtype=bool))
 
-            def coverage_counts(self):
-                return (len(dates) * len(assets) * 2 - len(self.matched), 0)
+            def unmatched_count(self):
+                return len(dates) * len(assets) * 2 - len(self.matched)
 
         metadata = {
             **model_stats._model_target_metadata(
@@ -1358,7 +1355,6 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         lookup = NativeLookup(
             index=index,
             primary_key=("timestamp", "asset_id", "family_id"),
-            prediction_column="prediction_score",
         )
         try:
             projected = predicted.assign(family_id=family)
@@ -1389,7 +1385,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 time_window=window,
                 prediction_lookup=lookup,
             )
-            assert lookup.coverage_counts() == (0, 0)
+            assert lookup.unmatched_count() == 0
         finally:
             lookup.close()
         write_statistics_artifact(

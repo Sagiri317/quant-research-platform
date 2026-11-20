@@ -114,3 +114,33 @@ def test_parquet_metrics_require_a_regular_file_not_a_dataset_directory(tmp_path
     pd.DataFrame({"value": [1.0, None, 3.0]}).to_parquet(regular)
     definitions["score"]["member"] = regular.name
     assert execution._metrics(output, definitions) == {"score": 2.0}
+
+
+def test_metric_filters_select_native_dataset_rows_and_require_row_data(tmp_path):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.storage.datasets import write_dataset
+
+    write_dataset(
+        tmp_path / "table",
+        pd.DataFrame({"asset_id": ["a", "b", "c"], "value": [1.0, 10.0, 3.0]}),
+        spec=DataSpec(
+            data_id="metrics",
+            frequency="1d",
+            grain="research_row",
+            primary_key=("asset_id",),
+            column_roles={"asset_id": "key", "value": "context"},
+            partition_columns=(),
+        ),
+    )
+    selected = {
+        "column": "value",
+        "reduction": "mean",
+        "filters": [["asset_id", "in", ["a", "c"]]],
+    }
+    assert execution._metrics(tmp_path, {"score": {"member": "table", **selected}}) == {
+        "score": 2.0
+    }
+    (tmp_path / "summary.json").write_text('{"value": 10}')
+    for member in ("summary.json", ""):
+        with pytest.raises(ValueError, match="agent_metric_filters_require_rows"):
+            execution._metrics(tmp_path, {"score": {"member": member, **selected}})

@@ -341,6 +341,7 @@ def test_native_pair_publication_preserves_listing_history(tmp_path):
     from quant_research_platform.contracts.data import DataSpec
     from quant_research_platform.markets.prepare import prepare
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
 
     days = pd.bdate_range("2024-01-02", periods=25)
     inputs = {}
@@ -394,22 +395,26 @@ def test_native_pair_publication_preserves_listing_history(tmp_path):
         )
         inputs[name] = str(path)
     name = "linked_pair_relative_return_20d"
-    result = read_dataset(
-        prepare(
-            dict(
-                market_id="a_share",
-                data_id="linked_market_factors",
-                inputs=inputs,
-                factor_columns=[name],
-                parameters={"pair_assets": {"a": "b"}},
-                time_window=dict(
-                    start=str(decision.timestamp.min().date()),
-                    end=str(decision.timestamp.max().date()),
-                ),
-                output_root=str(tmp_path / "factors"),
-            )
+    log_spread = "linked_pair_beta_adjusted_spread_60d"
+    output = prepare(
+        dict(
+            market_id="a_share",
+            data_id="linked_market_factors",
+            inputs=inputs,
+            factor_columns=[name, log_spread],
+            parameters={"pair_assets": {"a": "b"}},
+            time_window=dict(
+                start=str(decision.timestamp.min().date()),
+                end=str(decision.timestamp.max().date()),
+            ),
+            output_root=str(tmp_path / "factors"),
         )
     )
+    result = read_dataset(output)
+    assert open_dataset_session(output).spec["column_units"] == {
+        name: "decimal_return",
+        log_spread: "log_return",
+    }
     assert result[name].iloc[20:24].to_numpy(float) == pytest.approx([0.0] * 4)
     assert pd.isna(result[name].iloc[-1])
 
@@ -626,6 +631,16 @@ def test_native_foreign_revision_windows_preserve_each_visible_endpoint(
         )
     )
     actual = read_dataset(output).set_index(["asset_id", "timestamp"])
+    # Keeping only a one-day response shortens the revision halo; dropping the
+    # relative shock removes the SPY leg, never another asset's own observations.
+    field = fields[0 if revised_asset == "XLK" else 2]
+    selected = calculate(
+        decisions,
+        {"public_etf_prices": raw},
+        columns=[field],
+        parameters={"asset_us_tickers": {a: a for a in assets}},
+    ).set_index(["asset_id", "timestamp"])
+    np.testing.assert_allclose(selected.loc[actual.index, field], actual[field])
     for cutoff in cutoffs:
         # Independently replay published endpoint facts, then apply the formulas.
         visible = (

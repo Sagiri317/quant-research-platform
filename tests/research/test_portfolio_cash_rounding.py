@@ -72,9 +72,6 @@ def test_many_fills_conserve_cash_and_publish_native_returns(
         def values_for_frame(self, frame, *, mark_matched):
             return np.ones(len(frame)), bytearray([1] * len(frame))
 
-        def coverage_counts(self):
-            return 0, 0
-
     chunks, _ = _build_producer(
         tmp_path / "inputs",
         monkeypatch,

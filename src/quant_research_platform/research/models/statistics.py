@@ -1108,7 +1108,6 @@ def model_statistics(config):
     lookup = _PredictionLookup(
         index=index,
         primary_key=("timestamp", "asset_id", "family_id"),
-        prediction_column="prediction_score",
     )
     try:
         for item in config["periods"]:
@@ -1240,7 +1239,7 @@ def model_statistics(config):
             time_window=window,
             prediction_lookup=lookup,
         )
-        prediction_coverage = {"unmatched_prediction_rows": lookup.coverage_counts()[0]}
+        prediction_coverage = {"unmatched_prediction_rows": lookup.unmatched_count()}
     finally:
         lookup.close()
     return write_statistics_artifact(

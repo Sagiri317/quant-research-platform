@@ -153,7 +153,9 @@ def test_all_unlocatable_events_publish_typed_empty(tmp_path, changes):
 @pytest.mark.parametrize("chunksize", (1, 100))
 def test_conflicting_event_amount_keeps_key_and_independent_facts(tmp_path, chunksize):
     output = prepare(
-        tmp_path, [row(), row(Amount="0.5"), row(Stkcd="2", Amount="0.75")], chunksize
+        tmp_path,
+        [row(), row(Amount="0.5"), row(Stkcd="2", Amount="0.75"), row()],
+        chunksize,
     )
     frame = read_dataset(output).set_index("source_asset_id")
     assert len(frame) == 2
@@ -164,11 +166,11 @@ def test_conflicting_event_amount_keeps_key_and_independent_facts(tmp_path, chun
     assert not frame.loc["000001", "settlement_date_unresolved"]
     assert frame.loc["000002", "amount"] == 0.75
     assert "version_identity" not in frame
-    counts = open_dataset_session(output).manifest["producer_diagnostics"][
-        "source_row_counts"
-    ]
+    diagnostics = open_dataset_session(output).manifest["producer_diagnostics"]
+    assert diagnostics["exact_duplicate_count"] == 1
+    counts = diagnostics["source_row_counts"]
     assert counts["conflicting_amount_rows"] == 2
-    assert counts["raw_rows"] == 3
+    assert counts["raw_rows"] == 4
 
 
 @pytest.mark.parametrize("payments", [("bad", ""), ("2024-06-05", "2024-06-06")])

@@ -148,7 +148,8 @@ Missing inputs restrict only computations which need them. Continue valid work.
 BUILTINS = {
     "lookup": (
         "Read public context: {scope: "
-        "documents|memory|catalog|evidence|operations, query: string, key?: alias "
+        "documents|memory|catalog|evidence|operations, query: string, "
+        "profile?: research profile for catalog, key?: alias "
         "or evidence ID, offset?: nonnegative integer, page_size?: positive integer}. "
         "Offset and page size count characters with key (default/max 30000), matching "
         "records without key (default/max 6). Request shorter pages if context omits "

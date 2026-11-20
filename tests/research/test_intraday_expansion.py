@@ -135,6 +135,43 @@ def test_opening_gap_repair_uses_only_its_two_price_denominator_endpoints(minute
     )
 
 
+@pytest.mark.parametrize(
+    ("elapsed", "segments", "expected"),
+    [
+        ([0, 299, 302], [0, 0, 0], 10 / 11),
+        ([0, 240, 300], [0, 0, 1], 10 / 11),
+        ([0, 297, 12600], [0, 0, 1], np.nan),
+    ],
+)
+def test_opening_gap_repair_needs_an_observed_window_endpoint(
+    elapsed, segments, expected
+):
+    opening = pd.Timestamp("2024-01-02 01:30")
+    prefix = np.arange(0, elapsed[1], 3)
+    seconds = np.r_[prefix, elapsed[1:]]
+    quotes = pd.DataFrame(
+        dict(
+            market_id="a_share",
+            asset_id="a",
+            timestamp=opening + pd.to_timedelta(seconds, unit="s"),
+            mid=np.r_[np.repeat(110.0, len(prefix)), 108.0, 100.0],
+            segment_id=np.r_[np.repeat(segments[0], len(prefix)), segments[1:]],
+        )
+    )
+    daily = pd.DataFrame(
+        dict(
+            asset_id=["a"],
+            signal_session=pd.Timestamp("2023-12-29"),
+            timestamp=pd.Timestamp("2024-01-02 01:00"),
+            close=100.0,
+        )
+    )
+    name = "opening_gap_repair_fraction_5m"
+    result = calculate(quotes, columns=(name,), daily_context=daily)
+    assert result[name].iloc[:-1].isna().all()
+    np.testing.assert_allclose(result[name].iloc[-1], expected)
+
+
 def test_flow_warmup_uses_each_segments_elapsed_time_and_recovers_after_missing():
     frame = panel().iloc[:44].copy()
     frame["segment_id"] = np.repeat([0, 1, 2], [4, 11, 29])
