@@ -37,11 +37,14 @@ def leave_one_out_mean(values, group_ids):
     sides = []
     for step in (1, -1):
         ordered, keys = values.iloc[::step], group_ids.iloc[::step]
-        groups = ordered.groupby(keys, sort=False)
-        prior = groups.shift()
-        count = prior.notna().groupby(keys, sort=False).cumsum()
-        anchor = groups.transform("first")
-        centered = (prior - anchor).fillna(0).groupby(keys, sort=False).cumsum()
+        block = ordered.to_frame("value")
+        groups = block.groupby(keys, sort=False)
+        prior = groups.value.shift()
+        anchor = groups.value.transform("first")
+        block["known"] = prior.notna()
+        block["offset"] = (prior - anchor).fillna(0)
+        count = groups.known.cumsum()
+        centered = groups.offset.cumsum()
         sides.append(
             (
                 (anchor + centered / count.where(count > 0)).iloc[::step],

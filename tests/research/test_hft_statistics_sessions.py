@@ -98,6 +98,40 @@ def test_factor_rankic_averages_sessions_before_hac_and_keeps_fdr_family(
     assert artifact.metadata["hac_lag_unit"] == "trading_session"
 
 
+@pytest.mark.parametrize("missing_session", [False, True])
+def test_fmb_hac_uses_session_means_and_preserves_missing_sessions(
+    tmp_path, missing_session
+):
+    frame, _, config = _case(tmp_path, missing_session=missing_session)
+    frame["total_market_cap"] = 1.0
+    config.update(
+        dataset=str(
+            write_evaluation_input(
+                tmp_path / "fmb", frame, factors=("x",), labels=("label",)
+            )
+        ),
+        analyses=["fama_macbeth"],
+        statistics={"hac_lag": 1, "fama_macbeth_core_factors": []},
+    )
+    config["evaluation"]["factors"] = ["x"]
+    artifact = read_statistics_artifact(factor_statistics(config))
+    with artifact.table("fama_macbeth_periods.parquet") as periods:
+        rows = periods.loc[periods.coefficient_id.eq("x")]
+        for _, block in rows.groupby("regression_id"):
+            np.testing.assert_allclose(block.value, [1, 1, -1, -1])
+    with artifact.table("fama_macbeth.parquet") as table:
+        slopes = table.loc[table.coefficient_id.eq("x")]
+        assert slopes.input_date_count.eq(3 if missing_session else 2).all()
+        assert slopes.period_count.eq(2).all()
+        # Session slopes (1/3, -1); a timestamp-pooled estimate would be zero.
+        np.testing.assert_allclose(slopes["mean"], -1 / 3)
+        if missing_session:
+            assert slopes.reason.eq("incomplete_session_clock").all()
+            assert slopes.p_value.isna().all()
+        else:
+            np.testing.assert_allclose(slopes.standard_error, 1 / 3)
+
+
 def test_intraday_statistics_requires_a_declared_session_axis(tmp_path):
     _, _, config = _case(tmp_path)
     del config["sessions"]

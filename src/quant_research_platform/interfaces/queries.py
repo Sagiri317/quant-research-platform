@@ -35,8 +35,10 @@ def inspect(path: Path) -> dict[str, object]:
         "manifest.json",
         "_manifest/manifest.json",
         "model.json",
+        "policy.json",
         "spec.json",
         "metadata.json",
+        "summary.json",
     ):
         candidate = root / name
         if candidate.is_file():

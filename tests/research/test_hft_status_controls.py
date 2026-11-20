@@ -183,6 +183,11 @@ def test_maker_cancel_keeps_pre_ack_fills_and_real_locked_inventory(tmp_path):
         passive={"queue_model": "conservative", "cancel_latency_ms": 1000},
     )
     signals = panel.iloc[[0]][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    # A later buy signal must not replace the independently required ST exit.
+    signals = pd.concat(
+        (signals, signals.assign(timestamp=START + pd.Timedelta(seconds=1.75))),
+        ignore_index=True,
+    )
     events = trade_input(
         tmp_path / "trades",
         [

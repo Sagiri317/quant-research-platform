@@ -82,11 +82,10 @@ def test_direct_consumers_require_actual_declared_inputs(tmp_path, operation, ca
     ),
 )
 @pytest.mark.parametrize("duplicate", (False, True))
-def test_evaluation_key_validation_has_one_owner_per_invariant(
+def test_evaluation_rejects_duplicate_observations_across_source_batches(
     tmp_path, monkeypatch, primary_key, duplicate
 ):
     from quant_research_platform.research.evaluations import runner
-    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
     dates = pd.date_range("2024-01-01", periods=4, freq="s")
     frame = pd.DataFrame(
@@ -121,17 +120,6 @@ def test_evaluation_key_validation_has_one_owner_per_invariant(
         primary_key=primary_key,
         partition_columns=(),
     )
-    indexes = []
-    original_add = ExactPrimaryKeyIndex.add_table
-
-    def observed_add(self, table, **kwargs):
-        if {"timestamp", "asset_id"} <= set(table.column_names) and not any(
-            index is self for index in indexes
-        ):
-            indexes.append(self)
-        return original_add(self, table, **kwargs)
-
-    monkeypatch.setattr(ExactPrimaryKeyIndex, "add_table", observed_add)
     original_chunks = runner.iter_dataset_time_chunks
     monkeypatch.setattr(
         runner,
@@ -164,5 +152,3 @@ def test_evaluation_key_validation_has_one_owner_per_invariant(
             runner.evaluate(config)
     else:
         assert runner.evaluate(config).is_dir()
-    # Projection omits venue: the wider-key case has only the narrower owner.
-    assert len(indexes) == 1

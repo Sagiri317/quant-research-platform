@@ -331,6 +331,17 @@ def test_opening_path_freezes_at_observation_boundary_and_is_scale_invariant():
     assert compute_factors(incomplete, columns=names)[list(names)].isna().all().all()
 
 
+def test_opening_return_and_path_efficiency_have_different_price_dependencies():
+    frame = panel().iloc[:101].copy()
+    frame.loc[50, "mid"] = np.nan
+    names = ("opening_observed_return_5m", "opening_path_efficiency_5m")
+    result = compute_factors(frame, columns=names).iloc[-1]
+    assert result[names[0]] == pytest.approx(np.expm1(0.01))
+    assert pd.isna(result[names[1]])
+    frame.loc[100, "mid"] = np.nan
+    assert compute_factors(frame, columns=names).iloc[-1][list(names)].isna().all()
+
+
 def test_semivariance_and_bipower_use_observed_log_returns():
     frame = panel().iloc[:4].copy()
     frame["mid"] = np.exp([0, 0.01, -0.01, 0.02])

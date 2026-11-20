@@ -746,19 +746,23 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(
     assert frame.total_assets.tolist() == [100.0, 110.0]
 
 
-@pytest.mark.parametrize("mode", ["initial", "revision", "predecessor", "chronology"])
+@pytest.mark.parametrize(
+    "mode", ["initial", "revision", "predecessor", "chronology", "before_period"]
+)
 def test_known_missing_coordinates_are_unknown_at_their_real_public_dates(
     tmp_path, mode
 ):
     layout = StorageLayout(tmp_path)
+    first = "2019-12-30" if mode == "before_period" else "2020-01-30"
     with choice_session(response()) as session:
         _disclosure(
             session,
             layout,
+            first=first,
             events="2020-01-29" if mode == "chronology" else "2020-02-01",
         )
         if mode != "initial":
-            _snapshot(session, layout, "2020-01-30", [100.0] * 14)
+            _snapshot(session, layout, first, [100.0] * 14)
         if mode == "predecessor":
             for branch in ("1", "3"):
                 _snapshot(session, layout, "2020-02-01", [110.0] * 14, branch=branch)
@@ -768,7 +772,7 @@ def test_known_missing_coordinates_are_unknown_at_their_real_public_dates(
         data_ids=("financial_balance",),
     )
     frame = _read(result)["financial_balance"]
-    if mode == "chronology":
+    if mode in {"chronology", "before_period"}:
         assert frame.empty
     elif mode == "initial":
         assert frame.total_assets.isna().all()

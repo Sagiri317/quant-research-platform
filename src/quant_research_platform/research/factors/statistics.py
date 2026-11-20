@@ -244,7 +244,8 @@ def build_a_share_factor_statistics_tables(
             factors=factors,
             core_factors=core,
             max_lags=max_lags,
-            input_date_count=len(input_dates),
+            input_dates=input_dates,
+            sessions=config.get("sessions"),
         )
         tables["fama_macbeth_periods"] = period_frame
     return tables
@@ -538,68 +539,48 @@ def _fama_macbeth_summary(
     factors: tuple[str, ...],
     core_factors: tuple[str, ...],
     max_lags: int,
-    input_date_count: int | None = None,
+    input_dates=None,
+    sessions=None,
 ) -> pd.DataFrame:
-    if input_date_count is None:
-        input_date_count = periods["timestamp"].nunique()
-    rows: list[dict[str, object]] = []
-    definitions = [
-        (regression, coefficient)
-        for regression, columns, _weight in _fama_macbeth_definitions(
-            factors, core_factors
-        )
-        for coefficient in ("intercept", *columns)
-    ]
-    groups = dict(
-        tuple(periods.groupby(["regression_id", "coefficient_id"], sort=False))
-    )
-    empty = periods.iloc[:0]
-    for regression_id, coefficient_id in definitions:
-        group = groups.get((regression_id, coefficient_id), empty)
-        defined = group.loc[group["status"].eq("DEFINED")]
-        values = defined["value"].dropna()
-        count = len(values)
-        white_defined = int(defined["white_p_value"].notna().sum())
-        white_undefined = int(group["white_p_value"].isna().sum())
-        row = {
-            "regression_id": regression_id,
-            "coefficient_id": coefficient_id,
-            "period_count": count,
-            "status": "UNDEFINED",
-            "reason": "incomplete_session_clock"
-            if count != input_date_count
-            else "hac_lag_exceeds_observations",
-            "mean": float(np.mean(values)) if count else np.nan,
-            "standard_error": np.nan,
-            "t_statistic": np.nan,
-            "p_value": np.nan,
-            "ci_lower": np.nan,
-            "ci_upper": np.nan,
-            "white_defined_period_count": white_defined,
-            "white_undefined_period_count": white_undefined,
-            "input_date_count": input_date_count,
-        }
-        if count == input_date_count and count >= max(2, max_lags + 1):
-            try:
-                inference = hac_mean(values, max_lags=max_lags)
-            except ValueError as exc:
-                if str(exc) != "hac_inference_undefined":
-                    raise
-                row["reason"] = "hac_inference_undefined"
-                rows.append(row)
-                continue
-            row.update(
-                status="DEFINED",
-                reason=None,
-                mean=inference.mean,
-                standard_error=inference.standard_error,
-                t_statistic=inference.t_statistic,
-                p_value=inference.p_value,
-                ci_lower=inference.confidence_interval[0],
-                ci_upper=inference.confidence_interval[1],
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
+
+    keys = ["regression_id", "coefficient_id"]
+    definitions = pd.MultiIndex.from_tuples(
+        [
+            (regression, coefficient)
+            for regression, columns, _weight in _fama_macbeth_definitions(
+                factors, core_factors
             )
-        rows.append(row)
-    return pd.DataFrame(rows)
+            for coefficient in ("intercept", *columns)
+        ],
+        names=keys,
+    )
+    cross = periods.pivot(index="timestamp", columns=keys, values="value").reindex(
+        columns=definitions
+    )
+    if input_dates is not None:
+        cross = cross.reindex(index=pd.DatetimeIndex(input_dates))
+    daily = daily_mean_frame(cross, sessions=sessions)
+    daily.columns = pd.Index(daily.columns.to_list(), tupleize_cols=False)
+    summary = time_series_inference_summary(
+        daily.reset_index(),
+        identity_column="timestamp",
+        max_lags=max_lags,
+        fdr_method=None,
+        fdr_alpha=0.05,
+    ).rename(columns={"observation_count": "period_count"})
+    summary.index = pd.MultiIndex.from_tuples(summary.pop("timestamp"), names=keys)
+    white = periods.groupby(keys).white_p_value
+    summary["white_defined_period_count"] = white.count().reindex(
+        definitions, fill_value=0
+    )
+    summary["white_undefined_period_count"] = (white.size() - white.count()).reindex(
+        definitions, fill_value=0
+    )
+    summary["input_date_count"] = len(daily)
+    return summary.reset_index().loc[
+        :, list(STATISTICS_TABLE_COLUMNS["fama_macbeth.parquet"])
+    ]
 
 
 def factor_statistics(config):

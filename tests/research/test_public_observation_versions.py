@@ -158,6 +158,31 @@ def test_later_share_copies_and_conflicts_have_local_publication_effects(kind):
     assert empty.empty
 
 
+def test_nullable_share_withdrawal_and_reinstatement_keep_their_release_clocks():
+    days = pd.bdate_range("2024-01-02", periods=2)
+    initial = _shares(days)
+    releases = pd.date_range(days[-1] + pd.Timedelta(days=1), periods=3)
+    changes = pd.concat([initial.iloc[[-1]]] * 3, ignore_index=True).assign(
+        shares_outstanding=[np.nan, np.nan, 130.0], available_at=releases
+    )
+    shares = pd.concat([initial, changes], ignore_index=True).astype(
+        {"shares_outstanding": "Float64"}
+    )
+    decisions = pd.DataFrame(
+        {
+            "asset_id": "f",
+            "market_id": "a_share",
+            "timestamp": releases.insert(0, releases[0] - pd.Timedelta(seconds=1)),
+        }
+    )
+    result = fund_flows.calculate(
+        decisions,
+        {"public_fund_shares": shares, "trading_calendar": _calendar(days)},
+        columns=["etf_share_change_1d"],
+    )
+    np.testing.assert_allclose(result.etf_share_change_1d, [0.1, np.nan, np.nan, 0.3])
+
+
 def test_pcf_replaces_whole_basket_and_uses_one_identical_complete_copy():
     days = pd.bdate_range("2024-01-02", periods=2)
     parts = pd.DataFrame(

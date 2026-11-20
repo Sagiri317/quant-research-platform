@@ -439,10 +439,9 @@ def accepts(data_id, record):
     return path.endswith(".json" if data_id == "public_etf_prices" else ".xlsx")
 
 
-def _numbers(frame, columns):
-    counts = frame.attrs.setdefault("invalid_numeric_cells", {})
-    for column in columns:
-        if column in counts:
+def _numbers(frame, fields, counts):
+    for column, unit in fields.items():
+        if unit in {"identifier", "text", "date"}:
             continue
         values = (
             frame[column]
@@ -456,7 +455,6 @@ def _numbers(frame, columns):
         finite = np.isfinite(numeric)
         counts[column] = counts.get(column, 0) + int((values.notna() & ~finite).sum())
         frame[column] = numeric.where(finite)
-    return frame
 
 
 def _rename(frame, mapping):
@@ -683,8 +681,6 @@ def normalize(data_id, path, record):
         )
         if frame.empty:
             return
-        _numbers(frame, ("volume",))
-        frame["volume"] *= 100
         frame["asset_id"] = frame.pop("code").str.zfill(6)
         frame["price_basis"] = "unadjusted_raw"
         yield frame
@@ -1346,8 +1342,9 @@ def normalize(data_id, path, record):
         yield result
 
 
-def normalize_selected_facts(frame, *, source):
+def normalize_selected_facts(frame, *, data_id, source, numeric_counts):
     """Interpret source facts only in the corrected observation domain."""
+    _numbers(frame, DATASETS[data_id], numeric_counts)
     dates = ["publication_date"]
     if "_report_declared_send_date" in frame:
         dates.append("_report_declared_send_date")
@@ -1363,8 +1360,9 @@ def normalize_selected_facts(frame, *, source):
     frame["publication_date"] = (
         parsed[0] if len(parsed) == 1 else pd.concat(parsed, axis=1).max(axis=1)
     )
-    if source == "sse_etf_shares":
-        _numbers(frame, ("shares_outstanding",))
+    if source == "eastmoney_cn_etf_daily":
+        frame["volume"] *= 100
+    elif source == "sse_etf_shares":
         frame["shares_outstanding"] *= 10000
     elif source in SOURCES["public_refinancing_balances"]:
         fields = [
@@ -1373,10 +1371,8 @@ def normalize_selected_facts(frame, *, source):
             "ending_quantity",
             "ending_balance",
         ]
-        _numbers(frame, fields)
         frame[fields] *= 10000
     elif source == "sec_13f":
-        _numbers(frame, ("value_usd",))
         filing = frame.publication_date
         scale = filing.lt("2023-01-03").map({True: 1000, False: 1})
         frame["value_usd"] *= scale.where(filing.notna())
@@ -1389,7 +1385,6 @@ def normalize_selected_facts(frame, *, source):
             raise ValueError("public_fund_no_stock_flag_invalid")
         frame["explicit_no_stock"] = flags.map({True: "true", False: "false"})
     elif source == "public_index_weight_history_extracted":
-        _numbers(frame, ("weight",))
         if not frame.weight.between(0, 100).all():
             raise ValueError("public_index_weight_percent_invalid")
         frame["weight"] /= 100

@@ -24,13 +24,13 @@ ETF 底仓单独运行同一账户的 `hold` 策略，使用新的输出路径�
 
 | 文件 | 用途 |
 | --- | --- |
-| `prepare-source.json`、`prepare-source-hft.json` | 分别读取结构化日频和逐笔来源；不下载或整理 raw |
+| `prepare-source.json`、`prepare-source-hft.json` | 分别读取结构化日频和逐笔来源。逐笔示例选择 2018-02-14 的开发样本，正式股票研究按[服务器日期覆盖](../docs/data.md#venvoo-a-股-level-2)设置窗口。 |
 | `prepare-financial.json` | 结构化财务事实的 PIT 计算接口；当前研究不启用 Choice 财务或分析师预期 |
 | [prepare-cash-distributions.json](prepare-cash-distributions.json) | 从实际现金分红和除息前价格准备股息收益，持续分红交互还需要决策面板的 `volatility_60d`。 |
 | [prepare-calendar-seasonality.json](prepare-calendar-seasonality.json)、[prepare-size-volatility-interaction.json](prepare-size-volatility-interaction.json) | 用实际股票行情、交易日历及收盘市值和残差波动计算两个收盘信号。 |
 | [assemble-stock-close-signals.json](assemble-stock-close-signals.json)、[prepare-stock-signal-decisions.json](prepare-stock-signal-decisions.json) | 收盘观测与下一会话开盘前的决策时点。这里的输入窗口按信号日填写，首尾分别取目标决策区间之前的一个实际交易日。 |
 | [assemble-stock-model-inputs.json](assemble-stock-model-inputs.json) | 合并同一决策时点的因子，选用每项因子的一种表示，形成四个模型的共同候选输入。 |
-| [prepare-quote-trade-pressure.json](high-frequency/prepare-quote-trade-pressure.json)、[assemble-etf-signals.json](high-frequency/assemble-etf-signals.json)、[sample-etf-model-inputs.json](high-frequency/sample-etf-model-inputs.json) | 单只 ETF 的报价因子、逐报价组装与 3 秒决策时钟采样。各操作均可单独调用。 |
+| [prepare-quote-trade-pressure.json](high-frequency/prepare-quote-trade-pressure.json)、[assemble-etf-signals.json](high-frequency/assemble-etf-signals.json)、[sample-hft-etf-model-inputs.json](high-frequency/sample-hft-etf-model-inputs.json) | 单只 ETF 的报价因子、逐报价组装与 3 秒决策时钟采样。各操作均可单独调用。 |
 | `prepare-on-id.json` | 隔夜与日内收益 |
 | `prepare-hft-panel.json`、`prepare-hft-factors.json`、`prepare-hft-labels.json` | 共同高频面板、盘口因子、收益标签，各阶段独立 |
 | `assemble-selected.json`、`assemble-hft.json` | 已有列的拼接与高频研究数据集组装 |

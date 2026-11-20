@@ -1048,3 +1048,44 @@ def test_order_activation_uses_decision_clock_once(
         [] if execution_ms is None else [origin.value + execution_ms * 1_000_000]
     )
     assert [t.quantity for t in trades] == ([] if gap else [200])
+
+
+def test_threshold_taker_freezes_shares_at_the_decision_quote(tmp_path):
+    panel = quotes("2024-01-02", assets=("a",), mid=10.01)
+    panel.loc[1:, ["mid", "bid_px1", "ask_px1"]] = [9.99, 9.98, 10.0]
+    signal = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    params = parameters(("a",))
+    params["initial_inventory"] = {}
+    batches, summary = native_account(
+        tmp_path,
+        [(daily_view(panel), panel, signal)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    # 60% of 5000 / 10.01 permits two lots. The later mid cannot add a third.
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert [(trade.quantity, trade.notional) for trade in trades] == [(200, 2000.0)]
+    assert summary["nav"] == pytest.approx(4998.0)
+
+
+def test_later_buy_cannot_sell_an_earlier_inflight_fill(tmp_path):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:06", "01:30:09"),
+    )
+    panel["mid"] = [10.0, 10.2, 10.0, 10.0]
+    panel["ask_px1"], panel["bid_px1"] = panel.mid + 0.01, panel.mid - 0.01
+    panel["ask_vol1"] = panel["bid_vol1"] = 50000.0
+    signals = panel.iloc[:2][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    params = parameters(("a",)) | dict(
+        initial_capital=500000, initial_inventory={"a": 10000}, latency_ms=6000
+    )
+    batches, _ = native_account(
+        tmp_path,
+        [(daily_view(panel), panel, signals)],
+        params,
+        TimeWindow("2024-01-02", "2024-01-02"),
+    )
+    # The second buy's share ceiling is already exceeded by the first fill.
+    assert [t.quantity for batch in batches for t in batch.trades] == [20000]

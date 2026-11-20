@@ -350,11 +350,15 @@ def _industry_frame(snapshots, *, end_date=None):
     frame = frame.drop_duplicates()
     conflicting = frame.duplicated(key, keep=False)
     if conflicting.any():
-        for column in set(_INDUSTRY_COLUMNS).difference(key):
-            different = frame.groupby(key, dropna=False)[column].transform(
-                lambda values: values.nunique(dropna=False) > 1
-            )
-            frame.loc[conflicting & different, column] = None
+        repeated = frame.loc[conflicting]
+        disputed = (
+            repeated.groupby(key, dropna=False, sort=False)
+            .transform("nunique", dropna=False)
+            .gt(1)
+        )
+        frame.loc[conflicting, disputed.columns] = repeated[disputed.columns].mask(
+            disputed
+        )
         frame = frame.drop_duplicates(key)
     for column in ("timestamp", "observation_date", "publication_date"):
         frame[column] = pd.to_datetime(frame[column]).astype("datetime64[ns]")

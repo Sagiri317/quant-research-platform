@@ -1063,3 +1063,63 @@ def test_quarterly_skips_immature_initial_history_and_continues(tmp_path):
     assert read_predictions(results[1]["predictions"])[
         0
     ].timestamp.min() == pd.Timestamp("2014-07-01")
+
+
+def test_each_rolling_input_group_retains_its_own_representative(tmp_path):
+    dates = pd.date_range("2020-01-06", periods=6, freq="7D")
+    x = np.tile(np.arange(10, dtype=float), len(dates))
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(10),
+            "asset_id": np.tile(list("abcdefghij"), len(dates)),
+            "x": x,
+            "inverse": -x,
+            "label": x / 100,
+            "eligible": True,
+            "label_available_at": dates.repeat(10),
+        }
+    )
+    path = tmp_path / "inputs.parquet"
+    frame.to_parquet(path, index=False)
+    spec = input_spec()
+    spec["column_roles"]["inverse"] = "feature"
+    model = fit_config(tmp_path, path)["model"]
+    results = run_sessions(
+        {
+            "inputs": {"path": str(path), "spec": spec},
+            "output": str(tmp_path / "rolling"),
+            "market_id": "a_share",
+            "models": [
+                {**model, "input_feature_columns": ["x", "inverse"]},
+                {**model, "model_id": "single", "input_feature_columns": ["inverse"]},
+            ],
+            "absolute_rank_correlation": 0.9,
+            "training_start": "2020-01-06",
+            "sessions": dates.strftime("%Y-%m-%d").tolist(),
+            "min_train_sessions": 3,
+            "validation_sessions": 1,
+            "prediction_sessions": 1,
+            "rolling_window": {"start": "2020-02-03", "end": "2020-02-10"},
+            "evaluation_cutoff": "2020-02-11",
+            "label_unit": "decimal_return",
+            "evaluation": {
+                "evaluation_id": "weekly",
+                "market_id": "a_share",
+                "research_dataset_id": "synthetic",
+                "signals": [
+                    {
+                        "signal_id": "s",
+                        "source_kind": "prediction",
+                        "source_column": "s",
+                    }
+                ],
+                "label_columns": ["label"],
+                "evaluation_axis": "cross_sectional",
+            },
+        }
+    )
+    # Both columns have identical coverage and opposite ranks. The first model
+    # prefers x on a tie; the second requires inverse. Neither may steer the other.
+    assert [
+        load_model(row["model"])[0].metadata["input_columns"] for row in results
+    ] == [["x"], ["inverse"], ["x"], ["inverse"]]

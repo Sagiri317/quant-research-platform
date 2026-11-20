@@ -22,6 +22,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.interfaces.queries import inspect
 from quant_research_platform.research.policies.cost_aware import (
     backtest_cost_model,
     differentiable_returns,
@@ -176,6 +177,7 @@ def test_execution_env_reward_equals_hand_shortfall_and_native_ledger(tmp_path):
     summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
     assert summary["net_pnl"] == pytest.approx(-1)
     assert summary["nav"] == pytest.approx(4999)
+    assert inspect(output)["nav"] == pytest.approx(summary["nav"])
     artifact = read_statistics_artifact(
         portfolio_statistics(
             {
@@ -304,7 +306,7 @@ def test_real_ppo_roundtrip_and_later_native_backtest(tmp_path, n_envs):
             },
         }
     )
-    facts = parse_qrp_json_object((model / "policy.json").read_bytes())
+    facts = inspect(model)
     assert facts["actual_timesteps"] == 8
     progress = pd.read_csv(model.with_name(model.name + ".trial") / "progress.csv")
     assert progress["train/n_updates"].max() == facts["actual_updates"]

@@ -629,18 +629,19 @@ def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
         [
             dict(
                 code="510300",
-                timestamp="2024-01-02",
+                timestamp=day,
                 open="2",
                 close="2.1",
                 high="2.2",
                 low="1.9",
-                volume="10",
+                volume=volume,
                 amount="2050",
                 return_percent="2",
                 turnover_rate_percent="3",
                 source_sha256="original-response",
                 source_url="https://example.org/original",
             )
+            for day, volume in (("2024-01-02", "10"), ("2024-02-02", "bad volume"))
         ]
     ).to_csv(path, index=False)
     record = dict(
@@ -663,7 +664,10 @@ def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
         ]
     ).to_csv(clock, index=False)
     from quant_research_platform.sources.prepare import prepare_source
-    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.reading import (
+        open_dataset_session,
+        read_dataset,
+    )
 
     output = tmp_path / "out"
     prepare_source(
@@ -671,11 +675,18 @@ def test_cny_etf_prices_convert_lots_to_fund_units(tmp_path):
             source_id="public_research",
             raw_root=str(tmp_path),
             release_csv=str(clock),
+            end_date="2024-01-31",
             outputs={"public_domestic_etf_prices": str(output)},
         )
     )
     frame = read_dataset(output)
     assert frame.volume.tolist() == [1000]
+    assert (
+        open_dataset_session(output).manifest["producer_diagnostics"][
+            "source_invalid_numeric_cells"
+        ]["volume"]
+        == 0
+    )
     assert frame.amount.tolist() == [2050]
     assert frame.price_basis.tolist() == ["unadjusted_raw"]
     assert frame.asset_id.tolist() == ["510300"]

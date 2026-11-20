@@ -1,6 +1,7 @@
 """Prepare public observations without claiming unknown historical availability."""
 
 import hashlib
+import io
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +16,7 @@ from quant_research_platform.sources.tabular import read_csv as _read_csv
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
-from .normalization import DATASETS, _numbers, normalize, normalize_selected_facts
+from .normalization import DATASETS, normalize, normalize_selected_facts
 
 PROVENANCE = (
     "source",
@@ -91,10 +92,16 @@ def materialize_interim_data(
     report_dates, cell_dates, correction_evidence = _report_observation_corrections(
         source_root, records, data_ids
     )
-    fund_identities = None
-    if fund_identity_csv is not None and "public_fund_nav" in data_ids:
+    fund_identities = identity_hash = None
+    if (
+        clocks is not None
+        and fund_identity_csv is not None
+        and "public_fund_nav" in data_ids
+    ):
+        payload = Path(fund_identity_csv).read_bytes()
+        identity_hash = hashlib.sha256(payload).hexdigest()
         fund_identities = _read_csv(
-            fund_identity_csv,
+            io.BytesIO(payload),
             dtype="str",
             columns=["fund_code", "clock_source_key", "clock_valid_from"],
         )
@@ -175,7 +182,12 @@ def materialize_interim_data(
                             ]
                         if frame.empty:
                             continue
-                        normalize_selected_facts(frame, source=record["source"])
+                        normalize_selected_facts(
+                            frame,
+                            data_id=data_id,
+                            source=record["source"],
+                            numeric_counts=numeric_counts,
+                        )
                         if "published_at" not in frame:
                             frame["published_at"] = record.get(
                                 "historical_published_at"
@@ -281,16 +293,6 @@ def materialize_interim_data(
                             and frame.publication_date.lt(observed).any()
                         ):
                             raise ValueError("public_release_clock_precedes_dependency")
-                        numeric_fields = [
-                            field
-                            for field, unit in DATASETS[data_id].items()
-                            if unit not in {"identifier", "text", "date"}
-                        ]
-                        _numbers(frame, numeric_fields)
-                        for field, count in frame.attrs.get(
-                            "invalid_numeric_cells", {}
-                        ).items():
-                            numeric_counts[field] = numeric_counts.get(field, 0) + count
                         for field, unit in DATASETS[data_id].items():
                             if unit in {"identifier", "text"}:
                                 frame[field] = frame[field].astype("str")
@@ -337,13 +339,9 @@ def materialize_interim_data(
                             else {}
                         ),
                         **(
-                            {
-                                "fund_identity_sha256": hashlib.sha256(
-                                    Path(fund_identity_csv).read_bytes()
-                                ).hexdigest()
-                            }
-                            if fund_identity_csv is not None
-                            and "public_fund_nav" in data_ids
+                            {"fund_identity_sha256": identity_hash}
+                            if identity_hash is not None
+                            and data_id == "public_fund_nav"
                             else {}
                         ),
                     },
@@ -467,8 +465,6 @@ def _release_clocks(path):
     if path is None:
         return None, None
     payload = Path(path).read_bytes()
-    import io
-
     required = {
         "source",
         "observation_date",

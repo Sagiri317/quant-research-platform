@@ -754,3 +754,42 @@ def test_missing_predictions_preserve_orders_but_do_not_disable_restore(
     assert not any(
         d.name == "passive_cancel_requested" for b in batches for d in b.diagnostics
     )
+
+
+@pytest.mark.parametrize(
+    "second_score, sell_before_ack", [(1.0, False), (0.0, False), (0.0, True)]
+)
+def test_only_a_new_sell_signal_reposts_a_sell_after_an_old_order_fills(
+    tmp_path, second_score, sell_before_ack
+):
+    panel = quotes(
+        "2024-01-02", assets=("a",), clocks=tuple(f"01:30:0{s}" for s in range(6))
+    )
+    panel["mid"] = [10, 10, 10.2, 10, 10, 10]
+    panel["ask_px1"], panel["bid_px1"] = panel.mid + 0.01, panel.mid - 0.01
+    panel["ask_vol1"] = panel["bid_vol1"] = 50000
+    signals = panel.iloc[[0, 2]][["timestamp", "asset_id"]].assign(
+        prediction_score=[1.0, second_score]
+    )
+    if sell_before_ack:
+        signals = pd.concat(
+            (
+                signals,
+                signals.iloc[[-1]].assign(
+                    timestamp=panel.timestamp.iloc[2] + pd.Timedelta(milliseconds=750),
+                    prediction_score=-1.0,
+                ),
+            )
+        )
+    batches, _ = replay(
+        tmp_path,
+        panel,
+        signals,
+        [(2.5, "a", "sell", 20000, 9.98), (4.5, "a", "buy", 10000, 10.02)],
+        cancel_ms=1000,
+        capital=500000,
+        account_parameters={"initial_inventory": {"a": 10000}},
+    )
+    assert [t.quantity for batch in batches for t in batch.trades] == (
+        [20000, -10000] if sell_before_ack else [20000]
+    )

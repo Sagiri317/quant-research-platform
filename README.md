@@ -46,6 +46,8 @@ qrp inspect <已发布产物目录>
 qrp schema-inventory --project-root . --output <盘点结果.json>
 ```
 
+`qrp inspect` 读取策略训练目录时返回模型说明，读取策略回测目录时返回回测摘要。查看逐笔账本的元数据可指定回测目录下的 `ledger/`。
+
 例如 Python 直接调用：
 
 ```python

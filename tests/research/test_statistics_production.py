@@ -727,7 +727,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 factors=(TEST_FACTORS[0],),
                 core_factors=(),
                 max_lags=19,
-                input_date_count=20,
             )
             .query("regression_id == @persisted_periods.regression_id.iloc[0]")
             .set_index("coefficient_id")

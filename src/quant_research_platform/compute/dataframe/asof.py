@@ -1,7 +1,5 @@
 """Point-in-time alignment of explicitly released, versioned observations."""
 
-from collections import deque
-
 import numpy as np
 import pandas as pd
 
@@ -11,25 +9,25 @@ def rolling_available_at(clocks, window):
     clocks = (
         pd.to_datetime(clocks, utc=True).dt.tz_localize(None).astype("datetime64[ns]")
     )
-    timestamps = clocks.to_numpy()
-    values = timestamps.view("int64")
-    missing = np.isnat(timestamps)
-    result = np.full(len(values), np.datetime64("NaT"), dtype="datetime64[ns]")
-    maxima = deque()
-    unknown = 0
-    for i, value in enumerate(values):
-        unknown += missing[i]
-        if i >= window:
-            unknown -= missing[i - window]
-        if not missing[i]:
-            while maxima and values[maxima[-1]] <= value:
-                maxima.pop()
-            maxima.append(i)
-        while maxima and maxima[0] <= i - window:
-            maxima.popleft()
-        if i + 1 >= window and not unknown:
-            result[i] = timestamps[maxima[0]]
-    return pd.Series(result, index=clocks.index)
+    values = clocks.to_numpy().view("int64")
+    nat = np.datetime64("NaT", "ns").view("int64")
+    result = np.full(len(values), nat, dtype="int64")
+    if len(values) >= window:
+        # Each full window is either one block or a suffix and a prefix.
+        padded = np.pad(values, (0, -len(values) % window), constant_values=nat)
+        blocks = padded.reshape(-1, window)
+        prefix = np.maximum.accumulate(blocks, axis=1).ravel()
+        suffix = np.maximum.accumulate(blocks[:, ::-1], axis=1)[:, ::-1].ravel()
+        np.maximum(
+            prefix[window - 1 : len(values)],
+            suffix[: len(values) - window + 1],
+            out=result[window - 1 :],
+        )
+        missing = values == nat
+        if missing.any():
+            counts = np.r_[0, missing.cumsum()]
+            result[window - 1 :][counts[window:] != counts[:-window]] = nat
+    return pd.Series(result.view("datetime64[ns]"), index=clocks.index)
 
 
 def _visible_updates(observations, columns, by):
@@ -132,7 +130,7 @@ def observation_versions(frame, *, keys, columns):
         list(columns)
     ].shift()
     same = (
-        versions[list(columns)].eq(previous)
+        versions[list(columns)].eq(previous).fillna(False)
         | (versions[list(columns)].isna() & previous.isna())
     ).all(axis=1)
     first = ~versions.duplicated(list(keys))

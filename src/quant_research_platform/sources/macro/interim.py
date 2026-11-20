@@ -291,7 +291,7 @@ def validate_observations(frame):
     if np.isinf(frame.value.to_numpy()).any():
         raise ValueError("macro_value_must_be_finite_or_missing")
     for column in ("timestamp", "published_at", "retrieved_at"):
-        frame[column] = pd.to_datetime(frame[column], utc=True)
+        frame[column] = pd.to_datetime(frame[column], utc=True, format="mixed")
     for column in ("observation_date", "vintage_date"):
         frame[column] = pd.to_datetime(frame[column])
     if frame[list(KEY)].isna().any().any():
@@ -425,7 +425,7 @@ def read_release_csv(path, *, start_date=None, end_date=None):
             # Explicit offsets keep machine-local time out of source evidence.
             if not values.str.contains(r"(?:Z|[+-]\d{2}:?\d{2})$", regex=True).all():
                 raise ValueError("macro_release_timezone_required")
-            times = pd.to_datetime(values, utc=True)
+            times = pd.to_datetime(values, utc=True, format="mixed")
             data.loc[selected, "timestamp"] = times
             basis = "inferred_snapshot_release"
             if clock == "published_at":

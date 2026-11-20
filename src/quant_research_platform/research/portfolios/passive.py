@@ -434,6 +434,7 @@ class PassiveOrders:
         activation_times,
         *,
         segment_bound=True,
+        buy_only=(),
         modes=None,
         decision_book=None,
         quantities=None,
@@ -444,7 +445,8 @@ class PassiveOrders:
         diagnostics = []
         at_ns = int(at.value)
         for asset, target in targets.items():
-            mode = "maker" if modes is None else modes[asset]
+            explicit_mode = modes is not None and asset in modes
+            mode = modes[asset] if explicit_mode else "maker"
             if mode == "wait":
                 continue
             previous_mode = self.execution_modes.get(asset, "maker")
@@ -459,6 +461,7 @@ class PassiveOrders:
             if mode != "cancel" and (
                 asset not in self.intents
                 or target != self.intents[asset][0]
+                or (asset in buy_only) != self.intents[asset][4]
                 or previous_mode != mode
                 or not segment_bound
                 or asset in self.intent_cancellations
@@ -468,6 +471,7 @@ class PassiveOrders:
                     at_ns,
                     activation_times[asset],
                     segment_bound,
+                    asset in buy_only,
                 )
                 reservation = None
                 if decision_book is not None and activation_times[asset] is not None:
@@ -479,12 +483,10 @@ class PassiveOrders:
                         float(quantities[asset]),
                         quantities,
                     )
-                if modes is not None and (
-                    asset in self.intent_cancellations
-                    or (
-                        asset in self.intents
-                        and (order is not None or asset in self.pending_reservations)
-                    )
+                if asset in self.intent_cancellations or (
+                    explicit_mode
+                    and asset in self.intents
+                    and (order is not None or asset in self.pending_reservations)
                 ):
                     self.replacements[asset] = intent, mode, reservation
                     if asset not in self.intent_cancellations:
@@ -533,7 +535,7 @@ class PassiveOrders:
                 or asset not in self.intents
             ):
                 continue
-            target, signal_at, activation_at, _ = self.intents[asset]
+            target, signal_at, activation_at = self.intents[asset][:3]
             if (
                 activation_at is not None
                 and at.value >= activation_at
@@ -646,11 +648,11 @@ class PassiveOrders:
                 or self.execution_modes.get(asset, "maker") != "maker"
             ):
                 continue
-            target, signal_at, activation_at, _ = self.intents[asset]
+            target, signal_at, activation_at, _, buy_only = self.intents[asset]
             if activation_at is None or at_ns < activation_at or at_ns <= signal_at:
                 continue
             requested = target - units[asset]
-            if not requested:
+            if not requested or (buy_only and requested < 0):
                 self.intents.pop(asset)
                 self.pending_reservations.pop(asset, None)
                 continue

@@ -72,11 +72,25 @@ def _training_daily(
     sequence = metadata["model_algorithm"] in SEQUENCE_ALGORITHMS
     read_windows = tuple(_fit_read_windows(windows, sequence=sequence))
     assets = tuple(metadata["training_asset_ids"])
+    scope = facts.get("asset_ids")
+    original = _dataset_input_options(facts["inputs"])
+    filters = original.get("row_filters", ())
+    if scope is not None:
+        filters = (*filters, ("asset_id", "in", tuple(scope)))
     options = _dataset_input_options(
         inputs,
+        time_window=original.get("time_window"),
         discovery_windows=tuple(window for window, _ in read_windows),
-        row_filters=(("asset_id", "in", assets),),
+        row_filters=filters,
     )
+    # Keep saved selectors relative to the caller's current dataset root.
+    for selector in ("files", "years"):
+        fitted = original.get(selector)
+        requested = options.get(selector)
+        if fitted is not None:
+            options[selector] = tuple(
+                item for item in fitted if requested is None or item in requested
+            )
     selected_columns = options.get("columns")
     options.setdefault("columns", ("timestamp", "asset_id"))
     session = open_dataset_session(**options)
@@ -118,6 +132,7 @@ def _training_daily(
         return selected
 
     def frames():
+        rows_input = 0
         for read_window, context_only in read_windows:
             first, last = time_window_inclusive_bounds(read_window)
             for month in pd.period_range(first, last, freq="M"):
@@ -135,7 +150,11 @@ def _training_daily(
                     for frame in chunks:
                         if not frame.timestamp.dt.normalize().isin(sessions).all():
                             raise ValueError("evaluation_input_session_not_declared")
+                        if not context_only:
+                            rows_input += len(frame)
                         yield frame
+        if rows_input != metadata["rows_input"]:
+            raise ValueError("model_period_training_sample_mismatch")
 
     def values():
         with closing_iterator(
@@ -177,7 +196,11 @@ def _training_daily(
                     frame,
                     evaluation_axis=evaluation_axis,
                     sessions=frame.session.unique(),
-                    asset_ids=assets,
+                    asset_ids=(
+                        frame.asset_id.unique()
+                        if evaluation_axis == "cross_sectional"
+                        else assets
+                    ),
                     regression=True,
                     baseline_columns=("zero",),
                     top_quantile=top_quantile,

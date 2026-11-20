@@ -848,34 +848,39 @@ def test_observation_uses_visible_quote_and_rejects_future_fitted_prediction(tmp
 
 
 def test_future_quote_absence_cannot_change_current_pending_state(tmp_path):
-    episode = execution_episode(tmp_path)
+    episode = execution_episode(tmp_path, kinds=("gold_etf", "gold_etf"))
+    episode["window"] = {
+        "start": "2024-01-02T01:30:03.001",
+        "end": "2024-01-02T01:30:08",
+    }
     episode["account"]["parameters"]["latency_ms"] = 4000
-    truncated = deepcopy(episode)
     panel = read_dataset(episode["account"]["panel"])
-    panel = panel.loc[panel.timestamp.dt.time <= pd.Timestamp("01:30:03").time()]
-    write_dataset(tmp_path / "unknown_future", panel, spec=quote_spec(panel))
-    truncated["account"]["panel"] = str(tmp_path / "unknown_future")
+    start = pd.Timestamp(episode["window"]["start"])
+    arrival = start + pd.Timedelta(seconds=4)
+    # B's decision book is just before the window. Its later quote may never arrive.
+    before = panel.loc[panel.asset_id.eq("a") | panel.timestamp.lt(start)]
+    later = panel.loc[panel.asset_id.eq("b") & panel.timestamp.eq(arrival)]
     states = []
-    for config in (episode, truncated):
+    for name, future in (("full", later), ("truncated", later.iloc[:0])):
+        quotes = pd.concat([before, future]).sort_values(["timestamp", "asset_id"])
+        write_dataset(tmp_path / name, quotes, spec=quote_spec(quotes))
+        config = deepcopy(episode)
+        config["account"]["panel"] = str(tmp_path / name)
         env = TradingEnv([config])
         try:
             observation, _ = env.reset(seed=0)
-            next_observation, _, done, _, _ = env.step([7])
+            next_observation, _, done, _, _ = env.step([0, 7])
             assert not done
-            assert env.decision.timestamp == pd.Timestamp("2024-01-02T01:30:03.001")
-            states.append(
-                (
-                    observation,
-                    next_observation,
-                    env.decision.cash,
-                    env.decision.reserved_cash,
-                )
-            )
+            assert env.decision.timestamp == start + pd.Timedelta(seconds=3)
+            states.append((observation, next_observation))
+            assert env.decision.pending_quantities.b == 200
+            assert env.decision.reserved_cash == pytest.approx(200 * 10.01 + 5)
+            _, _, done, _, _ = env.step([0, 0])
+            assert done
+            assert env.nav == pytest.approx(2_000_000 - (7 if name == "full" else 0))
         finally:
             env.close()
-    np.testing.assert_allclose(states[0][0], states[1][0])
-    np.testing.assert_allclose(states[0][1], states[1][1])
-    assert states[0][2:] == pytest.approx(states[1][2:])
+    np.testing.assert_allclose(states[0], states[1])
 
 
 def test_risk_time_excludes_lunch_overnight_and_weekend():

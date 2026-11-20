@@ -801,7 +801,7 @@ def test_public_index_weights_preserve_percentage_units_and_explicit_clock(
         assert result.published_at.isna().all()
 
 
-def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
+def test_fund_share_units_and_nav_clock_identity_stay_source_specific(tmp_path):
     source = tmp_path / "raw"
     source.mkdir()
     payload = write_source_csv(
@@ -817,16 +817,41 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
         "sha256": hashlib.sha256(payload).hexdigest(),
         "historical_published_at": None,
     }
-    write_source_manifest(source, {"schema_version": 1, "records": [record]})
+    nav_record = write_fund_records(
+        source / "nav.jsonl.gz",
+        [
+            {
+                "fund_code": "510050",
+                "source_sha256": "nav-response",
+                "source_url": "https://example.org/nav",
+                "fields": {"Data_netWorthTrend": [{"x": 1704124800000, "y": 1.25}]},
+            }
+        ],
+    ) | {"source": "eastmoney_fund_history_extracted"}
+    write_source_manifest(source, {"records": [record, nav_record]})
+    identity = tmp_path / "identities.csv"
+    identity.write_text(
+        "fund_code,clock_source_key,clock_valid_from\n510050,fund_clock,2020-01-01\n"
+    )
     output = tmp_path / "normalized"
     result = prepare_source(
         {
             "source_id": "public_research",
             "raw_root": str(source),
-            "outputs": {"public_fund_shares": str(output)},
+            "fund_identity_csv": str(identity),
+            "outputs": {
+                "public_fund_shares": str(output),
+                "public_fund_nav": str(tmp_path / "no-clock-nav"),
+            },
         }
     )
     assert result.skipped == ()
+    assert (
+        "fund_identity_sha256"
+        not in open_dataset_session(tmp_path / "no-clock-nav").manifest[
+            "source_evidence"
+        ]
+    )
     frame = read_dataset(output)
     assert frame.shares_outstanding.tolist() == [125000]
     assert frame.source_sha256.tolist() == ["original-response"]
@@ -837,7 +862,8 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
     clocks = tmp_path / "release-clocks.csv"
     clocks.write_text(
         "source,observation_date,estimated_available_at,availability_basis,evidence_url\n"
-        "sse_etf_shares,2024-01-02,2024-01-03T01:30:00Z,assumed_next_open,https://example.org/rule\n",
+        "sse_etf_shares,2024-01-02,2024-01-03T01:30:00Z,assumed_next_open,https://example.org/rule\n"
+        "fund_clock,2024-01-02,2024-01-03T03:00Z,nav_release,https://example.org/nav-rule\n",
         encoding="utf-8",
     )
     assumed = tmp_path / "assumed"
@@ -846,9 +872,26 @@ def test_sse_fund_units_native_write_and_unknown_publication(tmp_path):
             "source_id": "public_research",
             "raw_root": str(source),
             "release_csv": str(clocks),
-            "outputs": {"public_fund_shares": str(assumed)},
+            "fund_identity_csv": str(identity),
+            "outputs": {
+                "public_fund_shares": str(assumed),
+                "public_fund_nav": str(tmp_path / "nav"),
+            },
         }
     )
+    assert (
+        "fund_identity_sha256"
+        not in open_dataset_session(assumed).manifest["source_evidence"]
+    )
+    assert (
+        open_dataset_session(tmp_path / "nav").manifest["source_evidence"][
+            "fund_identity_sha256"
+        ]
+        == hashlib.sha256(identity.read_bytes()).hexdigest()
+    )
+    assert read_dataset(tmp_path / "nav").available_at.tolist() == [
+        pd.Timestamp("2024-01-03T03:00Z")
+    ]
     published = read_dataset(assumed)
     assert published.published_at.isna().all()
     assert published.available_at.iloc[0] == pd.Timestamp("2024-01-03T01:30:00Z")

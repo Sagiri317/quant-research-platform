@@ -474,7 +474,9 @@ def _rows(index, data_id, end, diagnostics=None) -> Iterator[tuple[object, ...]]
             )
             continue
         earliest = min(index.get(f"events:{pair[0]}:{pair[1]}", {}), default=None)
-        if earliest is not None and date.fromisoformat(earliest[0]) < first:
+        if first < date.fromisoformat(pair[1]) or (
+            earliest is not None and date.fromisoformat(earliest[0]) < first
+        ):
             diagnostics["excluded_invalid_chronology_rows"] = (
                 diagnostics.get("excluded_invalid_chronology_rows", 0) + 1
             )

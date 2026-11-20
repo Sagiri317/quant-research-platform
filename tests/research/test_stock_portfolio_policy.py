@@ -14,6 +14,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.policies import PolicyDecision
+from quant_research_platform.research.policies.environments import TradingEnv
 from quant_research_platform.research.policies.portfolio_policy import (
     portfolio_policy_parameters,
     portfolio_targets,
@@ -22,6 +23,8 @@ from quant_research_platform.research.policies.reinforcement import backtest_pol
 from quant_research_platform.research.protocols.a_share_hft import label_catalog
 from quant_research_platform.storage.datasets import write_dataset
 from tests.helpers.high_frequency import (
+    daily_view,
+    memory_account,
     parameters,
     quotes,
     schedule,
@@ -269,3 +272,72 @@ def test_native_stock_pred_cross_day_t1_no_restore_and_finite_capacity(
     assert facts["decision_interval_seconds"] == 3
     assert facts["holding_period"] == "continuous_cross_session_holdings"
     assert ledger.capital.initial_capital == 10_000
+
+
+def test_untradable_conversion_shares_remain_in_policy_nav(monkeypatch):
+    first = quotes("2024-01-02", assets=("a", "c"))
+    second = quotes("2024-01-03", assets=("b", "c"))
+    day = second.session_date[0]
+    listing = first.session_date[0]
+    rights = pd.DataFrame(
+        [
+            dict(
+                event_id="conversion",
+                asset_id="a",
+                listing_date=listing,
+                timestamp=day,
+                kind="conversion",
+                effective_at=day,
+                available_at=day,
+                evidence_identity="a" * 64,
+                entitlement_proved=True,
+                value_per_old_unit=0.0,
+                remaining_old_units_per_old_unit=0.0,
+                successor_asset_id="b",
+                successor_listing_date=listing,
+                successor_units_per_old_unit=1.0,
+            )
+        ]
+    )
+    signal = (
+        second.loc[second.asset_id.eq("c"), ["timestamp", "asset_id"]].iloc[:1].copy()
+    )
+    signal["timestamp"] += pd.Timedelta(milliseconds=1)
+    signal["prediction_score"] = 0.01
+    params = parameters(("a", "c"))
+    del params["buy_threshold"], params["sell_threshold"]
+    params["initial_inventory"] = {"a": 100}
+    sessions = [
+        (daily_view(first, listing=listing), first, signal.iloc[:0]),
+        (daily_view(second, listing=listing, rights_events=rights), second, signal),
+    ]
+    batches = []
+    episode = dict(
+        kind="hft",
+        task="portfolio",
+        asset_ids=["a", "c"],
+        feature_columns=["prediction_score"],
+        window={"start": "2024-01-02", "end": "2024-01-03"},
+        prediction={"paths": ["memory"]},
+        risk_aversion=0,
+        unfinished_penalty_bps=0,
+        account=memory_account(monkeypatch, sessions, schedule(), params),
+    )
+    env = TradingEnv([episode], on_batch=batches.append)
+    try:
+        env.reset(seed=0)
+        decision = env.decision
+        # 4000 cash + 100 B at 10. B is not a policy action or a source of cash.
+        assert decision.nav == 5000 and decision.cash == 4000
+        assert list(decision.features.index) == ["a", "c"]
+        assert decision.maximum_quantities.c == 300
+        target, _ = portfolio_targets(
+            decision, decision.maximum_quantities, portfolio_policy_parameters({})
+        )
+        _, _, done, _, info = env.step_targets(target)
+        assert done and info["nav"] == pytest.approx(4997)
+        assert [
+            (t.asset_id, t.quantity) for batch in batches for t in batch.trades
+        ] == [("c", 300)]
+    finally:
+        env.close()

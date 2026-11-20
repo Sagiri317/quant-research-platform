@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pyarrow as pa
 
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks,
@@ -48,7 +47,6 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_time_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 
 def _input_roles(declared, spec, selected_columns):
@@ -303,13 +301,8 @@ def evaluate(config):
         raise ValueError("evaluation_workers_requires_a_share_factors")
 
     def prepared():
-        # The reader owns the declared PK; only a wider PK needs this
-        # additional, narrower evaluation-key invariant.
-        seen = (
-            ExactPrimaryKeyIndex(primary_key=("timestamp", "asset_id"))
-            if set(declared["primary_key"]) != {"timestamp", "asset_id"}
-            else None
-        )
+        # Equal timestamps stay in the same chunk, even across source files.
+        narrower_key = len(declared["primary_key"]) > 2
         # Acquire the input in its consuming generator. A rejected destination or
         # failed initialization cannot leave an unstarted input session open.
         with closing_iterator(
@@ -321,12 +314,7 @@ def evaluate(config):
                     and not frame.timestamp.dt.normalize().isin(dates).all()
                 ):
                     raise ValueError("evaluation_input_session_not_declared")
-                if seen is not None and seen.add_table(
-                    pa.Table.from_pandas(
-                        frame.loc[:, ["timestamp", "asset_id"]],
-                        preserve_index=False,
-                    )
-                ):
+                if narrower_key and frame.duplicated(["timestamp", "asset_id"]).any():
                     raise ValueError("evaluation_input_duplicate_keys")
                 frame = frame.copy()
                 if predictions:
@@ -570,13 +558,14 @@ def _scoped_evaluation_frames(sources):
             session,
             _allow_infinite_columns=tuple(dict.fromkeys(entry["allow_infinite"])),
         )
+        narrower_key = len(session.spec["primary_key"]) > 2
         with closing_iterator(
             iter_dataset_time_chunks(session, one_timestamp=True)
         ) as frames:
             for frame in frames:
                 # The dataset reader owns its declared PK. The join may use a
                 # narrower key, so check assets only within this complete date.
-                if frame.asset_id.isna().any() or frame.asset_id.duplicated().any():
+                if narrower_key and frame.asset_id.duplicated().any():
                     raise ValueError("evaluation_input_duplicate_keys")
                 if "market_id" in frame and not frame.market_id.eq("a_share").all():
                     raise ValueError("evaluation_market_mismatch")

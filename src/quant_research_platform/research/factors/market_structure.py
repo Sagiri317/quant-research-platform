@@ -606,7 +606,7 @@ def _industry_context(frame, out, requested, history_start):
     ).all(axis=1)
     sector_keys = [frame[name].where(known) for name in sector_columns]
     groups = frame.groupby([timestamps, *sector_keys], sort=False, observed=True)
-    index = pd.MultiIndex.from_arrays([timestamps, *sector_keys])
+    sector_ids = groups.ngroup()
     if {
         "industry_return_dispersion_20d",
         "industry_positive_return_hhi_20d",
@@ -637,34 +637,16 @@ def _industry_context(frame, out, requested, history_start):
                 .transform("sum")
             )
             peer_fraction = (negatives - means.lt(0)) / (counts - 1).where(counts > 1)
-            out["industry_isolation_20d"] = (
-                (means.clip(lower=0) * peer_fraction).reindex(index).to_numpy()
+            out["industry_isolation_20d"] = sector_ids.map(
+                (means.clip(lower=0) * peer_fraction).reset_index(drop=True)
             )
-    peer_ids = (
-        groups.ngroup()
-        if {
-            "industry_turnover_relative",
-            "industry_comovement_20d",
-        }.intersection(requested)
-        or any(
-            name.startswith(
-                (
-                    "industry_return_relative_",
-                    "industry_catchup_",
-                    "industry_catchdown_",
-                )
-            )
-            for name in requested
-        )
-        else None
-    )
     for width in (1, 5, 20):
         names = {kind: f"industry_{kind}_{width}d" for kind in ("catchup", "catchdown")}
         relative = width == 1 and "industry_return_relative_1d" in requested
         if not relative and not set(names.values()).intersection(requested):
             continue
         values = frame["_mom" if width == 20 else f"_mom{width}"]
-        peers = leave_one_out_mean(values, peer_ids)
+        peers = leave_one_out_mean(values, sector_ids)
         if relative:
             out["industry_return_relative_1d"] = values - peers
         valid = values.notna() & peers.notna()
@@ -676,20 +658,9 @@ def _industry_context(frame, out, requested, history_start):
             out[names["catchdown"]] = (
                 (values - peers).clip(lower=0).where(peers < 0, 0).where(valid)
             )
-    for source, target, ratio in (
-        ("_t", "industry_turnover_relative", True),
-        ("_r", "_loo_r", None),
-    ):
-        if target not in requested and not (
-            target == "_loo_r" and "industry_comovement_20d" in requested
-        ):
-            continue
-        values = frame[source]
-        peers = leave_one_out_mean(values, peer_ids)
-        if ratio is None:
-            frame[target] = peers
-        else:
-            out[target] = values / peers.where(peers > 0) if ratio else values - peers
+    if "industry_turnover_relative" in requested:
+        peers = leave_one_out_mean(frame._t, sector_ids)
+        out["industry_turnover_relative"] = frame._t / peers.where(peers > 0)
     if {
         "industry_amount_share",
         "industry_amount_hhi",
@@ -703,11 +674,7 @@ def _industry_context(frame, out, requested, history_start):
         requested
     ):
         n = groups._a.transform("count")
-        squares = (
-            shares.pow(2)
-            .groupby([timestamps, *sector_keys], sort=False)
-            .transform("sum")
-        )
+        squares = shares.pow(2).groupby(sector_ids, sort=False).transform("sum")
         out["industry_amount_hhi"] = ((squares - 1 / n) / (1 - 1 / n)).where(
             (n > 1) & (amount_total > 0)
         )
@@ -721,16 +688,13 @@ def _industry_context(frame, out, requested, history_start):
         paired_cap = frame.float_market_cap.where(paired)
         market_amount = paired_amount.groupby(timestamps).transform("sum")
         market_cap = paired_cap.groupby(timestamps).transform("sum")
-        sector_amount = paired_amount.groupby(
-            [timestamps, *sector_keys], sort=False
-        ).transform("sum")
-        sector_cap = paired_cap.groupby(
-            [timestamps, *sector_keys], sort=False
-        ).transform("sum")
+        sector_amount = paired_amount.groupby(sector_ids, sort=False).transform("sum")
+        sector_cap = paired_cap.groupby(sector_ids, sort=False).transform("sum")
         out["industry_activity_pressure"] = (
             sector_amount / market_amount.where(market_amount > 0)
         ) / (sector_cap / market_cap.where(market_cap > 0)).where(sector_cap > 0)
     if "industry_comovement_20d" in requested:
+        peers = leave_one_out_mean(frame._r, sector_ids)
         out["industry_comovement_20d"] = frame._r.rolling(
             HistoryWindow(history_start, 20), min_periods=20
-        ).corr(frame._loo_r)
+        ).corr(peers)

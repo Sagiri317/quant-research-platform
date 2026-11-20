@@ -269,6 +269,11 @@ def test_merged_releases_select_clocks_per_row_without_inventing_publication(tmp
             published_at="2024-01-02T18:00+08:00",
             estimated_available_at="2024-01-04T00:00+08:00",
         ),
+        dict(
+            row,
+            published_at="2024-01-02T10:00:01.125Z",
+            retrieved_at="2026-11-11T08:00:00.001+08:00",
+        ),
         dict(row, release_date="2024-01-03"),
         dict(row, estimated_available_at="2024-01-05T00:00+08:00"),
     ]
@@ -279,17 +284,19 @@ def test_merged_releases_select_clocks_per_row_without_inventing_publication(tmp
         pd.Timestamp(v)
         for v in (
             "2024-01-02T10:00Z",
+            "2024-01-02T10:00:01.125Z",
             "2024-01-03T16:00Z",
             "2024-01-04T16:00Z",
         )
     ]
     assert actual.availability_basis.tolist() == [
         "release_timestamp",
+        "release_timestamp",
         "release_date_end",
         "inferred_snapshot_release",
     ]
-    assert actual.published_at.notna().tolist() == [True, False, False]
-    assert actual.vintage_date.notna().tolist() == [True, True, False]
+    assert actual.published_at.notna().tolist() == [True, True, False, False]
+    assert actual.vintage_date.notna().tolist() == [True, True, True, False]
     pd.DataFrame([row]).assign(estimated_available_at=None).to_csv(path, index=False)
     with pytest.raises(ValueError, match="macro_release_clock_missing"):
         read_release_csv(path)

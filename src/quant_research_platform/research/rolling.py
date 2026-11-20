@@ -279,8 +279,11 @@ def _historical_validation(fold, session, candidates, days, count):
                 availability_column=availability,
                 target_column=target,
             )
-            observed.update(frame.loc[mature, "timestamp"].dt.normalize())
-            ready = frame.loc[mature, ["timestamp", availability]].max(axis=1).min()
+            valid = frame.loc[mature, ["timestamp", availability]]
+            observed.update(valid.timestamp.dt.normalize().unique())
+            ready = valid.timestamp.where(
+                valid.timestamp.ge(valid[availability]), valid[availability]
+            ).min()
             if pd.notna(ready) and (first_ready is None or ready < first_ready):
                 first_ready = ready
     mature_days = days[days.isin(observed)]
@@ -335,10 +338,10 @@ def _training_exposures(session, fold, spec, availability, axis):
 
 
 def _select_inputs(
-    fold, session, candidates, *, correlation_threshold=None, axis=None, preferred=()
+    fold, session, candidates, *, correlation_threshold=None, axis=None, preferred=None
 ):
     groups = {}
-    for _, spec in candidates:
+    for model_id, spec in candidates:
         if spec.model_algorithm in DEEPLOB_ALGORITHMS:
             continue
         key = (
@@ -357,7 +360,7 @@ def _select_inputs(
                 spec.input_columns,
                 axis=axis,
                 threshold=correlation_threshold,
-                preferred=preferred,
+                preferred=preferred.get(model_id, ()) if preferred else (),
             )
             continue
         pending, first, varying = set(spec.input_columns), {}, set()
@@ -470,7 +473,7 @@ def _validation_predictions(frames, spec, prediction_model):
     return values
 
 
-def _select(config, fold, session, candidates, calendar, preferred=()):
+def _select(config, fold, session, candidates, calendar, preferred=None):
     from quant_research_platform.research.models.production import (
         _fit_input_key,
         _fit_prepared,
@@ -876,7 +879,7 @@ def _run(config, folds, days):
         raise ValueError("quarterly_one_prediction_signal_required")
     write_qrp_json_file(root / "config.json", config)
     results = []
-    preferred = ()
+    preferred = {}
     for fold in folds:
         history = TimeWindow(fold.train.start, fold.validation.end)
         selected_fold = _historical_validation(
@@ -893,7 +896,7 @@ def _run(config, folds, days):
         for model, parameters, selection in _select(
             config, fold, session, candidates, calendar, preferred
         ):
-            preferred = selection["inputs"]["retained"]
+            preferred[model["model_id"]] = selection["inputs"]["retained"]
             destination = root / fold.fold_id / model["model_id"]
             trained = fit(
                 {

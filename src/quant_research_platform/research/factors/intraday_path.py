@@ -160,20 +160,23 @@ def calculate(panel, *, columns):
                         if v.notna().all() and s.notna().all() and v.sum() > 0:
                             value = s.sum() / v.sum()
                         opening_flow[minutes] = value
-                    elif (
-                        np.isfinite(price[: end + 1]).all()
-                        and (price[: end + 1] > 0).all()
-                        and work.segment_id.iloc[: end + 1].nunique() == 1
-                    ):
+                    elif work.segment_id.iloc[0] == work.segment_id.iloc[end]:
+                        path = price[: end + 1]
                         if kind == "observed_return":
-                            value = price[end] / price[0] - 1
-                        elif has_price_variation(
-                            price[: end + 1].min(), price[: end + 1].max()
+                            if (
+                                np.isfinite(path[[0, -1]]).all()
+                                and min(path[0], path[-1]) > 0
+                            ):
+                                value = path[-1] / path[0] - 1
+                        elif (
+                            np.isfinite(path).all()
+                            and path.min() > 0
+                            and has_price_variation(path.min(), path.max())
                         ):
                             value = float(
                                 path_efficiency(
-                                    np.log(price[end] / price[0]),
-                                    np.abs(np.diff(np.log(price[: end + 1]))).sum(),
+                                    np.log(path[-1] / path[0]),
+                                    np.abs(np.diff(np.log(path))).sum(),
                                 )
                             )
                 if name in requested:

@@ -79,10 +79,13 @@ def _tables(output):
         return metrics, epochs.copy(), artifact.metadata
 
 
-def test_training_tails_select_predictions_before_missing_labels(tmp_path):
+@pytest.mark.parametrize(
+    "scope", ["all", "asset_ids", "row_filters", "files", "years", "time_window"]
+)
+def test_training_tails_select_predictions_before_missing_labels(tmp_path, scope):
     from quant_research_platform.research.models.periods import _training_daily
 
-    dates = pd.date_range("2020-01-01", periods=2)
+    dates = pd.date_range("2019-12-31", periods=2)
     frame = pd.DataFrame(
         [
             (day, f"s{i:02d}", float(i), i / 100, True, day)
@@ -98,16 +101,51 @@ def test_training_tails_select_predictions_before_missing_labels(tmp_path):
             "label_available_at",
         ],
     )
-    frame.loc[frame.index[-1], "label"] = np.nan
+    frame.loc[frame.asset_id.eq("s10"), "label"] = np.nan
+    assets = sorted(frame.asset_id.unique())
+    outside = frame.loc[frame.asset_id.eq("s09")].assign(
+        asset_id="outside", x=100.0, label=np.nan
+    )
+    excludes_day = scope in {"years", "time_window"}
+    if excludes_day:
+        frame.loc[frame.timestamp.eq(dates[0]), "label"] = np.nan
     path = tmp_path / "input.parquet"
-    frame.to_parquet(path, index=False)
+    if scope == "files":
+        path = tmp_path / "members"
+        path.mkdir()
+        frame.to_parquet(path / "fitted.parquet", index=False)
+        outside.to_parquet(path / "outside.parquet", index=False)
+    else:
+        if scope in {"row_filters", "asset_ids"}:
+            frame = pd.concat([frame, outside], ignore_index=True)
+        frame.to_parquet(path, index=False)
     source = {"path": str(path), "spec": _declaration()}
     config = {
         **fit_config(tmp_path, path),
         "inputs": source,
-        "fit_windows": [{"start": "2020-01-01", "end": "2020-01-02"}],
+        "fit_windows": [{"start": "2019-12-31", "end": "2020-01-01"}],
     }
+    if scope == "asset_ids":
+        config["asset_ids"] = assets
+    elif scope == "row_filters":
+        config["inputs"] = {**source, "row_filters": [["asset_id", "in", assets]]}
+    elif scope == "files":
+        config["inputs"] = {**source, "files": ["fitted.parquet"]}
+    elif scope == "years":
+        config["inputs"] = {**source, "years": [2020]}
+    elif scope == "time_window":
+        config["inputs"] = {
+            **source,
+            "time_window": {"start": "2020-01-01", "end": "2020-01-01"},
+        }
     result, facts = load_model(fit(config))
+    if scope == "files":
+        relocated = path.rename(tmp_path / "relocated")
+        source = {
+            **source,
+            "path": str(relocated),
+            "files": ["fitted.parquet", "outside.parquet"],
+        }
     daily = _training_daily(
         source,
         result,
@@ -121,7 +159,20 @@ def test_training_tails_select_predictions_before_missing_labels(tmp_path):
     assert second.loc["long_mean_label", "value"] == pytest.approx(0.09)
     assert second.loc["long_ic", "observation_count"] == 1
     assert pd.isna(second.loc["long_ic", "value"])
-    assert daily.loc[daily.metric.eq("mse"), "observation_count"].sum() == 21
+    mse = daily.loc[daily.metric.eq("mse")].set_index("timestamp")
+    assert mse.observation_count.sum() == (10 if excludes_day else 20)
+    assert mse.loc[dates[0], "input_count"] == (0 if excludes_day else 11)
+    if scope == "all":
+        # Dropping only s10 keeps every mature label but changes the long portfolio.
+        with pytest.raises(ValueError, match="model_period_training_sample_mismatch"):
+            _training_daily(
+                {**source, "row_filters": [["asset_id", "in", assets[:-1]]]},
+                result,
+                facts,
+                sessions=dates,
+                evaluation_axis="cross_sectional",
+                top_quantile=0.2,
+            )
 
 
 def test_historical_candidates_export_only_their_saved_validation_facts():
