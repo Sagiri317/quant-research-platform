@@ -672,21 +672,15 @@ def calculate(decisions, sources, *, columns, parameters=None):
     session_days = session_groups = None
     if "trading_calendar" in sources:
         from quant_research_platform.markets.implementations.a_share.calendar import (
-            CURRENT_MARKET_TYPES,
             next_trading_sessions,
+            trading_session_segments,
             unified_trading_sessions,
         )
 
-        calendar = sources["trading_calendar"].loc[
-            sources["trading_calendar"].source_market_type.isin(CURRENT_MARKET_TYPES)
-        ]
+        calendar = sources["trading_calendar"]
         session_days = unified_trading_sessions(calendar)
         successors = next_trading_sessions(calendar, session_days)
-        session_groups = (
-            pd.Series(session_days, index=session_days)
-            .ne(pd.Series(successors, index=session_days).shift())
-            .cumsum()
-        )
+        session_groups = trading_session_segments(session_days, successors)
     shares = (
         share_states(
             sources["public_fund_shares"].loc[

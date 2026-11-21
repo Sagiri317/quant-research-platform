@@ -163,7 +163,8 @@ def _signal_metric_blocks(
                     metrics[name] = (
                         long[0] - other[0] if reason is None else np.nan,
                         reason,
-                        long[2] + other[2],
+                        # Overlapping signal tails cover the full paired domain.
+                        min(metrics["mean_label"][2], long[2] + other[2]),
                     )
             if regression:
                 usable = part.loc[np.isfinite(part.signal) & np.isfinite(part.label)]

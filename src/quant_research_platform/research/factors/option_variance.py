@@ -79,9 +79,10 @@ def implied_variances(decisions, risk, contracts):
         .reset_index()
     )
     surfaces = surface.groupby(["timestamp", "_decision", "underlying_id"], sort=False)
-    for i, row in decisions.iterrows():
+    priced = decisions.close.gt(0) & decisions.asset_id.isin(surface.underlying_id)
+    for row in decisions.loc[priced].itertuples():
         key = (row.signal_session, row.timestamp, row.asset_id)
-        if key not in surfaces.indices or not row.close > 0:
+        if key not in surfaces.indices:
             continue
         own = surfaces.get_group(key)
         curve = []
@@ -94,7 +95,7 @@ def implied_variances(decisions, risk, contracts):
         for width, name in zip((20, 60), names, strict=True):
             horizon = width / 252
             if tenor[0] <= horizon <= tenor[-1]:
-                result.loc[i, name] = (
+                result.loc[row.Index, name] = (
                     np.interp(horizon, tenor, tenor * variance) / horizon
                 )
     return result

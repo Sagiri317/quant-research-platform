@@ -8,6 +8,9 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
     strict_string_series,
 )
+from quant_research_platform.markets.implementations.a_share.calendar import (
+    trading_session_segments,
+)
 
 RECIPES = {
     "financing_balance_to_float_cap": (
@@ -259,8 +262,7 @@ def calculate(
     )
     gaps = None
     if axis is not None and session_successors is not None:
-        proved = session_successors.reindex(axis[:-1]).eq(axis[1:]).to_numpy()
-        gaps = np.r_[0, np.cumsum(~proved)]
+        gaps = trading_session_segments(axis, session_successors).to_numpy()
 
     def observation_dates(lag):
         if not lag:

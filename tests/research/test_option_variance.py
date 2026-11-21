@@ -100,9 +100,15 @@ def test_batched_contract_alignment_keeps_each_decision_cutoff():
                             implied_volatility=sigma + (0.1 if strike == 110 else 0),
                         )
                     )
+    # A missing native nullable spot cannot select ATM at that decision.
+    missing = decisions.iloc[[0]].assign(close=pd.NA)
+    missing["timestamp"] += pd.Timedelta(minutes=1)
+    decisions = pd.concat([decisions, missing], ignore_index=True)
+    decisions["close"] = decisions.close.astype("Float64")
     result = implied_variances(decisions, pd.DataFrame(risk), pd.DataFrame(contracts))
+    assert result.iloc[-1].isna().all()
     target = 20 * 365 / 252
-    for day, row in result.iterrows():
+    for day, row in result.iloc[:2].iterrows():
         near, far = 20 - day, 80 - day
         expected = (
             (far - target) * near * (0.2 + 0.1 * day) ** 2
@@ -188,6 +194,7 @@ def test_option_risk_versions_are_selected_before_surface_aggregation(
     prices, calendar = inputs()
     prices[["open", "close"]] = 100.0
     prices["high"] = prices["low"] = 100.0
+    prices["available_at"] = prices.timestamp + pd.Timedelta(hours=8)
     calendar["timestamp"] = calendar.calendar_date
     sources = {}
     for name, frame, keys in (

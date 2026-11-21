@@ -245,12 +245,11 @@ def _columns(spec, availability):
     )
 
 
-def _historical_validation(fold, session, candidates, days, count):
+def _historical_validation(fold, session, candidates, days, count, history):
     target = candidates[0][1].target_column
     availability = session.spec.get("label_availability_columns", {}).get(
         target, training_availability_columns(target)[0]
     )
-    history = TimeWindow(fold.train.start, fold.validation.end)
     cutoff = pd.Timestamp(fold.prediction.start) - pd.Timedelta(1, "ns")
     modes = tuple(dict.fromkeys(spec.sample_filter_mode for _, spec in candidates))
     columns = tuple(
@@ -473,7 +472,7 @@ def _validation_predictions(frames, spec, prediction_model):
     return values
 
 
-def _select(config, fold, session, candidates, calendar, preferred=None):
+def _select(config, fold, session, candidates, calendar, days, preferred=None):
     from quant_research_platform.research.models.production import (
         _fit_input_key,
         _fit_prepared,
@@ -639,6 +638,11 @@ def _select(config, fold, session, candidates, calendar, preferred=None):
     rank_daily = {}
     evaluation = config["evaluation"]
     axis = evaluation.get("evaluation_axis", "cross_sectional")
+    validation_days = days[
+        days.slice_indexer(
+            pd.Timestamp(fold.validation.start), pd.Timestamp(fold.validation.end)
+        )
+    ]
     for values, row in zip(predictions, rows, strict=True):
         if not np.isfinite(values[signal_domain]).all():
             raise ValueError("invalid_prediction_values")
@@ -650,7 +654,7 @@ def _select(config, fold, session, candidates, calendar, preferred=None):
                 label=validation[target].where(common).loc[signal_domain],
             ),
             evaluation_axis=axis,
-            sessions=validation.timestamp.dt.normalize().drop_duplicates(),
+            sessions=validation_days,
             asset_ids=tuple(validation.asset_id.loc[signal_domain].unique()),
             regression=True,
             baseline_columns=("zero",),
@@ -881,9 +885,15 @@ def _run(config, folds, days):
     results = []
     preferred = {}
     for fold in folds:
-        history = TimeWindow(fold.train.start, fold.validation.end)
+        prior = days.searchsorted(pd.Timestamp(fold.prediction.start)) - 1
+        history = TimeWindow(fold.train.start, days[prior].date())
         selected_fold = _historical_validation(
-            fold, session, candidates, days, config.get("validation_sessions", 20)
+            fold,
+            session,
+            candidates,
+            days,
+            config.get("validation_sessions", 20),
+            history,
         )
         if selected_fold is None:
             results.append(
@@ -894,7 +904,7 @@ def _run(config, folds, days):
         window = _window_payload(fold.prediction)
         cutoff = pd.Timestamp(fold.prediction.start) - pd.Timedelta(nanoseconds=1)
         for model, parameters, selection in _select(
-            config, fold, session, candidates, calendar, preferred
+            config, fold, session, candidates, calendar, days, preferred
         ):
             preferred[model["model_id"]] = selection["inputs"]["retained"]
             destination = root / fold.fold_id / model["model_id"]

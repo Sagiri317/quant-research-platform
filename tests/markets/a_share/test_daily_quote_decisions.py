@@ -634,6 +634,8 @@ def test_native_etf_action_versions_and_local_returns_reach_saved_factors(tmp_pa
             amount=10000.0,
         )
     )
+    prices["available_at"] = days + pd.Timedelta(hours=7, seconds=1)
+    prices.loc[prices.index[-1], "available_at"] += pd.Timedelta(days=3)
     spec = interim_catalog().get("public_domestic_etf_prices")
     price_root = tmp_path / "prices"
     write_dataset(
@@ -664,6 +666,10 @@ def test_native_etf_action_versions_and_local_returns_reach_saved_factors(tmp_pa
         )
     )
     panel = read_dataset(panel_root).set_index("signal_session")
+    assert (
+        panel.loc[days[-2], daily_quotes.LABEL + "_available_at"]
+        == prices.available_at.iloc[-1]
+    )
     assert panel.loc[days[1], "period_return"] == pytest.approx(0.01)
     assert panel.loc[days[1], "return_available_at"] == pd.Timestamp("2024-01-03 16:00")
     assert pd.isna(panel.loc[days[3], "period_return"])
@@ -912,3 +918,81 @@ def test_split_scale_survives_a_missing_ex_date_quote():
     assert panel.loc[days[2:4], "adj_close"].tolist() == pytest.approx([10.0, 12.0])
     assert panel.loc[days[1:3], "period_return"].isna().all()
     assert panel.loc[days[3], "period_return"] == pytest.approx(0.2)
+
+
+def test_etf_bar_released_after_preopen_only_enters_later_decisions():
+    days = pd.date_range("2024-01-08", periods=5).as_unit("ns")
+    calendar = pd.DataFrame(
+        dict(calendar_date=days, source_market_type=1, is_trading_day=True)
+    )
+    bars = pd.DataFrame(
+        dict(
+            asset_id="510300",
+            timestamp=days,
+            open=10.0,
+            close=[10.0, 11.0, 12.0, 13.0, 14.0],
+            volume=100.0,
+            available_at=days + pd.Timedelta(hours=15, minutes=59, seconds=59),
+        )
+    )
+    # Monday's close arrives Tuesday night; Wednesday can then use both closes.
+    bars.loc[0, "available_at"] = days[1] + pd.Timedelta(hours=17)
+    bars.loc[3, "available_at"] = pd.NaT
+    actions = pd.DataFrame(columns=["asset_id", "timestamp"])
+    result = daily_quotes.daily_decisions(bars, calendar, actions=actions).set_index(
+        "signal_session"
+    )
+    assert result.loc[days[0], ["open", "close", "volume"]].isna().all()
+    assert not result.loc[days[0], "eligible"]
+    assert result.loc[days[0], daily_quotes.LABEL] == pytest.approx(0.1)
+    assert (
+        result.loc[days[0], daily_quotes.LABEL + "_available_at"]
+        == bars.available_at.iloc[1]
+    )
+    assert result.loc[days[1], "period_return"] == pytest.approx(0.1)
+    assert result.loc[days[1], "return_available_at"] == bars.available_at.iloc[0]
+    assert result.loc[days[2], "period_return"] == pytest.approx(12 / 11 - 1)
+    assert result.loc[days[2], daily_quotes.LABEL] == pytest.approx(0.3)
+    assert pd.isna(result.loc[days[2], daily_quotes.LABEL + "_available_at"])
+    assert pd.isna(result.loc[days[3], "close"])
+
+
+def test_delayed_ex_date_bar_enters_history_only_after_release():
+    days = pd.date_range("2024-01-01", periods=28)
+    calendar = pd.DataFrame(
+        dict(calendar_date=days, source_market_type=1, is_trading_day=True)
+    )
+    bars = pd.DataFrame(
+        dict(
+            asset_id="510300",
+            timestamp=days,
+            open=10.0,
+            close=10.0,
+            volume=100.0,
+            available_at=days + pd.Timedelta(hours=8),
+        )
+    )
+    bars.loc[19, ["volume", "available_at"]] = [120.0, days[23]]
+    dividend = pd.DataFrame(
+        dict(
+            asset_id=["510300:dividends"],
+            timestamp=days[19],
+            available_at=days[18],
+            event_type="dividends",
+            amount=1.0,
+            numerator=float("nan"),
+            denominator=float("nan"),
+        )
+    )
+    frame = daily_quotes.daily_decisions(bars, calendar, actions=dividend).set_index(
+        "signal_session"
+    )
+    # A 1 CNY dividend changes the 10 CNY reinvested price to 11. The
+    # ex-date close is needed for that scale, even at later decisions.
+    assert frame.loc[days[19:22], ["adj_close", "avg_volume_20d"]].isna().all().all()
+    assert frame.loc[days[20], "close"] == 10
+    assert frame.loc[days[22], "adj_close"] == pytest.approx(11)
+    assert frame.loc[days[22], "avg_volume_20d"] == pytest.approx(101)
+    assert pd.isna(frame.loc[days[21], "volatility_20d"])
+    # Sample standard deviation of one 10% return and nineteen zero returns.
+    assert frame.loc[days[22], "volatility_20d"] == pytest.approx(0.1 / 20**0.5)

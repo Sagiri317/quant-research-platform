@@ -7,7 +7,10 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.asof import observation_versions
+from quant_research_platform.compute.dataframe.asof import (
+    observation_versions,
+    rolling_available_at,
+)
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -15,6 +18,7 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
     next_trading_sessions,
+    trading_session_segments,
     unified_trading_sessions,
 )
 from quant_research_platform.research.factors.price_volume.calculations import (
@@ -234,6 +238,7 @@ def daily_decisions(prices, calendar, *, actions=None):
     # ETF/index quotes use Shanghai/Shenzhen calendars, not other boards' histories.
     calendar = calendar.loc[calendar.source_market_type.isin((1, 4))]
     sessions = unified_trading_sessions(calendar)
+    successors = pd.Series(next_trading_sessions(calendar, sessions), index=sessions)
     if actions is not None and not actions.empty:
         actions = observation_versions(
             actions,
@@ -242,36 +247,45 @@ def daily_decisions(prices, calendar, *, actions=None):
         )
     blocks = []
     for asset, group in prices.groupby("asset_id", sort=False):
-        group = group.sort_values("timestamp").set_index("timestamp")
+        group = group.set_index("timestamp")
         axis = sessions[
             (sessions >= group.index.min()) & (sessions <= group.index.max())
         ]
         data = group.reindex(axis)
-        following = next_trading_sessions(calendar, axis)
+        following = pd.DatetimeIndex(successors.reindex(axis))
+        decisions = following + pd.Timedelta(hours=1)
         # Unknown calendar intervals cannot become adjacent return observations.
-        segments = pd.Series(following, index=axis).shift().ne(axis).cumsum()
-        current = data[["open", "close"]]
-        next_prices = current.reindex(following).set_axis(axis)
+        segments = trading_session_segments(axis, following)
+        quote_clock = (
+            data.pop("available_at")
+            if "available_at" in data
+            else pd.Series(axis + pd.Timedelta(hours=7, seconds=1), index=axis)
+        )
+        next_prices = data[["open", "close"]].reindex(following).set_axis(axis)
+        label_clock = quote_clock.reindex(following).set_axis(axis)
+        previous = data.close.groupby(segments).shift()
+        previous_clock = quote_clock.groupby(segments).shift()
+        return_clock = pd.concat([previous_clock, quote_clock], axis=1).max(
+            axis=1, skipna=False
+        )
         valid = next_prices.open.gt(0) & next_prices.close.gt(0)
-        out = data.copy()
+        # Apply each decision's cutoff without discarding later-visible history.
+        out = data.where(quote_clock.le(decisions), axis="index")
         out["asset_id"] = asset
         out["market_id"] = "a_share"
         out["signal_session"] = axis
         out["execution_session"] = following
-        out["timestamp"] = following + pd.Timedelta(hours=1)
+        out["timestamp"] = decisions
         out["order_submit_at"] = out.timestamp + pd.Timedelta(seconds=1)
-        out["return_available_at"] = axis + pd.Timedelta(hours=7, seconds=1)
-        out[LABEL + "_available_at"] = following + pd.Timedelta(hours=7, seconds=1)
+        out[LABEL + "_available_at"] = label_clock.where(valid)
         out[LABEL] = (next_prices.close / next_prices.open - 1).where(valid)
-        previous = data.close.groupby(segments).shift()
-        out["period_return"] = data.close / previous.where(previous > 0) - 1
+        adjusted_close = data.close
         out["adj_close"] = np.nan
         out["secondary_flow_imbalance"] = np.nan
         out["market_return"] = np.nan
-        if "volume" in data and actions is None:
-            out["period_return"] = np.nan
         if actions is not None:
             multiplier = pd.Series(1.0, index=axis)
+            scale_clock = pd.Series(axis, index=axis)
             selected = actions.loc[actions.asset_id.str.split(":").str[0].eq(asset)]
             for date, events in selected.groupby("timestamp", sort=False):
                 # Pre-listing conversion belongs to a different price lifecycle.
@@ -296,33 +310,36 @@ def daily_decisions(prices, calendar, *, actions=None):
                 # A split changes the share count even when no ex-date quote exists.
                 if pd.notna(cash) and cash != 0:
                     cash /= data.close.loc[date]
+                    scale_clock.loc[date] = quote_clock.loc[date]
                 multiplier.loc[date] = q + cash if complete else np.nan
                 if complete:
-                    # Both closes are known by the current session's close.
-                    # A later action version must not inherit that earlier clock.
-                    out.loc[date, "return_available_at"] = max(
-                        out.loc[date, "return_available_at"], known.available_at.max()
+                    return_clock.loc[date] = max(
+                        return_clock.loc[date], known.available_at.max()
                     )
-            out["adj_close"] = data.close * multiplier.groupby(segments).cumprod(
-                skipna=False
+            scale = multiplier.groupby(segments).cumprod(skipna=False)
+            scale_known = (
+                scale_clock.groupby(segments).cummax(skipna=False).le(decisions)
             )
+            out["adj_close"] = out.close * scale.where(scale_known)
             # A one-session return needs only this session's action, not an
             # unknown cumulative adjustment from an earlier session.
-            out["period_return"] = (
-                data.close * multiplier / previous.where(previous > 0) - 1
-            )
-        out["return_available_at"] = out.return_available_at.where(
-            out.period_return.notna()
-        )
-        out["eligible"] = data.close.gt(0)
+            adjusted_close = data.close * multiplier
+        elif "volume" in data:
+            adjusted_close = pd.Series(np.nan, index=axis)
+        returns = adjusted_close / previous.where(previous > 0) - 1
+        out["period_return"] = returns.where(return_clock.le(decisions))
+        out["return_available_at"] = return_clock.where(out.period_return.notna())
+        out["eligible"] = out.close.gt(0)
         for width in (20, 60):
             out[f"volatility_{width}d"] = (
-                out.period_return.groupby(segments)
+                returns.groupby(segments)
                 .rolling(width, min_periods=width)
                 .std()
                 .droplevel(0)
+                .where(rolling_available_at(return_clock, width).le(decisions))
             )
             out[f"implied_variance_{width}d"] = np.nan
+        volume_known = rolling_available_at(quote_clock, 20).le(decisions)
         for field in ("volume", "amount"):
             if field in data:
                 out[f"avg_{field}_20d"] = (
@@ -331,6 +348,7 @@ def daily_decisions(prices, calendar, *, actions=None):
                     .rolling(20, min_periods=20)
                     .mean()
                     .droplevel(0)
+                    .where(volume_known)
                 )
         blocks.append(out.loc[out.timestamp.notna()].reset_index(drop=True))
     if blocks:
@@ -436,27 +454,36 @@ def produce(spec, *, inputs, time_window):
         if spec.data_id == "etf_daily_panel"
         else "index_market"
     )
-    options = _dataset_input_options(inputs[source])
     params = json.loads(spec.parameters_json)
     asset_column = (
         "asset_id" if source == "public_domestic_etf_prices" else "source_asset_id"
     )
-    if "asset_ids" in params:
-        options = _dataset_input_options(
+    source_session = open_dataset_session(
+        **_dataset_input_options(
             inputs[source],
-            row_filters=((asset_column, "in", tuple(params["asset_ids"])),),
+            row_filters=((asset_column, "in", tuple(params["asset_ids"])),)
+            if "asset_ids" in params
+            else (),
         )
-    prices = materialize_dataset_session(open_dataset_session(**options))
-    if asset_column != "asset_id":
-        prices = prices.rename(columns={asset_column: "asset_id"})
-    fields = [
-        "asset_id",
+    )
+    fields = (
+        asset_column,
         "timestamp",
         "open",
         "close",
-        *(name for name in ("high", "low", "volume", "amount") if name in prices),
-    ]
-    prices = prices.loc[:, fields]
+        *(
+            ("high", "low", "volume", "amount", "available_at")
+            if source == "public_domestic_etf_prices"
+            else ()
+        ),
+    )
+    prices = materialize_dataset_session(source_session.projected_view(fields)).rename(
+        columns={asset_column: "asset_id"}
+    )
+    if "available_at" in prices:
+        prices["available_at"] = pd.to_datetime(
+            prices.available_at, utc=True
+        ).dt.tz_localize(None)
     calendar = materialize_dataset_session(
         open_dataset_session(**_dataset_input_options(inputs["trading_calendar"]))
     )
@@ -500,11 +527,34 @@ def produce(spec, *, inputs, time_window):
             implied_variances,
         )
 
+        # Risk rows match the signal session exactly; contract terms can predate it.
+        risk_window = TimeWindow(frame.signal_session.min(), frame.signal_session.max())
         risk, contracts = (
             materialize_dataset_session(
-                open_dataset_session(**_dataset_input_options(inputs[name]))
+                open_dataset_session(
+                    **_dataset_input_options(inputs[name], time_window=window)
+                ).projected_view(
+                    (
+                        "timestamp",
+                        "available_at",
+                        "contract_id",
+                        "underlying_id",
+                        *fields,
+                    )
+                )
             )
-            for name in ("public_option_risk", "public_option_contracts")
+            for name, window, fields in (
+                (
+                    "public_option_risk",
+                    risk_window,
+                    ("asset_id", "option_type", "implied_volatility"),
+                ),
+                (
+                    "public_option_contracts",
+                    None,
+                    ("security_id", "expiry_date", "exercise_price"),
+                ),
+            )
         )
         implied = implied_variances(frame, risk, contracts)
         frame[list(implied)] = implied

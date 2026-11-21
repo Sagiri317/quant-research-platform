@@ -113,16 +113,16 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 and pd.notna(event.close)
                 and event.close > 0
             )
-            if not known:
-                if start < stop:
+            if start < stop:
+                if known:
+                    event_yield = event.amount / event.close
+                    sums[start] += event_yield
+                    sums[stop] -= event_yield
+                else:
                     unknown[start] += 1
                     unknown[stop] -= 1
-                continue
-            if start < stop:
-                event_yield = event.amount / event.close
-                sums[start] += event_yield
-                sums[stop] -= event_yield
-            if event.amount > 0:
+            # Historical payout evidence depends on cash, not a pre-ex price.
+            if pd.notna(event.amount) and event.amount > 0:
                 for year in range(3):
                     start, stop = max(limits[year], visible), limits[year + 1]
                     if start < stop:

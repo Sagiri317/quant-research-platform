@@ -62,6 +62,11 @@ def next_trading_sessions(
     return pd.DatetimeIndex(result)
 
 
+def trading_session_segments(sessions, successors):
+    """Split an ordered session axis wherever its calendar successor is unproved."""
+    return pd.Series(successors, index=sessions).shift().ne(sessions).cumsum()
+
+
 def compute_listing_session_facts(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,

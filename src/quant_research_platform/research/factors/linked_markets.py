@@ -11,6 +11,7 @@ from quant_research_platform.compute.dataframe.asof import (
 )
 from quant_research_platform.contracts.factors import FactorDefinition
 
+FUTURES_INDEX_IDS = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}
 FUTURES = (
     "index_future_near_basis",
     "index_future_basis_change_1d",
@@ -244,8 +245,9 @@ def futures_states(futures, contracts, index_prices, *, product="IF"):
 
 
 def _futures_states(futures, contracts, index_prices, *, product):
-    index_id = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}[product]
-    f = futures.sort_values(["asset_id", "timestamp"], kind="stable")
+    index_id = FUTURES_INDEX_IDS[product]
+    f = futures.astype(dict.fromkeys(("close", "volume", "open_interest"), "float64"))
+    f = f.sort_values(["asset_id", "timestamp"], kind="stable")
     if f.empty:
         return pd.DataFrame(columns=["asset_id", "timestamp", "available_at", *FUTURES])
     sessions = pd.DatetimeIndex(f.timestamp.unique()).sort_values()
@@ -516,6 +518,8 @@ def calculate(decisions, sources, *, columns, parameters=None):
     group_names = {name for name in usable if name.startswith("index_group_")}
     if group_names:
         from quant_research_platform.markets.implementations.a_share.calendar import (
+            next_trading_sessions,
+            trading_session_segments,
             unified_trading_sessions,
         )
 
@@ -525,10 +529,12 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 missing[name] = ["parameters.index_group"]
         else:
             raw = sources["index_market"]
-            axis = unified_trading_sessions(
-                sources["trading_calendar"].loc[
-                    sources["trading_calendar"].source_market_type.isin((1, 4))
-                ]
+            calendar = sources["trading_calendar"].loc[
+                sources["trading_calendar"].source_market_type.isin((1, 4))
+            ]
+            axis = unified_trading_sessions(calendar)
+            segments = trading_session_segments(
+                axis, next_trading_sessions(calendar, axis)
             )
             prices = (
                 raw.loc[raw.source_asset_id.isin(group)]
@@ -539,7 +545,8 @@ def calculate(decisions, sources, *, columns, parameters=None):
                 prices.loc[prices.index < pd.Timestamp(first_published), asset] = np.nan
             signal = pd.DatetimeIndex(work.signal_session)
             for width in (5, 20):
-                changes = prices / prices.shift(width).where(lambda x: x > 0) - 1
+                previous = prices.groupby(segments, sort=False).shift(width)
+                changes = prices / previous.where(previous > 0) - 1
                 complete = changes.notna().all(axis=1)
                 for kind, values in (
                     ("positive_fraction", changes.gt(0).mean(axis=1)),
@@ -592,19 +599,20 @@ def calculate(decisions, sources, *, columns, parameters=None):
         ):
             from quant_research_platform.compute.dataframe.history import liquidity_beta
 
-            index_id = {"IF": "000300", "IH": "000016", "IC": "000905", "IM": "000852"}[
-                product
-            ]
+            index_id = FUTURES_INDEX_IDS[product]
             benchmark = (
                 sources["index_market"]
                 .loc[sources["index_market"].source_asset_id.eq(index_id)]
                 .sort_values("timestamp")
             )
-            returns = (
-                benchmark.close
-                / benchmark.close.shift().where(benchmark.close.shift() > 0)
-                - 1
-            ).set_axis(benchmark.timestamp)
+            closes = benchmark.set_index("timestamp").close
+            # A missing spot quote on an observed session breaks both adjacent returns.
+            sessions = closes.index.union(
+                pd.DatetimeIndex(work.signal_session.dropna().unique())
+            )
+            closes = closes.reindex(sessions)
+            previous = closes.shift()
+            returns = closes / previous.where(previous > 0) - 1
             exposure = pd.Series(np.nan, index=work.index)
             for at in work.groupby(_history_ids(work), sort=False).indices.values():
                 exposure.loc[at] = liquidity_beta(

@@ -203,6 +203,24 @@ class PassiveOrders:
             order.face_value_per_share,
         )
 
+    def _maker_quote(self, book, side):
+        book_side = "bid" if side == 1 else "ask"
+        level = self.config.get("quote_level", 1)
+        prices = book.reindex(
+            [f"{book_side}_px{i}" for i in range(1, level + 1)]
+        ).to_numpy(dtype="float64", na_value=np.nan)
+        depth = book.get(f"{book_side}_vol{level}", np.nan)
+        if (
+            not np.isfinite(prices).all()
+            or (prices <= 0).any()
+            or (side * np.diff(prices) >= 0).any()
+            or pd.isna(depth)
+            or not np.isfinite(depth)
+            or depth < 0
+        ):
+            return None
+        return float(prices[-1]), depth
+
     def _intent_reservation(self, asset, target, record):
         if record is None:
             return 0.0, 0
@@ -239,15 +257,13 @@ class PassiveOrders:
         )
         if not count:
             return 0.0, 0
-        book_side = (
-            ("bid" if side == 1 else "ask")
-            if mode == "maker"
-            else ("ask" if side == 1 else "bid")
-        )
-        level = self.config.get("quote_level", 1) if mode == "maker" else 1
-        price = book[f"{book_side}_px{level}"]
-        if pd.isna(price) or not np.isfinite(price) or price <= 0:
-            return 0.0, 0
+        if mode == "maker":
+            quote = self._maker_quote(book, side)
+            if quote is None:
+                return 0.0, 0
+            price, _ = quote
+        else:
+            price = book["ask_px1" if side == 1 else "bid_px1"]
         key = market, side
         if key not in self.costs:
             self.costs[key] = prepare_trade_cost(
@@ -665,21 +681,8 @@ class PassiveOrders:
                     )
                 )
                 continue
-            book_side = "bid" if side == 1 else "ask"
-            level = self.config.get("quote_level", 1)
-            prices = row.reindex(
-                [f"{book_side}_px{index}" for index in range(1, level + 1)]
-            ).to_numpy(dtype="float64", na_value=np.nan)
-            price = float(prices[-1])
-            depth = row.get(f"{book_side}_vol{level}", np.nan)
-            if (
-                not np.isfinite(prices).all()
-                or (prices <= 0).any()
-                or (side * np.diff(prices) >= 0).any()
-                or pd.isna(depth)
-                or not np.isfinite(depth)
-                or depth < 0
-            ):
+            quote = self._maker_quote(row, side)
+            if quote is None:
                 diagnostics.append(
                     PortfolioDiagnostic(
                         asset,
@@ -689,6 +692,7 @@ class PassiveOrders:
                     )
                 )
                 continue
+            price, depth = quote
             market, minimum, increment, maximum = self.limits[asset]
             available = sellable[asset] if side == -1 else np.inf
             capacity = execution_depth(

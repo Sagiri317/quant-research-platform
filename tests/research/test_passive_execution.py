@@ -352,6 +352,34 @@ def test_native_book_segments_and_unquoted_unheld_asset_allow_passive_fill(tmp_p
     assert [trade.quantity for batch in batches for trade in batch.trades] == [100]
 
 
+def test_nullable_markout_waits_for_next_observed_price(tmp_path):
+    panel = quotes(
+        "2024-01-02",
+        assets=("a",),
+        clocks=("01:30:00", "01:30:03", "01:30:06", "01:30:09"),
+    )
+    for column in ("mid", "ask_px1"):
+        panel[column] = (
+            panel[column].astype("Float64").mask(panel.timestamp.dt.second.eq(6))
+        )
+    panel["bid_vol1"] = 100.0
+    signals = panel.iloc[:1][["timestamp", "asset_id"]].assign(prediction_score=1.0)
+    batches, _ = replay(
+        tmp_path,
+        panel,
+        signals,
+        [(4, "a", "sell", 300, 9.99)],
+        account_parameters={"markout_ms": 1000.0},
+    )
+    observed = [
+        d.text
+        for b in batches
+        for d in b.diagnostics
+        if d.name == "markout_observed_at_ns"
+    ]
+    assert observed == [str(panel.timestamp.iloc[-1].value)]
+
+
 def test_passive_depth_and_markouts_reuse_native_partial_fill_ledger(tmp_path):
     panel = quotes("2024-01-02", assets=("a",)).assign(bid_px2=9.98, bid_vol2=100.0)
     panel.loc[2, ["mid", "bid_px1", "ask_px1"]] = [10.5, 10.49, 10.51]

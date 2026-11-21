@@ -163,6 +163,8 @@ def test_dividends_use_pre_ex_price_and_known_announcements_only(tmp_path):
     prices = frame[
         ["market_id", "asset_id", "signal_session", "listing_date", "close"]
     ].rename(columns={"signal_session": "timestamp"})
+    # The old payout needs no pre-ex price to prove positive cash was paid.
+    prices.loc[prices.timestamp.eq("2018-06-11"), "close"] = np.nan
     frame = frame.drop(columns="close")
 
     def calc(table):

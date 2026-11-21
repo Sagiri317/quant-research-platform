@@ -753,6 +753,34 @@ def test_shared_cash_inflight_reservations_and_taker_capacity(tmp_path):
     assert info["economic_reward_bps"] == pytest.approx(-4 / 3500 * 10000)
 
 
+def test_missing_maker_queue_leaves_cash_for_another_assets_taker(tmp_path):
+    episode = execution_episode(tmp_path, kinds=("gold_etf", "gold_etf"), capital=3500)
+    panel = read_dataset(episode["account"]["panel"])
+    panel.loc[panel.asset_id.eq("a"), "bid_vol1"] = np.nan
+    write_dataset(tmp_path / "missing-queue", panel, spec=quote_spec(panel))
+    episode["account"]["panel"] = str(tmp_path / "missing-queue")
+    _, batches, _, info, _ = replay(episode, [[4, 7], [0, 0], [0, 0], [0, 0]])
+    # Only b can execute: 1500 cash covers 100 at 10.01 plus 5, not 200.
+    assert [(t.asset_id, t.quantity) for batch in batches for t in batch.trades] == [
+        ("b", 100)
+    ]
+    assert info["nav"] == pytest.approx(3494)
+
+
+def test_unheld_etf_missing_nullable_mid_does_not_block_other_asset(tmp_path):
+    episode = execution_episode(tmp_path, kinds=("gold_etf", "gold_etf"), capital=3500)
+    episode["account"]["parameters"]["initial_inventory"] = {"a": 0, "b": 100}
+    panel = read_dataset(episode["account"]["panel"])
+    for col in ("mid", "ask_px1"):
+        panel[col] = panel[col].astype("Float64").mask(panel.asset_id.eq("a"))
+    write_dataset(tmp_path / "missing-book", panel, spec=quote_spec(panel))
+    episode["account"]["panel"] = str(tmp_path / "missing-book")
+    _, batches, _, _, _ = replay(episode, [[0, 7], [0, 0], [0, 0], [0, 0]])
+    assert [(t.asset_id, t.quantity) for batch in batches for t in batch.trades] == [
+        ("b", 200)
+    ]
+
+
 def test_multiple_arriving_iocs_share_cash_before_their_replacements(tmp_path):
     episode = execution_episode(
         tmp_path, kinds=("gold_etf", "gold_etf"), capital=6000, cancel_ms=1500

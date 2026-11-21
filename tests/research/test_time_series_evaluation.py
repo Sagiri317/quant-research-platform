@@ -270,6 +270,18 @@ def test_daily_tails_use_prediction_boundaries_and_preserve_label_units():
         assert observed.loc[metric, "value"] == pytest.approx(np.mean(values))
     assert observed.loc["long_ic", "observation_count"] == 5
     assert observed.loc["short_ic", "observation_count"] == 5
+    assert observed.loc["long_short_spread", "observation_count"] == 10
+    assert observed.loc["long_excess_label", "observation_count"] == 30
+    tied = daily_signal_metrics(
+        frame.assign(signal=1.0),
+        evaluation_axis="cross_sectional",
+        sessions=["2020-01-04"],
+        asset_ids=frame.asset_id.unique(),
+        top_quantile=0.2,
+    ).set_index("metric")
+    # Both tails select the same 15 observed pairs at each timestamp.
+    assert tied.loc["long_short_spread", "observation_count"] == 30
+
     assert observed.valid_block_count.eq(2).all()
     empty = daily.loc[daily.timestamp.eq("2020-01-06")]
     assert empty.value.isna().all() and empty.observation_count.eq(0).all()

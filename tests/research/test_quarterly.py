@@ -228,12 +228,12 @@ def test_rank_selection_compares_common_defined_days_then_refits(
     # candidate on day two. Averaging its own two days would be incomparable.
     for day, xs, zs in [
         ("2021-12-15", [-1.0, 0.0, 1.0], [30.0, 0.0, -30.0]),
-        ("2021-12-16", [0.0] * 5, [-2.0, -1.0, 0.0, 1.0, 2.0]),
+        ("2021-12-17", [0.0] * 5, [-2.0, -1.0, 0.0, 1.0, 2.0]),
         ("2022-01-03", [-1.0, 0.0, 1.0], [0.0] * 3),
     ]:
         for i, (x, z) in enumerate(zip(xs, zs, strict=True)):
             timestamp = pd.Timestamp(day)
-            label = (z if day == "2021-12-16" else x) * 0.01
+            label = (z if day == "2021-12-17" else x) * 0.01
             records.append(
                 (timestamp, f"s{i}", x, z, label, timestamp + pd.Timedelta(days=1))
             )
@@ -271,7 +271,7 @@ def test_rank_selection_compares_common_defined_days_then_refits(
             "lasso": [{"alpha": alpha} for alpha in (0.001, 0.2, 100.0)]
         },
         "training_start": "2021-10-01",
-        "sessions": frame.timestamp.drop_duplicates().dt.strftime("%Y-%m-%d").tolist(),
+        "sessions": sorted({*frame.timestamp.dt.strftime("%Y-%m-%d"), "2021-12-16"}),
         "validation_sessions": 2,
         "rolling_window": {"start": "2022-01-01", "end": "2022-01-04"},
         "evaluation_cutoff": "2022-01-05",
@@ -320,10 +320,10 @@ def test_rank_selection_compares_common_defined_days_then_refits(
     assert selection["fit_window"]["end"] == "2021-11-01"
     assert selection["validation_window"] == {
         "start": "2021-12-15",
-        "end": "2021-12-16",
+        "end": "2021-12-17",
     }
     assert fitted.metadata["rows_after_input_label_dropna"] == 26
-    assert fitted.metadata["train_end"].startswith("2021-12-16")
+    assert fitted.metadata["train_end"].startswith("2021-12-17")
     assert read_predictions(item["predictions"])[0].timestamp.min() == pd.Timestamp(
         "2022-01-03"
     )
@@ -361,6 +361,16 @@ def test_rank_selection_compares_common_defined_days_then_refits(
     assert metrics["rank_ic"]["evaluation_axis"] == "cross_sectional"
     assert metrics["mse"]["value"] == scores[1]["validation_daily_mse"]
     assert metrics["mse"]["observation_count"] == 8
+    assert metrics["mse"]["session_count"] == 3
+    assert metrics["mse"]["valid_session_count"] == 2
+    gap = next(
+        row
+        for row in daily
+        if row["selected"]
+        and row["metric"] == "mse"
+        and row["timestamp"] == pd.Timestamp("2021-12-16")
+    )
+    assert gap["observation_count"] == 0 and pd.isna(gap["value"])
     # The highest score has an immature label. It still owns the top quantile,
     # so dropping it before selection must not promote the next stock.
     top = next(
@@ -965,6 +975,7 @@ def test_candidate_context_and_validation_changes_keep_fresh_fit_semantics(
         session,
         candidates,
         None,
+        pd.date_range("2020-01-01", "2020-01-09"),
     )
     scores = selected[0][2]["candidates"]
     held = frame.loc[frame.timestamp.between("2020-01-04", "2020-01-06")]
@@ -1065,8 +1076,10 @@ def test_quarterly_skips_immature_initial_history_and_continues(tmp_path):
     ].timestamp.min() == pd.Timestamp("2014-07-01")
 
 
-def test_each_rolling_input_group_retains_its_own_representative(tmp_path):
-    dates = pd.date_range("2020-01-06", periods=6, freq="7D")
+def test_clipped_session_fold_uses_latest_history_and_each_groups_representative(
+    tmp_path,
+):
+    dates = pd.date_range("2020-01-06", periods=7, freq="7D")
     x = np.tile(np.arange(10, dtype=float), len(dates))
     frame = pd.DataFrame(
         {
@@ -1098,8 +1111,8 @@ def test_each_rolling_input_group_retains_its_own_representative(tmp_path):
             "sessions": dates.strftime("%Y-%m-%d").tolist(),
             "min_train_sessions": 3,
             "validation_sessions": 1,
-            "prediction_sessions": 1,
-            "rolling_window": {"start": "2020-02-03", "end": "2020-02-10"},
+            "prediction_sessions": 2,
+            "rolling_window": {"start": "2020-02-10", "end": "2020-02-17"},
             "evaluation_cutoff": "2020-02-11",
             "label_unit": "decimal_return",
             "evaluation": {
@@ -1123,3 +1136,11 @@ def test_each_rolling_input_group_retains_its_own_representative(tmp_path):
     assert [
         load_model(row["model"])[0].metadata["input_columns"] for row in results
     ] == [["x"], ["inverse"], ["x"], ["inverse"]]
+    # The first requested forecast is inside the original two-session block.
+    # Feb 3 was observable before Feb 10, so it contributes ten labeled rows.
+    fitted, facts = load_model(results[0]["model"])
+    assert fitted.metadata["rows_after_input_label_dropna"] == 50
+    assert facts["training_selection"]["validation_window"] == {
+        "start": "2020-02-03",
+        "end": "2020-02-03",
+    }

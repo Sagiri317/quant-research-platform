@@ -10,7 +10,9 @@ from quant_research_platform.research.factors.linked_markets import (
 )
 
 
-@pytest.mark.parametrize("case", ("known", "missing_member", "not_published", "early"))
+@pytest.mark.parametrize(
+    "case", ("known", "missing_member", "not_published", "early", "calendar_gap")
+)
 def test_fixed_index_group_does_not_shrink_or_use_prepublication_backcasts(case):
     days = pd.bdate_range("2024-01-02", periods=7)
     raw = pd.concat(
@@ -36,9 +38,12 @@ def test_fixed_index_group_does_not_shrink_or_use_prepublication_backcasts(case)
             timestamp=clock,
         )
     )
+    axis = pd.date_range(days[0], days[-1])
     calendar = pd.DataFrame(
-        dict(calendar_date=days, source_market_type=1, is_trading_day=True)
+        dict(calendar_date=axis, source_market_type=1, is_trading_day=axis.isin(days))
     )
+    if case == "calendar_gap":
+        calendar = calendar.loc[calendar.calendar_date.ne(days[3])]
     names = [f"index_group_{kind}_5d" for kind in ("positive_fraction", "leader_gap")]
     result = calculate(
         decisions,
@@ -180,6 +185,15 @@ def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     assert state.index_future_annualized_basis == pytest.approx(0.02 * 365 / 10)
     assert state.index_future_roll_concentration == pytest.approx(0.8**2 + 0.2**2)
     assert state.index_future_volume_to_oi == pytest.approx(1)
+    # Native nullable facts affect only the outputs that use each fact.
+    nullable = f.astype({"close": "Float64", "open_interest": "Float64"})
+    nullable.loc[1, "open_interest"] = pd.NA
+    state = futures_states(nullable, c, i).iloc[0]
+    assert pd.isna(state.index_future_volume_to_oi)
+    assert state.index_future_near_basis == pytest.approx(0.02)
+    nullable.loc[0, "close"] = pd.NA
+    assert pd.isna(futures_states(nullable, c, i).iloc[0].index_future_calendar_spread)
+
     decision = pd.DataFrame(
         dict(
             market_id="a_share",
@@ -213,8 +227,8 @@ def test_futures_basis_oi_and_calendar_day_annualization_by_hand():
     assert partial.us_sector_etf_return_shock_1d.isna().all()
 
 
-@pytest.mark.parametrize("lifecycle", ["known", "relisted", "unknown"])
-def test_hedging_exposure_uses_the_actual_futures_benchmark(lifecycle):
+@pytest.mark.parametrize("case", ["known", "relisted", "unknown", "benchmark_gaps"])
+def test_hedging_exposure_uses_the_actual_futures_benchmark(case):
     dates = pd.bdate_range("2024-01-02", periods=132)
     changes = 0.01 * np.sin(np.arange(len(dates)) / 3)
     spot = 100 * np.cumprod(1 + changes)
@@ -251,10 +265,14 @@ def test_hedging_exposure_uses_the_actual_futures_benchmark(lifecycle):
             listing_date=pd.Timestamp("2000-01-01"),
         )
     )
-    if lifecycle != "known":
+    if case in {"relisted", "unknown"}:
         decision.loc[decision.index[-1], "listing_date"] = (
-            dates[-1] if lifecycle == "relisted" else pd.NaT
+            dates[-1] if case == "relisted" else pd.NaT
         )
+    if case == "benchmark_gaps":
+        # Each missing quote invalidates both adjacent one-session returns.
+        # 131 return intervals minus six leaves only 125 of the required 126.
+        benchmark = benchmark.drop(index=[25, 50, 75])
     decision["asset_id"] = decision.asset_id.astype("string")
     result = calculate(
         decision,
@@ -263,7 +281,7 @@ def test_hedging_exposure_uses_the_actual_futures_benchmark(lifecycle):
         ),
         columns=["basis_shock_x_hedging_exposure"],
     )
-    if lifecycle == "known":
+    if case == "known":
         assert result.basis_shock_x_hedging_exposure.iloc[-1] == pytest.approx(
             0.002, rel=1e-10
         )

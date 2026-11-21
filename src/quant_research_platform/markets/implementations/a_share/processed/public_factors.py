@@ -101,7 +101,7 @@ def configured_spec(spec, config):
                 raise ValueError("linked_index_group_release_date_invalid") from error
             if pd.isna(date) or date.tz is not None or date != date.normalize():
                 raise ValueError("linked_index_group_release_date_invalid")
-    if params.get("future_product", "IF") not in {"IF", "IC", "IH", "IM"}:
+    if params.get("future_product", "IF") not in linked_markets.FUTURES_INDEX_IDS:
         raise ValueError("linked_future_product_invalid")
     if type(params.get("index_id", "000300")) is not str or not params.get(
         "index_id", "000300"

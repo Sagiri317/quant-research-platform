@@ -909,7 +909,7 @@ def inventory_batches(
                     for column in decision_columns:
                         if column not in {"prediction_score", "prediction_error_scale"}:
                             visible_features.loc[asset, column] = row[column]
-                    if not np.isfinite(row.mid) or row.mid <= 0:
+                    if pd.isna(row.mid) or not np.isfinite(row.mid) or row.mid <= 0:
                         continue
                     costs = []
                     for side in ("buy", "sell"):
@@ -924,7 +924,7 @@ def inventory_batches(
                             else 1
                         )
                         price = row.get(f"{book_side}_px{level}", np.nan)
-                        if not np.isfinite(price) or price <= 0:
+                        if pd.isna(price) or not np.isfinite(price) or price <= 0:
                             costs.append(np.nan)
                             continue
                         decision_prices[asset, side] = price
@@ -1274,7 +1274,7 @@ def inventory_batches(
                 yield from advance_events(at)
             current = group.set_index("asset_id")
             current["can_enter"] = status_can_enter.reindex(current.index).fillna(False)
-            valid = np.isfinite(current.mid) & current.mid.gt(0)
+            valid = (np.isfinite(current.mid) & current.mid.gt(0)).fillna(False)
             marks.loc[current.index[valid]] = current.loc[valid, "mid"]
             sources.update({asset: "observed_mid" for asset in current.index[valid]})
             if markout_ns is not None:
@@ -1283,7 +1283,7 @@ def inventory_batches(
                     while queue:
                         fill_id, price, side, due, segment = queue[0]
                         same_segment = row.segment_id == segment
-                        observed = same_segment and np.isfinite(row.mid) and row.mid > 0
+                        observed = same_segment and valid[asset]
                         if same_segment and (not observed or at.value < due):
                             break
                         queue.popleft()
